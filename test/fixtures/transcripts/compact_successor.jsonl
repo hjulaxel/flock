@@ -1,0 +1,16 @@
+{"type": "user", "uuid": "u", "sessionId": "0f000003-0000-4000-8000-000000000003", "message": {"role": "user", "content": "hi"}}
+{"type": "user", "uuid": "u", "sessionId": "0f000003-0000-4000-8000-000000000003", "message": {"role": "user", "content": "hi"}}
+{"type": "user", "uuid": "u", "sessionId": "0f000003-0000-4000-8000-000000000003", "message": {"role": "user", "content": "hi"}}
+{"type": "user", "uuid": "u", "sessionId": "0f000003-0000-4000-8000-000000000003", "message": {"role": "user", "content": "hi"}}
+{"type": "user", "uuid": "u", "sessionId": "0f000003-0000-4000-8000-000000000003", "message": {"role": "user", "content": "hi"}}
+{"type": "user", "uuid": "u", "sessionId": "0f000003-0000-4000-8000-000000000003", "message": {"role": "user", "content": "hi"}}
+{"type": "user", "uuid": "u", "sessionId": "0f000003-0000-4000-8000-000000000003", "message": {"role": "user", "content": "hi"}}
+{"type": "user", "uuid": "u", "sessionId": "0f000003-0000-4000-8000-000000000003", "message": {"role": "user", "content": "hi"}}
+{"type": "user", "uuid": "u", "sessionId": "0f000003-0000-4000-8000-000000000003", "message": {"role": "user", "content": "hi"}}
+{"type": "user", "uuid": "u", "sessionId": "0f000003-0000-4000-8000-000000000003", "message": {"role": "user", "content": "hi"}}
+{"type": "user", "uuid": "u", "sessionId": "0f000003-0000-4000-8000-000000000003", "message": {"role": "user", "content": "hi"}}
+{"type": "system", "subtype": "compact_boundary", "sessionId": "0f000003-0000-4000-8000-000000000003", "compactMetadata": {"trigger": "auto"}}
+{"type": "user", "uuid": "u", "sessionId": "0f000003-0000-4000-8000-000000000003", "message": {"role": "user", "content": "hi"}, "session_id": "0f0000c3-0000-4000-8000-0000000000c3"}
+{"type": "user", "uuid": "u", "sessionId": "0f000003-0000-4000-8000-000000000003", "message": {"role": "user", "content": "hi"}, "session_id": "0f0000c3-0000-4000-8000-0000000000c3"}
+{"type": "user", "uuid": "u", "sessionId": "0f000003-0000-4000-8000-000000000003", "message": {"role": "user", "content": "hi"}, "session_id": "0f0000c3-0000-4000-8000-0000000000c3"}
+{"type": "user", "uuid": "u", "sessionId": "0f000003-0000-4000-8000-000000000003", "message": {"role": "user", "content": "hi"}, "session_id": "0f0000c3-0000-4000-8000-0000000000c3"}

@@ -1,0 +1,9 @@
+{"type": "mode", "mode": "default", "sessionId": "0f000006-0000-4000-8000-000000000006"}
+{"type": "queue-operation", "sessionId": "0f000006-0000-4000-8000-000000000006", "timestamp": "2026-07-23T23:55:36.386Z"}
+{"type": "attachment", "parentUuid": null, "uuid": "cp1", "sessionId": "0f000006-0000-4000-8000-000000000006", "timestamp": "2026-07-23T23:55:24.143Z", "version": "2.1.218"}
+{"type": "user", "parentUuid": "cp1", "uuid": "cp2", "sessionId": "0f000006-0000-4000-8000-000000000006", "message": {"role": "user", "content": "hi"}}
+{"type": "assistant", "parentUuid": "cp2", "uuid": "cp3", "sessionId": "0f000006-0000-4000-8000-000000000006", "message": {"role": "assistant", "content": "ok"}}
+{"type": "attachment", "parentUuid": "cp3", "uuid": "cp4", "sessionId": "0f000006-0000-4000-8000-000000000006", "timestamp": "2026-07-23T23:55:27.179Z"}
+{"type": "user", "parentUuid": "cp4", "uuid": "nw1", "sessionId": "0f000006-0000-4000-8000-000000000006", "message": {"role": "user", "content": "Reply with just: ok"}}
+{"type": "assistant", "parentUuid": "nw1", "uuid": "nw2", "sessionId": "0f000006-0000-4000-8000-000000000006", "message": {"role": "assistant", "content": "ok"}}
+{"type": "last-prompt", "sessionId": "0f000006-0000-4000-8000-000000000006"}

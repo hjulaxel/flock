@@ -1,0 +1,3 @@
+this is not json
+{ broken json
+{"type": "user", "uuid": "u", "sessionId": "0f0000ff-0000-4000-8000-0000000000ff", "message": {"role": "user", "content": "hi"}}

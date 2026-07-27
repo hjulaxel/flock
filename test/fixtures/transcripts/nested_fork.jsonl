@@ -1,0 +1,3 @@
+{"type": "attachment", "uuid": "u1", "sessionId": "0f000005-0000-4000-8000-000000000005", "forkedFrom": {"sessionId": "0f0000a5-0000-4000-8000-0000000000a5", "messageUuid": "m1"}}
+{"type": "user", "uuid": "u2", "sessionId": "0f000005-0000-4000-8000-000000000005", "forkedFrom": {"sessionId": "0f0000b5-0000-4000-8000-0000000000b5", "messageUuid": "m0"}, "message": {"role": "user", "content": "hi"}}
+{"type": "user", "uuid": "u", "sessionId": "0f000005-0000-4000-8000-000000000005", "message": {"role": "user", "content": "hi"}}

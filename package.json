@@ -1,0 +1,357 @@
+{
+  "name": "lineage-sessions",
+  "displayName": "Lineage for Claude Code",
+  "description": "A live tree of your parallel Claude Code sessions - fork lineage, attention routing, and orchestration verbs. Not affiliated with Anthropic.",
+  "version": "0.0.1",
+  "publisher": "creemux",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.94.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Lineage launches terminals, which VS Code blocks in Restricted Mode."
+    }
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "lineage",
+          "title": "Lineage",
+          "icon": "media/lineage.svg"
+        }
+      ]
+    },
+    "views": {
+      "lineage": [
+        {
+          "id": "lineageSessions",
+          "name": "Sessions",
+          "icon": "media/lineage.svg",
+          "contextualTitle": "Claude Code Sessions"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "lineage.refresh",
+        "title": "Refresh",
+        "category": "Lineage",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "lineage.newSession",
+        "title": "New Claude Session",
+        "category": "Lineage",
+        "icon": "$(add)"
+      },
+      {
+        "command": "lineage.focusSession",
+        "title": "Focus Session",
+        "category": "Lineage",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "lineage.forkSession",
+        "title": "Fork Session",
+        "category": "Lineage",
+        "icon": "$(git-branch)"
+      },
+      {
+        "command": "lineage.resumeSession",
+        "title": "Resume Session Here",
+        "category": "Lineage",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "lineage.askSession",
+        "title": "Ask in a Fork...",
+        "category": "Lineage",
+        "icon": "$(comment)"
+      },
+      {
+        "command": "lineage.renameSession",
+        "title": "Rename Session...",
+        "category": "Lineage"
+      },
+      {
+        "command": "lineage.closeSession",
+        "title": "Close Session",
+        "category": "Lineage"
+      },
+      {
+        "command": "lineage.closeWithSummary",
+        "title": "Close with Summary...",
+        "category": "Lineage"
+      },
+      {
+        "command": "lineage.wrapSession",
+        "title": "Wrap Up Session",
+        "category": "Lineage"
+      },
+      {
+        "command": "lineage.copySessionId",
+        "title": "Copy Session ID",
+        "category": "Lineage"
+      },
+      {
+        "command": "lineage.hideSession",
+        "title": "Hide Session",
+        "category": "Lineage"
+      },
+      {
+        "command": "lineage.unhideSession",
+        "title": "Unhide Session...",
+        "category": "Lineage"
+      },
+      {
+        "command": "lineage.openProject",
+        "title": "Open Project in New Window",
+        "category": "Lineage",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "lineage.installHooks",
+        "title": "Install Instant-Update Hooks...",
+        "category": "Lineage"
+      },
+      {
+        "command": "lineage.removeHooks",
+        "title": "Remove Instant-Update Hooks",
+        "category": "Lineage"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "lineage.newSession",
+          "when": "view == lineageSessions",
+          "group": "navigation@1"
+        },
+        {
+          "command": "lineage.refresh",
+          "when": "view == lineageSessions",
+          "group": "navigation@2"
+        },
+        {
+          "command": "lineage.installHooks",
+          "when": "view == lineageSessions && !lineage.hooksInstalled",
+          "group": "1_hooks@1"
+        },
+        {
+          "command": "lineage.removeHooks",
+          "when": "view == lineageSessions && lineage.hooksInstalled",
+          "group": "1_hooks@2"
+        },
+        {
+          "command": "lineage.unhideSession",
+          "when": "view == lineageSessions",
+          "group": "2_manage@1"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "lineage.focusSession",
+          "when": "view == lineageSessions && viewItem =~ /;live;/",
+          "group": "inline@1"
+        },
+        {
+          "command": "lineage.forkSession",
+          "when": "view == lineageSessions && viewItem =~ /;live;/",
+          "group": "inline@2"
+        },
+        {
+          "command": "lineage.resumeSession",
+          "group": "inline@1",
+          "when": "view == lineageSessions && viewItem =~ /;archived;/"
+        },
+        {
+          "command": "lineage.forkSession",
+          "group": "inline@2",
+          "when": "view == lineageSessions && viewItem =~ /;archived;/"
+        },
+        {
+          "command": "lineage.openProject",
+          "when": "view == lineageSessions && viewItem =~ /;group;/",
+          "group": "inline@1"
+        },
+        {
+          "command": "lineage.askSession",
+          "when": "view == lineageSessions && viewItem =~ /;live;/",
+          "group": "1_actions@1"
+        },
+        {
+          "command": "lineage.renameSession",
+          "when": "view == lineageSessions && viewItem =~ /;session;/",
+          "group": "1_actions@2"
+        },
+        {
+          "command": "lineage.wrapSession",
+          "when": "view == lineageSessions && viewItem =~ /;bound;/",
+          "group": "1_actions@3"
+        },
+        {
+          "command": "lineage.closeSession",
+          "when": "view == lineageSessions && viewItem =~ /;live;/",
+          "group": "2_close@1"
+        },
+        {
+          "command": "lineage.closeWithSummary",
+          "when": "view == lineageSessions && viewItem =~ /;live;/",
+          "group": "2_close@2"
+        },
+        {
+          "command": "lineage.copySessionId",
+          "when": "view == lineageSessions && viewItem =~ /;session;/",
+          "group": "3_util@1"
+        },
+        {
+          "command": "lineage.hideSession",
+          "when": "view == lineageSessions && viewItem =~ /;session;/",
+          "group": "3_util@2"
+        },
+        {
+          "command": "lineage.resumeSession",
+          "group": "1_actions@0",
+          "when": "view == lineageSessions && viewItem =~ /;archived;/"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "lineage.focusSession",
+          "when": "false"
+        },
+        {
+          "command": "lineage.forkSession",
+          "when": "false"
+        },
+        {
+          "command": "lineage.askSession",
+          "when": "false"
+        },
+        {
+          "command": "lineage.renameSession",
+          "when": "false"
+        },
+        {
+          "command": "lineage.closeSession",
+          "when": "false"
+        },
+        {
+          "command": "lineage.closeWithSummary",
+          "when": "false"
+        },
+        {
+          "command": "lineage.wrapSession",
+          "when": "false"
+        },
+        {
+          "command": "lineage.copySessionId",
+          "when": "false"
+        },
+        {
+          "command": "lineage.hideSession",
+          "when": "false"
+        },
+        {
+          "command": "lineage.openProject",
+          "when": "false"
+        }
+      ]
+    },
+    "colors": [
+      {
+        "id": "lineage.brand",
+        "description": "Lineage brand accent used for tree icons.",
+        "defaults": {
+          "light": "#D97757",
+          "dark": "#D97757",
+          "highContrast": "#D97757",
+          "highContrastLight": "#D97757"
+        }
+      },
+      {
+        "id": "lineage.waiting",
+        "description": "Color for sessions waiting on user input.",
+        "defaults": {
+          "light": "editorWarning.foreground",
+          "dark": "editorWarning.foreground",
+          "highContrast": "editorWarning.foreground",
+          "highContrastLight": "editorWarning.foreground"
+        }
+      }
+    ],
+    "viewsWelcome": [
+      {
+        "view": "lineageSessions",
+        "contents": "No live Claude Code sessions found.\n[New Claude Session](command:lineage.newSession)\nLineage reads `claude agents --json` every few seconds. If sessions are running but none appear, set `lineage.claudeBinary` to the full path of your claude CLI."
+      }
+    ],
+    "configuration": {
+      "title": "Lineage",
+      "properties": {
+        "lineage.pollIntervalMs": {
+          "type": "number",
+          "default": 3000,
+          "minimum": 1000,
+          "maximum": 60000,
+          "description": "How often to poll `claude agents --json` (milliseconds)."
+        },
+        "lineage.claudeBinary": {
+          "type": "string",
+          "default": "",
+          "description": "Full path to the claude CLI. Empty = search PATH."
+        },
+        "lineage.groupByFolder": {
+          "type": "boolean",
+          "default": true,
+          "description": "Group sessions by their working directory."
+        },
+        "lineage.sortWaitingFirst": {
+          "type": "boolean",
+          "default": true,
+          "description": "Sort sessions waiting on you above the rest."
+        },
+        "lineage.showGhosts": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show exited ancestor sessions that live sessions were forked from."
+        },
+        "lineage.showArchived": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show closed sessions read from ~/.claude/projects. `claude agents --json` lists running sessions only, so without this a session disappears from the tree when you close it. Archived rows are dimmed, sorted below live ones, and can be reopened with Resume Session Here."
+        },
+        "lineage.hooks.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Opt in to instant updates via Claude Code hooks (installed as a skills-dir plugin; never edits ~/.claude/settings.json)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit -p . && tsc --noEmit -p tsconfig.test.json",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "~1.94.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.9"
+  }
+}
