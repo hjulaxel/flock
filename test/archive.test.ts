@@ -13,10 +13,17 @@ import {
   archivedAsEntries,
   archivedLabel,
   archivedOnly,
+  continuationOf,
+  keptArchived,
+  memberKeepIds,
   readHeadFacts,
 } from '../src/archive';
 import { buildForest } from '../src/lineage';
-import type { ArchivedSession, ParentResolution } from '../src/types';
+import type {
+  ArchivedSession,
+  EditorialRecord,
+  ParentResolution,
+} from '../src/types';
 
 const A = '0f00000a-0000-4000-8000-00000000000a';
 const B = '0f00000b-0000-4000-8000-00000000000b';
@@ -124,6 +131,32 @@ describe('archive: ArchiveIndexer', () => {
     expect(r.sessions[0]?.label).toBeUndefined();
   });
 
+  // Regression: the cache was keyed on (mtime, size, path) only, so the
+  // fact-less row cached during the live scan was still a "hit" after the
+  // session closed — and a closed transcript never changes again, so the
+  // archived row lost its cwd and title for the lifetime of the window.
+  it('re-reads the head once a scanned-while-live session goes archived', () => {
+    writeTranscript('-a', A, [
+      { type: 'custom-title', customTitle: 'api refactor' },
+      { type: 'user', cwd: '/Users/x/repo' },
+    ]);
+    const idx = new ArchiveIndexer(projects);
+
+    const live = idx.scan({ liveIds: new Set([A]) });
+    expect(live.reread).toBe(0);
+    expect(live.sessions[0]?.label).toBeUndefined();
+    expect(live.sessions[0]?.cwd).toBeUndefined();
+
+    // The session closes. The transcript is untouched — same mtime, same size.
+    const closed = idx.scan({ liveIds: new Set<string>() });
+    expect(closed.reread).toBe(1);
+    expect(closed.sessions[0]?.label).toBe('api refactor');
+    expect(closed.sessions[0]?.cwd).toBe('/Users/x/repo');
+
+    // ...and the now-complete entry is cached, so it is read exactly once.
+    expect(idx.scan({ liveIds: new Set<string>() }).reread).toBe(0);
+  });
+
   it('survives a missing projects dir and keeps the last good index', () => {
     writeTranscript('-a', A, [{}]);
     const idx = new ArchiveIndexer(projects);
@@ -139,6 +172,16 @@ describe('archive: ArchiveIndexer', () => {
     writeTranscript('-a', A, [{}]);
     fs.writeFileSync(path.join(projects, 'loose-file'), 'x');
     expect(new ArchiveIndexer(projects).scan().ok).toBe(true);
+  });
+
+  it('transcriptMtimes() covers a live id and a closed id alike', () => {
+    writeTranscript('-a', A, [{ type: 'custom-title', customTitle: 'live' }]);
+    writeTranscript('-b', B, [{ type: 'custom-title', customTitle: 'closed' }]);
+    const idx = new ArchiveIndexer(projects);
+    idx.scan({ liveIds: new Set([A]) });
+    const mtimes = idx.transcriptMtimes();
+    expect(mtimes.get(A)).toBeGreaterThan(0);
+    expect(mtimes.get(B)).toBeGreaterThan(0);
   });
 });
 
@@ -165,6 +208,105 @@ describe('archive: helpers', () => {
   it('archivedLabel falls back to the short id', () => {
     expect(archivedLabel(mk(A))).toBe('0f00000a');
     expect(archivedLabel(mk(A, { label: 'named' }))).toBe('named');
+  });
+
+  // M14. Tree membership is editorial: a session with a non-deleted record
+  // keeps its row when its terminal closes — the row flips to inactive rather
+  // than leaving the tree. keepIds carries that membership past the
+  // `showArchived` gate.
+  describe('keptArchived', () => {
+    const none = new Set<string>();
+
+    it('returns nothing when history is off and nothing is a member', () => {
+      expect(
+        keptArchived([mk(A), mk(B)], none, { showArchived: false }),
+      ).toEqual([]);
+      expect(
+        keptArchived([mk(A), mk(B)], none, {
+          showArchived: false,
+          keepIds: none,
+        }),
+      ).toEqual([]);
+    });
+
+    it('keeps a MEMBER session even with history off', () => {
+      const out = keptArchived([mk(A), mk(B)], none, {
+        showArchived: false,
+        keepIds: new Set([B]),
+      });
+      // Without this a session's row would vanish on the roster tick after its
+      // tab closed — exactly the "closed tab = gone from the tree" behaviour
+      // M14 removes.
+      expect(out.map((s) => s.sessionId)).toEqual([B]);
+    });
+
+    it('returns every non-live session when history is on', () => {
+      const out = keptArchived([mk(A), mk(B)], none, { showArchived: true });
+      expect(out.map((s) => s.sessionId)).toEqual([A, B]);
+    });
+
+    it('never returns a live session, member or not', () => {
+      // A live row already exists for it; the archived twin would duplicate it.
+      expect(
+        keptArchived([mk(A)], new Set([A]), {
+          showArchived: false,
+          keepIds: new Set([A]),
+        }),
+      ).toEqual([]);
+      expect(keptArchived([mk(A)], new Set([A]), { showArchived: true })).toEqual(
+        [],
+      );
+    });
+
+    it('ignores a kept id with no transcript behind it', () => {
+      const out = keptArchived([mk(A)], none, {
+        showArchived: false,
+        keepIds: new Set([C]),
+      });
+      expect(out).toEqual([]);
+    });
+  });
+
+  // M14. Which records earn membership, and how chain re-keys route.
+  describe('memberKeepIds', () => {
+    const rec = (id: string, over: Partial<EditorialRecord> = {}): EditorialRecord => ({
+      id,
+      createdAt: '2026-07-29T00:00:00.000Z',
+      updatedAt: '2026-07-29T00:00:00.000Z',
+      ...over,
+    });
+    const self = (id: string): string => id;
+
+    it('every non-deleted record is a member; deleted ones are not', () => {
+      const keep = memberKeepIds(
+        {
+          [A]: rec(A, { title: 'kept' }),
+          [B]: rec(B, { deleted: true }),
+          [C]: rec(C, { closed: '2026-07-29T00:00:00.000Z' }),
+        },
+        self,
+      );
+      // A record is the evidence the session was ever the user's — a closed
+      // stamp included: CLOSE ends the tab, never the row.
+      expect(keep).toEqual(new Set([A, C]));
+    });
+
+    it('routes a record on a superseded generation to its chain tip', () => {
+      const keep = memberKeepIds({ [A]: rec(A) }, (id) => (id === A ? B : id));
+      // Both ids survive: the tip is the row the collapse keeps, the original
+      // id still matters while the index has not caught up.
+      expect(keep).toEqual(new Set([A, B]));
+    });
+
+    it('a chat record contributes neither its own id nor its chain tip', () => {
+      // Without this skip, a chat would come back as an inactive "closed" row
+      // the moment its tab shut — the exact row the feature exists to avoid.
+      const keep = memberKeepIds(
+        { [A]: rec(A, { chat: true }), [C]: rec(C) },
+        (id) => (id === A ? B : id),
+      );
+      expect(keep).toEqual(new Set([C]));
+    });
   });
 });
 
@@ -198,6 +340,33 @@ describe('archive: buildForest integration', () => {
     expect(n.label).toBe('closed one');
     expect(n.endedAt).toBe(1000);
     expect(f.visibleRoots).toContain(A); // survives ghost pruning
+  });
+
+  // The hide verb is retired (M14), but buildForest still honours a node-level
+  // hidden flag — this pins the rendering old state written by other windows
+  // can still reach: archived rather than live, on screen, greyed and last.
+  it('keeps a hidden+archived session on screen, sorted after live rows', () => {
+    const f = buildForest({
+      entries: [{ sessionId: B, name: 'still working', status: 'idle' }],
+      archived: [mk(A, { label: 'put away', cwd: '/w', startedAt: 1 })],
+      resolutions: res({ [A]: null, [B]: null }),
+      records: {
+        [A]: {
+          id: A,
+          hidden: true,
+          closed: '2026-07-28T00:00:00.000Z',
+          createdAt: '2026-07-28T00:00:00.000Z',
+          updatedAt: '2026-07-28T00:00:00.000Z',
+        },
+      },
+    });
+    const n = f.nodes.get(A)!;
+    expect(n.hidden).toBe(true);
+    expect(n.deleted).toBe(false);
+    expect(n.archived).toBe(true);
+    // The point of the whole change: hiding must not remove the row.
+    expect(f.visibleRoots).toContain(A);
+    expect(f.visibleRoots).toEqual([B, A]);
   });
 
   it('a live row always wins over its archived twin (no duplicate)', () => {
@@ -234,17 +403,20 @@ describe('archive: buildForest integration', () => {
     expect(withoutArchive.nodes.get(A)!.ghost).toBe(true);
   });
 
-  it('sorts archived roots after live ones, most recent first', () => {
+  it('sorts archived roots after live ones, by startedAt like every other row', () => {
     const f = buildForest({
       entries: [{ sessionId: C, name: 'live', status: 'idle', startedAt: 9_000 }],
       archived: [
-        mk(A, { label: 'older', endedAt: 100 }),
-        mk(B, { label: 'newer', endedAt: 900 }),
+        // Deliberately the OPPOSITE of "most recently ended first" (the
+        // pre-P7 rule): A started first but ENDED long after B. If the sort
+        // still keyed off endedAt/recency, B would lead A here.
+        mk(A, { label: 'started first', startedAt: 100, endedAt: 900 }),
+        mk(B, { label: 'started later', startedAt: 900, endedAt: 100 }),
       ],
       resolutions: res({ [A]: null, [B]: null, [C]: null }),
       records: {},
     });
-    expect(f.visibleRoots).toEqual([C, B, A]);
+    expect(f.visibleRoots).toEqual([C, A, B]);
   });
 
   it('an editorial title still wins over the archive label', () => {
@@ -267,5 +439,153 @@ describe('archive: buildForest integration', () => {
       records: {},
     });
     expect(f.attentionCount).toBe(0);
+  });
+
+  // P5: an archived node's transcript is not being written to anymore, so its
+  // own endedAt IS the last-activity timestamp — no activityMtimes lookup
+  // needed, and it must win even when the map disagrees (it never should, but
+  // the archived path must not depend on it being right).
+  it('gives an archived node lastActiveAt === its own endedAt, always', () => {
+    const f = buildForest({
+      entries: [],
+      archived: [mk(A, { endedAt: 12_345 })],
+      resolutions: res({ [A]: null }),
+      records: {},
+      activityMtimes: new Map([[A, 1]]), // deliberately wrong; must be ignored
+    });
+    expect(f.nodes.get(A)!.lastActiveAt).toBe(12_345);
+  });
+});
+
+// --------------------------------------------------- generation chains (M10)
+
+describe('archive: continuation detection (M10)', () => {
+  it('flags a plain-resume continuation via its copied head', () => {
+    // B's transcript starts with lines copied from A — sessionId A, no
+    // forkedFrom — exactly what a plain `--resume` re-mint writes on disk.
+    const f = writeTranscript('-p', B, [
+      { type: 'user', sessionId: A, cwd: '/x', timestamp: '2026-07-01T10:00:00Z' },
+      { type: 'assistant', sessionId: A },
+      { type: 'user', sessionId: B },
+    ]);
+    const facts = readHeadFacts(f, B);
+    expect(facts.firstSessionId).toBe(A);
+    expect(facts.forkMarker).toBeUndefined();
+    expect(continuationOf(B, facts)).toBe(A);
+  });
+
+  it('a fork transcript (forkedFrom, rewritten head) is NOT a continuation', () => {
+    const f = writeTranscript('-p', B, [
+      { forkedFrom: { sessionId: A }, sessionId: B, type: 'user' },
+      { type: 'assistant', sessionId: B },
+    ]);
+    const facts = readHeadFacts(f, B);
+    expect(facts.forkMarker).toBe(true);
+    expect(continuationOf(B, facts)).toBeUndefined();
+  });
+
+  it('a deep forkedFrom marker vetoes even a mismatched head', () => {
+    // Defensive: should a fork ever keep the parent's id in its copied head,
+    // the marker anywhere in the window still vetoes the continuation verdict.
+    const f = writeTranscript('-p', B, [
+      { type: 'user', sessionId: A },
+      { type: 'user', sessionId: A },
+      { forkedFrom: { sessionId: A }, sessionId: B },
+    ]);
+    expect(continuationOf(B, readHeadFacts(f, B))).toBeUndefined();
+  });
+
+  it('a plain transcript whose head is its own id is nobody\'s continuation', () => {
+    const f = writeTranscript('-p', A, [
+      { type: 'user', sessionId: A, cwd: '/x' },
+    ]);
+    expect(continuationOf(A, readHeadFacts(f, A))).toBeUndefined();
+  });
+
+  it('indexes continuesId and serves chainFacts for LIVE files too', () => {
+    writeTranscript('-p', A, [{ type: 'user', sessionId: A, cwd: '/x' }]);
+    writeTranscript('-p', B, [
+      { type: 'user', sessionId: A },
+      { type: 'user', sessionId: B },
+    ]);
+    const idx = new ArchiveIndexer(projects);
+    // B is live: its display facts are skipped, but the chain verdict is
+    // still read (once — the head never changes).
+    const r = idx.scan({ liveIds: new Set([B]) });
+    expect(r.ok).toBe(true);
+
+    const byId = new Map(idx.chainFacts().map((f) => [f.sessionId, f]));
+    expect(byId.get(B)?.continuesId).toBe(A);
+    expect(byId.get(A)?.continuesId).toBeUndefined();
+    expect(byId.get(B)?.mtimeMs).toBeGreaterThan(0);
+
+    const row = idx.current().find((s) => s.sessionId === B);
+    expect(row?.continuesId).toBe(A);
+    idx.dispose();
+  });
+});
+
+// ═════════════════════════ M22.3: multi-root indexing ═══════════════════════
+
+describe('archive: extraProjectsDirs (M22.3)', () => {
+  const C = '0f0000c9-0000-4000-8000-0000000000c9';
+
+  /** A transcript in a PROFILE's own projects root, not the primary one. */
+  function writeProfileTranscript(profileRoot: string, sessionId: string): string {
+    const dir = path.join(profileRoot, '-p');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${sessionId}.jsonl`);
+    fs.writeFileSync(
+      file,
+      JSON.stringify({ type: 'custom-title', customTitle: 'profile session' }) + '\n',
+    );
+    return file;
+  }
+
+  it('indexes a profile root beside the primary, transcriptPath pointing into it', () => {
+    writeTranscript('-a', A, [{ type: 'custom-title', customTitle: 'default' }]);
+    const profileProjects = path.join(root, 'profiles', 'personal', 'projects');
+    const profileFile = writeProfileTranscript(profileProjects, C);
+
+    const idx = new ArchiveIndexer(projects);
+    const result = idx.scan({ extraProjectsDirs: [profileProjects] });
+    expect(result.ok).toBe(true);
+    const ids = result.sessions.map((s) => s.sessionId).sort();
+    expect(ids).toEqual([A, C].sort());
+    const profileRow = result.sessions.find((s) => s.sessionId === C);
+    expect(profileRow?.transcriptPath).toBe(profileFile);
+    expect(profileRow?.label).toBe('profile session');
+    idx.dispose();
+  });
+
+  it('an unreadable extra root is skipped silently — the primary result stands', () => {
+    writeTranscript('-a', A, [{ cwd: '/x' }]);
+    const idx = new ArchiveIndexer(projects);
+    const result = idx.scan({
+      extraProjectsDirs: [path.join(root, 'no-such-profile', 'projects')],
+    });
+    expect(result.ok).toBe(true);
+    expect(result.sessions.map((s) => s.sessionId)).toEqual([A]);
+    idx.dispose();
+  });
+
+  it('a duplicate root (the primary listed again) does not double-index', () => {
+    writeTranscript('-a', A, [{ cwd: '/x' }]);
+    const idx = new ArchiveIndexer(projects);
+    const result = idx.scan({ extraProjectsDirs: [projects] });
+    expect(result.ok).toBe(true);
+    expect(result.sessions.map((s) => s.sessionId)).toEqual([A]);
+    expect(result.scanned).toBe(1);
+    idx.dispose();
+  });
+
+  it('a PRIMARY root failure still aborts to the previous index, extras or not', () => {
+    const idx = new ArchiveIndexer(path.join(root, 'missing-primary'));
+    const profileProjects = path.join(root, 'profiles', 'personal', 'projects');
+    writeProfileTranscript(profileProjects, C);
+    const result = idx.scan({ extraProjectsDirs: [profileProjects] });
+    expect(result.ok).toBe(false);
+    expect(result.sessions).toEqual([]);
+    idx.dispose();
   });
 });

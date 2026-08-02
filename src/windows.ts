@@ -35,6 +35,65 @@ import { log, logError } from './log';
 const FOCUS_PATH = '/focus';
 /** Query key carrying the session to reveal once the window is up. */
 const SESSION_PARAM = 'session';
+/**
+ * How often a LIVE window re-stamps its published record.
+ *
+ * `publishedAt` is compared against state.ts's WINDOW_TTL_MS (7 days) in two
+ * places: `getWindows()` filters expired records out, and `publishWindow()`
+ * DELETES them and nulls `boundWindowId` on every session that pointed at
+ * them. Publishing once per activation therefore means a window left open for
+ * a week silently loses cross-window focus and has its terminal bindings wiped
+ * from under it. Refreshing well inside the TTL keeps the record current
+ * without weakening the TTL, whose real job is reaping records left behind by
+ * windows that died.
+ */
+const REPUBLISH_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Ceiling on the `asExternalUri` RPC itself. `activate()` awaits the whole
+ * publish chain, so under Remote-SSH / a dead tunnel / a host that simply
+ * never answers, an unbounded wait here means NOTHING after it ever runs: no
+ * tree, no webview, no commands, no poller, no hook watcher — the extension
+ * looks dead. `Terminal.processId` hit this exact failure mode first
+ * (`src/terminals.ts`'s `withTimeout`); this is the same fix applied to the
+ * one other unbounded host RPC in the codebase.
+ */
+const PUBLISH_TIMEOUT_MS = 5_000;
+
+/**
+ * How long a host that failed to publish — no handle at all, or a handle
+ * whose `publishWindow` write itself errored — waits before trying again.
+ * Deliberately far longer than REPUBLISH_INTERVAL_MS: a host that cannot
+ * produce a focus handle is not going to start being able to a few seconds
+ * later, and `refreshPublication()` sits on the roster poll path (SPEC's
+ * ~3s tick). Without this floor, a permanently handle-less host (an
+ * unsupported remote target, say) would re-run the RPC on every single tick,
+ * forever — an RPC storm against a host that was never going to answer.
+ */
+const FAILED_PUBLISH_RETRY_MS = 10 * 60_000;
+
+/**
+ * `value`, or `undefined` once `ms` has elapsed. The timer is always cleared,
+ * so a resolved race never holds the host process open. Shaped exactly like
+ * `src/terminals.ts`'s helper of the same name — same failure mode, same fix.
+ */
+function withTimeout<T>(
+  value: Thenable<T>,
+  ms: number,
+): Promise<T | undefined> {
+  return new Promise<T | undefined>((resolve) => {
+    let done = false;
+    const finish = (v: T | undefined): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(v);
+    };
+    const timer = setTimeout(() => finish(undefined), ms);
+    (timer as unknown as { unref?: () => void }).unref?.();
+    void Promise.resolve(value).then(finish, () => finish(undefined));
+  });
+}
 
 /**
  * Append session=<id> to a focus handle's query WITHOUT clobbering the query
@@ -81,6 +140,9 @@ export function withSessionQuery(handleUri: string, sessionId: string): string {
 export interface FocusIntegration extends DisposableLike {
   readonly windowId: string;
   focusWindow(rec: WindowRecord, sessionId?: string): Promise<boolean>;
+  /** Re-stamp this window's published record if it is getting old. Cheap and
+   *  idempotent — call it from any recurring path (the roster tick). */
+  refreshPublication(): Promise<void>;
 }
 
 class FocusIntegrationImpl implements FocusIntegration {
@@ -91,6 +153,13 @@ class FocusIntegrationImpl implements FocusIntegration {
   private disposed = false;
   /** The "Allow ... to open this URI?" explainer is shown at most once. */
   private permissionHintShown = false;
+  /** Epoch ms of the last successful publish; 0 until the first one lands. */
+  private lastPublishedAt = 0;
+  /** Epoch ms before which refreshPublication() will not even try. Set on
+   *  EVERY publish() attempt, success or failure — see publish() for why a
+   *  failed attempt still has to push this forward. */
+  private nextPublishAt = 0;
+  private publishing = false;
 
   constructor(windowId: string, deps: WindowDeps) {
     this.windowId = windowId;
@@ -118,12 +187,21 @@ class FocusIntegrationImpl implements FocusIntegration {
    *  every activate — handles are NEVER cached across sessions. */
   async publish(): Promise<void> {
     let handle: string | null = null;
+    let published = false;
     try {
       const base = vscode.Uri.parse(
         `${vscode.env.uriScheme}://${EXTENSION_ID}${FOCUS_PATH}`,
       );
-      const external = await vscode.env.asExternalUri(base);
-      const asString = external.toString();
+      // Bounded: some hosts (a dead tunnel, an unsupported remote target)
+      // never answer asExternalUri at all, and activate() awaits this whole
+      // chain — see PUBLISH_TIMEOUT_MS. A timeout degrades through the exact
+      // same "no handle" path a host that plainly cannot produce one already
+      // takes, below.
+      const external = await withTimeout(
+        vscode.env.asExternalUri(base),
+        PUBLISH_TIMEOUT_MS,
+      );
+      const asString = external === undefined ? '' : external.toString();
       handle = asString.length > 0 ? asString : null;
     } catch (err) {
       logError('windows.asExternalUri', err);
@@ -133,6 +211,7 @@ class FocusIntegrationImpl implements FocusIntegration {
         'windows: no focus handle available in this host —',
         'cross-window focus will degrade to a message',
       );
+      this.nextPublishAt = Date.now() + FAILED_PUBLISH_RETRY_MS;
       return;
     }
 
@@ -145,9 +224,39 @@ class FocusIntegrationImpl implements FocusIntegration {
     };
     try {
       await this.deps.publishWindow(rec);
-      log('windows: published focus handle for', this.windowId, handle);
+      this.lastPublishedAt = Date.now();
+      published = true;
+      log(
+        'windows: published focus handle for',
+        this.windowId,
+        handle,
+        '(last success', new Date(this.lastPublishedAt).toISOString() + ')',
+      );
     } catch (err) {
       logError('windows.publishWindow', err);
+    }
+    // Set on BOTH exits, success or not: a host that CAN produce a handle but
+    // whose publishWindow write keeps failing must back off exactly like a
+    // host with no handle at all, or refreshPublication() below re-tries it
+    // every few seconds forever — the RPC storm this mechanism exists to
+    // stop. lastPublishedAt above stays the honest "last time this actually
+    // worked" stamp; nextPublishAt is purely a retry-not-before floor.
+    this.nextPublishAt =
+      Date.now() + (published ? REPUBLISH_INTERVAL_MS : FAILED_PUBLISH_RETRY_MS);
+  }
+
+  /** Re-publish once the record is old enough to be worth refreshing. Never
+   *  rejects and never overlaps itself. */
+  async refreshPublication(): Promise<void> {
+    if (this.disposed || this.publishing) return;
+    if (Date.now() < this.nextPublishAt) return;
+    this.publishing = true;
+    try {
+      await this.publish();
+    } catch (err) {
+      logError('windows.refreshPublication', err);
+    } finally {
+      this.publishing = false;
     }
   }
 
@@ -171,7 +280,7 @@ class FocusIntegrationImpl implements FocusIntegration {
     try {
       const target = wanted ? withSessionQuery(handle, wanted) : handle;
       vscode.window.setStatusBarMessage(
-        'Lineage: handing focus to another window…',
+        'Canopy: handing focus to another window…',
         3000,
       );
       const ok = await vscode.env.openExternal(vscode.Uri.parse(target));
@@ -223,9 +332,9 @@ class FocusIntegrationImpl implements FocusIntegration {
     if (this.permissionHintShown) return;
     this.permissionHintShown = true;
     void vscode.window.showInformationMessage(
-      'Lineage could not hand focus to the window that owns this session. ' +
-        'The editor asks "Allow \'Lineage\' to open this URI?" the first ' +
-        'time — choose Open to let Lineage raise other windows.',
+      'Canopy could not hand focus to the window that owns this session. ' +
+        'The editor asks "Allow \'Canopy\' to open this URI?" the first ' +
+        'time — choose Open to let Canopy raise other windows.',
     );
   }
 }

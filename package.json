@@ -1,25 +1,46 @@
 {
-  "name": "lineage-sessions",
-  "displayName": "Lineage for Claude Code",
-  "description": "A live tree of your parallel Claude Code sessions - fork lineage, attention routing, and orchestration verbs. Not affiliated with Anthropic.",
-  "version": "0.0.1",
+  "name": "canopy",
+  "displayName": "Canopy for Claude Code",
+  "description": "See every Claude Code session you're running as one live tree — who forked from whom, who's working, and who's waiting on you.",
+  "version": "0.1.0",
   "publisher": "creemux",
-  "private": true,
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hjulaxel/canopy.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hjulaxel/canopy/issues"
+  },
+  "homepage": "https://github.com/hjulaxel/canopy#readme",
   "engines": {
     "vscode": "^1.94.0"
   },
   "categories": [
+    "AI",
+    "Visualization",
     "Other"
   ],
+  "keywords": [
+    "claude",
+    "claude code",
+    "agents",
+    "sessions",
+    "orchestration"
+  ],
   "main": "./dist/extension.js",
+  "icon": "media/icon.png",
   "activationEvents": [
     "onStartupFinished"
   ],
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": false,
-      "description": "Lineage launches terminals, which VS Code blocks in Restricted Mode."
+      "description": "Canopy launches terminals, which VS Code blocks in Restricted Mode."
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "Canopy needs a real filesystem and terminals to find and launch Claude Code sessions."
     }
   },
   "contributes": {
@@ -27,18 +48,46 @@
       "activitybar": [
         {
           "id": "lineage",
-          "title": "Lineage",
-          "icon": "media/lineage.svg"
+          "title": "Canopy",
+          "icon": "media/bot.svg"
         }
       ]
     },
     "views": {
       "lineage": [
         {
+          "type": "webview",
+          "id": "lineageSessionsInline",
+          "name": "Sessions",
+          "icon": "media/bot.svg",
+          "contextualTitle": "Claude Code Sessions",
+          "when": "!lineage.nativeTree"
+        },
+        {
           "id": "lineageSessions",
           "name": "Sessions",
-          "icon": "media/lineage.svg",
-          "contextualTitle": "Claude Code Sessions"
+          "icon": "media/bot.svg",
+          "contextualTitle": "Claude Code Sessions",
+          "when": "lineage.nativeTree"
+        },
+        {
+          "id": "lineageAccounts",
+          "name": "Accounts",
+          "icon": "media/bot.svg",
+          "contextualTitle": "AI Accounts",
+          "when": "config.lineage.accounts.enabled",
+          "visibility": "collapsed"
+        }
+      ],
+      "explorer": [
+        {
+          "id": "lineageProject",
+          "name": "Project",
+          "icon": "media/bot.svg",
+          "contextualTitle": "Canopy Project",
+          "when": "lineage.explorerFollow",
+          "visibility": "visible",
+          "initialSize": 1
         }
       ]
     },
@@ -46,102 +95,429 @@
       {
         "command": "lineage.refresh",
         "title": "Refresh",
-        "category": "Lineage",
+        "category": "Canopy",
         "icon": "$(refresh)"
       },
       {
         "command": "lineage.newSession",
         "title": "New Claude Session",
-        "category": "Lineage",
+        "category": "Canopy",
         "icon": "$(add)"
+      },
+      {
+        "command": "lineage.newSessionIn",
+        "title": "New Claude Session in Folder...",
+        "category": "Canopy"
+      },
+      {
+        "command": "lineage.newProject",
+        "title": "New Project...",
+        "category": "Canopy",
+        "icon": "$(new-folder)"
+      },
+      {
+        "command": "lineage.configureProject",
+        "title": "Configure Project...",
+        "category": "Canopy",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "lineage.renameProjectInline",
+        "title": "Rename Project in Place",
+        "category": "Canopy"
+      },
+      {
+        "command": "lineage.renameProject",
+        "title": "Rename Project...",
+        "category": "Canopy"
+      },
+      {
+        "command": "lineage.closeProject",
+        "title": "Close Project...",
+        "category": "Canopy",
+        "icon": "$(archive)"
+      },
+      {
+        "command": "lineage.reopenProject",
+        "title": "Open Project...",
+        "category": "Canopy",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "lineage.deleteProject",
+        "title": "Delete Project",
+        "category": "Canopy"
+      },
+      {
+        "command": "lineage.addProjectDirectory",
+        "title": "Add Directory to Project...",
+        "category": "Canopy"
+      },
+      {
+        "command": "lineage.newSessionInProject",
+        "title": "New Session in Project",
+        "category": "Canopy",
+        "icon": "$(add)"
+      },
+      {
+        "command": "lineage.newSessionInBranch",
+        "title": "New Session on Branch",
+        "category": "Canopy",
+        "icon": "$(git-branch)"
+      },
+      {
+        "command": "lineage.chatInProject",
+        "title": "New Chat in Project",
+        "category": "Canopy",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "lineage.chatHistory",
+        "title": "View Chat History...",
+        "category": "Canopy",
+        "icon": "$(history)"
+      },
+      {
+        "command": "lineage.projectFromFolder",
+        "title": "Make a Project from this Folder...",
+        "category": "Canopy",
+        "icon": "$(new-folder)"
+      },
+      {
+        "command": "lineage.hideFolder",
+        "title": "Hide this Folder",
+        "category": "Canopy",
+        "icon": "$(eye-closed)"
+      },
+      {
+        "command": "lineage.showHidden",
+        "title": "Show Hidden Folders and Projects...",
+        "category": "Canopy"
       },
       {
         "command": "lineage.focusSession",
         "title": "Focus Session",
-        "category": "Lineage",
+        "category": "Canopy",
         "icon": "$(terminal)"
       },
       {
         "command": "lineage.forkSession",
         "title": "Fork Session",
-        "category": "Lineage",
+        "category": "Canopy",
         "icon": "$(git-branch)"
       },
       {
-        "command": "lineage.resumeSession",
-        "title": "Resume Session Here",
-        "category": "Lineage",
-        "icon": "$(debug-restart)"
+        "command": "lineage.forkAndCompact",
+        "title": "Fork and Compact",
+        "category": "Canopy",
+        "icon": "$(combine)"
       },
       {
-        "command": "lineage.askSession",
-        "title": "Ask in a Fork...",
-        "category": "Lineage",
-        "icon": "$(comment)"
+        "command": "lineage.resumeSession",
+        "title": "Open Session Here",
+        "category": "Canopy",
+        "icon": "$(debug-restart)"
       },
       {
         "command": "lineage.renameSession",
         "title": "Rename Session...",
-        "category": "Lineage"
+        "category": "Canopy"
+      },
+      {
+        "command": "lineage.renameSessionInline",
+        "title": "Rename Session in Place",
+        "category": "Canopy"
       },
       {
         "command": "lineage.closeSession",
         "title": "Close Session",
-        "category": "Lineage"
+        "category": "Canopy"
       },
       {
         "command": "lineage.closeWithSummary",
         "title": "Close with Summary...",
-        "category": "Lineage"
+        "category": "Canopy"
       },
       {
         "command": "lineage.wrapSession",
         "title": "Wrap Up Session",
-        "category": "Lineage"
+        "category": "Canopy"
       },
       {
         "command": "lineage.copySessionId",
         "title": "Copy Session ID",
-        "category": "Lineage"
+        "category": "Canopy"
       },
       {
-        "command": "lineage.hideSession",
-        "title": "Hide Session",
-        "category": "Lineage"
+        "command": "lineage.deleteSession",
+        "title": "Delete Session",
+        "category": "Canopy",
+        "icon": "$(trash)"
       },
       {
-        "command": "lineage.unhideSession",
-        "title": "Unhide Session...",
-        "category": "Lineage"
+        "command": "lineage.deleteSessions",
+        "title": "Delete Selected Sessions",
+        "category": "Canopy",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "lineage.restoreSession",
+        "title": "Restore Deleted Session...",
+        "category": "Canopy"
+      },
+      {
+        "command": "lineage.deleteStale",
+        "title": "Delete Stale Sessions...",
+        "category": "Canopy",
+        "icon": "$(clear-all)"
       },
       {
         "command": "lineage.openProject",
         "title": "Open Project in New Window",
-        "category": "Lineage",
+        "category": "Canopy",
         "icon": "$(folder-opened)"
       },
       {
         "command": "lineage.installHooks",
         "title": "Install Instant-Update Hooks...",
-        "category": "Lineage"
+        "category": "Canopy"
       },
       {
         "command": "lineage.removeHooks",
         "title": "Remove Instant-Update Hooks",
-        "category": "Lineage"
+        "category": "Canopy"
+      },
+      {
+        "command": "lineage.showNotifications",
+        "title": "Show Notifications",
+        "category": "Canopy",
+        "icon": "$(bell)"
+      },
+      {
+        "command": "lineage.showNotificationsUnread",
+        "title": "Show Notifications (unread)",
+        "category": "Canopy",
+        "icon": {
+          "light": "media/icons/bell-dot-light.svg",
+          "dark": "media/icons/bell-dot-dark.svg"
+        }
+      },
+      {
+        "command": "lineage.markAllNotificationsRead",
+        "title": "Mark All Notifications as Read",
+        "category": "Canopy",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "lineage.muteSessionNotifications",
+        "title": "Hide Notifications for This Session",
+        "category": "Canopy",
+        "icon": "$(bell-slash)"
+      },
+      {
+        "command": "lineage.unmuteSessionNotifications",
+        "title": "Show Notifications for This Session",
+        "category": "Canopy",
+        "icon": "$(bell)"
+      },
+      {
+        "command": "lineage.showOnlyActiveSessions",
+        "title": "Show Only Active Sessions",
+        "category": "Canopy",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "lineage.showAllSessions",
+        "title": "Show Closed Sessions Too",
+        "category": "Canopy",
+        "icon": "$(filter-filled)"
+      },
+      {
+        "command": "lineage.switchWorkspace",
+        "title": "Switch Workspace...",
+        "category": "Canopy",
+        "icon": "$(layers)"
+      },
+      {
+        "command": "lineage.followInExplorer",
+        "title": "Follow the Active Project in the Explorer",
+        "category": "Canopy",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "lineage.stopFollowingInExplorer",
+        "title": "Stop Following the Active Project in the Explorer",
+        "category": "Canopy"
+      },
+      {
+        "command": "lineage.addAccount",
+        "title": "Add Account...",
+        "category": "Canopy",
+        "icon": "$(add)"
+      },
+      {
+        "command": "lineage.loginAccount",
+        "title": "Sign In to Account...",
+        "category": "Canopy",
+        "icon": "$(key)"
+      },
+      {
+        "command": "lineage.removeAccount",
+        "title": "Remove Account",
+        "category": "Canopy"
+      },
+      {
+        "command": "lineage.setDefaultAccount",
+        "title": "Use as Default Account",
+        "category": "Canopy",
+        "icon": "$(star-full)"
+      },
+      {
+        "command": "lineage.moveAccountUp",
+        "title": "Move Account Up",
+        "category": "Canopy"
+      },
+      {
+        "command": "lineage.moveAccountDown",
+        "title": "Move Account Down",
+        "category": "Canopy"
+      },
+      {
+        "command": "lineage.refreshAccountUsage",
+        "title": "Refresh Account Usage",
+        "category": "Canopy",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "lineage.newSessionFromAccount",
+        "title": "New Session on This Account",
+        "category": "Canopy",
+        "icon": "$(add)"
+      },
+      {
+        "command": "lineage.newSessionFromPicker",
+        "title": "New Session From...",
+        "category": "Canopy"
+      },
+      {
+        "command": "lineage.setProjectAccount",
+        "title": "Set AI Account...",
+        "category": "Canopy"
+      },
+      {
+        "command": "lineage.hideBranch",
+        "title": "Hide Branch",
+        "category": "Canopy"
+      },
+      {
+        "command": "lineage.showBranches",
+        "title": "Show Branches...",
+        "category": "Canopy"
+      },
+      {
+        "command": "lineage.foldBranches",
+        "title": "Hide Branches",
+        "category": "Canopy",
+        "icon": "$(chevron-down)"
+      },
+      {
+        "command": "lineage.unfoldBranches",
+        "title": "Show Branches",
+        "category": "Canopy",
+        "icon": "$(chevron-right)"
+      },
+      {
+        "command": "lineage.revealBranch",
+        "title": "Reveal Worktree in Finder",
+        "category": "Canopy"
+      },
+      {
+        "command": "lineage.copyBranchName",
+        "title": "Copy Branch Name",
+        "category": "Canopy"
+      },
+      {
+        "command": "lineage.copyBranchPath",
+        "title": "Copy Worktree Path",
+        "category": "Canopy"
       }
     ],
     "menus": {
       "view/title": [
+        {
+          "command": "lineage.switchWorkspace",
+          "when": "view == lineageProject",
+          "group": "navigation@0"
+        },
+        {
+          "command": "lineage.stopFollowingInExplorer",
+          "when": "view == lineageProject",
+          "group": "1_manage@0"
+        },
+        {
+          "command": "lineage.showNotifications",
+          "when": "view == lineageSessions && !lineage.hasUnseen",
+          "group": "navigation@0"
+        },
+        {
+          "command": "lineage.showNotificationsUnread",
+          "when": "view == lineageSessions && lineage.hasUnseen",
+          "group": "navigation@0"
+        },
+        {
+          "command": "lineage.markAllNotificationsRead",
+          "when": "view == lineageSessions",
+          "group": "2_manage@4"
+        },
+        {
+          "command": "lineage.showNotifications",
+          "when": "view == lineageSessionsInline && !lineage.hasUnseen",
+          "group": "navigation@0"
+        },
+        {
+          "command": "lineage.showNotificationsUnread",
+          "when": "view == lineageSessionsInline && lineage.hasUnseen",
+          "group": "navigation@0"
+        },
+        {
+          "command": "lineage.markAllNotificationsRead",
+          "when": "view == lineageSessionsInline",
+          "group": "2_manage@4"
+        },
         {
           "command": "lineage.newSession",
           "when": "view == lineageSessions",
           "group": "navigation@1"
         },
         {
-          "command": "lineage.refresh",
+          "command": "lineage.newProject",
           "when": "view == lineageSessions",
           "group": "navigation@2"
+        },
+        {
+          "command": "lineage.reopenProject",
+          "when": "view == lineageSessions",
+          "group": "navigation@3"
+        },
+        {
+          "command": "lineage.showOnlyActiveSessions",
+          "when": "view == lineageSessions && !lineage.onlyActive",
+          "group": "navigation@4"
+        },
+        {
+          "command": "lineage.showAllSessions",
+          "when": "view == lineageSessions && lineage.onlyActive",
+          "group": "navigation@4"
+        },
+        {
+          "command": "lineage.refresh",
+          "when": "view == lineageSessions",
+          "group": "2_manage@3"
+        },
+        {
+          "command": "lineage.showHidden",
+          "when": "view == lineageSessions",
+          "group": "2_manage@0"
         },
         {
           "command": "lineage.installHooks",
@@ -154,21 +530,86 @@
           "group": "1_hooks@2"
         },
         {
-          "command": "lineage.unhideSession",
+          "command": "lineage.deleteStale",
           "when": "view == lineageSessions",
           "group": "2_manage@1"
+        },
+        {
+          "command": "lineage.restoreSession",
+          "when": "view == lineageSessions",
+          "group": "2_manage@2"
+        },
+        {
+          "command": "lineage.newSession",
+          "when": "view == lineageSessionsInline",
+          "group": "navigation@1"
+        },
+        {
+          "command": "lineage.newProject",
+          "when": "view == lineageSessionsInline",
+          "group": "navigation@2"
+        },
+        {
+          "command": "lineage.reopenProject",
+          "when": "view == lineageSessionsInline",
+          "group": "navigation@3"
+        },
+        {
+          "command": "lineage.showOnlyActiveSessions",
+          "when": "view == lineageSessionsInline && !lineage.onlyActive",
+          "group": "navigation@4"
+        },
+        {
+          "command": "lineage.showAllSessions",
+          "when": "view == lineageSessionsInline && lineage.onlyActive",
+          "group": "navigation@4"
+        },
+        {
+          "command": "lineage.refresh",
+          "when": "view == lineageSessionsInline",
+          "group": "2_manage@3"
+        },
+        {
+          "command": "lineage.showHidden",
+          "when": "view == lineageSessionsInline",
+          "group": "2_manage@0"
+        },
+        {
+          "command": "lineage.installHooks",
+          "when": "view == lineageSessionsInline && !lineage.hooksInstalled",
+          "group": "1_hooks@1"
+        },
+        {
+          "command": "lineage.removeHooks",
+          "when": "view == lineageSessionsInline && lineage.hooksInstalled",
+          "group": "1_hooks@2"
+        },
+        {
+          "command": "lineage.deleteStale",
+          "when": "view == lineageSessionsInline",
+          "group": "2_manage@1"
+        },
+        {
+          "command": "lineage.restoreSession",
+          "when": "view == lineageSessionsInline",
+          "group": "2_manage@2"
+        },
+        {
+          "command": "lineage.addAccount",
+          "when": "view == lineageAccounts",
+          "group": "navigation@1"
+        },
+        {
+          "command": "lineage.refreshAccountUsage",
+          "when": "view == lineageAccounts",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
         {
-          "command": "lineage.focusSession",
-          "when": "view == lineageSessions && viewItem =~ /;live;/",
-          "group": "inline@1"
-        },
-        {
           "command": "lineage.forkSession",
           "when": "view == lineageSessions && viewItem =~ /;live;/",
-          "group": "inline@2"
+          "group": "inline@1"
         },
         {
           "command": "lineage.resumeSession",
@@ -181,24 +622,89 @@
           "when": "view == lineageSessions && viewItem =~ /;archived;/"
         },
         {
+          "command": "lineage.forkSession",
+          "when": "view == lineageSessions && viewItem =~ /;live;/",
+          "group": "0_open@1"
+        },
+        {
+          "command": "lineage.forkAndCompact",
+          "when": "view == lineageSessions && viewItem =~ /;live;/",
+          "group": "0_open@2"
+        },
+        {
+          "command": "lineage.forkSession",
+          "when": "view == lineageSessions && viewItem =~ /;archived;/",
+          "group": "0_open@1"
+        },
+        {
+          "command": "lineage.forkAndCompact",
+          "when": "view == lineageSessions && viewItem =~ /;archived;/",
+          "group": "0_open@2"
+        },
+        {
+          "command": "lineage.newSessionInProject",
+          "when": "view == lineageSessions && viewItem =~ /;project;/",
+          "group": "inline@1"
+        },
+        {
+          "command": "lineage.chatInProject",
+          "when": "view == lineageSessions && viewItem =~ /;project;/",
+          "group": "inline@2"
+        },
+        {
+          "command": "lineage.chatInProject",
+          "when": "view == lineageSessions && viewItem =~ /;project;/",
+          "group": "1_actions@0"
+        },
+        {
+          "command": "lineage.chatHistory",
+          "when": "view == lineageSessions && viewItem =~ /;project;/",
+          "group": "1_actions@1"
+        },
+        {
+          "command": "lineage.configureProject",
+          "when": "view == lineageSessions && viewItem =~ /;project;/",
+          "group": "1_actions@2"
+        },
+        {
+          "command": "lineage.addProjectDirectory",
+          "when": "view == lineageSessions && viewItem =~ /;project;/",
+          "group": "1_actions@3"
+        },
+        {
           "command": "lineage.openProject",
+          "when": "view == lineageSessions && viewItem =~ /;project;/",
+          "group": "1_actions@4"
+        },
+        {
+          "command": "lineage.closeProject",
+          "when": "view == lineageSessions && viewItem =~ /;project;/",
+          "group": "2_close@0"
+        },
+        {
+          "command": "lineage.deleteProject",
+          "when": "view == lineageSessions && viewItem =~ /;project;/",
+          "group": "2_close@1"
+        },
+        {
+          "command": "lineage.projectFromFolder",
           "when": "view == lineageSessions && viewItem =~ /;group;/",
           "group": "inline@1"
         },
         {
-          "command": "lineage.askSession",
-          "when": "view == lineageSessions && viewItem =~ /;live;/",
+          "command": "lineage.hideFolder",
+          "when": "view == lineageSessions && viewItem =~ /;group;/",
+          "group": "inline@2"
+        },
+        {
+          "command": "lineage.openProject",
+          "when": "view == lineageSessions && viewItem =~ /;group;/",
           "group": "1_actions@1"
         },
         {
           "command": "lineage.renameSession",
           "when": "view == lineageSessions && viewItem =~ /;session;/",
           "group": "1_actions@2"
-        },
-        {
-          "command": "lineage.wrapSession",
-          "when": "view == lineageSessions && viewItem =~ /;bound;/",
-          "group": "1_actions@3"
         },
         {
           "command": "lineage.closeSession",
@@ -216,14 +722,79 @@
           "group": "3_util@1"
         },
         {
-          "command": "lineage.hideSession",
-          "when": "view == lineageSessions && viewItem =~ /;session;/",
-          "group": "3_util@2"
-        },
-        {
           "command": "lineage.resumeSession",
           "group": "1_actions@0",
           "when": "view == lineageSessions && viewItem =~ /;archived;/"
+        },
+        {
+          "command": "lineage.deleteSession",
+          "when": "view == lineageSessions && viewItem =~ /;session;/ && !lineage.multiSelect",
+          "group": "2_close@3"
+        },
+        {
+          "command": "lineage.deleteSessions",
+          "when": "view == lineageSessions && viewItem =~ /;session;/ && lineage.multiSelect",
+          "group": "2_close@3"
+        },
+        {
+          "command": "lineage.muteSessionNotifications",
+          "when": "view == lineageSessions && viewItem =~ /;notified;/",
+          "group": "3_util@3"
+        },
+        {
+          "command": "lineage.unmuteSessionNotifications",
+          "when": "view == lineageSessions && viewItem =~ /;silenced;/",
+          "group": "3_util@3"
+        },
+        {
+          "command": "lineage.switchWorkspace",
+          "when": "view == lineageSessions && viewItem =~ /;project;/",
+          "group": "1_actions@5"
+        },
+        {
+          "command": "lineage.newSessionFromPicker",
+          "when": "view == lineageSessions && viewItem =~ /;project;/",
+          "group": "1_actions@6"
+        },
+        {
+          "command": "lineage.setProjectAccount",
+          "when": "view == lineageSessions && viewItem =~ /;project;/",
+          "group": "1_actions@7"
+        },
+        {
+          "command": "lineage.newSessionFromAccount",
+          "when": "view == lineageAccounts && viewItem =~ /;account;/",
+          "group": "inline@1"
+        },
+        {
+          "command": "lineage.newSessionFromAccount",
+          "when": "view == lineageAccounts && viewItem =~ /;account;/",
+          "group": "0_open@1"
+        },
+        {
+          "command": "lineage.loginAccount",
+          "when": "view == lineageAccounts && viewItem =~ /;account;/",
+          "group": "1_actions@1"
+        },
+        {
+          "command": "lineage.setDefaultAccount",
+          "when": "view == lineageAccounts && viewItem =~ /;account;/",
+          "group": "1_actions@2"
+        },
+        {
+          "command": "lineage.moveAccountUp",
+          "when": "view == lineageAccounts && viewItem =~ /;account;/",
+          "group": "2_order@1"
+        },
+        {
+          "command": "lineage.moveAccountDown",
+          "when": "view == lineageAccounts && viewItem =~ /;account;/",
+          "group": "2_order@2"
+        },
+        {
+          "command": "lineage.removeAccount",
+          "when": "view == lineageAccounts && viewItem =~ /;account;/",
+          "group": "3_remove@1"
         }
       ],
       "commandPalette": [
@@ -236,7 +807,7 @@
           "when": "false"
         },
         {
-          "command": "lineage.askSession",
+          "command": "lineage.forkAndCompact",
           "when": "false"
         },
         {
@@ -260,45 +831,323 @@
           "when": "false"
         },
         {
-          "command": "lineage.hideSession",
+          "command": "lineage.openProject",
           "when": "false"
         },
         {
-          "command": "lineage.openProject",
+          "command": "lineage.projectFromFolder",
           "when": "false"
+        },
+        {
+          "command": "lineage.renameSessionInline",
+          "when": "false"
+        },
+        {
+          "command": "lineage.renameProject",
+          "when": "false"
+        },
+        {
+          "command": "lineage.renameProjectInline",
+          "when": "false"
+        },
+        {
+          "command": "lineage.showNotificationsUnread",
+          "when": "false"
+        },
+        {
+          "command": "lineage.newSessionInBranch",
+          "when": "false"
+        },
+        {
+          "command": "lineage.newSessionFromPicker",
+          "when": "false"
+        },
+        {
+          "command": "lineage.moveAccountUp",
+          "when": "false"
+        },
+        {
+          "command": "lineage.moveAccountDown",
+          "when": "false"
+        },
+        {
+          "command": "lineage.hideBranch",
+          "when": "false"
+        },
+        {
+          "command": "lineage.foldBranches",
+          "when": "false"
+        },
+        {
+          "command": "lineage.unfoldBranches",
+          "when": "false"
+        },
+        {
+          "command": "lineage.revealBranch",
+          "when": "false"
+        },
+        {
+          "command": "lineage.copyBranchName",
+          "when": "false"
+        },
+        {
+          "command": "lineage.copyBranchPath",
+          "when": "false"
+        }
+      ],
+      "webview/context": [
+        {
+          "command": "lineage.reopenProject",
+          "when": "webviewId == 'lineageSessionsInline' && webviewSection == 'background'",
+          "group": "0_open@1"
+        },
+        {
+          "command": "lineage.newProject",
+          "when": "webviewId == 'lineageSessionsInline' && webviewSection == 'background'",
+          "group": "0_open@2"
+        },
+        {
+          "command": "lineage.newSession",
+          "when": "webviewId == 'lineageSessionsInline' && webviewSection == 'background'",
+          "group": "0_open@3"
+        },
+        {
+          "command": "lineage.forkSession",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;live;/",
+          "group": "0_open@1"
+        },
+        {
+          "command": "lineage.forkAndCompact",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;live;/",
+          "group": "0_open@2"
+        },
+        {
+          "command": "lineage.resumeSession",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;archived;/",
+          "group": "0_open@0"
+        },
+        {
+          "command": "lineage.forkSession",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;archived;/",
+          "group": "0_open@1"
+        },
+        {
+          "command": "lineage.forkAndCompact",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;archived;/",
+          "group": "0_open@2"
+        },
+        {
+          "command": "lineage.chatInProject",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
+          "group": "0_open@1"
+        },
+        {
+          "command": "lineage.chatHistory",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
+          "group": "0_open@2"
+        },
+        {
+          "command": "lineage.newSessionInProject",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
+          "group": "0_open@3"
+        },
+        {
+          "command": "lineage.renameProjectInline",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
+          "group": "0_open@4"
+        },
+        {
+          "command": "lineage.configureProject",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
+          "group": "0_open@5"
+        },
+        {
+          "command": "lineage.addProjectDirectory",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
+          "group": "1_actions@1"
+        },
+        {
+          "command": "lineage.openProject",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
+          "group": "1_actions@2"
+        },
+        {
+          "command": "lineage.closeProject",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
+          "group": "2_close@0"
+        },
+        {
+          "command": "lineage.deleteProject",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
+          "group": "2_close@1"
+        },
+        {
+          "command": "lineage.projectFromFolder",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;group;/",
+          "group": "0_open@1"
+        },
+        {
+          "command": "lineage.hideFolder",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;group;/",
+          "group": "0_open@2"
+        },
+        {
+          "command": "lineage.openProject",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;group;/",
+          "group": "1_actions@1"
+        },
+        {
+          "command": "lineage.renameSessionInline",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;session;/",
+          "group": "1_actions@2"
+        },
+        {
+          "command": "lineage.closeSession",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;live;/",
+          "group": "2_close@1"
+        },
+        {
+          "command": "lineage.closeWithSummary",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;live;/",
+          "group": "2_close@2"
+        },
+        {
+          "command": "lineage.copySessionId",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;session;/",
+          "group": "3_util@1"
+        },
+        {
+          "command": "lineage.deleteSession",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;session;/ && !lineage.multiSelect",
+          "group": "2_close@3"
+        },
+        {
+          "command": "lineage.deleteSessions",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;session;/ && lineage.multiSelect",
+          "group": "2_close@3"
+        },
+        {
+          "command": "lineage.muteSessionNotifications",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;notified;/",
+          "group": "3_util@3"
+        },
+        {
+          "command": "lineage.unmuteSessionNotifications",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;silenced;/",
+          "group": "3_util@3"
+        },
+        {
+          "command": "lineage.switchWorkspace",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
+          "group": "1_actions@3"
+        },
+        {
+          "command": "lineage.newSessionFromPicker",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
+          "group": "1_actions@4"
+        },
+        {
+          "command": "lineage.setProjectAccount",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
+          "group": "1_actions@5"
+        },
+        {
+          "command": "lineage.newSessionInBranch",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/",
+          "group": "0_open@1"
+        },
+        {
+          "command": "lineage.revealBranch",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/",
+          "group": "0_open@2"
+        },
+        {
+          "command": "lineage.copyBranchName",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/",
+          "group": "1_copy@1"
+        },
+        {
+          "command": "lineage.copyBranchPath",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/",
+          "group": "1_copy@2"
+        },
+        {
+          "command": "lineage.hideBranch",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/ && !(viewItem =~ /;primary;/)",
+          "group": "2_curate@1"
+        },
+        {
+          "command": "lineage.showBranches",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/",
+          "group": "2_curate@2"
+        },
+        {
+          "command": "lineage.showBranches",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;branchOthers;/",
+          "group": "0_open@1"
         }
       ]
     },
     "colors": [
       {
         "id": "lineage.brand",
-        "description": "Lineage brand accent used for tree icons.",
+        "description": "Canopy brand accent used for tree icons.",
         "defaults": {
-          "light": "#D97757",
-          "dark": "#D97757",
-          "highContrast": "#D97757",
-          "highContrastLight": "#D97757"
+          "light": "#0B7F73",
+          "dark": "#3BDD9C",
+          "highContrast": "#3BDD9C",
+          "highContrastLight": "#0B7F73"
         }
       },
       {
-        "id": "lineage.waiting",
-        "description": "Color for sessions waiting on user input.",
+        "id": "lineage.running",
+        "description": "Status dot for a session that is working right now.",
         "defaults": {
-          "light": "editorWarning.foreground",
-          "dark": "editorWarning.foreground",
-          "highContrast": "editorWarning.foreground",
-          "highContrastLight": "editorWarning.foreground"
+          "light": "charts.yellow",
+          "dark": "charts.yellow",
+          "highContrast": "charts.yellow",
+          "highContrastLight": "charts.yellow"
+        }
+      },
+      {
+        "id": "lineage.done",
+        "description": "Status dot for a session that has finished and is waiting on you — the row that wants your attention.",
+        "defaults": {
+          "light": "charts.red",
+          "dark": "charts.red",
+          "highContrast": "charts.red",
+          "highContrastLight": "charts.red"
+        }
+      },
+      {
+        "id": "lineage.closed",
+        "description": "Row colour for a session that is over: closed, exited, or an inferred ancestor. Used by the built-in tree view, which has no other way to dim a row.",
+        "defaults": {
+          "light": "list.deemphasizedForeground",
+          "dark": "list.deemphasizedForeground",
+          "highContrast": "list.deemphasizedForeground",
+          "highContrastLight": "list.deemphasizedForeground"
         }
       }
     ],
     "viewsWelcome": [
       {
         "view": "lineageSessions",
-        "contents": "No live Claude Code sessions found.\n[New Claude Session](command:lineage.newSession)\nLineage reads `claude agents --json` every few seconds. If sessions are running but none appear, set `lineage.claudeBinary` to the full path of your claude CLI."
+        "when": "!lineage.onlyActive",
+        "contents": "No live Claude Code sessions found.\n[New Claude Session](command:lineage.newSession)\n[New Project](command:lineage.newProject)\nA project is a name plus one or more directories; sessions running in any of them group under it.\nCanopy reads `claude agents --json` every few seconds. If sessions are running but none appear, set `lineage.claudeBinary` to the full path of your claude CLI."
+      },
+      {
+        "view": "lineageSessions",
+        "when": "lineage.onlyActive",
+        "contents": "No active Claude Code sessions. Closed ones are hidden by the session filter.\n[Show Closed Sessions Too](command:lineage.showAllSessions)\n[New Claude Session](command:lineage.newSession)"
+      },
+      {
+        "view": "lineageAccounts",
+        "contents": "No AI accounts yet.\n[Add Account](command:lineage.addAccount)\nAn account is one subscription you can launch sessions on — a work plan, a personal plan, an API key. Each gets its own config directory, so you sign in once per account and never again."
       }
     ],
     "configuration": {
-      "title": "Lineage",
+      "title": "Canopy",
       "properties": {
         "lineage.pollIntervalMs": {
           "type": "number",
@@ -312,15 +1161,48 @@
           "default": "",
           "description": "Full path to the claude CLI. Empty = search PATH."
         },
+        "lineage.tmux": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "off"
+          ],
+          "enumDescriptions": [
+            "Use tmux when it is installed (never on Windows). Sessions Canopy launches run inside a private tmux server, invisible — no status bar, no prefix key.",
+            "Never use tmux. Sessions run as bare claude processes; workspace switches park them by closing and resume them from their transcripts."
+          ],
+          "description": "Run Canopy-launched Claude sessions inside a private tmux server (`tmux -L lineage`). This upgrades workspace parking from close-and-resume to detach-and-reattach: switching away hides a session's tab while the conversation KEEPS RUNNING — busy ones too — and switching back reattaches it instantly, live state intact. Requires tmux on PATH; without it (and always on Windows) Canopy falls back to close-and-resume. Sessions started outside Canopy are never wrapped either way."
+        },
+        "lineage.terminalLocation": {
+          "type": "string",
+          "default": "editor",
+          "enum": [
+            "editor",
+            "panel",
+            "newWindow"
+          ],
+          "enumDescriptions": [
+            "Open the session as a normal editor tab, alongside your files.",
+            "Open the session in the terminal panel at the bottom.",
+            "Open the session as an editor tab and immediately move it into its own window."
+          ],
+          "description": "Where a Claude session's terminal opens."
+        },
         "lineage.groupByFolder": {
           "type": "boolean",
           "default": true,
-          "description": "Group sessions by their working directory."
+          "description": "Group sessions that no project claims by their working directory."
         },
-        "lineage.sortWaitingFirst": {
+        "lineage.onlyProjectSessions": {
           "type": "boolean",
-          "default": true,
-          "description": "Sort sessions waiting on you above the rest."
+          "default": false,
+          "description": "Show only sessions that belong to one of your projects. The roster is machine-wide, so this is the fastest way to stop seeing every directory anyone ever ran claude in. Ignored while you have no projects."
+        },
+        "lineage.onlyActiveSessions": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show only sessions that are still running. Closed, exited and inferred-ancestor rows are filtered out of the tree — nothing is deleted, and a live session forked from a closed one keeps its place. This is the \"Show Only Active Sessions\" toggle in the view title."
         },
         "lineage.showGhosts": {
           "type": "boolean",
@@ -330,18 +1212,137 @@
         "lineage.showArchived": {
           "type": "boolean",
           "default": false,
-          "description": "Show closed sessions read from ~/.claude/projects. `claude agents --json` lists running sessions only, so without this a session disappears from the tree when you close it. Archived rows are dimmed, sorted below live ones, and can be reopened with Resume Session Here."
+          "description": "Show ALL closed sessions found in ~/.claude/projects, even ones this tree never knew. Off by default: your own sessions already stay in the tree after their tab closes (as dimmed, resumable inactive rows, until you delete them) — this switch only adds foreign history on top."
+        },
+        "lineage.showPhantomRows": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show roster rows that are not sessions: entries whose process has exited but that `claude agents --json` never reaped, and `claude bg-spare` daemon warm-spares (pre-forked processes waiting to be claimed, which report an inherited name and a frozen status). Off by default — these cannot be focused, forked or resumed, and a stuck spare will pin the attention badge on the view indefinitely. Turn on to debug the roster."
+        },
+        "lineage.staleAfterHours": {
+          "type": "number",
+          "default": 48,
+          "minimum": 1,
+          "description": "Age at which \"Delete Stale Sessions...\" pre-ticks a session. This never removes anything on its own — it only decides which checkboxes start ticked in that command."
+        },
+        "lineage.busyStaleMinutes": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "description": "How long a session may keep the CLI's \"busy\" status with an untouched transcript before Canopy stops drawing the running (amber) dot and shows it as idle. `claude agents --json` sometimes freezes a session's status at `busy` after its turn actually ended (most often an interactive session you finished with); a genuinely working session writes its transcript within seconds, so silence this long means it is done. Raise it if a long single tool call briefly flips to idle; turn on \"Show Phantom Rows\" to see the raw, uncorrected status."
         },
         "lineage.hooks.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Opt in to instant updates via Claude Code hooks (installed as a skills-dir plugin; never edits ~/.claude/settings.json)."
+          "description": "Read the Claude Code hook event stream for instant updates. \"Install Instant-Update Hooks…\" sets this for you — installing the plugin only makes Claude write the events, this is the switch that makes Canopy read them. The plugin lives in a skills directory and never edits ~/.claude/settings.json."
+        },
+        "lineage.notifications.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Track finished sessions: a session that completes a turn while you are elsewhere gets a green dot (also on its project row) until you look at it, and appears under the bell in the sidebar title. Turn off to go back to the plain waiting-only dot. Per-session override: right-click a session → Mute / Unmute Notifications."
+        },
+        "lineage.notifications.popup": {
+          "type": "boolean",
+          "default": false,
+          "description": "Also show a toast with a Focus button when a session finishes a turn while you are not looking at it. Off by default — with many parallel sessions the bell and the dots carry the same information without the interruptions."
+        },
+        "lineage.workspaces.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the workspace switcher in the status bar. A workspace scopes this window to one project: switching saves the current tab layout under the project you leave, hides what does not belong to the target, and restores the target's saved layout. Foreign sessions are parked: with tmux installed (see `lineage.tmux`) their tab hides while the conversation keeps running — busy ones included — and reattaches when you switch back; without tmux the terminal closes and the conversation resumes from its transcript, in which case busy sessions are never closed. Unsaved editors and terminals Canopy does not own are never touched. The terminal panel is never used."
+        },
+        "lineage.workspaces.resumeSessions": {
+          "type": "boolean",
+          "default": true,
+          "description": "When switching to a project workspace, resume its parked sessions from their transcripts (up to 8 per switch). Parking closes a session's terminal when you switch away, so with this OFF nothing is parked at all — foreign session tabs stay open instead."
+        },
+        "lineage.workspaces.autoSwitch": {
+          "type": "boolean",
+          "default": true,
+          "description": "Focus follows project: when you start working in a session that belongs to another project, the window switches to that project's workspace by itself — the layout you leave is saved, foreign tabs hide, the project's saved layout comes back. Nothing is stopped and nothing asks a question. Turn off to switch only via the status bar / command."
+        },
+        "lineage.explorer.followProject": {
+          "type": "boolean",
+          "default": true,
+          "description": "The Explorer follows the active project: switching projects swaps the built-in file tree to that project's directories — the main one on top, any extra connected directories as their own collapsible roots below it, wherever they live on disk. Outline and Timeline are untouched. Requires running \"Canopy: Follow the Active Project in the Explorer\" once per window, which converts it to a Canopy workspace (one reload, then switching is instant and no terminal is lost). With this off, an already-converted window keeps its folders where they are."
+        },
+        "lineage.accounts.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the Accounts view, where each AI subscription you can launch sessions on gets a row: which plan it is, how much of its five-hour and weekly windows is gone, and which one new sessions use by default. Each account keeps its own config directory, so signing in to one never signs you out of another, and a session stays on the account it started on for life — resuming or forking it re-uses that account whatever the routing says today. Turn off if you only ever use one account; nothing about how sessions launch changes, the view just stops taking up sidebar space."
+        },
+        "lineage.viewStyle": {
+          "type": "string",
+          "enum": [
+            "inline",
+            "native"
+          ],
+          "enumDescriptions": [
+            "Rename a session in place on its row, the way the Explorer renames a file. The sidebar is drawn by the extension.",
+            "Use the built-in VS Code tree. Rename opens a box at the top of the window, because the tree API has no editable row."
+          ],
+          "default": "inline",
+          "markdownDescription": "How the Sessions view is drawn. `inline` renames on the row like the Explorer; `native` uses the built-in tree widget. Takes effect on the next window reload."
+        },
+        "lineage.showTokens": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Show how many tokens a session is carrying, left of the time-since-active. The number is the context the last assistant turn ran with (prompt + cache + output), read from the transcript — so it matches what `/context` reports and grows as the conversation does. Off by default: it is a second number on every row."
+        },
+        "lineage.branchColors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Colours for the branch chips, in order — index 0 is the first branch under a project (usually `main`). Each entry is either a hex colour (`#7aa2f7`) or a VS Code theme colour id (`charts.blue`, `terminal.ansiCyan`). A short list fills the rest from the built-in muted palette; anything that is not one of those two shapes is ignored. Empty = the built-in palette, which softens the theme's own `charts.*` colours toward the editor foreground."
         }
       }
-    }
+    },
+    "keybindings": [
+      {
+        "command": "lineage.renameSession",
+        "key": "f2",
+        "when": "focusedView == lineageSessions"
+      },
+      {
+        "command": "lineage.renameSessionInline",
+        "key": "f2",
+        "when": "focusedView == lineageSessionsInline"
+      }
+    ],
+    "walkthroughs": [
+      {
+        "id": "canopyGettingStarted",
+        "title": "Get started with Canopy",
+        "description": "Three things worth knowing before you run six agents at once.",
+        "steps": [
+          {
+            "id": "canopy.sessions",
+            "title": "Your sessions are already here",
+            "description": "Canopy reads the Claude Code CLI's own session registry, so anything you have run `claude` on shows up with no setup.\n[Open the Sessions view](command:workbench.view.extension.lineage)",
+            "media": { "markdown": "media/walkthrough/sessions.md" },
+            "completionEvents": ["onCommand:lineage.refresh"]
+          },
+          {
+            "id": "canopy.start",
+            "title": "Start one from the tree",
+            "description": "Press + on any project row. The session appears immediately with its name selected — type over it or press Enter. No dialog.\n[New Claude Session](command:lineage.newSession)",
+            "media": { "markdown": "media/walkthrough/start.md" },
+            "completionEvents": ["onCommand:lineage.newSession"]
+          },
+          {
+            "id": "canopy.attention",
+            "title": "Watch the right edge",
+            "description": "Amber means working. Red means finished and not yet seen — like an unread message, it clears when you look. Everything else stays blank on purpose.",
+            "media": { "markdown": "media/walkthrough/attention.md" }
+          }
+        ]
+      }
+    ]
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "node esbuild.mjs --production",
     "compile": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit -p . && tsc --noEmit -p tsconfig.test.json",

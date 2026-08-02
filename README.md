@@ -1,81 +1,133 @@
-# Lineage for Claude Code
+<p align="center">
+  <img src="media/icon.png" width="88" height="88" alt="">
+</p>
 
-A live tree of your parallel Claude Code sessions — fork lineage, attention
-routing, and orchestration verbs, in the sidebar.
+<h1 align="center">Canopy for Claude Code</h1>
 
-> **Not affiliated with, endorsed by, or sponsored by Anthropic.** "Claude" and
-> "Claude Code" are trademarks of Anthropic, PBC, used here only to describe
-> what this extension works with. This is an independent, community-built tool.
+<p align="center">
+  See every Claude Code session you're running as one live tree —<br>
+  who forked from whom, who's working, and who's waiting on you.
+</p>
+
+---
+
+When you run one coding agent, a terminal tab is enough. When you run six, the
+hard part stops being the code and starts being the bookkeeping: which of these
+is still thinking, which one finished twenty minutes ago and has been waiting
+since, which three came from the same conversation, and which worktree each of
+them is standing in.
+
+Canopy puts all of it in the sidebar as a single live tree. Fork ancestry is
+drawn, not guessed. A finished session gets an unread mark that clears when you
+look at it. Sessions group under projects you define, colour-coded by git
+branch. And it is read-only where it counts — no daemon, no network, and nothing
+written to your repository.
+
+<!-- TODO(launch): screenshot of the sidebar — a project with three or four
+     sessions, one amber, one red, branch chips visible. This is the single
+     highest-impact asset on the marketplace page. -->
 
 ## What it does
 
 - **A tree of sessions, not a list.** See which session was forked from which —
-  the branch points every other tool throws away.
-- **Attention routing.** Sessions waiting on you sort first, carry a badge on
-  the view, and show a status glyph inline.
-- **Orchestration verbs.** New, fork, ask-in-a-fork, rename, wrap up, close
-  (with an optional summary), copy id, hide/unhide, drag to re-parent.
-- **Cross-window focus.** Click a session that lives in another window and that
-  window comes forward.
-- **Projects, grouped.** Sessions group by working directory; open any project
-  in a new window from the group row.
+  the branch points every other tool throws away. Native in-session `/fork`s
+  count too: they write no transcript marker at all, and are recovered from the
+  CLI daemon's own dispatch log and nested under their parent.
 
-## How it works
+- **Attention routing, unread-style.** One mark at the right edge of the row,
+  and only two things ever draw it: **amber** is working, **red** is finished
+  and not yet looked at. Everything else draws nothing, because a column of
+  marks nobody needs is a column the eye learns to skip. Look at a finished
+  session and its dot goes quiet; the dot also rolls up to the project row, and
+  the view badge counts exactly the red dots on screen.
 
-Every window independently polls `claude agents --json` — the CLI's own
-scriptable, global session registry — and reads session transcripts to recover
-parent/child edges for sessions it did not launch itself. Sessions the
-extension launches get a pre-minted `--session-id`, so their lineage is exact
-by construction rather than inferred.
+- **A bell over the tree.** The latest finished sessions, unseen first, each
+  with its project and age. Click one to jump there and mark it read, dismiss a
+  single entry, or mark all read at once. Plus a per-session mute that puts a
+  struck-through bell on the row.
 
-There is no daemon, no background service, and no Python. Your editorial layer
-(titles, summaries, hidden flags) is stored in the extension's own
-`globalStorage` directory — nothing else on disk is modified.
+- **Ages you can trust.** The time on a row is how long since *you* last
+  prompted that session — read from the transcript, not the file's modification
+  time — so a session churning away unattended does not sit there reporting
+  "now".
 
-**Hooks are optional.** The extension is fully functional without them. If you
-opt in, they install as a self-contained skills-directory plugin under
-`~/.claude/skills/lineage-events/` and are removed by deleting that directory.
-The extension **never** edits `~/.claude/settings.json`.
+- **Branches, when there are branches.** Running one agent per `git worktree` is
+  how parallel work actually gets done, and grouping by directory throws away
+  the only fact that mattered: that five checkouts are one repository. Canopy
+  reads `git worktree list`, files every checkout of a project's repo under that
+  project wherever it sits on disk, and gives each branch a colour-coded row.
+  Click a branch to start a session in that worktree.
+
+- **Several accounts, one window.** A row per subscription you can launch on —
+  work plan, personal plan, an API key — each showing how much of its five-hour
+  and weekly windows is gone. Every account keeps its own config directory, so
+  you sign in **once per account, ever**. New sessions are routed automatically,
+  and a session is then pinned to its account for life.
+
+- **Project workspaces.** Scope a window to one project. Switching saves the tab
+  layout you leave and restores the target's. With tmux installed, other
+  projects' sessions keep running while hidden and reattach instantly; without
+  it they close and resume from transcript. Unsaved editors are never touched.
+
+- **Orchestration verbs.** New, fork, **fork and compact** (branch a long
+  conversation and let the *branch* squash its history — the parent keeps
+  everything), ask-in-a-fork, rename in place, close with an optional summary,
+  and drag to re-parent.
+
+- **Nothing is lost.** Closing a tab does not remove its row — it dims and stays
+  one click from resuming. Only **Delete** removes a row, and that is undoable.
+  No transcript is ever touched.
 
 ## Requirements
 
-- The `claude` CLI on your `PATH` (or set `lineage.claudeBinary` to its full
-  path).
-- VS Code 1.94 or newer.
-- A trusted workspace. Restricted Mode blocks terminal creation, which this
-  extension needs.
+- The `claude` CLI on your `PATH`, or `lineage.claudeBinary` set to its full path.
+- VS Code 1.94 or newer. Also runs in Cursor, Windsurf and VSCodium — Canopy
+  uses no proposed APIs.
+- A trusted workspace. Restricted Mode blocks terminal creation, which Canopy
+  needs.
 
-## Settings
+## Documentation
 
-| Setting | Default | What it does |
-| --- | --- | --- |
-| `lineage.pollIntervalMs` | `3000` | How often to poll `claude agents --json`. |
-| `lineage.claudeBinary` | `""` | Full path to the `claude` CLI. Empty = search `PATH`. |
-| `lineage.groupByFolder` | `true` | Group sessions by working directory. |
-| `lineage.sortWaitingFirst` | `true` | Sort sessions waiting on you above the rest. |
-| `lineage.showGhosts` | `true` | Show exited ancestor sessions that live sessions were forked from. |
-| `lineage.hooks.enabled` | `false` | Opt in to instant updates via Claude Code hooks. |
+- **[Settings](docs/settings.md)** — all 23, with defaults.
+- **[Reference](docs/reference.md)** — how it works, projects, notifications,
+  workspaces, close vs delete, naming, and the sidebar rendering modes.
 
 ## Privacy
 
-Nothing leaves your machine. The extension makes no network requests. It reads
-the local session roster and local transcript files, and writes only to its own
-extension storage (plus, if you explicitly opt in, the hooks plugin directory
-and `~/.lineage/events.ndjson`).
+Nothing leaves your machine. Canopy makes no network requests. It reads the
+local session roster and local transcript files, and writes only to its own
+extension storage — plus, if you explicitly opt in, the hooks plugin directory
+and `~/.lineage/events.ndjson`.
 
 ## Development
 
 ```sh
 npm install
-npm run typecheck   # tsc --noEmit
+npm run typecheck   # tsc --noEmit, source and tests
 npm test            # vitest run
 npm run compile     # esbuild bundle -> dist/extension.js
 npm run watch       # rebuild on change
 ```
 
-`SPEC.md` is the authoritative implementation contract. `src/types.ts` and
-`src/log.ts` are frozen — do not edit them.
+`SPEC.md` is the authoritative implementation contract through M5; `STATUS.md`
+records what is actually built. `src/log.ts` and `test/mocks/vscode.ts` are
+frozen.
+
+## Credits
+
+Provider logos under `media/providers/` are the official brand marks, with paths
+taken from [Simple Icons](https://simpleicons.org) (icon data released under
+CC0 1.0). The marks themselves remain the trademarks of their respective owners.
 
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+---
+
+> **Not affiliated with, endorsed by, or sponsored by Anthropic, OpenAI or
+> Google.** "Claude" and "Claude Code" are trademarks of Anthropic, PBC;
+> "OpenAI" and "Codex" of OpenAI, L.L.C.; "Gemini" of Google LLC. Their names
+> and logos appear here only to identify which tool a session runs — nominative
+> use — and each remains the property of its owner. This is an independent,
+> community-built tool.

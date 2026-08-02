@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" role="img">
+  <title>Notifications — something finished</title>
+  <!-- Dark-theme twin of bell-dot-light.svg: identical geometry, lighter ink.
+       The dot keeps the SAME red in both — it is the alert, and an alert that
+       changes hue with the theme stops reading as one. -->
+  <g fill="none" stroke="#C5C5C5" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3.1 10.9V7.2a3.9 3.9 0 0 1 7.8 0v3.7l1 1.6H2.1z"/>
+    <path d="M5.6 12.5a1.4 1.4 0 0 0 2.8 0"/>
+    <path d="M7 3.3V2.4"/>
+  </g>
+  <circle cx="13.2" cy="2.8" r="2.8" fill="#F14C4C"/>
+</svg>

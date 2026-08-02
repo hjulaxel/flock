@@ -13,9 +13,19 @@
 // with a RelativePattern base is the documented way to watch outside the
 // workspace) and can be merged record-by-record instead of clobbered.
 //
-// Imports allowed here: ./types, ./log, node:fs/promises, node:path,
-// node:process. NEVER vscode — the watcher lives in extension.ts and calls
-// reloadFromDisk(); this module stays unit-testable with no mock.
+// Imports allowed here: ./types, ./log, ./projects, ./accounts (both pure),
+// node:fs/promises, node:path, node:process. NEVER vscode — the watcher lives
+// in extension.ts and calls reloadFromDisk(); this module stays unit-testable
+// with no mock.
+//
+// M22 adds two more top-level shapes and one new KIND of value. `accounts` is
+// an ordinary record map and merges like every other one. `accountSettings` is
+// the file's first SINGLETON — one object with one clock, merged newest-wins as
+// a whole rather than key by key, because its single field is a single choice
+// and two windows disagreeing about it should resolve to the later opinion
+// rather than to a blend. Nothing in either shape is a credential: an account
+// is a path plus a label, and the one secret-bearing field (`extraEnv`) is
+// validated by NAME and never by value, never echoed, never logged.
 
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
@@ -23,14 +33,31 @@ import * as process from 'node:process';
 
 import { log, logError } from './log';
 import {
+  ACCOUNT_TOMBSTONE_TTL_MS,
+  DEFAULT_PROVIDER,
+  MAX_ACCOUNT_LABEL_LEN,
+  MAX_PROJECT_NAME_LEN,
+  PROJECT_TOMBSTONE_TTL_MS,
   STATE_SCHEMA_VERSION,
+  isProviderId,
+  isRoutingChoice,
   isSessionId,
+  type AccountProfile,
+  type AccountSettings,
+  type ChainRecord,
   type DisposableLike,
   type EditorialRecord,
+  type HiddenFolder,
   type HookInstallState,
   type LineageState,
+  type ProjectRecord,
+  type RoutingChoice,
   type WindowRecord,
+  type WorkspaceSnapshot,
+  type WorkspaceTabRecord,
 } from './types';
+import { normalizeDir, pathKey } from './projects';
+import { isAccountId, isEnvVarName, nextOrder, sortProfiles } from './accounts';
 
 // ------------------------------------------------------------------ constants
 
@@ -72,11 +99,17 @@ const MAX_CORRUPT_BACKUPS = 5;
  *  still hand us something exotic). */
 const CANONICAL_MAX_DEPTH = 24;
 
-/** Inferred lineage sources are NEVER persisted (SPEC §5.5) — only edges we
- *  minted ourselves or the user drew by hand survive a round trip. */
+/** INFERRED lineage sources are NEVER persisted (SPEC §5.5) — what survives a
+ *  round trip is exact knowledge only: edges we minted ourselves, edges the
+ *  user drew by hand, and (M11) edges the CLI daemon's own dispatch log
+ *  recorded for a native `/fork`. 'daemon' qualifies because the roster entry
+ *  is a dispatch record, not an inference — and it MUST be persisted, because
+ *  the daemon roster is ephemeral and the fork child's transcript carries no
+ *  marker at all. */
 const PERSISTED_PARENT_SOURCES: ReadonlySet<string> = new Set([
   'minted',
   'reparent',
+  'daemon',
 ]);
 
 /** Patch keys the caller does not get to set: identity and the merge clock. */
@@ -105,7 +138,24 @@ export function nowIso(): string {
 }
 
 function emptyState(): LineageState {
-  return { version: STATE_SCHEMA_VERSION, records: {}, windows: {} };
+  return {
+    version: STATE_SCHEMA_VERSION,
+    records: {},
+    windows: {},
+    projects: {},
+    hiddenFolders: {},
+    chains: {},
+    workspaces: {},
+    accounts: {},
+    accountSettings: {},
+  };
+}
+
+/** Accounts are handed out as copies like every other record, and `extraEnv`
+ *  gets its own copy: it is the one nested object in this file, and a caller
+ *  mutating it would be editing the store's memory in place. */
+function cloneAccount(a: AccountProfile): AccountProfile {
+  return a.extraEnv ? { ...a, extraEnv: { ...a.extraEnv } } : { ...a };
 }
 
 function delay(ms: number): Promise<void> {
@@ -187,18 +237,223 @@ function sanitizeRecord(key: string, value: unknown): EditorialRecord | null {
   ) {
     delete rec.parentId;
   }
-  for (const k of ['hidden', 'launchedByUs'] as const) {
+  for (const k of [
+    'deleted',
+    'launchedByUs',
+    'notify',
+    'parked',
+    'chat',
+  ] as const) {
     if (rec[k] !== undefined && typeof rec[k] !== 'boolean') delete rec[k];
   }
-  for (const k of ['title', 'summary', 'cwd', 'wrapRequestedAt'] as const) {
+  // M14: the hide verb is retired — tree membership is editorial and DELETE is
+  // the one put-away verb (still restorable). A record hidden by an older
+  // version reads as deleted, which is the same "off the tree, on purpose"
+  // state it was in. Idempotent, so a stale window still writing `hidden`
+  // converges on the next read here.
+  if (rec.hidden === true) rec.deleted = true;
+  delete rec.hidden;
+  for (const k of [
+    'title',
+    'summary',
+    'cwd',
+    'wrapRequestedAt',
+    'doneAt',
+    'seenAt',
+    'notifyDismissedAt',
+  ] as const) {
     if (rec[k] !== undefined && typeof rec[k] !== 'string') delete rec[k];
   }
-  for (const k of ['closed', 'boundWindowId'] as const) {
+  for (const k of ['closed', 'boundWindowId', 'tmux'] as const) {
     if (rec[k] !== undefined && rec[k] !== null && typeof rec[k] !== 'string') {
       delete rec[k];
     }
   }
+  if (rec.provider !== undefined && !isProviderId(rec.provider)) {
+    delete rec.provider;
+  }
+  // M22. The account pin. Validated against the strict slug shape rather than
+  // "is a string", because this id is interpolated into a filesystem path by
+  // the profile-directory helper and state.json is hand-editable.
+  if (rec.profileId !== undefined && !isAccountId(rec.profileId)) {
+    delete rec.profileId;
+  }
   return rec as unknown as EditorialRecord;
+}
+
+/**
+ * One account, sanitized (M22).
+ *
+ * Strict about the KEY for a reason the other sanitizers do not have: an
+ * account id names a directory under `~/.lineage/profiles/`, so a hand-edited
+ * `"../../.claude"` would point a "separate" account straight back at the real
+ * login. `isAccountId` is the same slug rule that mints them.
+ *
+ * `extraEnv` is inspected by NAME and TYPE only — never by value, never
+ * logged, not even when a pair is rejected. On an API-key account that value
+ * IS the credential.
+ */
+function sanitizeAccount(key: string, value: unknown): AccountProfile | null {
+  if (!isAccountId(key)) return null;
+  if (!isPlainObject(value)) return null;
+
+  // A tombstone, exactly as with projects: an id plus a merge stamp, reduced
+  // to the fields the merge compares so a hand-edited file cannot hand a
+  // reader a half-real account.
+  if (value.deleted === true) {
+    const stamp = isNonEmptyString(value.updatedAt) ? value.updatedAt : nowIso();
+    return {
+      id: key,
+      provider: DEFAULT_PROVIDER,
+      label: '',
+      order: 0,
+      deleted: true,
+      createdAt: isNonEmptyString(value.createdAt) ? value.createdAt : stamp,
+      updatedAt: stamp,
+    };
+  }
+
+  const acc: Record<string, unknown> = { ...value }; // unknown fields preserved
+  acc.id = key;
+  // An unreadable provider falls back rather than dropping the record: the
+  // account still exists and still has credentials behind it, and rendering it
+  // under the wrong logo is a far smaller failure than losing it.
+  acc.provider = isProviderId(value.provider) ? value.provider : DEFAULT_PROVIDER;
+
+  const rawLabel = typeof value.label === 'string' ? value.label.trim() : '';
+  acc.label =
+    rawLabel === '' ? key : rawLabel.slice(0, MAX_ACCOUNT_LABEL_LEN);
+
+  const dir = typeof value.configDir === 'string' ? value.configDir.trim() : '';
+  if (dir === '') delete acc.configDir;
+  else acc.configDir = dir;
+
+  const env: Record<string, string> = {};
+  if (isPlainObject(value.extraEnv)) {
+    for (const [name, v] of Object.entries(value.extraEnv)) {
+      if (!isEnvVarName(name) || typeof v !== 'string') {
+        log('state: dropped an unusable env entry from account', key, name);
+        continue;
+      }
+      env[name] = v;
+    }
+  }
+  if (Object.keys(env).length > 0) acc.extraEnv = env;
+  else delete acc.extraEnv;
+
+  acc.order =
+    typeof value.order === 'number' && Number.isFinite(value.order)
+      ? value.order
+      : 0;
+
+  delete acc.deleted; // handled above; anything falsy here is just noise
+  if (!isNonEmptyString(acc.createdAt)) acc.createdAt = nowIso();
+  if (!isNonEmptyString(acc.updatedAt)) acc.updatedAt = acc.createdAt;
+
+  return acc as unknown as AccountProfile;
+}
+
+/** The singleton account settings (M22). Unknown keys survive, the one field
+ *  we understand is validated, and a blob that is not an object at all becomes
+ *  the empty record rather than being carried as junk. */
+function sanitizeAccountSettings(value: unknown): AccountSettings {
+  if (!isPlainObject(value)) return {};
+  const out: Record<string, unknown> = { ...value };
+  if (out.defaultRouting !== undefined && !isRoutingChoice(out.defaultRouting)) {
+    log('state: dropped an unusable defaultRouting');
+    delete out.defaultRouting;
+  }
+  if (out.updatedAt !== undefined && !isNonEmptyString(out.updatedAt)) {
+    delete out.updatedAt;
+  }
+  return out as AccountSettings;
+}
+
+/**
+ * A project record, sanitized. `rootDir` is the identity of the thing on disk
+ * and a project without one cannot match any session, so a missing/blank
+ * rootDir drops the whole record rather than leaving an unmatched row in the
+ * tree. Unknown fields are preserved, same as everywhere else.
+ */
+function sanitizeProject(key: string, value: unknown): ProjectRecord | null {
+  if (!isNonEmptyString(key)) return null;
+  if (!isPlainObject(value)) return null;
+
+  // A tombstone has no rootDir requirement — it is an id plus a merge stamp,
+  // and the whole point is that it survives a round trip through this function.
+  if (value.deleted === true) {
+    const stamp = isNonEmptyString(value.updatedAt) ? value.updatedAt : nowIso();
+    // Reduced to the merge-relevant fields on purpose. Nothing reads a
+    // tombstone's name or dirs, and normalising them here means a hand-edited
+    // file cannot hand a reader a `dirs` that is not an array.
+    return {
+      id: key,
+      name: '',
+      rootDir: '',
+      dirs: [],
+      deleted: true,
+      createdAt: isNonEmptyString(value.createdAt) ? value.createdAt : stamp,
+      updatedAt: stamp,
+    };
+  }
+
+  const rootDir = normalizeDir(value.rootDir);
+  if (rootDir === '') return null;
+
+  const proj: Record<string, unknown> = { ...value };
+  proj.id = key;
+  proj.rootDir = rootDir;
+
+  const rawName = typeof value.name === 'string' ? value.name.trim() : '';
+  proj.name =
+    rawName === ''
+      ? rootDir.slice(rootDir.lastIndexOf('/') + 1) || rootDir
+      : rawName.slice(0, MAX_PROJECT_NAME_LEN);
+
+  // Extra directories only: rootDir living in both lists would double-count in
+  // every membership walk.
+  const dirs: string[] = [];
+  const seen = new Set<string>([pathKey(rootDir)]);
+  if (Array.isArray(value.dirs)) {
+    for (const raw of value.dirs) {
+      const dir = normalizeDir(raw);
+      if (dir === '') continue;
+      const k = pathKey(dir);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      dirs.push(dir);
+    }
+  }
+  proj.dirs = dirs;
+
+  if (proj.provider !== undefined && !isProviderId(proj.provider)) {
+    delete proj.provider;
+  }
+  if (proj.hidden !== undefined && typeof proj.hidden !== 'boolean') {
+    delete proj.hidden;
+  }
+  // M22. A routing override that does not parse is no override at all — the
+  // project falls back to the global default, which is what it did before it
+  // had one.
+  if (proj.routing !== undefined && !isRoutingChoice(proj.routing)) {
+    delete proj.routing;
+  }
+  delete proj.deleted; // handled above; anything falsy here is just noise
+  if (!isNonEmptyString(proj.createdAt)) proj.createdAt = nowIso();
+  if (!isNonEmptyString(proj.updatedAt)) proj.updatedAt = proj.createdAt;
+
+  return proj as unknown as ProjectRecord;
+}
+
+/** The map key is the normalized path; the record just mirrors it. */
+function sanitizeHiddenFolder(key: string, value: unknown): HiddenFolder | null {
+  const path = normalizeDir(key);
+  if (path === '') return null;
+  const at =
+    isPlainObject(value) && isNonEmptyString(value.hiddenAt)
+      ? value.hiddenAt
+      : nowIso();
+  return { path, hiddenAt: at };
 }
 
 function sanitizeWindow(key: string, value: unknown): WindowRecord | null {
@@ -217,6 +472,81 @@ function sanitizeWindow(key: string, value: unknown): WindowRecord | null {
     delete win.folder;
   }
   return win as unknown as WindowRecord;
+}
+
+/** A generation chain (M10). The key is the chain root id; members are
+ *  deduped session ids with the root guaranteed present and first-or-earlier.
+ *  A chain that sanitizes down to fewer than two members is dropped — it
+ *  says nothing a plain session row does not. */
+function sanitizeChain(key: string, value: unknown): ChainRecord | null {
+  if (!isSessionId(key)) return null;
+  if (!isPlainObject(value)) return null;
+
+  const members: string[] = [];
+  const seen = new Set<string>();
+  const push = (raw: unknown): void => {
+    if (!isSessionId(raw) || seen.has(raw)) return;
+    seen.add(raw);
+    members.push(raw);
+  };
+  push(key); // the root is always a member, and always known
+  if (Array.isArray(value.members)) for (const m of value.members) push(m);
+  if (members.length < 2) return null;
+
+  const createdAt = isNonEmptyString(value.createdAt) ? value.createdAt : nowIso();
+  return {
+    rootId: key,
+    members,
+    createdAt,
+    updatedAt: isNonEmptyString(value.updatedAt) ? value.updatedAt : createdAt,
+  };
+}
+
+/** A workspace snapshot (M13). The map key is the project id; a snapshot with
+ *  no usable tab list still round-trips (an empty layout is a valid layout —
+ *  "close everything" is rememberable). */
+function sanitizeWorkspace(key: string, value: unknown): WorkspaceSnapshot | null {
+  if (!isNonEmptyString(key)) return null;
+  if (!isPlainObject(value)) return null;
+
+  const tabs: WorkspaceTabRecord[] = [];
+  if (Array.isArray(value.tabs)) {
+    for (const raw of value.tabs) {
+      if (!isPlainObject(raw)) continue;
+      const kind = raw.kind;
+      if (kind !== 'file' && kind !== 'session') continue;
+      const viewColumn =
+        typeof raw.viewColumn === 'number' &&
+        Number.isInteger(raw.viewColumn) &&
+        raw.viewColumn > 0
+          ? raw.viewColumn
+          : 1;
+      if (kind === 'file') {
+        if (!isNonEmptyString(raw.uri)) continue;
+        const tab: WorkspaceTabRecord = { kind, uri: raw.uri, viewColumn };
+        if (raw.active === true) tab.active = true;
+        if (raw.pinned === true) tab.pinned = true;
+        tabs.push(tab);
+      } else {
+        if (!isSessionId(raw.sessionId)) continue;
+        const tab: WorkspaceTabRecord = {
+          kind,
+          sessionId: raw.sessionId,
+          viewColumn,
+        };
+        if (raw.active === true) tab.active = true;
+        tabs.push(tab);
+      }
+    }
+  }
+
+  const savedAt = isNonEmptyString(value.savedAt) ? value.savedAt : nowIso();
+  return {
+    projectId: key,
+    tabs,
+    savedAt,
+    updatedAt: isNonEmptyString(value.updatedAt) ? value.updatedAt : savedAt,
+  };
 }
 
 function sanitizeHookState(value: unknown): HookInstallState | undefined {
@@ -304,6 +634,9 @@ export function migrateState(raw: unknown): LineageState {
   // next one here rather than editing the sanitizer below.
   let working: Record<string, unknown> = { ...raw };
   if (version < 1) working = migrateV0ToV1(working);
+  // v1 -> v2 is purely additive: the two new maps are created empty by the
+  // sanitizer below, so there is no step to run. Recorded here so the ladder
+  // still reads as a complete history.
 
   const out: Record<string, unknown> = { ...working }; // keeps unknown keys
 
@@ -326,6 +659,87 @@ export function migrateState(raw: unknown): LineageState {
     }
   }
   out.windows = windows;
+
+  const projects: Record<string, ProjectRecord> = {};
+  const tombstoneCutoff = Date.now() - PROJECT_TOMBSTONE_TTL_MS;
+  if (isPlainObject(working.projects)) {
+    for (const [key, value] of Object.entries(working.projects)) {
+      const proj = sanitizeProject(key, value);
+      if (!proj) {
+        log('state: dropped unusable project record', key);
+        continue;
+      }
+      // Sweep tombstones no window can still be contradicting. The TTL is much
+      // longer than WINDOW_TTL_MS, so by now nothing holds the live record.
+      if (proj.deleted === true) {
+        const at = Date.parse(proj.updatedAt);
+        if (Number.isFinite(at) && at < tombstoneCutoff) {
+          log('state: swept an expired project tombstone', key);
+          continue;
+        }
+      }
+      projects[key] = proj;
+    }
+  }
+  out.projects = projects;
+
+  const hiddenFolders: Record<string, HiddenFolder> = {};
+  if (isPlainObject(working.hiddenFolders)) {
+    for (const [key, value] of Object.entries(working.hiddenFolders)) {
+      const folder = sanitizeHiddenFolder(key, value);
+      if (folder) hiddenFolders[folder.path] = folder;
+      else log('state: dropped unusable hidden-folder record', key);
+    }
+  }
+  out.hiddenFolders = hiddenFolders;
+
+  // v3 (M10). Purely additive, exactly like v1 -> v2: an older file simply
+  // yields the empty map.
+  const chains: Record<string, ChainRecord> = {};
+  if (isPlainObject(working.chains)) {
+    for (const [key, value] of Object.entries(working.chains)) {
+      const chain = sanitizeChain(key, value);
+      if (chain) chains[key] = chain;
+      else log('state: dropped unusable chain record', key);
+    }
+  }
+  out.chains = chains;
+
+  // v4 (M13). Purely additive again.
+  const workspaces: Record<string, WorkspaceSnapshot> = {};
+  if (isPlainObject(working.workspaces)) {
+    for (const [key, value] of Object.entries(working.workspaces)) {
+      const ws = sanitizeWorkspace(key, value);
+      if (ws) workspaces[key] = ws;
+      else log('state: dropped unusable workspace record', key);
+    }
+  }
+  out.workspaces = workspaces;
+
+  // v5 (M22). Additive again: a v4 file yields an empty account roster and an
+  // empty settings record, which is exactly the state of a machine that has
+  // never opened the accounts view — one implicit default login, no rows.
+  const accounts: Record<string, AccountProfile> = {};
+  const accountCutoff = Date.now() - ACCOUNT_TOMBSTONE_TTL_MS;
+  if (isPlainObject(working.accounts)) {
+    for (const [key, value] of Object.entries(working.accounts)) {
+      const acc = sanitizeAccount(key, value);
+      if (!acc) {
+        log('state: dropped unusable account record', key);
+        continue;
+      }
+      if (acc.deleted === true) {
+        const at = Date.parse(acc.updatedAt);
+        if (Number.isFinite(at) && at < accountCutoff) {
+          log('state: swept an expired account tombstone', key);
+          continue;
+        }
+      }
+      accounts[key] = acc;
+    }
+  }
+  out.accounts = accounts;
+  out.accountSettings = sanitizeAccountSettings(working.accountSettings);
 
   const hook = sanitizeHookState(working.hookInstall);
   if (hook) out.hookInstall = hook;
@@ -362,6 +776,51 @@ function newerWins<T>(
   return out;
 }
 
+/** Union two chain records: the newer side's member order wins, the older
+ *  side's unseen members are appended. Exported for tests. */
+export function mergeChainRecords(a: ChainRecord, b: ChainRecord): ChainRecord {
+  const [newer, older] =
+    (a.updatedAt ?? '') >= (b.updatedAt ?? '') ? [a, b] : [b, a];
+  const members: string[] = [];
+  const seen = new Set<string>();
+  for (const m of [...newer.members, ...older.members]) {
+    if (!seen.has(m)) {
+      seen.add(m);
+      members.push(m);
+    }
+  }
+  return {
+    rootId: newer.rootId,
+    members,
+    createdAt:
+      (a.createdAt ?? '') <= (b.createdAt ?? '') ? a.createdAt : b.createdAt,
+    updatedAt: newer.updatedAt,
+  };
+}
+
+function mergeChainMaps(
+  disk: Record<string, ChainRecord> | undefined,
+  mem: Record<string, ChainRecord> | undefined,
+): Record<string, ChainRecord> {
+  const out: Record<string, ChainRecord> = {};
+  const d = disk ?? {};
+  const m = mem ?? {};
+  for (const key of new Set([...Object.keys(d), ...Object.keys(m)])) {
+    const dv = d[key];
+    const mv = m[key];
+    if (dv === undefined) {
+      if (mv !== undefined) out[key] = mv;
+      continue;
+    }
+    if (mv === undefined) {
+      out[key] = dv;
+      continue;
+    }
+    out[key] = mergeChainRecords(dv, mv);
+  }
+  return out;
+}
+
 /**
  * Record-level newest-wins merge. This is what makes multiple windows safe: a
  * window never writes its whole in-memory blob over the file, it writes the
@@ -382,6 +841,46 @@ export function mergeStates(
     mem.windows,
     (w) => w.publishedAt ?? '',
   );
+  out.projects = newerWins(
+    disk.projects,
+    mem.projects,
+    (p) => p.updatedAt ?? '',
+  );
+  // A hidden folder is a tombstone, not a value: there is nothing to merge
+  // field-wise, so the union of both sides is the whole answer. Un-hiding
+  // deletes the key, and a delete only sticks if the other window is not
+  // simultaneously re-hiding it — which is exactly the intended semantics.
+  out.hiddenFolders = newerWins(
+    disk.hiddenFolders,
+    mem.hiddenFolders,
+    (f) => f.hiddenAt ?? '',
+  );
+
+  // Chains (M10) are append-mostly member SETS, so newest-wins would drop a
+  // member the other window observed: the merge is a member UNION, ordered by
+  // the newer record first (its view of the order is the fresher one), with
+  // the older record's stragglers appended.
+  out.chains = mergeChainMaps(disk.chains, mem.chains);
+
+  // A workspace snapshot (M13) is one VALUE — the layout as last saved — so
+  // newest-wins is the whole story.
+  out.workspaces = newerWins(
+    disk.workspaces,
+    mem.workspaces,
+    (w) => w.updatedAt ?? '',
+  );
+
+  // Accounts (M22) are ordinary records: one row per account, each with its own
+  // clock, so the same newest-wins rule projects use is the whole story. It is
+  // also what makes reordering safe across windows — a move writes several
+  // records, and each lands or loses on its own merit rather than the whole
+  // list being replaced by whichever window wrote last.
+  out.accounts = newerWins(disk.accounts, mem.accounts, (a) => a.updatedAt ?? '');
+
+  // The settings record is ONE value with one clock. Newest wins wholesale
+  // rather than field-by-field: the only field in it is a single choice, and
+  // "the later opinion" is a better answer than a blend of two.
+  out.accountSettings = newerSettings(disk.accountSettings, mem.accountSettings);
 
   const hook = mem.hookInstall ?? disk.hookInstall;
   if (hook) out.hookInstall = hook;
@@ -389,6 +888,20 @@ export function mergeStates(
 
   out.version = STATE_SCHEMA_VERSION;
   return out as unknown as LineageState;
+}
+
+/** Newest-wins over the whole settings record; ties go to memory, exactly as
+ *  `newerWins` resolves them. A side with no stamp always loses, which is what
+ *  makes a window that has never touched the setting harmless. */
+function newerSettings(
+  disk: AccountSettings | undefined,
+  mem: AccountSettings | undefined,
+): AccountSettings {
+  const d = disk ?? {};
+  const m = mem ?? {};
+  const ds = typeof d.updatedAt === 'string' ? d.updatedAt : '';
+  const ms = typeof m.updatedAt === 'string' ? m.updatedAt : '';
+  return ds > ms ? { ...d } : { ...m };
 }
 
 // ------------------------------------------------------------------ store
@@ -573,6 +1086,32 @@ export class StateStore implements DisposableLike {
     return h ? { ...h } : { installed: false };
   }
 
+  /** Every project, name-sorted. Hidden ones are INCLUDED — the tree filters,
+   *  and "Show Hidden…" has to be able to list them. Deleted ones are not:
+   *  a tombstone is a merge artefact, never a row. */
+  getProjects(): ProjectRecord[] {
+    return Object.values(this.memory.projects ?? {})
+      .filter((p) => p.deleted !== true)
+      .map((p) => ({ ...p, dirs: [...(p.dirs ?? [])] }))
+      .sort((a, b) => {
+        const an = a.name.toLowerCase();
+        const bn = b.name.toLowerCase();
+        return an < bn ? -1 : an > bn ? 1 : a.id < b.id ? -1 : 1;
+      });
+  }
+
+  getProject(id: string): ProjectRecord | undefined {
+    const p = this.memory.projects?.[id];
+    if (!p || p.deleted === true) return undefined;
+    return { ...p, dirs: [...(p.dirs ?? [])] };
+  }
+
+  getHiddenFolders(): HiddenFolder[] {
+    return Object.values(this.memory.hiddenFolders ?? {})
+      .map((f) => ({ ...f }))
+      .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  }
+
   onDidChange(listener: () => void): DisposableLike {
     this.listeners.push(listener);
     return {
@@ -639,6 +1178,74 @@ export class StateStore implements DisposableLike {
     });
   }
 
+  // ---------------------------------------------------------------- chains
+
+  /** Every persisted generation chain (M10). Copies, name irrelevant order. */
+  getChains(): ChainRecord[] {
+    return Object.values(this.memory.chains ?? {}).map((c) => ({
+      ...c,
+      members: [...c.members],
+    }));
+  }
+
+  /**
+   * Record that `newId` is a NEW GENERATION of the conversation `anchorId`
+   * belongs to (M10) — the creemux re-key. `anchorId` may be any member of an
+   * existing chain (typically the LINEAGE_NODE_ID a hook event inherited);
+   * when it belongs to none, a fresh chain rooted at it is created. If the
+   * two ids turn out to already sit in different chains, the chains are
+   * merged into the anchor's — both were observations of the same
+   * conversation, and losing either's members would orphan rows.
+   */
+  appendChainMember(anchorId: string, newId: string): Promise<void> {
+    if (!isSessionId(anchorId) || !isSessionId(newId) || anchorId === newId) {
+      return Promise.resolve();
+    }
+    return this.enqueue((state, stamp) => {
+      if (!isPlainObject(state.chains)) state.chains = {};
+      const chains = state.chains;
+
+      const owner = (id: string): ChainRecord | undefined =>
+        chains[id] ??
+        Object.values(chains).find((c) => c.members.includes(id));
+
+      const anchorChain = owner(anchorId);
+      const newChain = owner(newId);
+
+      if (anchorChain && newChain && anchorChain !== newChain) {
+        const merged = mergeChainRecords(anchorChain, newChain);
+        merged.rootId = anchorChain.rootId;
+        merged.updatedAt = stamp;
+        delete chains[newChain.rootId];
+        chains[anchorChain.rootId] = merged;
+        log(
+          'state: merged chains',
+          anchorChain.rootId,
+          '+',
+          newChain.rootId,
+        );
+        return;
+      }
+      const chain = anchorChain ?? newChain;
+      if (chain) {
+        if (chain.members.includes(newId) && chain.members.includes(anchorId)) {
+          return; // already known — no write, no change event
+        }
+        if (!chain.members.includes(anchorId)) chain.members.push(anchorId);
+        if (!chain.members.includes(newId)) chain.members.push(newId);
+        chain.updatedAt = stamp;
+        return;
+      }
+      chains[anchorId] = {
+        rootId: anchorId,
+        members: [anchorId, newId],
+        createdAt: stamp,
+        updatedAt: stamp,
+      };
+      log('state: new chain', anchorId, '→', newId);
+    });
+  }
+
   /**
    * Publish this window's focus handle and prune the windows that are gone.
    * Window records are namespaced by windowId, so another window's merge can
@@ -691,10 +1298,386 @@ export class StateStore implements DisposableLike {
     });
   }
 
+  // -------------------------------------------------------------- projects
+
+  /**
+   * Merge a patch into one project. Same rules as `upsert`: `undefined` never
+   * clobbers, the store owns id/createdAt/updatedAt. The whole record is run
+   * back through `sanitizeProject` afterwards, so a patch can never install a
+   * rootDir-less project or a `dirs` list that shadows the rootDir.
+   */
+  upsertProject(id: string, patch: Partial<ProjectRecord>): Promise<void> {
+    if (!isNonEmptyString(id)) {
+      log('state: refusing to upsert a project with no id');
+      return Promise.resolve();
+    }
+    const copy: Record<string, unknown> = { ...patch };
+    for (const key of RESERVED_RECORD_KEYS) delete copy[key];
+
+    return this.enqueue((state, stamp) => {
+      if (!isPlainObject(state.projects)) state.projects = {};
+      const prev = state.projects[id];
+      const next: Record<string, unknown> = prev ? { ...prev } : {};
+      for (const [key, value] of Object.entries(copy)) {
+        if (value === undefined) continue;
+        next[key] = value;
+      }
+      next.id = id;
+      next.createdAt = isNonEmptyString(next.createdAt) ? next.createdAt : stamp;
+      const clean = sanitizeProject(id, next);
+      if (!clean) {
+        log('state: refusing to write a project with no usable rootDir', id);
+        return;
+      }
+      clean.updatedAt = stamp;
+      state.projects[id] = clean;
+    });
+  }
+
+  /**
+   * Delete, recorded as a TOMBSTONE rather than a dropped key.
+   *
+   * `newerWins` keeps any key present on only one side, so a plain `delete`
+   * cannot be told apart from "the other window has not heard of this project
+   * yet": any window still holding the record in memory re-adds it on its very
+   * next write, silently undoing a confirmed modal delete. Keeping the id with
+   * `deleted: true` and a fresh `updatedAt` makes the delete a value the merge
+   * can compare, so it wins over every older copy. Readers filter tombstones
+   * out and `migrateState` sweeps them once they are older than any window.
+   */
+  deleteProject(id: string): Promise<void> {
+    if (!isNonEmptyString(id)) return Promise.resolve();
+    return this.enqueue((state, stamp) => {
+      if (!isPlainObject(state.projects)) state.projects = {};
+      state.projects[id] = {
+        id,
+        name: '',
+        rootDir: '',
+        dirs: [],
+        deleted: true,
+        createdAt: state.projects[id]?.createdAt ?? stamp,
+        updatedAt: stamp,
+      };
+    });
+  }
+
+  // --------------------------------------------------------- hidden folders
+
+  hideFolder(dir: string): Promise<void> {
+    const path = normalizeDir(dir);
+    if (path === '') return Promise.resolve();
+    return this.enqueue((state, stamp) => {
+      if (!isPlainObject(state.hiddenFolders)) state.hiddenFolders = {};
+      state.hiddenFolders[path] = { path, hiddenAt: stamp };
+    });
+  }
+
+  /** Removes the exact key AND any key that only differs by case/separator,
+   *  so un-hiding always undoes the hide the user is looking at. */
+  unhideFolder(dir: string): Promise<void> {
+    const key = pathKey(dir);
+    if (key === '') return Promise.resolve();
+    return this.enqueue((state) => {
+      if (!isPlainObject(state.hiddenFolders)) state.hiddenFolders = {};
+      for (const existing of Object.keys(state.hiddenFolders)) {
+        if (pathKey(existing) === key) delete state.hiddenFolders[existing];
+      }
+    });
+  }
+
   setHookState(s: HookInstallState): Promise<void> {
     const clean = sanitizeHookState(s) ?? { installed: false };
     return this.enqueue((state) => {
       state.hookInstall = clean;
+    });
+  }
+
+  // ------------------------------------------------------------- workspaces
+
+  /** The saved layout for one project (M13), or undefined. */
+  getWorkspace(projectId: string): WorkspaceSnapshot | undefined {
+    const ws = this.memory.workspaces?.[projectId];
+    return ws ? { ...ws, tabs: ws.tabs.map((t) => ({ ...t })) } : undefined;
+  }
+
+  /** Replace one project's saved layout wholesale — a layout is a value, not
+   *  a set, so there is nothing to merge field-wise. */
+  saveWorkspace(projectId: string, tabs: WorkspaceTabRecord[]): Promise<void> {
+    if (!isNonEmptyString(projectId)) return Promise.resolve();
+    return this.enqueue((state, stamp) => {
+      if (!isPlainObject(state.workspaces)) state.workspaces = {};
+      const clean = sanitizeWorkspace(projectId, {
+        tabs,
+        savedAt: stamp,
+        updatedAt: stamp,
+      });
+      if (!clean) return;
+      state.workspaces[projectId] = clean;
+    });
+  }
+
+  deleteWorkspace(projectId: string): Promise<void> {
+    if (!isNonEmptyString(projectId)) return Promise.resolve();
+    return this.enqueue((state) => {
+      if (!isPlainObject(state.workspaces)) state.workspaces = {};
+      delete state.workspaces[projectId];
+    });
+  }
+
+  // ---------------------------------------------------------------- accounts
+  // M22. The account roster, its one settings record, and the two writes that
+  // attach a routing choice to a project and a PIN to a session.
+
+  /** Every live account, in the user's own arrangement (accounts.sortProfiles
+   *  — the same order the view draws and the auto-picker breaks ties on).
+   *  Tombstones are never returned: a deleted account is gone, and the record
+   *  that proves it is a merge artefact, not a row. */
+  getAccounts(): AccountProfile[] {
+    return sortProfiles(
+      Object.values(this.memory.accounts ?? {}).filter((a) => a.deleted !== true),
+    ).map(cloneAccount);
+  }
+
+  getAccount(id: string): AccountProfile | undefined {
+    const a = this.memory.accounts?.[id];
+    if (!a || a.deleted === true) return undefined;
+    return cloneAccount(a);
+  }
+
+  /**
+   * Every account id this store holds, TOMBSTONES INCLUDED — for minting a new
+   * id, and for nothing else.
+   *
+   * Pins outlive tombstones (a pin is forever, a tombstone 30 days), so an id
+   * handed back out is an id that some conversation may still name. Re-adding
+   * an account with the same LABEL is meant to pick the same login back up —
+   * and does, when the replacement is the same kind of account — but a
+   * replacement that authenticates differently would answer those old pins
+   * with a different subscription, without a word. Dedupe against this and the
+   * collision suffix takes care of it.
+   */
+  accountIds(): string[] {
+    return Object.keys(this.memory.accounts ?? {});
+  }
+
+  getAccountSettings(): AccountSettings {
+    return { ...(this.memory.accountSettings ?? {}) };
+  }
+
+  /** The machine-wide default routing, or undefined for "never set" — which
+   *  every consumer must read as `{ kind: 'auto' }` rather than as an error. */
+  getDefaultRouting(): RoutingChoice | undefined {
+    const choice = this.memory.accountSettings?.defaultRouting;
+    return isRoutingChoice(choice) ? choice : undefined;
+  }
+
+  /**
+   * The account a CONVERSATION is pinned to, chain included.
+   *
+   * The session's own record first, then — if it carries no pin — the earliest
+   * pin held by any member of its generation chain. That second step is the
+   * whole reason this lives in the store rather than at the call site: a plain
+   * `--resume` can mint a fresh session id (M10), and the new generation's
+   * record is brand new and empty. Reading only its own field would launch
+   * generation two of a conversation on a different account from generation
+   * one, which is precisely the failure `profileId` exists to prevent.
+   *
+   * Members are ordered oldest → newest, so the answer is the account the
+   * conversation STARTED on. Forks are not covered here (a fork is a different
+   * conversation with its own record); the launcher copies the parent's pin at
+   * fork time, when it still knows who the parent is.
+   */
+  getSessionProfile(sessionId: string): string | undefined {
+    const own = this.memory.records[sessionId]?.profileId;
+    if (isAccountId(own)) return own;
+    for (const chain of Object.values(this.memory.chains ?? {})) {
+      if (!chain.members.includes(sessionId)) continue;
+      for (const member of chain.members) {
+        const pin = this.memory.records[member]?.profileId;
+        if (isAccountId(pin)) return pin;
+      }
+      break; // a session belongs to at most one chain
+    }
+    return undefined;
+  }
+
+  /**
+   * Merge a patch into one account. Same rules as `upsertProject`: `undefined`
+   * never clobbers, the store owns id/createdAt/updatedAt, and the whole record
+   * is run back through `sanitizeAccount` so a patch cannot install an env key
+   * a launch would silently drop.
+   *
+   * Writing over a TOMBSTONE starts from a blank record rather than from the
+   * tombstone: re-creating an account someone deleted has to produce an
+   * account, and inheriting `deleted: true` would make the write a no-op that
+   * looked like it worked.
+   */
+  upsertAccount(id: string, patch: Partial<AccountProfile>): Promise<void> {
+    if (!isAccountId(id)) {
+      log('state: refusing to upsert an account with an unusable id', id);
+      return Promise.resolve();
+    }
+    const copy: Record<string, unknown> = { ...patch };
+    for (const key of RESERVED_RECORD_KEYS) delete copy[key];
+    delete copy.deleted; // deleteAccount owns the tombstone
+
+    return this.enqueue((state, stamp) => {
+      if (!isPlainObject(state.accounts)) state.accounts = {};
+      const prev = state.accounts[id];
+      const base = prev && prev.deleted !== true ? prev : undefined;
+      const next: Record<string, unknown> = base ? { ...base } : {};
+      for (const [key, value] of Object.entries(copy)) {
+        if (value === undefined) continue;
+        next[key] = value;
+      }
+      next.id = id;
+      next.createdAt = isNonEmptyString(next.createdAt) ? next.createdAt : stamp;
+      // A new account lands at the END of the list. Anything else would move
+      // the rows the user already arranged.
+      if (next.order === undefined) {
+        next.order = nextOrder(
+          Object.values(state.accounts).filter((a) => a.deleted !== true),
+        );
+      }
+      const clean = sanitizeAccount(id, next);
+      if (!clean) {
+        log('state: refusing to write an unusable account', id);
+        return;
+      }
+      clean.updatedAt = stamp;
+      state.accounts[id] = clean;
+    });
+  }
+
+  /** Delete, as a TOMBSTONE — for the same reason `deleteProject` writes one:
+   *  a dropped key is indistinguishable from "the other window has not heard of
+   *  this account yet", and every live window would re-add it on its next
+   *  write. Sessions pinned to it keep the dangling id on purpose; they resume
+   *  on the default login (see routing.pinnedProfile) rather than being
+   *  silently moved to somebody else's subscription. */
+  deleteAccount(id: string): Promise<void> {
+    if (!isNonEmptyString(id)) return Promise.resolve();
+    return this.enqueue((state, stamp) => {
+      if (!isPlainObject(state.accounts)) state.accounts = {};
+      state.accounts[id] = {
+        id,
+        provider: DEFAULT_PROVIDER,
+        label: '',
+        order: 0,
+        deleted: true,
+        createdAt: state.accounts[id]?.createdAt ?? stamp,
+        updatedAt: stamp,
+      };
+    });
+  }
+
+  /** One account's position. Its own method rather than `upsertAccount({order})`
+   *  because a reorder must never MINT an account: the caller computes moves
+   *  from a list it rendered (accounts.moveUp / moveDown), and an id that has
+   *  since been deleted in another window has to be a no-op, not a resurrection.
+   */
+  setAccountOrder(id: string, order: number): Promise<void> {
+    if (!isAccountId(id) || !Number.isFinite(order)) return Promise.resolve();
+    return this.enqueue((state, stamp) => {
+      if (!isPlainObject(state.accounts)) state.accounts = {};
+      const prev = state.accounts[id];
+      if (!prev || prev.deleted === true) return;
+      if (prev.order === order) return; // no write, no change event
+      state.accounts[id] = { ...prev, order, updatedAt: stamp };
+    });
+  }
+
+  /** The machine-wide default routing. `null` clears it, which reads as
+   *  `{ kind: 'auto' }` everywhere — the same thing an untouched install has. */
+  setDefaultRouting(choice: RoutingChoice | null): Promise<void> {
+    if (choice !== null && !isRoutingChoice(choice)) {
+      log('state: refusing to store an unusable default routing');
+      return Promise.resolve();
+    }
+    return this.enqueue((state, stamp) => {
+      const next: AccountSettings = { ...(state.accountSettings ?? {}) };
+      if (choice === null) delete next.defaultRouting;
+      else next.defaultRouting = choice;
+      next.updatedAt = stamp;
+      state.accountSettings = next;
+    });
+  }
+
+  /**
+   * A project's routing override. `null` REMOVES it (back to the global
+   * default), which is why this is not `upsertProject({ routing })`: that path
+   * treats `undefined` as "leave alone" and has no spelling for "unset", and a
+   * persisted `routing: null` would be a third state nobody wants to reason
+   * about.
+   *
+   * Refuses to create a project that does not exist. Routing is a property OF a
+   * project, and a rootDir-less record minted here would be dropped by the
+   * sanitizer on the next load anyway.
+   */
+  setProjectRouting(
+    projectId: string,
+    choice: RoutingChoice | null,
+  ): Promise<void> {
+    if (!isNonEmptyString(projectId)) return Promise.resolve();
+    if (choice !== null && !isRoutingChoice(choice)) {
+      log('state: refusing to store an unusable project routing', projectId);
+      return Promise.resolve();
+    }
+    return this.enqueue((state, stamp) => {
+      if (!isPlainObject(state.projects)) state.projects = {};
+      const prev = state.projects[projectId];
+      if (!prev || prev.deleted === true) {
+        log('state: no such project to set routing on', projectId);
+        return;
+      }
+      const next: Record<string, unknown> = { ...prev };
+      if (choice === null) delete next.routing;
+      else next.routing = choice;
+      const clean = sanitizeProject(projectId, next);
+      if (!clean) return;
+      clean.updatedAt = stamp;
+      state.projects[projectId] = clean;
+    });
+  }
+
+  /**
+   * PIN a session to the account it launched on. Write-once, deliberately.
+   *
+   * A conversation belongs to one account for life: its transcript lives inside
+   * that account's config directory, and every later resume has to re-inject
+   * the same environment or it will either fail to find the conversation or
+   * bill a different subscription for the same thread. So a second, different
+   * pin is not a correction — it is a bug at the call site, and the store keeps
+   * the original and says so rather than making the session's history
+   * ambiguous.
+   */
+  setSessionProfile(sessionId: string, profileId: string): Promise<void> {
+    if (!isSessionId(sessionId)) return Promise.resolve();
+    if (!isAccountId(profileId)) {
+      log('state: refusing to pin a session to an unusable account id');
+      return Promise.resolve();
+    }
+    return this.enqueue((state, stamp) => {
+      const prev = state.records[sessionId];
+      const existing = prev?.profileId;
+      if (isAccountId(existing)) {
+        if (existing !== profileId) {
+          log(
+            'state: session',
+            sessionId,
+            'is already pinned to',
+            existing,
+            '— keeping it',
+          );
+        }
+        return; // no write, no change event
+      }
+      const next: Record<string, unknown> = prev ? { ...prev } : {};
+      next.id = sessionId;
+      next.profileId = profileId;
+      next.createdAt = isNonEmptyString(next.createdAt) ? next.createdAt : stamp;
+      next.updatedAt = stamp;
+      state.records[sessionId] = next as unknown as EditorialRecord;
     });
   }
 
@@ -755,7 +1738,6 @@ export class StateStore implements DisposableLike {
    *  correct when we did not. */
   private async flushLocked(batch: Mutator[]): Promise<void> {
     const stamp = nowIso();
-    let applied = false;
 
     for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt++) {
       const disk = await this.readDisk();
@@ -766,15 +1748,17 @@ export class StateStore implements DisposableLike {
         disk.ok ? disk.state : emptyState(),
         this.memory,
       );
-      if (!applied) {
-        for (const mutate of batch) {
-          try {
-            mutate(merged, stamp);
-          } catch (e) {
-            logError('state: mutation threw', e);
-          }
+      // Re-applied on EVERY attempt, not just the first. A retry happens
+      // because another window clobbered us, so it re-reads their content —
+      // and a mutation that removes something (a tombstone, an unhide) would
+      // otherwise be undone by the very merge that noticed the conflict. Every
+      // mutator is idempotent given a fixed `stamp`, which is why this is safe.
+      for (const mutate of batch) {
+        try {
+          mutate(merged, stamp);
+        } catch (e) {
+          logError('state: mutation threw', e);
         }
-        applied = true;
       }
 
       let text: string;
@@ -888,8 +1872,16 @@ export class StateStore implements DisposableLike {
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw) as unknown;
-    } catch (e) {
-      logError('state: state.json is not valid JSON', e);
+    } catch {
+      // The ERROR OBJECT is deliberately not logged. Since M22 this file can
+      // hold API keys (AccountProfile.extraEnv), and V8's SyntaxError message
+      // quotes the source either side of the fault — corruption landing near a
+      // key would put that key in the output channel. The backup path already
+      // never logs the text; this is the same rule for the message about it.
+      logError(
+        'state: state.json is not valid JSON',
+        new Error(this.filePath),
+      );
       await this.backupCorrupt(raw);
       const state = emptyState();
       return { state, text: stableStringify(state), ok: true };

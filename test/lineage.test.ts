@@ -17,6 +17,7 @@ import { normalizeStatus } from '../src/roster';
 import {
   MAX_GHOST_DEPTH,
   NEGATIVE_RESOLUTION_TTL_MS,
+  type ArchivedSession,
   type ArgvScanResult,
   type EditorialRecord,
   type ParentResolution,
@@ -439,24 +440,30 @@ function forestOf(
     records?: Record<string, EditorialRecord>;
     headers?: Map<string, TranscriptHeaderMeta>;
     showGhosts?: boolean;
-    sortWaitingFirst?: boolean;
+    onlyActive?: boolean;
+    activityMtimes?: ReadonlyMap<string, number>;
+    tailStats?: ReadonlyMap<string, { lastPromptAt?: number; tokens?: number }>;
+    archived?: ArchivedSession[];
   } = {},
 ) {
   const opts: {
     showGhosts?: boolean;
-    sortWaitingFirst?: boolean;
+    onlyActive?: boolean;
     now?: number;
   } = { now: 5_000_000 };
   if (extra.showGhosts !== undefined) opts.showGhosts = extra.showGhosts;
-  if (extra.sortWaitingFirst !== undefined) {
-    opts.sortWaitingFirst = extra.sortWaitingFirst;
-  }
+  if (extra.onlyActive !== undefined) opts.onlyActive = extra.onlyActive;
   const input = {
     entries,
     resolutions: new Map(Object.entries(edges)),
     records: extra.records ?? {},
     opts,
     ...(extra.headers === undefined ? {} : { headers: extra.headers }),
+    ...(extra.activityMtimes === undefined
+      ? {}
+      : { activityMtimes: extra.activityMtimes }),
+    ...(extra.tailStats === undefined ? {} : { tailStats: extra.tailStats }),
+    ...(extra.archived === undefined ? {} : { archived: extra.archived }),
   };
   return buildForest(input);
 }
@@ -494,6 +501,56 @@ describe('buildForest', () => {
     expect(ghost?.visibleChildren).toEqual([CHILD]);
   });
 
+  // Regression: a ghost had no cwd unless an editorial record supplied one,
+  // and a record's cwd exists only for sessions Canopy launched itself. The
+  // ghost IS the visible root of its subtree and grouping keys entirely off
+  // the root's cwd, so a fork of a just-closed parent fell out of its project
+  // row into "(unknown)" — or vanished under lineage.onlyProjectSessions.
+  it('gives a ghost the cwd of the child that referenced it', () => {
+    const f = forestOf([live(CHILD, { cwd: '/work/api' })], {
+      [CHILD]: { parentId: PARENT, source: 'forkedFrom' },
+    });
+    expect(f.nodes.get(PARENT)?.cwd).toBe('/work/api');
+  });
+
+  it('prefers an editorial cwd over the inherited one', () => {
+    const f = forestOf(
+      [live(CHILD, { cwd: '/work/api' })],
+      { [CHILD]: { parentId: PARENT, source: 'forkedFrom' } },
+      {
+        records: {
+          [PARENT]: {
+            id: PARENT,
+            cwd: '/work/recorded',
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+          },
+        },
+      },
+    );
+    expect(f.nodes.get(PARENT)?.cwd).toBe('/work/recorded');
+  });
+
+  it('carries an inherited cwd up a chain of ghosts', () => {
+    const f = forestOf(
+      [live(CHILD, { cwd: '/work/api' })],
+      {
+        [CHILD]: { parentId: PARENT, source: 'forkedFrom' },
+        [PARENT]: { parentId: OTHER, source: 'forkedFrom' },
+      },
+    );
+    expect(f.nodes.get(PARENT)?.ghost).toBe(true);
+    expect(f.nodes.get(OTHER)?.ghost).toBe(true);
+    expect(f.nodes.get(OTHER)?.cwd).toBe('/work/api');
+  });
+
+  it('leaves a ghost without a cwd when no descendant has one', () => {
+    const f = forestOf([live(CHILD, { cwd: undefined })], {
+      [CHILD]: { parentId: PARENT, source: 'forkedFrom' },
+    });
+    expect(f.nodes.get(PARENT)?.cwd).toBeUndefined();
+  });
+
   it('prefers an editorial title over the "(gone)" ghost label', () => {
     const f = forestOf(
       [live(CHILD)],
@@ -518,14 +575,80 @@ describe('buildForest', () => {
     expect(f.nodes.get(CHILD)?.parentId).toBe(PARENT);
   });
 
-  it('prunes a ghost whose only descendant is hidden', () => {
+  it('prunes a ghost whose only descendant is DELETED', () => {
     const f = forestOf(
       [live(CHILD)],
       { [CHILD]: { parentId: PARENT, source: 'forkedFrom' } },
-      { records: { [CHILD]: { ...record({ id: CHILD }), hidden: true } } },
+      { records: { [CHILD]: { ...record({ id: CHILD }), deleted: true } } },
     );
     expect(f.visibleRoots).toEqual([]);
     expect(f.nodes.size).toBe(2);
+  });
+
+  // A muted descendant is still on screen, so the ghost that carries its
+  // lineage has to stay too — otherwise hiding a fork would silently detach it.
+  it('keeps a ghost whose only descendant is merely hidden', () => {
+    const f = forestOf(
+      [live(CHILD)],
+      { [CHILD]: { parentId: PARENT, source: 'forkedFrom' } },
+      {
+        showGhosts: true,
+        records: { [CHILD]: { ...record({ id: CHILD }), hidden: true } },
+      },
+    );
+    expect(f.visibleRoots).toEqual([PARENT]);
+    expect(f.nodes.get(PARENT)?.visibleChildren).toEqual([CHILD]);
+  });
+
+  // M19 — `lineage.onlyActiveSessions`, the view-title filter.
+  describe('onlyActive', () => {
+    const archivedOf = (id: string): ArchivedSession => ({
+      sessionId: id,
+      transcriptPath: `/t/${id}.jsonl`,
+      endedAt: 4_000_000,
+      bytes: 10,
+      cwd: '/work',
+    });
+
+    it('drops what is over and keeps what is running', () => {
+      const f = forestOf(
+        [live(CHILD)],
+        {},
+        { archived: [archivedOf(OTHER)], onlyActive: true },
+      );
+      expect(f.visibleRoots).toEqual([CHILD]);
+      // A FILTER, not a delete: the node is still built, so every verb that
+      // takes an id still finds it and flipping the switch back is free.
+      expect(f.nodes.has(OTHER)).toBe(true);
+    });
+
+    it('promotes a live fork of a closed parent instead of losing it', () => {
+      // The whole reason this rides on the visibility pass rather than being a
+      // filter over the finished rows: a session whose parent you closed is
+      // still running, and it has to keep a place in the tree.
+      const f = forestOf(
+        [live(CHILD)],
+        { [CHILD]: { parentId: PARENT, source: 'forkedFrom' } },
+        { archived: [archivedOf(PARENT)], onlyActive: true },
+      );
+      expect(f.visibleRoots).toEqual([CHILD]);
+      expect(f.nodes.get(CHILD)?.parentId).toBe(PARENT); // lineage is untouched
+      expect(f.nodes.get(PARENT)?.visibleChildren).toEqual([CHILD]);
+    });
+
+    it('takes the ghosts with it — an inferred ancestor is not running either', () => {
+      const f = forestOf(
+        [live(CHILD)],
+        { [CHILD]: { parentId: PARENT, source: 'forkedFrom' } },
+        { showGhosts: true, onlyActive: true },
+      );
+      expect(f.visibleRoots).toEqual([CHILD]);
+    });
+
+    it('changes nothing while it is off', () => {
+      const f = forestOf([live(CHILD)], {}, { archived: [archivedOf(OTHER)] });
+      expect(f.visibleRoots.sort()).toEqual([CHILD, OTHER].sort());
+    });
   });
 
   it('cuts a cycle so the forest still has a root', () => {
@@ -555,7 +678,24 @@ describe('buildForest', () => {
     expect(f.edges).toEqual([]);
   });
 
-  it('promotes a hidden node’s children under the nearest visible ancestor', () => {
+  it('promotes a DELETED node’s children under the nearest visible ancestor', () => {
+    const GONE = OTHER;
+    const GRAND = '0f0000c3-0000-4000-8000-0000000000c3';
+    const f = forestOf(
+      [live(PARENT), live(GONE), live(GRAND)],
+      {
+        [GONE]: { parentId: PARENT, source: 'forkedFrom' },
+        [GRAND]: { parentId: GONE, source: 'forkedFrom' },
+      },
+      { records: { [GONE]: { ...record({ id: GONE }), deleted: true } } },
+    );
+    expect(f.nodes.get(PARENT)?.children).toEqual([GONE]);
+    expect(f.nodes.get(PARENT)?.visibleChildren).toEqual([GRAND]);
+    expect(f.nodes.get(GONE)?.deleted).toBe(true);
+  });
+
+  // M8: hide and delete are different verbs. Hiding MUTES — the row survives.
+  it('keeps a hidden node’s row and its subtree nested under it', () => {
     const HID = OTHER;
     const GRAND = '0f0000c3-0000-4000-8000-0000000000c3';
     const f = forestOf(
@@ -566,9 +706,48 @@ describe('buildForest', () => {
       },
       { records: { [HID]: { ...record({ id: HID }), hidden: true } } },
     );
-    expect(f.nodes.get(PARENT)?.children).toEqual([HID]);
-    expect(f.nodes.get(PARENT)?.visibleChildren).toEqual([GRAND]);
     expect(f.nodes.get(HID)?.hidden).toBe(true);
+    expect(f.nodes.get(HID)?.deleted).toBe(false);
+    // Not spliced out, and its child is NOT promoted past it.
+    expect(f.nodes.get(PARENT)?.visibleChildren).toEqual([HID]);
+    expect(f.nodes.get(HID)?.visibleChildren).toEqual([GRAND]);
+  });
+
+  it('sorts a hidden sibling after every visible one', () => {
+    const EARLY = OTHER; // hidden, but started FIRST
+    const f = forestOf(
+      [
+        live(PARENT),
+        live(EARLY, { startedAt: 1_000 }),
+        live(CHILD, { startedAt: 2_000 }),
+      ],
+      {
+        [EARLY]: { parentId: PARENT, source: 'forkedFrom' },
+        [CHILD]: { parentId: PARENT, source: 'forkedFrom' },
+      },
+      { records: { [EARLY]: { ...record({ id: EARLY }), hidden: true } } },
+    );
+    // Age alone would put EARLY first; muting overrides it.
+    expect(f.nodes.get(PARENT)?.children).toEqual([CHILD, EARLY]);
+    expect(f.nodes.get(PARENT)?.visibleChildren).toEqual([CHILD, EARLY]);
+  });
+
+  it('sorts a hidden ROOT last, whether or not it is waiting on the user', () => {
+    const HID = OTHER;
+    const f = forestOf(
+      [
+        live(HID, { status: 'waiting', waitingFor: 'dialog open', startedAt: 1_000 }),
+        live(CHILD, { startedAt: 2_000 }),
+      ],
+      {},
+      {
+        records: { [HID]: { ...record({ id: HID }), hidden: true } },
+      },
+    );
+    // Muting outranks everything, including "starts earlier" and "is waiting".
+    expect(f.visibleRoots).toEqual([CHILD, HID]);
+    // …and a muted session never badges the view.
+    expect(f.attentionCount).toBe(0);
   });
 
   it('counts only visible waiting sessions in attentionCount', () => {
@@ -614,14 +793,20 @@ describe('buildForest', () => {
     );
   });
 
-  it('sorts waiting roots first, then by start time, and can be switched off', () => {
+  it('never reorders visibleRoots when a session starts waiting on you (P7)', () => {
+    // The order-stability invariant the fix exists to guarantee: building the
+    // SAME forest twice, differing only in one root's attention state, must
+    // produce byte-identical root order. Attention is a rendering concern —
+    // the dot, the badge — never a position concern.
     const older = live(PARENT, { startedAt: 100 });
-    const newerWaiting = live(CHILD, { startedAt: 900, status: 'waiting' });
-    const waitingFirst = forestOf([older, newerWaiting], {});
-    expect(waitingFirst.roots).toEqual([CHILD, PARENT]);
+    const newerIdle = live(CHILD, { startedAt: 900 });
+    const idleForest = forestOf([older, newerIdle], {});
 
-    const byAge = forestOf([older, newerWaiting], {}, { sortWaitingFirst: false });
-    expect(byAge.roots).toEqual([PARENT, CHILD]);
+    const newerWaiting = live(CHILD, { startedAt: 900, status: 'waiting' });
+    const waitingForest = forestOf([older, newerWaiting], {});
+
+    expect(waitingForest.visibleRoots).toEqual(idleForest.visibleRoots);
+    expect(waitingForest.visibleRoots).toEqual([PARENT, CHILD]);
   });
 
   it('sorts children by start time with undefined last', () => {
@@ -710,5 +895,124 @@ describe('buildForest', () => {
         expected,
       );
     }
+  });
+
+  // P5: age is time since last activity, not time since the process was
+  // started. lastActiveAt comes from the archive indexer's transcript-mtime
+  // sweep, handed in as activityMtimes and keyed by session id.
+  it('gives a live entry lastActiveAt from a matching activityMtimes entry', () => {
+    const f = forestOf([live(CHILD, { startedAt: 1000 })], {}, {
+      activityMtimes: new Map([[CHILD, 4_999_000]]),
+    });
+    const node = f.nodes.get(CHILD);
+    expect(node?.startedAt).toBe(1000);
+    expect(node?.lastActiveAt).toBe(4_999_000);
+    expect(node?.lastActiveAt).not.toBe(node?.startedAt);
+  });
+
+  it('leaves lastActiveAt undefined for a live entry the sweep has not covered yet', () => {
+    const f = forestOf([live(CHILD, { startedAt: 1000 })], {}, {
+      activityMtimes: new Map([[PARENT, 4_999_000]]), // some OTHER id
+    });
+    expect(f.nodes.get(CHILD)?.lastActiveAt).toBeUndefined();
+  });
+
+  it('leaves lastActiveAt undefined for a live entry when no map is passed at all', () => {
+    const f = forestOf([live(CHILD, { startedAt: 1000 })], {});
+    expect(f.nodes.get(CHILD)?.lastActiveAt).toBeUndefined();
+  });
+
+  // M18: the transcript-tail facts, carried alongside the mtime sweep. The two
+  // are separate inputs because they answer different questions — "was
+  // anything written" vs "did the USER say anything" — and a node may have
+  // either without the other.
+  it('carries the tail facts onto a live node, per field', () => {
+    const f = forestOf([live(CHILD, { startedAt: 1000 })], {}, {
+      activityMtimes: new Map([[CHILD, 4_999_000]]),
+      tailStats: new Map([[CHILD, { lastPromptAt: 4_000_000, tokens: 287_207 }]]),
+    });
+    const node = f.nodes.get(CHILD);
+    expect(node?.lastPromptAt).toBe(4_000_000);
+    expect(node?.tokens).toBe(287_207);
+    // The mtime is still recorded — it is the fallback the age drops to.
+    expect(node?.lastActiveAt).toBe(4_999_000);
+  });
+
+  it('carries them onto an ARCHIVED node too', () => {
+    // A closed session's last prompt is as interesting as a live one's, and is
+    // the number its row has always claimed to show.
+    const f = forestOf([], {}, {
+      archived: [
+        {
+          sessionId: CHILD,
+          transcriptPath: '/tmp/x.jsonl',
+          endedAt: 4_999_000,
+          bytes: 10,
+          startedAt: 1000,
+        },
+      ],
+      tailStats: new Map([[CHILD, { lastPromptAt: 4_000_000, tokens: 512 }]]),
+    });
+    const node = f.nodes.get(CHILD);
+    expect(node?.archived).toBe(true);
+    expect(node?.lastPromptAt).toBe(4_000_000);
+    expect(node?.tokens).toBe(512);
+  });
+
+  it('ignores a junk or absent entry rather than writing a junk field', () => {
+    const f = forestOf([live(CHILD), live(PARENT)], {}, {
+      tailStats: new Map([
+        [CHILD, { lastPromptAt: Number.NaN, tokens: 0 }],
+      ]),
+    });
+    expect(f.nodes.get(CHILD)?.lastPromptAt).toBeUndefined();
+    expect(f.nodes.get(CHILD)?.tokens).toBeUndefined();
+    expect(f.nodes.get(PARENT)?.lastPromptAt).toBeUndefined();
+  });
+});
+
+// --------------------------------------------- resolveAll: chain remap (M10)
+
+describe('resolveAll: chain-tip parent remap (M10)', () => {
+  it('re-points an inferred edge at the tip and never ghosts the superseded id', async () => {
+    const spy = spyIO({ head: PARENT });
+    const resolver = new LineageResolver(spy.io);
+    // PARENT has been superseded by OTHER (its conversation's tip).
+    const map = await resolveAll(
+      [{ sessionId: CHILD }],
+      resolver,
+      {},
+      undefined,
+      (pid) => (pid === PARENT ? OTHER : pid),
+    );
+    expect(map.get(CHILD)).toEqual({ parentId: OTHER, source: 'forkedFrom' });
+    // The ghost walk chased the TIP, not the row the collapse just removed.
+    expect(map.has(OTHER)).toBe(true);
+    expect(map.has(PARENT)).toBe(false);
+  });
+
+  it('a mapper that throws or returns junk leaves the edge unchanged', async () => {
+    const spy = spyIO({ head: PARENT });
+    const resolver = new LineageResolver(spy.io);
+    const throwing = await resolveAll(
+      [{ sessionId: CHILD }],
+      resolver,
+      {},
+      undefined,
+      () => {
+        throw new Error('boom');
+      },
+    );
+    expect(throwing.get(CHILD)?.parentId).toBe(PARENT);
+
+    const junkResolver = new LineageResolver(spyIO({ head: PARENT }).io);
+    const junk = await resolveAll(
+      [{ sessionId: CHILD }],
+      junkResolver,
+      {},
+      undefined,
+      () => 'not-a-uuid',
+    );
+    expect(junk.get(CHILD)?.parentId).toBe(PARENT);
   });
 });

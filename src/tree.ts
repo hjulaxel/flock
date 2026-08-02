@@ -7,8 +7,12 @@
 
 import * as vscode from 'vscode';
 import {
+  ATTENTION_BADGE_ENABLED,
   BRAND_COLOR_ID,
   COMMANDS,
+  DEFAULT_PROVIDER,
+  PROVIDERS,
+  PROVIDER_MEDIA_DIR,
   TREE_DND_MIME,
   VIEW_ID,
   contextValueOf,
@@ -16,9 +20,11 @@ import {
   shortId,
 } from './types';
 import type {
-  ContextToken,
   DisposableLike,
   GroupNode,
+  ProjectGroupNode,
+  ProjectRecord,
+  ProviderId,
   SessionForest,
   SessionNode,
   SessionRef,
@@ -26,13 +32,21 @@ import type {
   TreeNode,
 } from './types';
 import { log, logError } from './log';
-import { sessionUri } from './decorations';
+import { projectUri, sessionUri } from './decorations';
+import { computeGrouping } from './projects';
+import type { GroupingResult } from './projects';
 
-const UNKNOWN_GROUP_KEY = '(unknown)';
 /** TreeView.reveal expands at most 3 levels — the API's hard cap. */
 const REVEAL_EXPAND_LEVELS = 3;
 /** Upper bound on the interned-element / shadow-expansion caches. */
 const CACHE_SOFT_LIMIT = 2000;
+
+const EMPTY_GROUPING: GroupingResult = {
+  projects: [],
+  folders: [],
+  loose: [],
+  hiddenCount: 0,
+};
 
 const EMPTY_FOREST: SessionForest = {
   nodes: new Map(),
@@ -45,151 +59,84 @@ const EMPTY_FOREST: SessionForest = {
 
 // ------------------------------------------------------------ pure helpers
 
-/** < 90s → 'now'; < 1h → '<m>m'; < 24h → '<h>h'; else '<d>d'.
- *  Negative / NaN / non-finite → '' (an unknown age renders as nothing). */
-export function formatAge(deltaMs: number): string {
-  if (typeof deltaMs !== 'number' || !Number.isFinite(deltaMs) || deltaMs < 0) {
-    return '';
-  }
-  if (deltaMs < 90_000) return 'now';
-  if (deltaMs < 3_600_000) return `${Math.floor(deltaMs / 60_000)}m`;
-  if (deltaMs < 86_400_000) return `${Math.floor(deltaMs / 3_600_000)}h`;
-  return `${Math.floor(deltaMs / 86_400_000)}d`;
-}
+// formatAge / statusDescriptor / sessionContextValue / projectContextValue moved
+// to ./viewmodel (M9): the native tree and the inline webview must render a row
+// identically, and two copies of "how a row reads" would diverge on the first
+// change. Re-exported so importers and tests keep their existing entry point.
+import {
+  formatAge,
+  formatTokens,
+  projectContextValue,
+  sessionContextValue,
+  statusDescriptor,
+  statusTone,
+} from './viewmodel';
 
-/** waiting → '● <waitingFor>'; busy → '▶ busy'; idle → '○ idle';
- *  exited → '✕ gone'; unknown → ''.
- *  This is the reason the tree does not depend on FileDecorations: the user
- *  can switch `explorer.decorations.badges` off and attention is still here. */
-export function statusDescriptor(node: SessionNode): string {
-  switch (node.status) {
-    case 'waiting': {
-      const what = node.roster?.waitingFor;
-      return `● ${what && what.trim() !== '' ? what : 'waiting'}`;
-    }
-    case 'busy':
-      return '▶ busy';
-    case 'idle':
-      return '○ idle';
-    case 'exited':
-      // Archived and ghost are both 'exited' but mean different things to the
-      // user: an archived session has a transcript and can be reopened, a
-      // ghost is an inferred ancestor that may have nothing behind it.
-      return node.archived ? '⏻ closed' : '✕ gone';
-    default:
-      return '';
-  }
-}
-
-/** contextValueOf([...]) with the §4-C2 token order. The package.json `when`
- *  clauses match these with viewItem =~ /;token;/, which is why every value is
- *  delimited on both sides. */
-export function sessionContextValue(
-  node: SessionNode,
-  boundHere: boolean,
-): string {
-  const tokens: ContextToken[] = ['session'];
-  const live = !node.ghost && !node.archived && node.status !== 'exited';
-
-  if (node.ghost) tokens.push('ghost');
-  else if (node.archived) tokens.push('archived');
-  else if (live) tokens.push('live');
-
-  if (node.ghost || node.archived || node.status === 'exited') {
-    tokens.push('exited');
-  }
-
-  if (live) {
-    if (node.status === 'waiting') tokens.push('waiting');
-    else if (node.status === 'busy') tokens.push('busy');
-    else if (node.status === 'idle') tokens.push('idle');
-  }
-
-  if (node.source === 'minted') tokens.push('ours');
-  if (boundHere) tokens.push('bound');
-  tokens.push(node.parentId ? 'forked' : 'root');
-
-  return contextValueOf(tokens);
-}
-
-/** Path basename without importing node:path (works for / and \ alike). */
-function baseName(p: string): string {
-  const trimmed = p.replace(/[\\/]+$/, '');
-  if (trimmed === '') return p;
-  const i = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
-  if (i < 0) return trimmed;
-  const tail = trimmed.slice(i + 1);
-  return tail === '' ? trimmed : tail;
-}
-
-function cmp(a: string, b: string): number {
-  return a < b ? -1 : a > b ? 1 : 0;
-}
+export {
+  formatAge,
+  formatTokens,
+  projectContextValue,
+  sessionContextValue,
+  statusDescriptor,
+} from './viewmodel';
 
 /** Escape the markdown that matters inside a trusted MarkdownString. Labels
- *  come from roster names and user renames — never trust them verbatim. */
+ *  come from roster names and user renames — never trust them verbatim.
+ *
+ *  This matters more than it looks: `isTrusted` enables `command:` links, so
+ *  ANY unescaped interpolation is a one-click command injection. Directory
+ *  names are as untrusted as labels — a cwd comes straight from
+ *  `claude agents --json` or a transcript, and backticks and brackets are
+ *  legal in POSIX path names. */
 function mdEscape(s: string): string {
   return s.replace(/[\\`*_[\]<>#|]/g, (m) => `\\${m}`);
 }
 
-function sameIds(a: readonly string[], b: readonly string[]): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-  return true;
+/** A path rendered inside a code span. Same escaping, same reason. */
+function mdCode(s: string): string {
+  return `\`${mdEscape(s)}\``;
 }
 
-/** GroupNodes for the visible roots, or null when grouping does not apply
- *  (fewer than two distinct folders — a single group is just noise).
- *  `prev` lets us hand back the identical object when nothing changed, so the
- *  workbench keeps its expansion state for the row. */
-function computeGroups(
-  forest: SessionForest,
-  prev: GroupNode[] | null,
-): GroupNode[] | null {
-  const byKey = new Map<string, GroupNode>();
-  for (const rootId of forest.visibleRoots) {
-    const node = forest.nodes.get(rootId);
-    if (!node) continue;
-    const cwd =
-      typeof node.cwd === 'string' && node.cwd.trim() !== '' ? node.cwd : '';
-    const key = cwd === '' ? UNKNOWN_GROUP_KEY : cwd;
-    let group = byKey.get(key);
-    if (!group) {
-      group = {
-        type: 'group',
-        key,
-        cwd,
-        label: cwd === '' ? UNKNOWN_GROUP_KEY : baseName(cwd),
-        rootIds: [],
-      };
-      byKey.set(key, group);
+/** `window.showInformationMessage` is absent under the unit-test double (and
+ *  could be on a slimmed-down host), and a missing toast must never abort a
+ *  drop. Same optional-member discipline the terminals module uses. */
+function notify(message: string): void {
+  try {
+    const w: Partial<typeof vscode.window> = vscode.window;
+    if (typeof w.showInformationMessage === 'function') {
+      void w.showInformationMessage(message);
+    } else {
+      log('tree:', message);
     }
-    group.rootIds.push(rootId);
+  } catch (err) {
+    logError('tree.notify', err);
   }
-  if (byKey.size < 2) return null;
-
-  const groups = Array.from(byKey.values()).sort(
-    (a, b) => cmp(a.label, b.label) || cmp(a.key, b.key),
-  );
-  if (!prev) return groups;
-
-  const prevByKey = new Map(prev.map((g) => [g.key, g] as const));
-  return groups.map((g) => {
-    const old = prevByKey.get(g.key);
-    if (
-      old &&
-      old.label === g.label &&
-      old.cwd === g.cwd &&
-      sameIds(old.rootIds, g.rootIds)
-    ) {
-      return old;
-    }
-    return g;
-  });
 }
 
 function nodeKey(el: TreeNode): string {
-  return el.type === 'group' ? `group:${el.key}` : el.id;
+  if (el.type === 'group') return `group:${el.key}`;
+  if (el.type === 'project') return `project:${el.projectId}`;
+  return el.id;
+}
+
+/** Cache key for the grouping pass: everything outside the forest that can
+ *  change the shape of the top level. Cheap to build (a handful of projects)
+ *  and it is what keeps getChildren() from recomputing on every hover. */
+function groupingSignature(
+  projects: readonly ProjectRecord[],
+  hiddenFolders: readonly string[],
+  groupByFolder: boolean,
+  onlyProjectSessions: boolean,
+): string {
+  const p = projects
+    .map(
+      (x) =>
+        `${x.id}\u0000${x.name}\u0000${x.rootDir}\u0000${(x.dirs ?? []).join(
+          '\u0001',
+        )}\u0000${x.provider ?? ''}\u0000${x.hidden === true ? '1' : '0'}`,
+    )
+    .join('\u0002');
+  return `${groupByFolder ? '1' : '0'}${onlyProjectSessions ? '1' : '0'}|${p}|${hiddenFolders.join('\u0002')}`;
 }
 
 // ---------------------------------------------------------------- provider
@@ -222,8 +169,8 @@ export class LineageTreeProvider
   private lastForest: SessionForest = EMPTY_FOREST;
 
   private groupCacheForest: SessionForest | null = null;
-  private groupCacheGrouping = false;
-  private groupCache: GroupNode[] | null = null;
+  private groupCacheSignature: string | null = null;
+  private groupCache: GroupingResult = EMPTY_GROUPING;
 
   private parentIndexForest: SessionForest | null = null;
   private parentIndex = new Map<string, string | null>();
@@ -261,38 +208,153 @@ export class LineageTreeProvider
     return ref;
   }
 
-  private groupsFor(forest: SessionForest): GroupNode[] | null {
-    let grouping = false;
+  /** A dependency that throws must never blank the tree — every one of these
+   *  degrades to the value that renders the most, not the least. */
+  private safe<T>(what: string, read: () => T, dflt: T): T {
     try {
-      grouping = this.deps.groupByFolder();
+      const v = read();
+      return v === undefined || v === null ? dflt : v;
     } catch (err) {
-      logError('tree.groupByFolder', err);
+      logError(`tree.${what}`, err);
+      return dflt;
     }
+  }
+
+  private groupingFor(forest: SessionForest): GroupingResult {
+    const groupByFolder = this.safe('groupByFolder', () => this.deps.groupByFolder(), true);
+    const onlyProjectSessions = this.safe(
+      'onlyProjectSessions',
+      () => this.deps.onlyProjectSessions(),
+      false,
+    );
+    const projects = this.safe<ProjectRecord[]>('projects', () => this.deps.projects(), []);
+    const hiddenFolders = this.safe<string[]>(
+      'hiddenFolders',
+      () => this.deps.hiddenFolders(),
+      [],
+    );
+
+    const signature = groupingSignature(
+      projects,
+      hiddenFolders,
+      groupByFolder,
+      onlyProjectSessions,
+    );
     if (
       this.groupCacheForest === forest &&
-      this.groupCacheGrouping === grouping
+      this.groupCacheSignature === signature
     ) {
       return this.groupCache;
     }
+
+    this.groupCache = computeGrouping(
+      {
+        visibleRootIds: forest.visibleRoots,
+        cwdOf: (id) => forest.nodes.get(id)?.cwd,
+        projects,
+        hiddenFolders,
+        groupByFolder,
+        onlyProjectSessions,
+        // M20. The native tree draws no chips — a TreeItem has one label, one
+        // icon and no room for a strip of buttons — but it must still CLAIM
+        // worktree sessions for their project, or the two view styles would
+        // disagree about which rows a project contains. Grouping is shared;
+        // only the rendering of it differs.
+        worktreesOf: (dir) => {
+          try {
+            return this.deps.worktreesOf?.(dir) ?? [];
+          } catch {
+            return [];
+          }
+        },
+      },
+      this.groupCache,
+    );
     this.groupCacheForest = forest;
-    this.groupCacheGrouping = grouping;
-    this.groupCache = grouping ? computeGroups(forest, this.groupCache) : null;
+    this.groupCacheSignature = signature;
     return this.groupCache;
   }
 
-  /** child id → id of the node it hangs under IN THE VISIBLE TREE (which is
-   *  not necessarily node.parentId: hidden and pruned-ghost ancestors are
-   *  spliced out and their children promoted). null = visible root. */
+  /**
+   * child id → id of the node it hangs under IN THE VISIBLE TREE (which is not
+   * necessarily node.parentId: hidden and pruned-ghost ancestors are spliced
+   * out and their children promoted). null = visible root.
+   *
+   * Walked DOWN from the visible roots, never over `forest.nodes` at large.
+   * buildForest assigns `visibleChildren` to EVERY node, invisible ones
+   * included, so a flat pass would let a hidden or pruned-ghost parent claim
+   * the child it was spliced out of — overwriting the correct entry and
+   * handing `reveal()` a parent chain through a row that `getChildren()` never
+   * returns. Which of the two won even depended on roster insertion order.
+   * Descending from the roots makes invisible nodes unreachable by
+   * construction, so getParent() and getChildren() cannot disagree.
+   */
   private visibleParents(forest: SessionForest): Map<string, string | null> {
     if (this.parentIndexForest === forest) return this.parentIndex;
     const map = new Map<string, string | null>();
-    for (const rootId of forest.visibleRoots) map.set(rootId, null);
-    for (const node of forest.nodes.values()) {
-      for (const childId of node.visibleChildren) map.set(childId, node.id);
+    const stack: string[] = [];
+    for (const rootId of forest.visibleRoots) {
+      if (map.has(rootId)) continue;
+      map.set(rootId, null);
+      stack.push(rootId);
+    }
+    for (;;) {
+      const id = stack.pop();
+      if (id === undefined) break;
+      const node = forest.nodes.get(id);
+      if (!node) continue;
+      for (const childId of node.visibleChildren) {
+        if (map.has(childId)) continue; // first (and only) visible parent wins
+        map.set(childId, id);
+        stack.push(childId);
+      }
     }
     this.parentIndexForest = forest;
     this.parentIndex = map;
     return map;
+  }
+
+  /**
+   * Sessions waiting on the user that are ACTUALLY ON SCREEN.
+   *
+   * `forest.attentionCount` cannot answer this: buildForest is never given the
+   * projects or the hidden-folder list, so it counts every waiting session,
+   * including the ones a hidden folder, a hidden project or
+   * `lineage.onlyProjectSessions` removes from the tree. Badging those leaves
+   * a permanent count with no row anywhere to open or dismiss — and hiding a
+   * noisy folder is exactly when a user reaches for that setting.
+   */
+  attentionCount(): number {
+    try {
+      const forest = this.forest();
+      const grouping = this.groupingFor(forest);
+      const roots = [
+        ...grouping.projects.flatMap((p) => p.rootIds),
+        ...grouping.folders.flatMap((g) => g.rootIds),
+        ...grouping.loose,
+      ];
+      const seen = new Set<string>();
+      const stack = [...roots];
+      let count = 0;
+      for (;;) {
+        const id = stack.pop();
+        if (id === undefined) break;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const node = forest.nodes.get(id);
+        if (!node) continue;
+        // The badge counts exactly the GREEN dots on screen (M12): unseen-done
+        // where tracking is on, waiting where it is off. statusTone already
+        // withholds the dot from muted rows — hiding a session is exactly how
+        // the user says "stop telling me about this one".
+        if (statusTone(node) === 'done') count++;
+        stack.push(...node.visibleChildren);
+      }
+      return count;
+    } catch (err) {
+      logError('tree.attentionCount', err);
+      return 0;
+    }
   }
 
   private isCollapsed(el: TreeNode): boolean {
@@ -317,14 +379,18 @@ export class LineageTreeProvider
       const forest = this.forest();
 
       if (!el) {
-        const groups = this.groupsFor(forest);
-        if (groups) return groups.slice();
-        // Empty root list (NOT a placeholder node) is what makes the
-        // contributes.viewsWelcome empty state render.
-        return forest.visibleRoots.map((id) => this.sessionRef(id));
+        // Projects first, then folder rows for whatever no project claims,
+        // then bare sessions. An empty root list (NOT a placeholder node) is
+        // what makes the contributes.viewsWelcome empty state render.
+        const grouping = this.groupingFor(forest);
+        return [
+          ...grouping.projects,
+          ...grouping.folders,
+          ...grouping.loose.map((id) => this.sessionRef(id)),
+        ];
       }
 
-      if (el.type === 'group') {
+      if (el.type === 'group' || el.type === 'project') {
         return el.rootIds.map((id) => this.sessionRef(id));
       }
 
@@ -339,18 +405,113 @@ export class LineageTreeProvider
 
   getTreeItem(el: TreeNode): vscode.TreeItem {
     try {
-      return el.type === 'group'
-        ? this.groupItem(el)
-        : this.sessionItem(el, this.forest());
+      if (el.type === 'group') return this.groupItem(el);
+      if (el.type === 'project') return this.projectItem(el);
+      return this.sessionItem(el, this.forest());
     } catch (err) {
       logError('tree.getTreeItem', err);
       const fallback = new vscode.TreeItem(
-        el.type === 'group' ? el.label : shortId(el.id),
+        el.type === 'session' ? shortId(el.id) : el.label,
         vscode.TreeItemCollapsibleState.None,
       );
       fallback.id = nodeKey(el);
       return fallback;
     }
+  }
+
+  /**
+   * A project row. It is always expandable even with no sessions: collapsing
+   * an empty project would hide the only affordance it has, and an expandable
+   * row with nothing under it reads correctly as "nothing running here yet".
+   */
+  private projectItem(el: ProjectGroupNode): vscode.TreeItem {
+    const item = new vscode.TreeItem(
+      el.label,
+      this.isCollapsed(el)
+        ? vscode.TreeItemCollapsibleState.Collapsed
+        : vscode.TreeItemCollapsibleState.Expanded,
+    );
+    item.id = `project:${el.projectId}`;
+
+    // No session count — the rows underneath ARE the count. Only the extra
+    // directories get a word, because nothing else on screen shows them.
+    // Mirrors pushProject() in viewmodel.ts; the two must read identically.
+    const extra = el.dirs.length - 1;
+    item.description =
+      extra > 0 ? `+${extra} dir${extra === 1 ? '' : 's'}` : undefined;
+
+    // Deliberately unbranded: a project is a container, not a session, so it
+    // gets no LLM logo and no ThemeColor. `undefined` would be worse than a
+    // plain ThemeIcon — the workbench then derives an icon from `resourceUri`
+    // (a fake `lineage-project:` scheme with no extension) through whatever
+    // file-icon theme is active, which is unpredictable rather than absent.
+    // `providerIcon()` stays reserved for sessionItem(), below.
+    item.iconPath = new vscode.ThemeIcon('root-folder');
+    item.contextValue = projectContextValue(el);
+    // A project row IS decorated since M12 — but only under its own scheme,
+    // which lights the attention dot when a session beneath it is unseen-done
+    // and renders nothing otherwise.
+    item.resourceUri = projectUri(el.projectId);
+    return item;
+  }
+
+  private providerOf(sessionId: string): ProviderId {
+    const id = this.safe<ProviderId>(
+      'providerFor',
+      () => this.deps.providerFor(sessionId),
+      DEFAULT_PROVIDER,
+    );
+    return PROVIDERS[id] ? id : DEFAULT_PROVIDER;
+  }
+
+  /** Absolute path of a provider svg inside the install, or '' if unavailable. */
+  private providerIconPath(file: string | undefined): string {
+    if (file === undefined || file === '') return '';
+    return (
+      this.safe<string | undefined>(
+        'mediaPath',
+        () => this.deps.mediaPath(`${PROVIDER_MEDIA_DIR}/${file}`),
+        undefined,
+      ) ?? ''
+    );
+  }
+
+  /**
+   * The provider's official brand mark from the extension install, or its
+   * codicon fallback.
+   *
+   * A file `iconPath` is NOT recoloured by the workbench, so a COLOURED mark
+   * ships as one file carrying its own brand colour, drawn to read on both light
+   * and dark. A MONOCHROME mark cannot do that from one file, so it ships as a
+   * `{light, dark}` pair — which is the same treatment its own brand guide
+   * prescribes, not a workaround.
+   *
+   * The codicon path exists because `mediaPath` returns undefined under the unit
+   * test mock and would do the same if a packaging slip dropped media/ — an
+   * icon-less row is not an acceptable outcome either way.
+   */
+  private providerIcon(
+    provider: ProviderId,
+  ): vscode.ThemeIcon | vscode.Uri | { light: vscode.Uri; dark: vscode.Uri } {
+    const info = PROVIDERS[provider] ?? PROVIDERS[DEFAULT_PROVIDER];
+    const lightPath = this.providerIconPath(info.iconFile);
+    const darkPath = this.providerIconPath(info.iconFileDark);
+    if (lightPath !== '') {
+      try {
+        const light = vscode.Uri.file(lightPath);
+        // Only pair them when BOTH resolved: one half of a light/dark pair is
+        // worse than the single file, because the missing side renders nothing.
+        return darkPath !== ''
+          ? { light, dark: vscode.Uri.file(darkPath) }
+          : light;
+      } catch (err) {
+        logError('tree.providerIcon', err);
+      }
+    }
+    return new vscode.ThemeIcon(
+      info.fallbackIcon,
+      new vscode.ThemeColor(BRAND_COLOR_ID),
+    );
   }
 
   private groupItem(el: GroupNode): vscode.TreeItem {
@@ -362,7 +523,10 @@ export class LineageTreeProvider
     );
     item.id = `group:${el.key}`;
     item.description = el.cwd;
-    item.iconPath = new vscode.ThemeIcon('folder');
+    // Same root-marker glyph as projectItem(), above — both are root-level
+    // containers and should read as the same kind of thing, not as "one is a
+    // real project and the other is a plain folder".
+    item.iconPath = new vscode.ThemeIcon('root-folder');
     item.contextValue = contextValueOf(['group']);
     // No resourceUri: groups are not sessions and must not be decorated.
     // No tooltip: resolveTreeItem() builds it lazily on hover.
@@ -397,14 +561,33 @@ export class LineageTreeProvider
     // selection across refreshes, and it must NOT move when the label does.
     item.id = node.id;
 
-    // For a closed session "how long since I last touched it" is the useful
-    // number, so archived rows age off endedAt rather than startedAt.
-    const ageBasis = node.archived
-      ? (node.endedAt ?? node.startedAt)
-      : node.startedAt;
+    // "How long since I last SPOKE to this" is the useful number for every row,
+    // live or closed — see the same fallback chain, and why it is in that
+    // order, in viewmodel.ts's pushSession. Both surfaces must read a row
+    // identically, so neither is allowed its own opinion about this.
+    const ageBasis = node.lastPromptAt ?? node.lastActiveAt ?? node.startedAt;
     const age = formatAge(Date.now() - (ageBasis ?? Number.NaN));
     const status = statusDescriptor(node);
-    item.description = [age, status].filter((p) => p !== '').join(' · ');
+    const tokens = this.safe('showTokens', () => this.deps.showTokens?.(), false)
+      ? formatTokens(node.tokens)
+      : '';
+    // The age leads: live state is the dot at the right edge now, so what is
+    // left here is when the row was last touched plus the words a dot cannot
+    // carry. 'hidden' is one of them — FileDecoration colours are gated behind
+    // the user's explorer.decorations.colors setting, so with them off a muted
+    // row would otherwise be identical to a live one but sorted oddly.
+    //
+    // The age CANNOT be right-aligned in a native tree: the workbench renders
+    // TreeItem.description flush against the label and pins only the
+    // decoration badge to the right edge. The inline sidebar draws its own row
+    // and does put the age next to the dot.
+    //
+    // What the native tree has instead of the inline sidebar's dimming is the
+    // hollow-ring badge and the grey label the decoration's colour brings with
+    // it — which is why 'closed' is a colour here and a word nowhere.
+    item.description = [tokens, age, status, node.hidden ? 'hidden' : '']
+      .filter((p) => p !== '')
+      .join(' · ');
 
     item.resourceUri = sessionUri(node.id);
 
@@ -416,18 +599,35 @@ export class LineageTreeProvider
     }
     item.contextValue = sessionContextValue(node, boundHere);
 
-    // A raw hex inside ThemeColor is silently ignored by the renderer — the
-    // id MUST be the contributes.colors entry.
-    item.iconPath = new vscode.ThemeIcon(
-      node.ghost
-        ? 'circle-slash'
-        : node.archived
-          ? 'history'
-          : node.parentId
-            ? 'git-branch'
-            : 'terminal',
-      new vscode.ThemeColor(BRAND_COLOR_ID),
-    );
+    // The leading glyph names WHO is running, not what state it is in: a
+    // session row shows its LLM provider's logo. State is not lost — it is in
+    // the decoration badge and its colour, in the description's age and the few
+    // words a mark cannot carry, and in the nesting, which is what shows a fork
+    // is a fork.
+    //
+    // A closed row therefore keeps its logo at full strength here. The inline
+    // sidebar greys the mark with a CSS filter; a file-backed iconPath is never
+    // recoloured by the workbench, so there is nothing to reach for, and a
+    // second greyed-out codicon in place of the logo would cost the row the one
+    // fact the glyph exists to carry.
+    //
+    // A ghost is the exception: it is an inferred ancestor, not an observed
+    // session, so claiming a provider for it would be a made-up fact.
+    //
+    // A hidden row is the other exception, for the same mechanical reason the
+    // closed row cannot be greyed — except that here it is worth spending the
+    // glyph, because eye-closed says WHY the row is grey and a dimmed logo
+    // would not.
+    if (node.hidden) {
+      item.iconPath = new vscode.ThemeIcon(
+        'eye-closed',
+        new vscode.ThemeColor('disabledForeground'),
+      );
+    } else {
+      item.iconPath = node.ghost
+        ? new vscode.ThemeIcon('circle-slash', new vscode.ThemeColor(BRAND_COLOR_ID))
+        : this.providerIcon(this.providerOf(node.id));
+    }
 
     // Clicking an archived row reopens it (`--resume`), which is safe exactly
     // because nothing else holds its transcript open. Clicking a live row
@@ -454,13 +654,15 @@ export class LineageTreeProvider
    *  materialise the path to an element it has not rendered yet. */
   getParent(el: TreeNode): TreeNode | undefined {
     try {
-      if (el.type === 'group') return undefined;
+      if (el.type !== 'session') return undefined;
       const forest = this.forest();
       const parentId = this.visibleParents(forest).get(el.id);
       if (parentId) return this.sessionRef(parentId);
-      const groups = this.groupsFor(forest);
-      if (!groups) return undefined;
-      return groups.find((g) => g.rootIds.indexOf(el.id) >= 0);
+      const grouping = this.groupingFor(forest);
+      return (
+        grouping.projects.find((p) => p.rootIds.indexOf(el.id) >= 0) ??
+        grouping.folders.find((g) => g.rootIds.indexOf(el.id) >= 0)
+      );
     } catch (err) {
       logError('tree.getParent', err);
       return undefined;
@@ -473,11 +675,9 @@ export class LineageTreeProvider
     try {
       const md = new vscode.MarkdownString();
       md.isTrusted = true;
-      if (el.type === 'group') {
-        this.appendGroupTooltip(md, el);
-      } else {
-        this.appendSessionTooltip(md, el);
-      }
+      if (el.type === 'group') this.appendGroupTooltip(md, el);
+      else if (el.type === 'project') this.appendProjectTooltip(md, el);
+      else this.appendSessionTooltip(md, el);
       item.tooltip = md;
     } catch (err) {
       logError('tree.resolveTreeItem', err);
@@ -487,9 +687,25 @@ export class LineageTreeProvider
 
   private appendGroupTooltip(md: vscode.MarkdownString, el: GroupNode): void {
     md.appendMarkdown(`**${mdEscape(el.label)}**\n\n`);
-    if (el.cwd !== '') md.appendMarkdown(`\`${el.cwd}\`\n\n`);
+    if (el.cwd !== '') md.appendMarkdown(`${mdCode(el.cwd)}\n\n`);
     md.appendMarkdown(
       `${el.rootIds.length} root session${el.rootIds.length === 1 ? '' : 's'}`,
+    );
+  }
+
+  private appendProjectTooltip(
+    md: vscode.MarkdownString,
+    el: ProjectGroupNode,
+  ): void {
+    const info = PROVIDERS[el.provider] ?? PROVIDERS[DEFAULT_PROVIDER];
+    md.appendMarkdown(`**${mdEscape(el.label)}**\n\n`);
+    md.appendMarkdown(`${mdEscape(info.label)} project\n\n`);
+    for (const [i, dir] of el.dirs.entries()) {
+      md.appendMarkdown(`- ${i === 0 ? '**main** ' : ''}${mdCode(dir)}\n`);
+    }
+    const count = el.rootIds.length;
+    md.appendMarkdown(
+      `\n${count} root session${count === 1 ? '' : 's'} here\n`,
     );
   }
 
@@ -505,11 +721,12 @@ export class LineageTreeProvider
     }
 
     md.appendMarkdown(`**${mdEscape(node.label)}**\n\n`);
+    // node.id passed isSessionId, so it is uuid-shaped and safe verbatim.
     md.appendMarkdown(`\`${node.id}\`\n\n`);
 
     const lines: string[] = [];
     lines.push(`kind: ${node.kind}${node.ghost ? ' (ghost)' : ''}`);
-    if (node.cwd) lines.push(`cwd: \`${node.cwd}\``);
+    if (node.cwd) lines.push(`cwd: ${mdCode(node.cwd)}`);
     if (typeof node.startedAt === 'number' && Number.isFinite(node.startedAt)) {
       let iso = '';
       try {
@@ -519,6 +736,26 @@ export class LineageTreeProvider
       }
       if (iso !== '') lines.push(`started: ${iso}`);
     }
+    // Both stamps, in the order the age falls back through them (M18), so a row
+    // whose age looks wrong shows WHICH source it came from.
+    for (const [what, at] of [
+      ['last prompt', node.lastPromptAt],
+      ['last active', node.lastActiveAt],
+    ] as const) {
+      if (typeof at !== 'number' || !Number.isFinite(at)) continue;
+      let iso = '';
+      try {
+        iso = new Date(at).toISOString();
+      } catch {
+        iso = '';
+      }
+      if (iso !== '') lines.push(`${what}: ${iso}`);
+    }
+    // Always in the hover, whatever `lineage.showTokens` says — the setting is
+    // about the ROW's width, and a hover costs none.
+    if (typeof node.tokens === 'number' && Number.isFinite(node.tokens)) {
+      lines.push(`context: ${node.tokens.toLocaleString('en-US')} tokens`);
+    }
     const waitingFor = node.roster?.waitingFor;
     lines.push(
       `status: ${node.status}${
@@ -527,6 +764,9 @@ export class LineageTreeProvider
           : ''
       }`,
     );
+    if (node.hidden) {
+      lines.push('hidden: sorted last, not counted in the badge');
+    }
 
     const chain = this.parentChain(forest, node);
     if (chain.length > 0) {
@@ -536,6 +776,11 @@ export class LineageTreeProvider
     } else {
       lines.push('parent: none (root)');
     }
+
+    // The close-with-summary text. Without this the only place it exists is
+    // state.json — the prompt says it is "recorded on the node", so the node
+    // is where it has to be readable.
+    if (node.summary) lines.push(`summary: ${mdEscape(node.summary)}`);
 
     for (const line of lines) md.appendMarkdown(`- ${line}\n`);
   }
@@ -587,11 +832,34 @@ export class LineageTreeProvider
       const ids = parseDraggedIds(raw);
       if (ids.length === 0) return;
 
-      // Dropping on a group (or on empty space) detaches to a root.
+      const forest = this.forest();
+
+      // Dropping on a PROJECT is a different verb entirely: it does not touch
+      // lineage, it teaches the project about the directory the session runs
+      // in. That is the whole gesture for "this work belongs to that project".
+      if (target && target.type === 'project') {
+        // Only a visible ROOT can move: a project row renders roots only, so
+        // dragging a nested fork onto it would silently do nothing on screen
+        // while still appending its cwd to the project's directory list.
+        const roots = new Set(forest.visibleRoots);
+        const movable = ids.filter((id) => roots.has(id));
+        if (movable.length === 0) {
+          notify(
+            'Canopy: only a top-level session can be moved to a project — ' +
+              'a fork follows the session it branched from.',
+          );
+          return;
+        }
+        for (const id of movable) {
+          await this.deps.assignToProject(id, target.projectId);
+        }
+        return;
+      }
+
+      // Dropping on a folder group (or on empty space) detaches to a root.
       const newParentId =
         target && target.type === 'session' ? target.id : null;
 
-      const forest = this.forest();
       for (const id of ids) {
         if (id === newParentId) {
           log('tree.handleDrop: refused self-parent', id);
@@ -626,7 +894,7 @@ export class LineageTreeProvider
   private pruneShadowState(forest: SessionForest): void {
     if (this.collapsedKeys.size === 0) return;
     for (const key of Array.from(this.collapsedKeys)) {
-      if (key.startsWith('group:')) continue;
+      if (key.startsWith('group:') || key.startsWith('project:')) continue;
       if (!forest.nodes.has(key)) this.collapsedKeys.delete(key);
     }
   }
@@ -686,18 +954,42 @@ export function registerTree(deps: TreeDeps): TreeController {
     treeDataProvider: provider,
     dragAndDropController: provider,
     showCollapseAll: true,
-    canSelectMany: false,
+    // M22. Shift- and ctrl-click select several rows, and the workbench then
+    // hands every row menu command its whole selection as a second argument —
+    // which is the entire native half of multi-delete. The webview has to build
+    // the same thing by hand (see media/webtree.js).
+    canSelectMany: true,
   });
 
   const disposables: vscode.Disposable[] = [view];
   disposables.push(
     view.onDidExpandElement((e) => provider.noteExpanded(e.element)),
     view.onDidCollapseElement((e) => provider.noteCollapsed(e.element)),
+    // Report the selection up, exactly as the webview does, so both views feed
+    // one answer and the plural menu entry is gated on one context key. The
+    // second argument the workbench passes covers the menu case on its own, but
+    // not a keybinding or the palette — those arrive with no argument at all.
+    view.onDidChangeSelection((e) => {
+      try {
+        const ids: string[] = [];
+        for (const element of e.selection ?? []) {
+          if (element && (element as SessionRef).type === 'session') {
+            ids.push((element as SessionRef).id);
+          }
+        }
+        deps.noteSelection?.(ids);
+      } catch (err) {
+        logError('tree.onDidChangeSelection', err);
+      }
+    }),
   );
 
   const updateBadge = (): void => {
     try {
-      const count = deps.getForest().attentionCount;
+      // Counted over the RENDERED tree, not the raw forest — see
+      // LineageTreeProvider.attentionCount(). Not counted at all while the
+      // badge is off: 0 falls through to `undefined` below, which clears it.
+      const count = ATTENTION_BADGE_ENABLED ? provider.attentionCount() : 0;
       view.badge =
         typeof count === 'number' && count > 0
           ? {

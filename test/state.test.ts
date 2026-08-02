@@ -11,9 +11,16 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { StateStore, mergeStates, migrateState, nowIso } from '../src/state';
+import {
+  StateStore,
+  mergeChainRecords,
+  mergeStates,
+  migrateState,
+  nowIso,
+} from '../src/state';
 import {
   STATE_SCHEMA_VERSION,
+  type ChainRecord,
   type EditorialRecord,
   type LineageState,
   type WindowRecord,
@@ -43,6 +50,15 @@ function readFile(dir: string): unknown {
   return JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8')) as unknown;
 }
 
+/** Plant a state.json before any store has touched the directory. */
+function seedStateFile(dir: string, blob: unknown): void {
+  fs.writeFileSync(
+    path.join(dir, 'state.json'),
+    JSON.stringify(blob, null, 2),
+    'utf8',
+  );
+}
+
 function listing(dir: string): string[] {
   return fs.readdirSync(dir).sort();
 }
@@ -69,6 +85,15 @@ function state(partial: Partial<LineageState> = {}): LineageState {
     version: STATE_SCHEMA_VERSION,
     records: {},
     windows: {},
+    projects: {},
+    hiddenFolders: {},
+    chains: {},
+    workspaces: {},
+    // v5 (M22). `migrateState` materialises both on every load, so a state
+    // this helper builds has to carry them or every deep-equality against a
+    // migrated blob fails on two empty objects.
+    accounts: {},
+    accountSettings: {},
     ...partial,
   };
 }
@@ -360,10 +385,13 @@ describe('migrateState', () => {
       id: S1,
       title: 'old title',
       summary: 'old summary',
-      hidden: true,
+      // hidden in the legacy blob: the hide verb is retired (M14), so the
+      // put-away state folds to deleted — off the tree, restorable.
+      deleted: true,
       cwd: '/repo',
       createdAt: '2026-01-01T00:00:00.000Z',
     });
+    expect(migrated.records[S1]?.hidden).toBeUndefined();
     expect(migrated.records[S1]?.parentId).toBeUndefined();
     expect(migrated.records[S1]?.parentSource).toBeUndefined();
     // the legacy blob is preserved verbatim, nothing is destroyed by the fold
@@ -592,6 +620,53 @@ describe('StateStore: concurrent writers', () => {
       summary: 'wrapped',
       hidden: true,
     });
+  });
+
+  // M8: `hidden` (muted) and `deleted` (removed from view) are independent
+  // flags, so both have to survive a round-trip and be clearable back to false.
+  it('persists hidden and deleted independently', async () => {
+    const dir = tempDir();
+    const store = makeStore(dir);
+    await store.load();
+
+    await store.upsert(S1, { hidden: true });
+    await store.upsert(S2, { deleted: true });
+
+    let blob = readFile(dir) as LineageState;
+    expect(blob.records[S1]).toMatchObject({ hidden: true });
+    expect(blob.records[S1]?.deleted).toBeUndefined();
+    expect(blob.records[S2]).toMatchObject({ deleted: true });
+
+    // Undo has to write an explicit false, not just omit the key.
+    await store.upsert(S2, { deleted: false });
+    blob = readFile(dir) as LineageState;
+    expect(blob.records[S2]?.deleted).toBe(false);
+  });
+
+  it('drops a non-boolean deleted rather than trusting it', async () => {
+    const dir = tempDir();
+    fs.writeFileSync(
+      path.join(dir, 'state.json'),
+      JSON.stringify({
+        version: 2,
+        records: {
+          [S1]: {
+            id: S1,
+            deleted: 'yes', // a hand-edit; must not read as truthy
+            hidden: 1,
+            createdAt: nowIso(),
+            updatedAt: nowIso(),
+          },
+        },
+        windows: {},
+        projects: {},
+        hiddenFolders: {},
+      }),
+    );
+    const store = makeStore(dir);
+    await store.load();
+    expect(store.get(S1)?.deleted).toBeUndefined();
+    expect(store.get(S1)?.hidden).toBeUndefined();
   });
 });
 
@@ -893,5 +968,828 @@ describe('StateStore.reloadFromDisk', () => {
 
     await store.reloadFromDisk();
     expect(store.get(S1)?.title).toBe('still here');
+  });
+});
+
+// ------------------------------------------------------------ projects (M7)
+
+describe('StateStore: projects', () => {
+  it('writes a project and reads it back sorted by name', async () => {
+    const dir = tempDir();
+    const store = makeStore(dir);
+    await store.load();
+
+    await store.upsertProject('p2', { name: 'Zeta', rootDir: '/zeta' });
+    await store.upsertProject('p1', { name: 'alpha', rootDir: '/alpha/' });
+
+    expect(store.getProjects().map((p) => p.name)).toEqual(['alpha', 'Zeta']);
+    expect(store.getProject('p1')?.rootDir).toBe('/alpha'); // normalized
+    expect(store.getProject('nope')).toBeUndefined();
+
+    const onDisk = readFile(dir) as { projects: Record<string, unknown> };
+    expect(Object.keys(onDisk.projects).sort()).toEqual(['p1', 'p2']);
+  });
+
+  it('never lets dirs shadow rootDir, whatever the caller passes', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.upsertProject('p1', {
+      name: 'API',
+      rootDir: '/code/api',
+      dirs: ['/code/api', '/CODE/API/', '/shared', '/shared'],
+    });
+    expect(store.getProject('p1')?.dirs).toEqual(['/shared']);
+  });
+
+  it('merges a patch instead of replacing the record', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.upsertProject('p1', {
+      name: 'API',
+      rootDir: '/code/api',
+      dirs: ['/shared'],
+    });
+    const created = store.getProject('p1')?.createdAt;
+
+    await store.upsertProject('p1', { name: 'Platform' });
+    const after = store.getProject('p1');
+    expect(after?.name).toBe('Platform');
+    expect(after?.rootDir).toBe('/code/api'); // untouched
+    expect(after?.dirs).toEqual(['/shared']); // untouched
+    expect(after?.createdAt).toBe(created);
+    expect(after?.updatedAt).not.toBe(created);
+  });
+
+  it('refuses a project with no usable rootDir', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.upsertProject('p1', { name: 'Nowhere' });
+    await store.upsertProject('p2', { name: 'Blank', rootDir: '   ' });
+    await store.upsertProject('', { name: 'NoId', rootDir: '/x' });
+    expect(store.getProjects()).toEqual([]);
+  });
+
+  it('falls back to the directory basename when the name is blank', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.upsertProject('p1', { name: '  ', rootDir: '/code/api' });
+    expect(store.getProject('p1')?.name).toBe('api');
+  });
+
+  it('deletes a project without touching anything else', async () => {
+    const dir = tempDir();
+    const store = makeStore(dir);
+    await store.load();
+    await store.upsertProject('p1', { name: 'A', rootDir: '/a' });
+    await store.upsert(S1, { title: 'session' });
+
+    await store.deleteProject('p1');
+    expect(store.getProjects()).toEqual([]);
+    expect(store.get(S1)?.title).toBe('session');
+
+    // and it stays deleted across a reload from the file we just wrote
+    const reader = makeStore(dir);
+    await reader.load();
+    expect(reader.getProjects()).toEqual([]);
+  });
+
+  it('keeps a project a second window wrote', async () => {
+    const dir = tempDir();
+    const a = makeStore(dir);
+    const b = makeStore(dir);
+    await a.load();
+    await b.load();
+
+    await a.upsertProject('pa', { name: 'From A', rootDir: '/a' });
+    await b.upsertProject('pb', { name: 'From B', rootDir: '/b' });
+
+    const reader = makeStore(dir);
+    await reader.load();
+    expect(reader.getProjects().map((p) => p.id).sort()).toEqual(['pa', 'pb']);
+  });
+
+  // Regression: delete used to drop the key outright. `newerWins` keeps any
+  // key present on only one side, so it could not tell a delete from "the
+  // other window has not heard of this yet" — and a second window still
+  // holding the project in memory silently undid a confirmed modal delete on
+  // its very next write, permanently.
+  it('a delete survives another window writing from stale memory', async () => {
+    const dir = tempDir();
+    const a = makeStore(dir);
+    const b = makeStore(dir);
+    await a.load();
+    await b.load();
+
+    await a.upsertProject('p1', { name: 'Api', rootDir: '/code/api' });
+    await b.reloadFromDisk(); // B now holds the project in memory too
+    expect(b.getProject('p1')).toBeDefined();
+
+    await a.deleteProject('p1');
+    // B writes something unrelated BEFORE its watcher told it about the delete.
+    await b.upsert(S1, { boundWindowId: null });
+
+    const reader = makeStore(dir);
+    await reader.load();
+    expect(reader.getProjects()).toEqual([]);
+    expect(reader.getProject('p1')).toBeUndefined();
+
+    // A does not get it back either, once it re-reads what B wrote.
+    await a.reloadFromDisk();
+    expect(a.getProjects()).toEqual([]);
+  });
+
+  it('keeps the tombstone out of every reader', async () => {
+    const dir = tempDir();
+    const store = makeStore(dir);
+    await store.load();
+    await store.upsertProject('p1', { name: 'Api', rootDir: '/code/api' });
+    await store.deleteProject('p1');
+
+    expect(store.getProjects()).toEqual([]);
+    expect(store.getProject('p1')).toBeUndefined();
+    // It IS on disk though — that is what makes the delete survive a merge.
+    const blob = readFile(dir) as LineageState;
+    expect(blob.projects['p1']?.deleted).toBe(true);
+  });
+
+  it('sweeps a tombstone older than any window could be', async () => {
+    const dir = tempDir();
+    seedStateFile(dir, {
+      version: 2,
+      records: {},
+      windows: {},
+      hiddenFolders: {},
+      projects: {
+        old: {
+          id: 'old',
+          name: '',
+          rootDir: '',
+          dirs: [],
+          deleted: true,
+          createdAt: '2020-01-01T00:00:00.000Z',
+          updatedAt: '2020-01-01T00:00:00.000Z',
+        },
+        fresh: {
+          id: 'fresh',
+          name: '',
+          rootDir: '',
+          dirs: [],
+          deleted: true,
+          createdAt: nowIso(),
+          updatedAt: nowIso(),
+        },
+      },
+    });
+    const store = makeStore(dir);
+    await store.load();
+    await store.upsert(S1, { title: 'force a write' });
+
+    const blob = readFile(dir) as LineageState;
+    expect(blob.projects['old']).toBeUndefined(); // swept
+    expect(blob.projects['fresh']?.deleted).toBe(true); // still load-bearing
+  });
+});
+
+describe('StateStore: hidden folders', () => {
+  it('hides and un-hides a folder by its normalized path', async () => {
+    const dir = tempDir();
+    const store = makeStore(dir);
+    await store.load();
+
+    await store.hideFolder('/tmp/junk/');
+    expect(store.getHiddenFolders().map((f) => f.path)).toEqual(['/tmp/junk']);
+
+    // un-hiding matches case-insensitively, the same way hiding matches
+    await store.unhideFolder('/TMP/JUNK');
+    expect(store.getHiddenFolders()).toEqual([]);
+
+    const reader = makeStore(dir);
+    await reader.load();
+    expect(reader.getHiddenFolders()).toEqual([]);
+  });
+
+  it('ignores a blank path on both verbs', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.hideFolder('   ');
+    await store.unhideFolder('');
+    expect(store.getHiddenFolders()).toEqual([]);
+  });
+});
+
+describe('migrateState: v1 -> v2', () => {
+  it('adds the two new maps to a v1 file without disturbing it', () => {
+    const migrated = migrateState({
+      version: 1,
+      records: { [S1]: { id: S1, title: 'kept', createdAt: nowIso(), updatedAt: nowIso() } },
+      windows: {},
+    });
+    expect(migrated.version).toBe(STATE_SCHEMA_VERSION);
+    expect(migrated.records[S1].title).toBe('kept');
+    expect(migrated.projects).toEqual({});
+    expect(migrated.hiddenFolders).toEqual({});
+  });
+
+  it('drops a project with no rootDir and keeps the rest', () => {
+    const migrated = migrateState({
+      version: 2,
+      records: {},
+      windows: {},
+      projects: {
+        good: { id: 'good', name: 'Good', rootDir: '/g', dirs: ['/g2'] },
+        bad: { id: 'bad', name: 'Bad' },
+      },
+      hiddenFolders: { '/tmp/junk/': { path: '/tmp/junk/', hiddenAt: nowIso() } },
+    });
+    expect(Object.keys(migrated.projects)).toEqual(['good']);
+    expect(migrated.projects.good.dirs).toEqual(['/g2']);
+    expect(Object.keys(migrated.hiddenFolders)).toEqual(['/tmp/junk']);
+  });
+
+  it('preserves unknown fields on a project record', () => {
+    const migrated = migrateState({
+      version: 2,
+      projects: {
+        p: { id: 'p', name: 'P', rootDir: '/p', futureField: 'keep me' },
+      },
+    });
+    expect(
+      (migrated.projects.p as unknown as Record<string, unknown>).futureField,
+    ).toBe('keep me');
+  });
+});
+
+// --------------------------------------------------- generation chains (M10)
+
+describe('state: generation chains (M10)', () => {
+  const chain = (
+    rootId: string,
+    members: string[],
+    stamps: Partial<Pick<ChainRecord, 'createdAt' | 'updatedAt'>> = {},
+  ): ChainRecord => ({
+    rootId,
+    members,
+    createdAt: stamps.createdAt ?? '2026-07-01T00:00:00.000Z',
+    updatedAt: stamps.updatedAt ?? '2026-07-01T00:00:00.000Z',
+  });
+
+  it('appendChainMember creates, extends mid-chain, and dedupes', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+
+    await store.appendChainMember(S1, S2);
+    expect(store.getChains()).toHaveLength(1);
+    expect(store.getChains()[0]?.rootId).toBe(S1);
+    expect(store.getChains()[0]?.members).toEqual([S1, S2]);
+
+    // Anchor on the MIDDLE of the chain — the hook's node id after a second
+    // re-key is the previous generation, not the root.
+    await store.appendChainMember(S2, S3);
+    expect(store.getChains()[0]?.members).toEqual([S1, S2, S3]);
+
+    // Repeats and self-links are no-ops.
+    await store.appendChainMember(S1, S2);
+    await store.appendChainMember(S3, S3);
+    expect(store.getChains()).toHaveLength(1);
+    expect(store.getChains()[0]?.members).toEqual([S1, S2, S3]);
+  });
+
+  it('appendChainMember merges two chains observed independently', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.appendChainMember(S1, S2);
+    await store.appendChainMember(S3, S4);
+    expect(store.getChains()).toHaveLength(2);
+
+    await store.appendChainMember(S2, S3); // links them
+    const chains = store.getChains();
+    expect(chains).toHaveLength(1);
+    expect(chains[0]?.rootId).toBe(S1);
+    expect([...chains[0]!.members].sort()).toEqual([S1, S2, S3, S4].sort());
+  });
+
+  it('chains survive a round trip and sanitize junk on load', async () => {
+    const dir = tempDir();
+    const a = makeStore(dir);
+    await a.load();
+    await a.appendChainMember(S1, S2);
+
+    const b = makeStore(dir);
+    await b.load();
+    expect(b.getChains()[0]?.members).toEqual([S1, S2]);
+
+    // Junk shapes are dropped by migrateState, valid ones kept.
+    const migrated = migrateState({
+      version: 3,
+      records: {},
+      windows: {},
+      projects: {},
+      hiddenFolders: {},
+      chains: {
+        [S1]: { members: [S2, 'not-a-uuid', S2] },
+        'not-a-uuid': { members: [S1, S2] },
+        [S3]: { members: [] }, // sanitizes to [S3] alone → dropped
+        [S4]: 'garbage',
+      },
+    });
+    expect(Object.keys(migrated.chains)).toEqual([S1]);
+    expect(migrated.chains[S1]?.members).toEqual([S1, S2]);
+  });
+
+  it('mergeStates unions chain members instead of newest-wins clobbering', () => {
+    const disk = state({
+      chains: {
+        [S1]: chain(S1, [S1, S2], { updatedAt: '2026-07-02T00:00:00.000Z' }),
+      },
+    });
+    const mem = state({
+      chains: {
+        [S1]: chain(S1, [S1, S3], { updatedAt: '2026-07-03T00:00:00.000Z' }),
+        [S4]: chain(S4, [S4, S2]),
+      },
+    });
+    const merged = mergeStates(disk, mem);
+    // Newer side's order first, older side's straggler appended — S2 (seen
+    // only by the disk side) must survive the merge.
+    expect(merged.chains[S1]?.members).toEqual([S1, S3, S2]);
+    expect(merged.chains[S1]?.updatedAt).toBe('2026-07-03T00:00:00.000Z');
+    expect(merged.chains[S4]?.members).toEqual([S4, S2]);
+  });
+
+  it('mergeChainRecords keeps the earliest createdAt', () => {
+    const merged = mergeChainRecords(
+      chain(S1, [S1, S2], {
+        createdAt: '2026-07-05T00:00:00.000Z',
+        updatedAt: '2026-07-09T00:00:00.000Z',
+      }),
+      chain(S1, [S1, S3], {
+        createdAt: '2026-07-01T00:00:00.000Z',
+        updatedAt: '2026-07-02T00:00:00.000Z',
+      }),
+    );
+    expect(merged.createdAt).toBe('2026-07-01T00:00:00.000Z');
+    expect(merged.updatedAt).toBe('2026-07-09T00:00:00.000Z');
+    expect(merged.members).toEqual([S1, S2, S3]);
+  });
+});
+
+// --------------------------------------------------------------- M11 + M12 + M13
+
+describe('state: daemon fork edges persist (M11)', () => {
+  it('parentSource "daemon" survives upsert and a reload round trip', async () => {
+    const dir = tempDir();
+    const store = makeStore(dir);
+    await store.load();
+    await store.upsert(S1, { parentId: S2, parentSource: 'daemon' });
+    expect(store.get(S1)?.parentSource).toBe('daemon');
+    expect(store.get(S1)?.parentId).toBe(S2);
+
+    const reread = makeStore(dir);
+    await reread.load();
+    expect(reread.get(S1)?.parentSource).toBe('daemon');
+  });
+
+  it('inferred sources are still refused', async () => {
+    const dir = tempDir();
+    const store = makeStore(dir);
+    await store.load();
+    await store.upsert(S1, {
+      parentId: S2,
+      parentSource: 'forkedFrom' as EditorialRecord['parentSource'],
+    });
+    expect(store.get(S1)?.parentSource).toBeUndefined();
+  });
+});
+
+describe('state: hide verb retired (M14)', () => {
+  it('a persisted hidden:true reads as deleted, and the flag is dropped', () => {
+    const migrated = migrateState({
+      version: STATE_SCHEMA_VERSION,
+      records: {
+        // Written by an M8–M13 window: put away, but explicitly not deleted.
+        [S1]: {
+          id: S1,
+          hidden: true,
+          deleted: false,
+          createdAt: nowIso(),
+          updatedAt: nowIso(),
+        },
+        // hidden:false is pure noise once the verb is gone.
+        [S2]: { id: S2, hidden: false, createdAt: nowIso(), updatedAt: nowIso() },
+      },
+    });
+    expect(migrated.records[S1]?.deleted).toBe(true);
+    expect(migrated.records[S1]?.hidden).toBeUndefined();
+    expect(migrated.records[S2]?.deleted).toBeUndefined();
+    expect(migrated.records[S2]?.hidden).toBeUndefined();
+  });
+});
+
+describe('state: notification fields sanitize (M12)', () => {
+  it('doneAt/seenAt/notify round-trip; junk types are dropped', () => {
+    const migrated = migrateState({
+      version: STATE_SCHEMA_VERSION,
+      records: {
+        [S1]: {
+          id: S1,
+          doneAt: '2026-07-29T10:00:00.000Z',
+          seenAt: '2026-07-29T11:00:00.000Z',
+          notify: false,
+          parked: true,
+          createdAt: nowIso(),
+          updatedAt: nowIso(),
+        },
+        [S2]: {
+          id: S2,
+          doneAt: 42,
+          seenAt: {},
+          notify: 'yes',
+          parked: 1,
+          createdAt: nowIso(),
+          updatedAt: nowIso(),
+        },
+      },
+    });
+    expect(migrated.records[S1]?.doneAt).toBe('2026-07-29T10:00:00.000Z');
+    expect(migrated.records[S1]?.seenAt).toBe('2026-07-29T11:00:00.000Z');
+    expect(migrated.records[S1]?.notify).toBe(false);
+    expect(migrated.records[S1]?.parked).toBe(true);
+    expect(migrated.records[S2]?.doneAt).toBeUndefined();
+    expect(migrated.records[S2]?.seenAt).toBeUndefined();
+    expect(migrated.records[S2]?.notify).toBeUndefined();
+    expect(migrated.records[S2]?.parked).toBeUndefined();
+  });
+
+  it('chat round-trips as a boolean; a junk type is dropped (M16)', () => {
+    // The whole chat feature rides on this flag surviving a load: it is the
+    // only thing that keeps a chat from rendering as a tree row.
+    const migrated = migrateState({
+      version: STATE_SCHEMA_VERSION,
+      records: {
+        [S1]: {
+          id: S1,
+          chat: true,
+          createdAt: nowIso(),
+          updatedAt: nowIso(),
+        },
+        [S2]: {
+          id: S2,
+          chat: 'yes',
+          createdAt: nowIso(),
+          updatedAt: nowIso(),
+        },
+      },
+    });
+    expect(migrated.records[S1]?.chat).toBe(true);
+    expect(migrated.records[S2]?.chat).toBeUndefined();
+  });
+});
+
+describe('state: workspaces (M13)', () => {
+  it('saves, reads back, and survives a reload', async () => {
+    const dir = tempDir();
+    const store = makeStore(dir);
+    await store.load();
+    await store.saveWorkspace('p1', [
+      { kind: 'file', uri: 'file:///code/a.ts', viewColumn: 2, active: true },
+      { kind: 'session', sessionId: S1, viewColumn: 1 },
+    ]);
+    const ws = store.getWorkspace('p1');
+    expect(ws?.tabs).toHaveLength(2);
+    expect(ws?.tabs[0]).toMatchObject({ kind: 'file', uri: 'file:///code/a.ts' });
+    expect(ws?.tabs[1]).toMatchObject({ kind: 'session', sessionId: S1 });
+
+    const reread = makeStore(dir);
+    await reread.load();
+    expect(reread.getWorkspace('p1')?.tabs).toHaveLength(2);
+    expect(reread.getWorkspace('p2')).toBeUndefined();
+  });
+
+  it('a re-save REPLACES the layout (a layout is a value, not a set)', async () => {
+    const dir = tempDir();
+    const store = makeStore(dir);
+    await store.load();
+    await store.saveWorkspace('p1', [
+      { kind: 'file', uri: 'file:///old.ts', viewColumn: 1 },
+    ]);
+    await store.saveWorkspace('p1', [
+      { kind: 'file', uri: 'file:///new.ts', viewColumn: 1 },
+    ]);
+    expect(store.getWorkspace('p1')?.tabs.map((t) => t.uri)).toEqual([
+      'file:///new.ts',
+    ]);
+  });
+
+  it('deleteWorkspace removes the layout', async () => {
+    const dir = tempDir();
+    const store = makeStore(dir);
+    await store.load();
+    await store.saveWorkspace('p1', []);
+    expect(store.getWorkspace('p1')).toBeDefined();
+    await store.deleteWorkspace('p1');
+    expect(store.getWorkspace('p1')).toBeUndefined();
+  });
+
+  it('sanitize drops unusable tab records but keeps the snapshot', () => {
+    const migrated = migrateState({
+      version: STATE_SCHEMA_VERSION,
+      workspaces: {
+        p1: {
+          tabs: [
+            { kind: 'file', uri: 'file:///ok.ts', viewColumn: 3 },
+            { kind: 'file' }, // no uri
+            { kind: 'session', sessionId: 'nope' },
+            { kind: 'browser', uri: 'x' }, // unknown kind
+            { kind: 'session', sessionId: S1, viewColumn: -2 }, // column clamps
+          ],
+          savedAt: nowIso(),
+          updatedAt: nowIso(),
+        },
+      },
+    });
+    const tabs = migrated.workspaces['p1']?.tabs ?? [];
+    expect(tabs).toHaveLength(2);
+    expect(tabs[0]?.uri).toBe('file:///ok.ts');
+    expect(tabs[1]).toMatchObject({ kind: 'session', sessionId: S1, viewColumn: 1 });
+  });
+
+  it('merges newest-wins across windows', () => {
+    const older = {
+      projectId: 'p1',
+      tabs: [{ kind: 'file' as const, uri: 'file:///old.ts', viewColumn: 1 }],
+      savedAt: '2026-07-01T00:00:00.000Z',
+      updatedAt: '2026-07-01T00:00:00.000Z',
+    };
+    const newer = {
+      ...older,
+      tabs: [{ kind: 'file' as const, uri: 'file:///new.ts', viewColumn: 1 }],
+      updatedAt: '2026-07-02T00:00:00.000Z',
+    };
+    const merged = mergeStates(
+      state({ workspaces: { p1: older } }),
+      state({ workspaces: { p1: newer } }),
+    );
+    expect(merged.workspaces['p1']?.tabs[0]?.uri).toBe('file:///new.ts');
+  });
+});
+
+describe('state: accounts (M22)', () => {
+  it('writes an account and reads it back — canonical order (arrival order via nextOrder here)', async () => {
+    const dir = tempDir();
+    const store = makeStore(dir);
+    await store.load();
+
+    await store.upsertAccount('work', { label: 'Work (Max)', provider: 'claude' });
+    await store.upsertAccount('personal', { label: 'Personal', provider: 'claude' });
+
+    expect(store.getAccounts().map((a) => a.id)).toEqual(['work', 'personal']);
+    expect(store.getAccount('work')?.label).toBe('Work (Max)');
+    expect(store.getAccount('nope')).toBeUndefined();
+
+    const onDisk = readFile(dir) as { accounts: Record<string, unknown> };
+    expect(Object.keys(onDisk.accounts).sort()).toEqual(['personal', 'work']);
+  });
+
+  it('merges a patch instead of replacing the record; store owns id/createdAt/updatedAt', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.upsertAccount('work', {
+      label: 'Work',
+      provider: 'claude',
+      configDir: '/a/b',
+    });
+    const created = store.getAccount('work')?.createdAt;
+
+    await store.upsertAccount('work', { label: 'Work (Max)' });
+    const after = store.getAccount('work');
+    expect(after?.label).toBe('Work (Max)');
+    expect(after?.configDir).toBe('/a/b'); // untouched
+    expect(after?.createdAt).toBe(created);
+    expect(after?.updatedAt).not.toBe(created);
+  });
+
+  it('extraEnv keys are validated by NAME only and round-trip through a reload untouched', async () => {
+    const dir = tempDir();
+    const store = makeStore(dir);
+    await store.load();
+    await store.upsertAccount('api', {
+      label: 'API key',
+      provider: 'claude',
+      extraEnv: { ANTHROPIC_API_KEY: 'sk-secret', 'bad key': 'dropped' } as unknown as Record<
+        string,
+        string
+      >,
+    });
+    expect(store.getAccount('api')?.extraEnv).toEqual({ ANTHROPIC_API_KEY: 'sk-secret' });
+
+    const reader = makeStore(dir);
+    await reader.load();
+    expect(reader.getAccount('api')?.extraEnv).toEqual({ ANTHROPIC_API_KEY: 'sk-secret' });
+  });
+
+  it('refuses to write an account with an unusable id', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.upsertAccount('Not Valid!', { label: 'x' });
+    expect(store.getAccounts()).toEqual([]);
+  });
+
+  it('deleteAccount tombstones: hidden from every reader, but the tombstone itself survives a reload', async () => {
+    const dir = tempDir();
+    const store = makeStore(dir);
+    await store.load();
+    await store.upsertAccount('work', { label: 'Work', provider: 'claude' });
+    await store.deleteAccount('work');
+
+    expect(store.getAccounts()).toEqual([]);
+    expect(store.getAccount('work')).toBeUndefined();
+
+    const blob = readFile(dir) as LineageState;
+    // Non-null: LineageState.accounts is typed optional only for source
+    // compatibility with pre-M22 literals — the store itself always writes it.
+    expect(blob.accounts!['work']?.deleted).toBe(true);
+
+    const reader = makeStore(dir);
+    await reader.load();
+    expect(reader.getAccounts()).toEqual([]);
+  });
+
+  it('accountIds sees the tombstones the readers hide — a new account must not claim a removed one\'s id', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.upsertAccount('work', { label: 'Work' });
+    await store.upsertAccount('personal', { label: 'Personal' });
+    await store.deleteAccount('work');
+
+    expect(store.getAccounts().map((a) => a.id)).toEqual(['personal']);
+    // Pins outlive tombstones, so the id is still spoken for.
+    expect(store.accountIds().sort()).toEqual(['personal', 'work']);
+  });
+
+  it('re-creating a deleted account starts blank rather than inheriting the tombstone', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.upsertAccount('work', { label: 'Work', configDir: '/old/path' });
+    await store.deleteAccount('work');
+    await store.upsertAccount('work', { label: 'Work Again' });
+
+    const revived = store.getAccount('work');
+    expect(revived?.deleted).toBeUndefined();
+    expect(revived?.label).toBe('Work Again');
+    expect(revived?.configDir).toBeUndefined(); // did not inherit the tombstone's leftovers
+  });
+
+  it('setAccountOrder updates only the order, no-ops when unchanged, and cannot mint an account', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.upsertAccount('a', { label: 'A' });
+
+    await store.setAccountOrder('a', 3);
+    expect(store.getAccount('a')?.order).toBe(3);
+
+    const stamp = store.getAccount('a')?.updatedAt;
+    await store.setAccountOrder('a', 3); // same value: no write, no new stamp
+    expect(store.getAccount('a')?.updatedAt).toBe(stamp);
+
+    await store.setAccountOrder('ghost', 0); // cannot resurrect a deleted/unknown id
+    expect(store.getAccount('ghost')).toBeUndefined();
+  });
+
+  it('setDefaultRouting sets and null clears it back to "unset" (reads as auto)', async () => {
+    const dir = tempDir();
+    const store = makeStore(dir);
+    await store.load();
+    expect(store.getDefaultRouting()).toBeUndefined();
+
+    await store.setDefaultRouting({ kind: 'account', id: 'work' });
+    expect(store.getDefaultRouting()).toEqual({ kind: 'account', id: 'work' });
+
+    const reader = makeStore(dir);
+    await reader.load();
+    expect(reader.getDefaultRouting()).toEqual({ kind: 'account', id: 'work' });
+
+    await store.setDefaultRouting(null);
+    expect(store.getDefaultRouting()).toBeUndefined();
+  });
+
+  it('setProjectRouting refuses to create a project, sets an override on an existing one, and null removes it', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+
+    await store.setProjectRouting('ghost-project', { kind: 'auto' });
+    expect(store.getProject('ghost-project')).toBeUndefined();
+
+    await store.upsertProject('p1', { name: 'API', rootDir: '/code/api' });
+    await store.setProjectRouting('p1', { kind: 'provider', provider: 'claude' });
+    expect(store.getProject('p1')?.routing).toEqual({ kind: 'provider', provider: 'claude' });
+
+    await store.setProjectRouting('p1', null); // no spelling for "unset" via upsertProject
+    expect(store.getProject('p1')?.routing).toBeUndefined();
+  });
+
+  it('setSessionProfile pins once and keeps the original pin on a second, different attempt', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.upsert(S1, { title: 'session' });
+
+    await store.setSessionProfile(S1, 'work');
+    expect(store.getSessionProfile(S1)).toBe('work');
+
+    await store.setSessionProfile(S1, 'personal'); // refused; the pin is for life
+    expect(store.getSessionProfile(S1)).toBe('work');
+  });
+
+  it("getSessionProfile falls back to the EARLIEST pin in the session's generation chain", async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.appendChainMember(S1, S2); // gen 1 -> gen 2
+    await store.setSessionProfile(S1, 'work'); // only generation 1 is pinned directly
+
+    // A plain --resume mints S2 with a fresh, otherwise-empty record.
+    expect(store.getSessionProfile(S2)).toBe('work');
+  });
+
+  it('a session with no pin anywhere, in or out of a chain, returns undefined', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.upsert(S1, { title: 'session' });
+    expect(store.getSessionProfile(S1)).toBeUndefined();
+  });
+
+  it('migrateState materialises accounts/accountSettings on a pre-M22 (v4) file', () => {
+    const migrated = migrateState({
+      version: 4,
+      records: {},
+      windows: {},
+      projects: {},
+      hiddenFolders: {},
+      chains: {},
+      workspaces: {},
+    });
+    expect(migrated.version).toBe(STATE_SCHEMA_VERSION);
+    expect(migrated.accounts).toEqual({});
+    expect(migrated.accountSettings).toEqual({});
+  });
+
+  it('migrateState sweeps an account tombstone older than any window could be', () => {
+    const migrated = migrateState({
+      version: STATE_SCHEMA_VERSION,
+      accounts: {
+        old: {
+          id: 'old',
+          provider: 'claude',
+          label: '',
+          order: 0,
+          deleted: true,
+          createdAt: '2020-01-01T00:00:00.000Z',
+          updatedAt: '2020-01-01T00:00:00.000Z',
+        },
+        fresh: {
+          id: 'fresh',
+          provider: 'claude',
+          label: '',
+          order: 0,
+          deleted: true,
+          createdAt: nowIso(),
+          updatedAt: nowIso(),
+        },
+      },
+    });
+    expect(migrated.accounts!['old']).toBeUndefined();
+    expect(migrated.accounts!['fresh']?.deleted).toBe(true);
+  });
+
+  it('mergeStates: accounts merge record-level newest-wins; accountSettings merges whole-record newest-wins', () => {
+    const olderAccount = {
+      id: 'a',
+      provider: 'claude' as const,
+      label: 'Old',
+      order: 0,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    };
+    const newerAccount = {
+      ...olderAccount,
+      label: 'New',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+    };
+
+    const disk = state({
+      accounts: { a: olderAccount },
+      accountSettings: {
+        defaultRouting: { kind: 'auto' },
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      },
+    });
+    const mem = state({
+      accounts: { a: newerAccount },
+      accountSettings: {
+        defaultRouting: { kind: 'account', id: 'a' },
+        updatedAt: '2026-01-02T00:00:00.000Z',
+      },
+    });
+    const merged = mergeStates(disk, mem);
+    expect(merged.accounts!['a']?.label).toBe('New');
+    expect(merged.accountSettings!.defaultRouting).toEqual({ kind: 'account', id: 'a' });
   });
 });

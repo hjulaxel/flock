@@ -11,6 +11,7 @@ import {
   hasTranscript,
   readTranscriptHeader,
   transcriptFile,
+  transcriptMtimeMs,
 } from '../src/transcript';
 import { FORK_HEAD_LINES } from '../src/types';
 
@@ -198,6 +199,33 @@ describe('transcriptFile / hasTranscript', () => {
   });
 });
 
+describe('transcriptMtimeMs', () => {
+  it('returns the file mtime for a located transcript', () => {
+    const projectsDir = tempDir('lineage-projects-');
+    const project = path.join(projectsDir, '-Users-axelh-code');
+    fs.mkdirSync(project);
+    const sid = '0f000020-0000-4000-8000-000000000020';
+    const file = path.join(project, `${sid}.jsonl`);
+    fs.writeFileSync(file, '{}');
+    const past = Date.now() - 3_600_000;
+    fs.utimesSync(file, past / 1000, past / 1000);
+
+    const mtime = transcriptMtimeMs(sid, { projectsDir });
+    expect(mtime).not.toBeNull();
+    // Filesystems vary in mtime resolution; a second of slack is plenty.
+    expect(Math.abs((mtime as number) - past)).toBeLessThan(1000);
+  });
+
+  it('returns null when no transcript can be located', () => {
+    const projectsDir = tempDir('lineage-projects-');
+    expect(
+      transcriptMtimeMs('0f0000ee-0000-4000-8000-0000000000ee', { projectsDir }),
+    ).toBeNull();
+    // A path-escaping id never even stats.
+    expect(transcriptMtimeMs('../../etc/passwd', { projectsDir })).toBeNull();
+  });
+});
+
 describe('readTranscriptHeader', () => {
   it('returns {} for a transcript with no header records', () => {
     expect(readTranscriptHeader('root', { hint: fx('root.jsonl') })).toEqual({});
@@ -242,5 +270,51 @@ describe('readTranscriptHeader', () => {
     expect(
       readTranscriptHeader(HEADLESS_ID, { hint: fx('headless_fork.jsonl') }).mode,
     ).toBe('default');
+  });
+});
+
+// ═════════════════════════ M22.3: extra projects roots ══════════════════════
+
+describe('transcriptFile: extraProjectsDirs (M22.3)', () => {
+  const ID = '0f0000d7-0000-4000-8000-0000000000d7';
+
+  function writeAt(projectsRoot: string, sessionId: string, body: string): string {
+    const dir = path.join(projectsRoot, '-proj');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${sessionId}.jsonl`);
+    fs.writeFileSync(file, body);
+    return file;
+  }
+
+  it('finds a transcript that lives only in a profile root', () => {
+    const primary = tempDir('lineage-primary-');
+    const profile = tempDir('lineage-profile-');
+    const file = writeAt(profile, ID, '{"cwd":"/x"}\n');
+    expect(
+      transcriptFile(ID, { projectsDir: primary, extraProjectsDirs: [profile] }),
+    ).toBe(file);
+    expect(
+      hasTranscript(ID, { projectsDir: primary, extraProjectsDirs: [profile] }),
+    ).toBe(true);
+  });
+
+  it('the primary root wins when both hold the id', () => {
+    const primary = tempDir('lineage-primary-');
+    const profile = tempDir('lineage-profile-');
+    const primaryFile = writeAt(primary, ID, '{"cwd":"/primary"}\n');
+    writeAt(profile, ID, '{"cwd":"/profile"}\n');
+    expect(
+      transcriptFile(ID, { projectsDir: primary, extraProjectsDirs: [profile] }),
+    ).toBe(primaryFile);
+  });
+
+  it('an unreadable extra root is skipped, not fatal', () => {
+    const primary = tempDir('lineage-primary-');
+    expect(
+      transcriptFile(ID, {
+        projectsDir: primary,
+        extraProjectsDirs: [path.join(primary, 'nope', 'projects')],
+      }),
+    ).toBeNull();
   });
 });

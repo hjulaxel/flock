@@ -20,6 +20,7 @@ import * as process from 'node:process';
 
 import { log, logError } from './log';
 import {
+  DEFAULT_BUSY_STALE_MINUTES,
   isSessionId,
   type DisposableLike,
   type NodeAttention,
@@ -37,6 +38,10 @@ function rosterArgv(): string[] {
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_BUFFER_BYTES = 16 * 1024 * 1024;
+
+/** `ps` budget for the warm-spare probe. Deliberately short: this runs on the
+ *  poll path, and a hung `ps` must cost a filter pass, never a roster tick. */
+const SPARE_PS_TIMEOUT_MS = 2000;
 
 /** Backoff ceiling for a poller whose fetches keep failing. */
 const MAX_BACKOFF_MS = 30_000;
@@ -176,16 +181,400 @@ export function normalizeStatus(e: RosterEntry): {
   return { status: 'unknown', attention: 'none' };
 }
 
+// -------------------------------------------------------- frozen "busy"
+
+/**
+ * True when a row is REPORTED as running: the exact predicate normalizeStatus's
+ * busy branch matches (busy/working status, or running/working state), and NOT
+ * a waiting/blocked row, which wins ahead of it in both decision tables and is
+ * never reclassified. Exported so RosterFilter can pay the transcript stat for
+ * these rows only.
+ */
+export function reportsBusy(entry: RosterEntry | null | undefined): boolean {
+  if (!entry) return false;
+  const status =
+    typeof entry.status === 'string' ? entry.status.trim().toLowerCase() : '';
+  const state =
+    typeof entry.state === 'string' ? entry.state.trim().toLowerCase() : '';
+  if (status === 'waiting' || state === 'blocked') return false;
+  return (
+    status === 'busy' ||
+    status === 'working' ||
+    state === 'running' ||
+    state === 'working'
+  );
+}
+
+/**
+ * Correct a FROZEN "busy" in the roster.
+ *
+ * `claude agents --json` is a live registry but not a clean one (see the
+ * phantom-row note below): a row's status can freeze "at whatever the session
+ * was doing when it let go". The commonest LIVE instance is an interactive
+ * session that finished its turn — the process is still up, so it is no
+ * phantom, but its `status` is stuck at `busy` and the tree paints a running
+ * (amber) dot on a session that is plainly done.
+ *
+ * The independent, hook-free tell is the transcript: a genuinely working
+ * session appends to its `.jsonl` within seconds (assistant tokens, tool
+ * results), so a `busy` row whose transcript has been untouched for MINUTES is
+ * stale. When it is, the reported status is rewritten to `idle` — the honest
+ * "alive but doing nothing", the very value a normally-finished interactive
+ * session already reports. Never to `waiting`: that raises an attention badge,
+ * and we have no evidence the session wants you, only that it is not running.
+ *
+ * Rewriting the raw `status`/`state` FIELDS (not a derived value) means both
+ * decision tables — normalizeStatus here and the deliberately-duplicated
+ * deriveStatus in lineage.ts — reach `idle` unchanged, so the two cannot drift.
+ *
+ * Conservative by construction: only rows that reportsBusy() are eligible, and
+ * only when the transcript mtime is KNOWN and older than `staleMs`. A missing
+ * mtime (no transcript located) leaves the row exactly as the CLI reported it
+ * — the safe direction is to keep the CLI's claim, never to invent one. Returns
+ * a CLONE when it changes anything; the input row is never mutated, because the
+ * poller compares it against the previous tick for change detection.
+ */
+export function destaleBusyStatus(
+  entry: RosterEntry,
+  transcriptMtimeMs: number | null,
+  now: number,
+  staleMs: number,
+): RosterEntry {
+  if (!reportsBusy(entry)) return entry;
+  if (
+    transcriptMtimeMs === null ||
+    !Number.isFinite(transcriptMtimeMs) ||
+    !Number.isFinite(now) ||
+    !Number.isFinite(staleMs) ||
+    staleMs <= 0
+  ) {
+    return entry;
+  }
+  if (now - transcriptMtimeMs < staleMs) return entry;
+
+  const next: RosterEntry = { ...entry, status: 'idle' };
+  // Clear only a busy-INDUCING state, so it cannot re-trigger the busy branch;
+  // any other state string carries its own meaning and is left intact.
+  const state =
+    typeof entry.state === 'string' ? entry.state.trim().toLowerCase() : '';
+  if (state === 'running' || state === 'working') delete next.state;
+  return next;
+}
+
+// ----------------------------------------------------------- phantom rows
+
+/**
+ * `claude agents --json` is a LIVE registry, but it is not a CLEAN one. Two
+ * kinds of row in it are not sessions at all, and neither can ever be focused,
+ * forked, resumed or closed from the tree:
+ *
+ *  1. **Rows the CLI never reaped.** A row whose `pid` is absent, or names a
+ *     process that no longer exists. Measured on the author's machine: one
+ *     such row 14 days old, still rendering as a live idle session — and it
+ *     was the row the user kept clicking, which offered a fork and produced
+ *     four live children hanging off a parent that had not existed for a
+ *     fortnight.
+ *  2. **Daemon warm-spares.** `claude bg-spare --bg-spare <socket>` is a
+ *     pre-forked process waiting to be CLAIMED by a session that does not
+ *     exist yet. The CLI registers it anyway, with a session id, a `name`
+ *     inherited from whoever used the pool last, and a status frozen at
+ *     whatever that session was doing when it let go. Measured: a spare 16
+ *     days old still reporting `status: "waiting", waitingFor: "dialog open"`
+ *     — a permanent attention badge on the view, pointing at a non-session.
+ *
+ * Dropping (1) loses nothing: a dead session that has a transcript is exactly
+ * what the M1.5 archive renders, and it belongs there — dimmed, sorted below
+ * the live rows, resumable — rather than masquerading as running.
+ */
+
+/**
+ * Liveness probe. `kill(pid, 0)` sends no signal; it only asks the kernel
+ * whether the pid exists and whether we would be allowed to signal it. EPERM
+ * therefore means "exists, but owned by another user", which is still alive.
+ * No spawn, no allocation — cheap enough for the 3 s poll path.
+ */
+export function isProcessAlive(pid: number): boolean {
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as { code?: unknown } | null)?.code === 'EPERM';
+  }
+}
+
+/**
+ * True for a daemon warm-spare's command line.
+ *
+ * Matched on the `--bg-spare` FLAG rather than the bare `bg-spare` subcommand
+ * token, because a flag cannot collide with a directory name or a word in a
+ * prompt the way a bare token can. If a future CLI stops passing the flag this
+ * predicate simply goes quiet and the spare row comes back — the same
+ * behaviour as before the filter existed. The failure direction is always
+ * "renders one row too many", never "silently drops a real session".
+ */
+export function isSpareCommand(command: string): boolean {
+  return (
+    typeof command === 'string' && /(^|\s)--bg-spare(=|\s|$)/.test(command)
+  );
+}
+
+/**
+ * `pid -> command line` for a batch of pids, in ONE `ps`. Never rejects; a pid
+ * `ps` could not describe is simply absent from the map.
+ */
+export function psCommands(
+  pids: readonly number[],
+): Promise<Map<number, string>> {
+  const out = new Map<number, string>();
+  // No `ps` contract on Windows — the filter's spare branch does not exist
+  // there, exactly like the argv walk in lineage.ts (SPEC §11.5).
+  if (process.platform === 'win32' || pids.length === 0) {
+    return Promise.resolve(out);
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (): void => {
+      if (settled) return;
+      settled = true;
+      resolve(out);
+    };
+    try {
+      execFile(
+        'ps',
+        ['-ww', '-o', 'pid=,command=', '-p', pids.join(',')],
+        { timeout: SPARE_PS_TIMEOUT_MS, maxBuffer: 1024 * 1024 },
+        (_err, stdout) => {
+          // `ps` exits non-zero when NONE of the pids exist, but still prints
+          // the ones that do — so the output is parsed regardless of `err`.
+          const text = typeof stdout === 'string' ? stdout : '';
+          for (const line of text.split('\n')) {
+            const m = /^\s*(\d+)\s+(\S[\s\S]*)$/.exec(line);
+            if (!m) continue;
+            const pid = Number.parseInt(m[1], 10);
+            if (Number.isFinite(pid)) out.set(pid, m[2]);
+          }
+          done();
+        },
+      );
+    } catch {
+      done();
+    }
+  });
+}
+
+export interface RosterFilterIO {
+  isAlive?: (pid: number) => boolean;
+  psCommands?: (pids: readonly number[]) => Promise<Map<number, string>>;
+  /** Transcript mtime (epoch ms) for a session, or null when none is located.
+   *  Injected rather than imported: roster.ts may not depend on ./transcript
+   *  (SPEC §4-A1 import budget), so the composition root wires the real locator
+   *  in. Absent → a filter that never destales, i.e. the pre-fix behaviour. */
+  transcriptMtime?: (sessionId: string) => number | null;
+  /** Clock, injectable for tests. Default Date.now. */
+  now?: () => number;
+  /** Silence window (ms) before a reported-busy row is treated as stale, read
+   *  FRESH every pass so a config change takes effect on the next tick. */
+  busyStaleMs?: () => number;
+}
+
+/**
+ * Drops phantom rows from a parsed roster. Stateful only for caching, and
+ * never throws: any failure returns the input unchanged, so the worst outcome
+ * is the pre-filter tree.
+ */
+export class RosterFilter {
+  private readonly isAlive: (pid: number) => boolean;
+  private readonly ps: (
+    pids: readonly number[],
+  ) => Promise<Map<number, string>>;
+  /** pid -> is-a-warm-spare. A process cannot rewrite its own argv, so one
+   *  verdict holds for the life of the pid; entries are evicted the moment
+   *  their pid leaves the roster, so a recycled pid never inherits one. */
+  private readonly spare = new Map<number, boolean>();
+  /** Ids already reported as dropped — a 3 s poll must not spam the channel. */
+  private readonly announced = new Set<string>();
+  /** Ids currently rewritten from a frozen `busy` to `idle`. Logged once on
+   *  entry, cleared when the row recovers or leaves the roster, so a genuine
+   *  busy→stale→busy→stale cycle each announces once. */
+  private readonly destaled = new Set<string>();
+  private readonly transcriptMtime: (sessionId: string) => number | null;
+  private readonly now: () => number;
+  private readonly busyStaleMs: () => number;
+
+  constructor(io?: RosterFilterIO) {
+    this.isAlive = io?.isAlive ?? isProcessAlive;
+    this.ps = io?.psCommands ?? psCommands;
+    this.transcriptMtime = io?.transcriptMtime ?? (() => null);
+    this.now = io?.now ?? Date.now;
+    this.busyStaleMs =
+      io?.busyStaleMs ?? (() => DEFAULT_BUSY_STALE_MINUTES * 60_000);
+  }
+
+  async apply(entries: RosterEntry[]): Promise<RosterEntry[]> {
+    const rows = Array.isArray(entries) ? entries : [];
+    const pids = rows
+      .map((e) => e.pid)
+      .filter((p): p is number => typeof p === 'number');
+    try {
+      // Cache maintenance runs on EVERY tick, including the ones that return
+      // early below. Both of those are exactly the ticks where pids leave the
+      // roster, and skipping eviction there breaks this class's own invariant
+      // ("a recycled pid never inherits a verdict"): a spare verdict left
+      // behind would silently filter out a real session that later lands on
+      // the same pid.
+      if (rows.length === 0) return entries;
+
+      // If NOT ONE row carries a pid, this CLI build does not report pids at
+      // all. Liveness is then unknowable, and filtering on it would empty the
+      // tree — so the whole filter stands down rather than guess.
+      if (pids.length === 0) return entries;
+
+      await this.classify(pids);
+
+      const kept: RosterEntry[] = [];
+      for (const entry of rows) {
+        const why = this.reject(entry);
+        if (why === null) {
+          kept.push(entry);
+          continue;
+        }
+        if (!this.announced.has(entry.sessionId)) {
+          this.announced.add(entry.sessionId);
+          log('roster: dropping', entry.sessionId.slice(0, 8), '—', why);
+        }
+      }
+      // The surviving rows are real sessions; correct any whose `busy` has gone
+      // stale (a finished session the CLI never flipped back to idle).
+      return this.destale(kept);
+    } catch (err) {
+      // Degrade toward rendering MORE, never toward a blank tree.
+      logError('roster: phantom filter failed', err);
+      return entries;
+    } finally {
+      this.forget(rows, pids);
+    }
+  }
+
+  /**
+   * Rewrite a frozen `busy` to `idle` for any kept row whose transcript has
+   * been silent past the window (see destaleBusyStatus). One clock read and one
+   * transcript stat per REPORTED-busy row — never for the quiet majority. A row
+   * with no transcript signal, or one written recently, is returned untouched.
+   */
+  private destale(kept: RosterEntry[]): RosterEntry[] {
+    const staleMs = this.busyStaleMs();
+    if (!Number.isFinite(staleMs) || staleMs <= 0) return kept; // disabled
+    const now = this.now();
+    let changed = false;
+    const out = kept.map((entry) => {
+      if (!reportsBusy(entry)) return entry;
+      const fixed = destaleBusyStatus(
+        entry,
+        this.transcriptMtime(entry.sessionId),
+        now,
+        staleMs,
+      );
+      if (fixed === entry) {
+        this.destaled.delete(entry.sessionId); // still genuinely busy
+        return entry;
+      }
+      changed = true;
+      if (!this.destaled.has(entry.sessionId)) {
+        this.destaled.add(entry.sessionId);
+        log(
+          'roster: destaling',
+          entry.sessionId.slice(0, 8),
+          '— busy but transcript silent',
+        );
+      }
+      return fixed;
+    });
+    return changed ? out : kept;
+  }
+
+  private reject(entry: RosterEntry): string | null {
+    if (entry.pid === undefined) {
+      return 'no pid — the CLI never reaped this row';
+    }
+    if (!this.isAlive(entry.pid)) return `pid ${entry.pid} is not running`;
+    if (this.spare.get(entry.pid) === true) {
+      return `pid ${entry.pid} is a claude bg-spare, not a session`;
+    }
+    return null;
+  }
+
+  private async classify(pids: readonly number[]): Promise<void> {
+    const unknown = [...new Set(pids)].filter(
+      (pid) => !this.spare.has(pid) && this.isAlive(pid),
+    );
+    if (unknown.length === 0) return;
+    const commands = await this.ps(unknown);
+    for (const pid of unknown) {
+      const command = commands.get(pid);
+      // A pid `ps` could not describe stays UNCLASSIFIED rather than being
+      // recorded as "not a spare": a transient ps failure must not permanently
+      // whitelist a spare. The row renders in the meantime, which is the safe
+      // direction to be wrong in.
+      if (command === undefined) continue;
+      this.spare.set(pid, isSpareCommand(command));
+    }
+  }
+
+  private forget(
+    entries: readonly RosterEntry[],
+    pids: readonly number[],
+  ): void {
+    const live = new Set(pids);
+    for (const pid of [...this.spare.keys()]) {
+      if (!live.has(pid)) this.spare.delete(pid);
+    }
+    const ids = new Set(entries.map((e) => e.sessionId));
+    for (const id of [...this.announced]) {
+      if (!ids.has(id)) this.announced.delete(id);
+    }
+    for (const id of [...this.destaled]) {
+      if (!ids.has(id)) this.destaled.delete(id);
+    }
+  }
+}
+
 // ---------------------------------------------------------------- fetching
 
 export interface FetchRosterOptions {
   claudeBin?: string; // default 'claude'
   timeoutMs?: number; // default 10_000
+  /** M22.3. Run the fetch AS this config dir (`CLAUDE_CONFIG_DIR` in the child
+   *  env). The agents registry is per config dir — the same isolation that
+   *  keeps account logins apart keeps their live rosters apart — so a tree
+   *  that only ever asks the default dir simply cannot see a session running
+   *  on a custom account. Absent = inherit, i.e. the default dir. */
+  configDir?: string;
+}
+
+/** The child environment for a roster fetch (M22.3). Exported for the test
+ *  lane: the env is the entire mechanism, so its exact shape is the contract.
+ *  With no dir the parent env is passed through UNTOUCHED — same object, not a
+ *  copy — so the default fetch stays byte-identical to pre-M22.3. */
+export function rosterEnvFor(configDir?: string): NodeJS.ProcessEnv {
+  const dir = typeof configDir === 'string' ? configDir.trim() : '';
+  if (dir === '') return process.env;
+  return { ...process.env, CLAUDE_CONFIG_DIR: dir };
 }
 
 function errMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   return typeof err === 'string' ? err : String(err);
+}
+
+/** True for a Windows batch shim. Since the CVE-2024-27980 fix (Node 18.20.2 /
+ *  20.12.2, i.e. every host behind engines.vscode ^1.94) `execFile` refuses to
+ *  spawn a .bat/.cmd directly and fails with EINVAL — and the npm install of
+ *  the CLI puts exactly such a shim on PATH. */
+function isWindowsShim(bin: string): boolean {
+  return process.platform === 'win32' && /\.(cmd|bat)$/i.test(bin);
 }
 
 /**
@@ -196,6 +585,13 @@ function errMessage(err: unknown): string {
  * execFile, never a shell: a binary path with spaces or a hostile PATH entry
  * can then never become a command line. The environment is inherited because
  * the CLI needs it (config dir, credentials, proxy).
+ *
+ * ONE exception, on win32 only: a `.cmd`/`.bat` shim cannot be spawned
+ * directly at all, so it goes through the command processor as
+ * `cmd /d /s /c "<bin>" agents --json`. The argv is still exactly
+ * ['agents','--json'] and `bin` is quoted, so nothing user-supplied can become
+ * a second command; `windowsVerbatimArguments` keeps Node from re-quoting the
+ * line we built.
  */
 export function fetchRoster(opts?: FetchRosterOptions): Promise<RosterResult> {
   const bin =
@@ -220,15 +616,22 @@ export function fetchRoster(opts?: FetchRosterOptions): Promise<RosterResult> {
     const fail = (error: string): void =>
       done({ ok: false, entries: [], error, tookMs: Date.now() - started });
 
+    const shim = isWindowsShim(bin);
+    const command = shim ? (process.env['ComSpec'] ?? 'cmd.exe') : bin;
+    const argv = shim
+      ? ['/d', '/s', '/c', `"${bin}" ${rosterArgv().join(' ')}`]
+      : rosterArgv();
+
     try {
       execFile(
-        bin,
-        rosterArgv(),
+        command,
+        argv,
         {
           timeout,
           maxBuffer: MAX_BUFFER_BYTES,
-          env: process.env,
+          env: rosterEnvFor(opts?.configDir),
           windowsHide: true,
+          ...(shim ? { windowsVerbatimArguments: true } : {}),
         },
         (err, stdout) => {
           if (err) {
@@ -260,11 +663,78 @@ export function fetchRoster(opts?: FetchRosterOptions): Promise<RosterResult> {
 }
 
 /**
+ * M22.3: one roster across every account (fetchRoster × config dirs, merged).
+ *
+ * The default dir is ALWAYS fetched and always fetched FIRST in the merge
+ * order: a session id can only appear once (they are uuids, but a defensive
+ * dedupe costs nothing), and on a collision the default dir's row wins —
+ * the same first-occurrence rule the archive scan applies to transcripts.
+ *
+ * Failure is per-dir: `ok` is true if ANY fetch succeeded, because a profile
+ * dir erroring (deleted, never logged in, CLI hiccup) must degrade that
+ * ACCOUNT's rows, not blank the whole tree. Errors from failed dirs are
+ * joined into `error` so the log still names them. `tookMs` is wall clock —
+ * the fetches run concurrently.
+ *
+ * `fetchImpl` is injectable for the test lane; production never passes it.
+ */
+export async function fetchRosterMulti(
+  opts: FetchRosterOptions & { configDirs?: readonly string[] },
+  fetchImpl: (o: FetchRosterOptions) => Promise<RosterResult> = fetchRoster,
+): Promise<RosterResult> {
+  const started = Date.now();
+  const extra: string[] = [];
+  const seenDirs = new Set<string>(['']); // '' = the default dir, always first
+  for (const raw of opts?.configDirs ?? []) {
+    const dir = typeof raw === 'string' ? raw.trim() : '';
+    if (dir === '' || seenDirs.has(dir)) continue;
+    seenDirs.add(dir);
+    extra.push(dir);
+  }
+
+  const base: FetchRosterOptions = {
+    ...(opts?.claudeBin === undefined ? {} : { claudeBin: opts.claudeBin }),
+    ...(opts?.timeoutMs === undefined ? {} : { timeoutMs: opts.timeoutMs }),
+  };
+  const results = await Promise.all([
+    fetchImpl(base),
+    ...extra.map((dir) => fetchImpl({ ...base, configDir: dir })),
+  ]);
+
+  const entries: RosterEntry[] = [];
+  const seenIds = new Set<string>();
+  const errors: string[] = [];
+  let anyOk = false;
+  for (const r of results) {
+    if (r.ok) {
+      anyOk = true;
+      for (const entry of r.entries) {
+        if (seenIds.has(entry.sessionId)) continue;
+        seenIds.add(entry.sessionId);
+        entries.push(entry);
+      }
+    } else if (typeof r.error === 'string' && r.error !== '') {
+      errors.push(r.error);
+    }
+  }
+  return {
+    ok: anyOk,
+    entries,
+    ...(errors.length === 0 ? {} : { error: errors.join(' | ') }),
+    tookMs: Date.now() - started,
+  };
+}
+
+/**
  * A non-empty `configured` value is returned verbatim (no existence check —
  * the user knows where their CLI is, and an over-eager check would reject a
  * shim we cannot stat). Otherwise scan PATH for an existing file named claude
- * (claude.cmd/claude.exe additionally on win32); first absolute hit wins,
- * else null.
+ * (claude.exe/claude.cmd on win32); first absolute hit wins, else null.
+ *
+ * On win32 the NATIVE executable is preferred over the batch shim, and the
+ * extension-less `claude` — the POSIX shell script npm drops next to the shim
+ * — is not a candidate at all: Windows cannot execute it, so returning it
+ * would only produce a spawn failure that reads as "the CLI is broken".
  */
 export function findClaudeBinary(configured?: string): string | null {
   if (typeof configured === 'string' && configured.trim().length > 0) {
@@ -272,7 +742,7 @@ export function findClaudeBinary(configured?: string): string | null {
   }
   const names =
     process.platform === 'win32'
-      ? ['claude.cmd', 'claude.exe', 'claude']
+      ? ['claude.exe', 'claude.cmd']
       : ['claude'];
   const rawPath = process.env['PATH'] ?? process.env['Path'] ?? '';
   if (rawPath.length === 0) return null;
@@ -315,10 +785,10 @@ export function rosterSignature(entries: RosterEntry[]): string {
       e.status ?? '',
       e.state ?? '',
       e.waitingFor ?? '',
-    ].join(' '),
+    ].join('\u0000'),
   );
   rows.sort();
-  return rows.join('');
+  return rows.join('\u0001');
 }
 
 /** True when two rosters would render identically. */

@@ -51,8 +51,12 @@ import { log, logError } from './log';
 // --------------------------------------------------------------- constants
 
 export const PLUGIN_NAME = 'lineage-events';
-/** Bumped whenever the generated files change; drives silent self-heal. */
-export const PLUGIN_VERSION = 1;
+/** Bumped whenever the generated files change; drives silent self-heal.
+ *  v2: HOOK_COMMAND became a single-write append (see below).
+ *  v3 (M10): the append wraps the payload with the LINEAGE_NODE_ID the hook
+ *  inherited, and UserPromptSubmit joined the event list — together these are
+ *  the creemux-style enrollment channel (see HookEvent.nodeId). */
+export const PLUGIN_VERSION = 3;
 /** semver stamped into plugin.json (the plugin loader wants a semver). */
 const PLUGIN_SEMVER = '0.1.0';
 
@@ -95,17 +99,46 @@ export function eventsFile(home?: string): string {
   return path.join(homeDir(home), EVENTS_DIR_NAME, EVENTS_BASENAME);
 }
 
-/** The append is instant — well inside the plugin-hook 1.5 s SessionEnd cap.
- *  No slow work may ever move into this command. */
+/**
+ * The append is instant — well inside the plugin-hook 1.5 s SessionEnd cap.
+ * No slow work may ever move into this command.
+ *
+ * ONE write(2), deliberately. The earlier `{ cat; echo; } >> file` form issued
+ * the payload and its terminating newline as two separate writes on the same
+ * O_APPEND descriptor, so a hook firing concurrently in another session could
+ * land its payload between them. That merges two JSON objects onto one line;
+ * `parseEventLine` then rejects it and BOTH events are silently dropped —
+ * measured at ~13% loss under eight concurrent appends, i.e. exactly the
+ * parallel-session workload this extension exists for. Buffering the payload
+ * and emitting it with a single `printf` makes the append atomic for any line
+ * below PIPE_BUF.
+ */
+/**
+ * v3 shape: `{"lineage_node_id":"<env>","payload":<stdin JSON>}`. The
+ * LINEAGE_NODE_ID environment variable is the stamp our terminals launch
+ * claude with, inherited by the hook process — so every event says WHICH of
+ * our launches it fired inside, which is what lets a re-minted session id
+ * (plain --resume, /clear, compaction) be re-keyed onto its conversation
+ * instead of becoming a duplicate row. Unset (a session we did not launch)
+ * yields an empty string, and empty stdin degrades to `payload:null` — both
+ * still parse, both still poke. Still ONE write(2); see the v2 note above on
+ * why the append must stay a single printf.
+ */
 export const HOOK_COMMAND =
-  '/bin/sh -c \'mkdir -p "$HOME/.lineage"; { cat; echo; } >> "$HOME/.lineage/events.ndjson"\'';
+  '/bin/sh -c \'mkdir -p "$HOME/.lineage"; p=$(cat); [ -n "$p" ] || p=null; ' +
+  'printf "{\\"lineage_node_id\\":\\"%s\\",\\"payload\\":%s}\\n" ' +
+  '"${LINEAGE_NODE_ID:-}" "$p" >> "$HOME/.lineage/events.ndjson"\'';
 
-/** The four hook events we listen for. Every one is a pure accelerator. */
+/** The hook events we listen for. Every one is a pure accelerator.
+ *  UserPromptSubmit (v3) is the freshness beat: it fires on every prompt, so
+ *  a conversation whose id churned is re-keyed within one user action —
+ *  exactly the cadence that kept creemux's tree current. */
 const HOOK_EVENTS = [
   'SessionStart',
   'SessionEnd',
   'Stop',
   'Notification',
+  'UserPromptSubmit',
 ] as const;
 
 /** JSON.stringify({name, version: '0.1.0', description}, null, 2) */
@@ -116,7 +149,7 @@ export function renderPluginJson(): string {
       version: PLUGIN_SEMVER,
       description:
         'Appends Claude Code session events to ~/.lineage/events.ndjson so the ' +
-        'Lineage VS Code extension can refresh instantly. Delete this directory ' +
+        'Canopy VS Code extension can refresh instantly. Delete this directory ' +
         'to uninstall.',
     },
     null,
@@ -137,7 +170,11 @@ export function renderHooksJson(): string {
 }
 
 /** JSON.parse; non-object -> null; hook_event_name/session_id/
- *  transcript_path mapped, session_id must pass isSessionId else null. */
+ *  transcript_path mapped, session_id must pass isSessionId else null.
+ *  Accepts BOTH line shapes: the v3 wrapper (`lineage_node_id` + `payload`)
+ *  and the flat v2 payload — a v2 plugin keeps emitting flat lines until its
+ *  session restarts, and dropping those would turn the upgrade into an
+ *  outage. */
 export function parseEventLine(line: string): HookEvent | null {
   let parsed: unknown;
   try {
@@ -146,14 +183,29 @@ export function parseEventLine(line: string): HookEvent | null {
     return null;
   }
   if (!isRecord(parsed)) return null;
-  const rec = parsed;
-  const name = rec['hook_event_name'];
-  const sid = rec['session_id'];
-  const tp = rec['transcript_path'];
+
+  let body: Record<string, unknown> = parsed;
+  let nodeId: string | null = null;
+  if ('lineage_node_id' in parsed) {
+    const nid = parsed['lineage_node_id'];
+    nodeId = isSessionId(nid) ? nid : null;
+    const payload = parsed['payload'];
+    body = isRecord(payload) ? payload : {};
+  }
+
+  const name = body['hook_event_name'];
+  const sid = body['session_id'];
+  const tp = body['transcript_path'];
+  // M11. SessionStart carries `source`: 'startup' | 'resume' | 'clear' |
+  // 'compact' | 'fork'. 'fork' is the one consumers must see — a node-id
+  // mismatch on a fork is a new BRANCH, never a re-key.
+  const src = body['source'];
   return {
     event: typeof name === 'string' && name.length > 0 ? name : null,
     sessionId: isSessionId(sid) ? sid : null,
     transcriptPath: typeof tp === 'string' && tp.length > 0 ? tp : null,
+    nodeId,
+    source: typeof src === 'string' && src.length > 0 ? src : null,
     raw: parsed,
   };
 }
@@ -273,8 +325,8 @@ export class HooksManager implements DisposableLike {
     const stored = this.getState();
     if (process.platform === 'win32') {
       void showWarning(
-        'Lineage hooks need a POSIX shell (/bin/sh) and are not supported on ' +
-          'Windows. Lineage keeps updating by polling.',
+        'Canopy hooks need a POSIX shell (/bin/sh) and are not supported on ' +
+          'Windows. Canopy keeps updating by polling.',
       );
       log('hooks: install skipped (win32)');
       return stored;
@@ -285,12 +337,12 @@ export class HooksManager implements DisposableLike {
       // Fully idempotent path: nothing changes, so nothing to consent to.
       log('hooks: already installed at', this.directory());
       const state = await this.markInstalled();
-      void showInfo(`Lineage hooks are already installed at ${this.directory()}.`);
+      void showInfo(`Canopy hooks are already installed at ${this.directory()}.`);
       return state;
     }
 
     const consent = await showInfo(
-      'Install the Lineage instant-update hooks?',
+      'Install the Canopy instant-update hooks?',
       { modal: true, detail: this.consentDetail(files) },
       'Install',
     );
@@ -314,7 +366,7 @@ export class HooksManager implements DisposableLike {
     } catch (err) {
       logError('hooks: write plugin files', err);
       void showWarning(
-        `Could not write ${this.directory()} — see the Lineage output channel.`,
+        `Could not write ${this.directory()} — see the Canopy output channel.`,
       );
       return stored;
     }
@@ -323,7 +375,7 @@ export class HooksManager implements DisposableLike {
     if (!verdict.ok) {
       log('hooks: install did not verify —', verdict.reason ?? 'unknown');
       void showWarning(
-        `Lineage hooks were not installed: ${verdict.reason ?? 'unknown error'}.`,
+        `Canopy hooks were not installed: ${verdict.reason ?? 'unknown error'}.`,
       );
       return stored;
     }
@@ -331,7 +383,7 @@ export class HooksManager implements DisposableLike {
     this.ensureEventsDir();
     const state = await this.markInstalled();
     void showInfo(
-      'Lineage hooks installed. Run /reload-plugins in existing Claude ' +
+      'Canopy hooks installed. Run /reload-plugins in existing Claude ' +
         'sessions (or restart them) to activate.',
     );
     log('hooks: installed at', this.directory());
@@ -349,7 +401,7 @@ export class HooksManager implements DisposableLike {
     }
     if (path.basename(dir) !== PLUGIN_NAME || manifestName(manifest) !== PLUGIN_NAME) {
       void showWarning(
-        `Refusing to remove ${dir}: it is not the Lineage hook plugin. ` +
+        `Refusing to remove ${dir}: it is not the Canopy hook plugin. ` +
           'Delete it by hand if you are sure.',
       );
       log('hooks: remove refused — foreign directory at', dir);
@@ -360,13 +412,13 @@ export class HooksManager implements DisposableLike {
     } catch (err) {
       logError('hooks: remove plugin directory', err);
       void showWarning(
-        `Could not remove ${dir} — see the Lineage output channel.`,
+        `Could not remove ${dir} — see the Canopy output channel.`,
       );
       return this.getState();
     }
     const state = await this.markRemoved();
     void showInfo(
-      'Lineage hook plugin removed. Existing Claude sessions keep it until ' +
+      'Canopy hook plugin removed. Existing Claude sessions keep it until ' +
         `/reload-plugins or a restart. Recorded events remain in ${this.eventsPath()}.`,
     );
     log('hooks: removed', dir);
@@ -432,7 +484,7 @@ export class HooksManager implements DisposableLike {
     log('hooks: self-healed', String(drifted.length), 'file(s)');
     const state = await this.markInstalled();
     void showInfo(
-      'Lineage refreshed its hook plugin files. Run /reload-plugins in ' +
+      'Canopy refreshed its hook plugin files. Run /reload-plugins in ' +
         'existing Claude sessions to pick up the change.',
     );
     return state;
@@ -527,7 +579,7 @@ export class HooksManager implements DisposableLike {
 
   private consentDetail(files: DesiredFile[]): string {
     return [
-      'Lineage will create a Claude Code plugin directory. No marketplace, no',
+      'Canopy will create a Claude Code plugin directory. No marketplace, no',
       'install step, and no shared file (including ~/.claude/settings.json) is',
       'touched:',
       '',
@@ -572,7 +624,7 @@ export class HooksManager implements DisposableLike {
     if (!carriesOurCommand(hooksJson)) {
       return {
         ok: false,
-        reason: 'hooks.json no longer runs the Lineage hook command',
+        reason: 'hooks.json no longer runs the Canopy hook command',
       };
     }
     return { ok: true };
@@ -778,6 +830,31 @@ export class HooksManager implements DisposableLike {
           logError('hooks: event listener', err);
         }
       }
+
+      // startWatcher() only ever checks MAX_EVENTS_BYTES once, at activation,
+      // so a window left open for days would grow ~/.lineage/events.ndjson
+      // without bound — every event ever appended, reclaimable only by
+      // quitting and relaunching. Checking again here, right after a drain
+      // that consumed every complete line, is safe exactly because nothing is
+      // left unread: `this.pending` is only non-empty when the tail we just
+      // read ends mid-line, and truncating THEN would throw away bytes nobody
+      // has parsed yet. Cross-window safety (another window truncates the
+      // same file concurrently) is already handled by the rewind at the
+      // `size < this.offset` check above.
+      if (this.offset > MAX_EVENTS_BYTES && this.pending.length === 0) {
+        try {
+          fs.truncateSync(file, 0);
+          this.offset = 0;
+          this.ino = fs.statSync(file).ino;
+          log(
+            'hooks: truncated the events file at',
+            String(MAX_EVENTS_BYTES),
+            'bytes',
+          );
+        } catch (err) {
+          logError('hooks: truncate events file', err);
+        }
+      }
     } catch (err) {
       logError('hooks: drain events', err);
     } finally {
@@ -823,8 +900,8 @@ export class HooksManager implements DisposableLike {
     );
     if (this.rosterActivityTicks >= SILENCE_MIN_ACTIVITY_TICKS) {
       void showWarning(
-        'Lineage hooks are installed but no hook events have arrived. Run ' +
-          '/reload-plugins in your Claude sessions (or restart them). Lineage ' +
+        'Canopy hooks are installed but no hook events have arrived. Run ' +
+          '/reload-plugins in your Claude sessions (or restart them). Canopy ' +
           'keeps updating by polling meanwhile.',
       );
     }

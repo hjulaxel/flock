@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" role="img">
+  <title>Notifications — something finished</title>
+  <!-- The bell is drawn a size down and pushed left so the dot sits in the free
+       corner rather than on top of it: a command icon is rendered as an <img>
+       and is never recoloured by the workbench, so a dot overlapping the bell
+       would need a background-coloured ring to separate the two — and that ring
+       is a guess about the user's theme. A gap needs no guess. Only the dot
+       claims a colour; the bell takes this theme's icon ink. -->
+  <g fill="none" stroke="#424242" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3.1 10.9V7.2a3.9 3.9 0 0 1 7.8 0v3.7l1 1.6H2.1z"/>
+    <path d="M5.6 12.5a1.4 1.4 0 0 0 2.8 0"/>
+    <path d="M7 3.3V2.4"/>
+  </g>
+  <circle cx="13.2" cy="2.8" r="2.8" fill="#F14C4C"/>
+</svg>

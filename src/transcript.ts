@@ -28,6 +28,10 @@ import {
 export interface TranscriptLocateOptions {
   hint?: string;        // e.g. a hook payload's transcript_path
   projectsDir?: string; // default path.join(os.homedir(), '.claude', 'projects')
+  /** M22.3. Account-profile projects roots (`<configDir>/projects`), probed
+   *  after the primary — a session launched on a custom account writes its
+   *  transcript there, and "has no transcript" gates resume and fork. */
+  extraProjectsDirs?: readonly string[];
 }
 
 export interface ScanOptions extends TranscriptLocateOptions {
@@ -76,17 +80,26 @@ export function transcriptFile(
     return null;
   }
 
-  const projectsDir = opts?.projectsDir ?? defaultProjectsDir();
   const fileName = `${sessionId}.jsonl`;
-  let subdirs: string[];
-  try {
-    subdirs = fs.readdirSync(projectsDir);
-  } catch {
-    return null; // no ~/.claude/projects yet, or unreadable
-  }
-  for (const sub of subdirs) {
-    const candidate = path.join(projectsDir, sub, fileName);
-    if (isFile(candidate)) return candidate;
+  const roots = [
+    opts?.projectsDir ?? defaultProjectsDir(),
+    ...(opts?.extraProjectsDirs ?? []),
+  ];
+  const seen = new Set<string>();
+  for (const raw of roots) {
+    const root = typeof raw === 'string' ? raw.trim() : '';
+    if (root === '' || seen.has(root)) continue;
+    seen.add(root);
+    let subdirs: string[];
+    try {
+      subdirs = fs.readdirSync(root);
+    } catch {
+      continue; // this root has no projects dir yet, or is unreadable
+    }
+    for (const sub of subdirs) {
+      const candidate = path.join(root, sub, fileName);
+      if (isFile(candidate)) return candidate;
+    }
   }
   return null;
 }
@@ -98,6 +111,28 @@ export function hasTranscript(
   opts?: TranscriptLocateOptions,
 ): boolean {
   return transcriptFile(sessionId, opts) !== null;
+}
+
+/**
+ * Epoch-ms mtime of the session's transcript, or null when none is located or
+ * cannot be stat'd. One `stat`, no read — a freshness PROBE, not a scan: it
+ * tells a session that is live-and-writing from one whose roster status has
+ * frozen (see roster.destaleBusyStatus). Consistent with this module's "never
+ * cache, never watch" contract — a single synchronous stat, exactly like
+ * isFile above. Never throws.
+ */
+export function transcriptMtimeMs(
+  sessionId: string,
+  opts?: TranscriptLocateOptions,
+): number | null {
+  const tp = transcriptFile(sessionId, opts);
+  if (tp === null) return null;
+  try {
+    const { mtimeMs } = fs.statSync(tp);
+    return Number.isFinite(mtimeMs) ? mtimeMs : null;
+  } catch {
+    return null; // raced deletion / EACCES — no signal, not an error
+  }
 }
 
 /**

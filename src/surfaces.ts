@@ -94,7 +94,7 @@ export async function openBrowser(
   const uri = parseHttpUrl(raw);
   if (uri === null) {
     log('surfaces.openBrowser: unparseable url', raw);
-    void vscode.window.showWarningMessage(`Lineage: not a valid URL — ${raw}`);
+    void vscode.window.showWarningMessage(`Canopy: not a valid URL — ${raw}`);
     return;
   }
 
@@ -131,7 +131,7 @@ export async function openBrowser(
 
   if (await openExternally(uri)) return;
   void vscode.window.showWarningMessage(
-    `Lineage could not open ${target} in a browser pane.`,
+    `Canopy could not open ${target} in a browser pane.`,
   );
 }
 
@@ -170,7 +170,7 @@ export async function openMarkdownPreview(fsPath: string): Promise<void> {
     await vscode.window.showTextDocument(doc, { preview: true });
   } catch (err) {
     logError('surfaces.openMarkdownPreview.fallback', err);
-    void vscode.window.showWarningMessage(`Lineage could not open ${p}.`);
+    void vscode.window.showWarningMessage(`Canopy could not open ${p}.`);
   }
 }
 
@@ -189,7 +189,7 @@ function samePath(a: string, b: string): boolean {
 
 /**
  * Open a folder as a project. Window-per-project is the model: the default
- * (and the only path any Lineage command uses) is `forceNewWindow: true`.
+ * (and the only path any Canopy command uses) is `forceNewWindow: true`.
  *
  * `newWindow: false` reuses the current window — that is a normal
  * File > Open Folder, which VS Code implements by restarting the extension
@@ -215,7 +215,7 @@ export async function openProject(
   } catch (err) {
     logError('surfaces.openProject.stat', err);
     void vscode.window.showWarningMessage(
-      `Lineage: folder no longer exists — ${p}`,
+      `Canopy: folder no longer exists — ${p}`,
     );
     return;
   }
@@ -237,7 +237,7 @@ export async function openProject(
     });
   } catch (err) {
     logError('surfaces.openProject', err);
-    void vscode.window.showErrorMessage(`Lineage could not open ${p}.`);
+    void vscode.window.showErrorMessage(`Canopy could not open ${p}.`);
   }
 }
 

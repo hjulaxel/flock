@@ -196,16 +196,30 @@ interface CacheEntry {
   expiresAt: number | null;
 }
 
-/** A recorded edge is only honoured when its source is one WE wrote. Inferred
- *  sources are never persisted (§5.5) — if one shows up in the state file it
- *  is drift, and it must not outrank a fresh inference. */
+/** Extra knowledge the caller has about one session. Both fields exist for
+ *  ARCHIVED sessions, whose transcript path is already known and whose file
+ *  will never change again. */
+export interface ResolveOptions {
+  /** Known transcript path — skips the readdir probe over every project dir. */
+  transcriptPath?: string;
+  /** The transcript is finished: cache a negative answer forever. */
+  immutable?: boolean;
+}
+
+/** A recorded edge is only honoured when its source is EXACT knowledge.
+ *  Inferred sources are never persisted (§5.5) — if one shows up in the state
+ *  file it is drift, and it must not outrank a fresh inference. 'daemon'
+ *  (M11) qualifies: it is the CLI daemon's own dispatch record for a native
+ *  /fork, persisted because the roster it comes from is ephemeral. */
 function recordedResolution(
   record: EditorialRecord | undefined,
   sessionId: string,
 ): ParentResolution | null {
   if (!record) return null;
   const source = record.parentSource;
-  if (source !== 'minted' && source !== 'reparent') return null;
+  if (source !== 'minted' && source !== 'reparent' && source !== 'daemon') {
+    return null;
+  }
   const raw = record.parentId ?? null;
   // A recorded parentId of null is itself exact knowledge ("we launched this
   // as a root", or "the user dragged it out to the root level").
@@ -243,6 +257,7 @@ export class LineageResolver {
   async resolve(
     entry: { sessionId: string; pid?: number },
     record?: EditorialRecord,
+    opts?: ResolveOptions,
   ): Promise<ParentResolution> {
     const id = entry?.sessionId;
     if (typeof id !== 'string' || id.length === 0) {
@@ -264,11 +279,17 @@ export class LineageResolver {
       return cached.resolution;
     }
 
-    const resolution = await this.derive(entry, id);
+    const resolution = await this.derive(entry, id, opts);
+    // Negatives normally expire: Claude writes transcripts lazily, so a
+    // just-launched session can become resolvable a moment later. An ARCHIVED
+    // transcript is finished and immutable, so re-deriving it can only ever
+    // reach the same answer — and doing so costs a 512 KB synchronous head
+    // read per session, every TTL window, on the extension-host thread. Those
+    // negatives are cached for the resolver's lifetime.
     this.cache.set(id, {
       resolution,
       expiresAt:
-        resolution.parentId === null
+        resolution.parentId === null && opts?.immutable !== true
           ? this.io.now() + NEGATIVE_RESOLUTION_TTL_MS
           : null,
     });
@@ -284,11 +305,13 @@ export class LineageResolver {
   private async derive(
     entry: { sessionId: string; pid?: number },
     id: string,
+    opts?: ResolveOptions,
   ): Promise<ParentResolution> {
     // Branch 2 — forkedFrom head-scan. Exact: the native in-app fork marker,
     // written on line 1, bounded to FORK_HEAD_LINES, aborted by a compaction
     // boundary seen first.
-    const head = this.scan(id, false);
+    const hint = opts?.transcriptPath;
+    const head = this.scan(id, false, hint);
     if (head) return { parentId: head, source: 'forkedFrom' };
 
     const pid = entry.pid;
@@ -315,7 +338,7 @@ export class LineageResolver {
       // truncated or historic transcript missing its boundary record would mint
       // a wrong edge.
       if (scan?.forkGateSeen === true) {
-        const deep = this.scan(id, true);
+        const deep = this.scan(id, true, hint);
         if (deep) return { parentId: deep, source: 'cli-fork' };
       }
     }
@@ -325,9 +348,12 @@ export class LineageResolver {
     return { parentId: null, source: 'none' };
   }
 
-  private scan(id: string, deep: boolean): string | null {
+  private scan(id: string, deep: boolean, hint?: string): string | null {
     try {
-      return this.sanitize(this.io.scanTranscript(id, { deep }), id);
+      return this.sanitize(
+        this.io.scanTranscript(id, hint === undefined ? { deep } : { deep, hint }),
+        id,
+      );
     } catch (err) {
       logError('lineage: transcript scan failed', err);
       return null;
@@ -356,6 +382,17 @@ export async function resolveAll(
   entries: RosterEntry[],
   resolver: LineageResolver,
   records: Record<string, EditorialRecord>,
+  /** Per-session extras, keyed by session id. The caller passes this for
+   *  archived sessions: it already knows their transcript path, and their
+   *  files never change again. */
+  extras?: ReadonlyMap<string, ResolveOptions>,
+  /** M10. Applied to every resolved parent id BEFORE it is used: the caller
+   *  passes the chain-tip mapper so an edge landing on a superseded
+   *  generation re-points to the conversation's current id. Doing it here —
+   *  not after — matters, because the ghost walk below would otherwise
+   *  synthesize a "(gone)" row for exactly the id whose row the chain
+   *  collapse just removed. */
+  mapParent?: (parentId: string) => string,
 ): Promise<Map<string, ParentResolution>> {
   const out = new Map<string, ParentResolution>();
   const safeRecords = records ?? {};
@@ -366,13 +403,35 @@ export async function resolveAll(
     }
   }
 
+  const applyMap = (r: ParentResolution): ParentResolution => {
+    if (!mapParent || r.parentId === null) return r;
+    let mapped: string;
+    try {
+      mapped = mapParent(r.parentId);
+    } catch (err) {
+      logError('lineage: mapParent threw', err);
+      return r;
+    }
+    if (!isSessionId(mapped) || mapped === r.parentId) return r;
+    return { parentId: mapped, source: r.source };
+  };
+
   for (const e of entries ?? []) {
     if (!e || typeof e.sessionId !== 'string' || e.sessionId.length === 0) {
       continue;
     }
     if (out.has(e.sessionId)) continue; // duplicate roster row
     try {
-      out.set(e.sessionId, await resolver.resolve(e, safeRecords[e.sessionId]));
+      out.set(
+        e.sessionId,
+        applyMap(
+          await resolver.resolve(
+            e,
+            safeRecords[e.sessionId],
+            extras?.get(e.sessionId),
+          ),
+        ),
+      );
     } catch (err) {
       logError(`lineage: resolve failed for ${shortId(e.sessionId)}`, err);
       out.set(e.sessionId, { parentId: null, source: 'none' });
@@ -397,7 +456,13 @@ export async function resolveAll(
     }
     let r: ParentResolution;
     try {
-      r = await resolver.resolve({ sessionId: item.id }, safeRecords[item.id]);
+      r = applyMap(
+        await resolver.resolve(
+          { sessionId: item.id },
+          safeRecords[item.id],
+          extras?.get(item.id),
+        ),
+      );
     } catch (err) {
       logError(`lineage: ghost resolve failed for ${shortId(item.id)}`, err);
       r = { parentId: null, source: 'none' };
@@ -422,10 +487,34 @@ export interface BuildForestInput {
    *  present in `entries` (see archive.archivedOnly): a live session's archived
    *  twin would be a duplicate row. */
   archived?: ArchivedSession[];
+  /** sessionId → transcript mtime, from ArchiveIndexer.transcriptMtimes(). Feeds
+   *  SessionNode.lastActiveAt for live entries; keyed by chain-tip-collapsed id,
+   *  same as `entries`/`archived`, so this must be built AFTER collapseChains
+   *  has run over the archive facts. Archived nodes get their `lastActiveAt`
+   *  from `archive.endedAt` directly (see below) and never consult this map. */
+  activityMtimes?: ReadonlyMap<string, number>;
+  /** M18. sessionId → what the transcript TAIL says about the session: when the
+   *  user last prompted it, and how many tokens the last turn ran with. Same
+   *  chain-tip-collapsed keying as `activityMtimes`. Both fields are optional
+   *  per entry and per session — a transcript whose tail carries neither (too
+   *  new, or nothing but tool traffic in the window) simply leaves the node's
+   *  fields unset and every renderer falls back to what it showed before. */
+  tailStats?: ReadonlyMap<string, { lastPromptAt?: number; tokens?: number }>;
   opts?: {
-    showGhosts?: boolean;       // default true
-    sortWaitingFirst?: boolean; // default true
-    now?: number;               // default Date.now()
+    showGhosts?: boolean; // default true
+    now?: number;         // default Date.now()
+    /** M12. `lineage.notifications.enabled` — the global default a
+     *  per-record `notify` can override. When tracking is OFF for a session,
+     *  its `unseen` stays undefined and every renderer falls back to the
+     *  pre-M12 behaviour (waiting = green). Default true. */
+    notificationsDefault?: boolean;
+    /** M19. `lineage.onlyActiveSessions` — drop every node that is OVER
+     *  (archived, exited, or an inferred ghost ancestor) from the visible tree,
+     *  promoting its children exactly as a deleted node's are. A view filter and
+     *  nothing else: the nodes are still built, still in `nodes`, and still
+     *  reachable by every verb that takes an id — flipping the switch back puts
+     *  them straight back. Default false. */
+    onlyActive?: boolean;
   };
 }
 
@@ -463,25 +552,49 @@ function nonEmpty(v: unknown): string | undefined {
   return typeof v === 'string' && v.length > 0 ? v : undefined;
 }
 
-/** startedAt ascending with undefined last, then id — a total order, so the
- *  tree never reshuffles between ticks for equal keys.
- *
- *  Archived (closed) nodes sort AFTER every live one, and among themselves by
- *  MOST RECENTLY ACTIVE first: for a closed session "when did I last touch it"
- *  is the useful key, and with 157 of them on this machine, oldest-first would
- *  bury everything you actually care about. */
-function compareByStartThenId(a: SessionNode, b: SessionNode): number {
-  if (a.archived !== b.archived) return a.archived ? 1 : -1;
-  if (a.archived && b.archived) {
-    const ae = a.endedAt;
-    const be = b.endedAt;
-    if (ae !== be) {
-      if (ae === undefined) return 1;
-      if (be === undefined) return -1;
-      return be - ae; // descending
-    }
-    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+/** Copy the M18 transcript-tail facts onto a node, one field at a time and
+ *  only when the value is a usable number. Shared by the live and the archived
+ *  pass because both read the same map: an archived session's last prompt is
+ *  as interesting as a live one's, and is the number its row has always been
+ *  claiming to show. */
+function applyTailStats(
+  node: SessionNode,
+  stats: { lastPromptAt?: number; tokens?: number } | undefined,
+): void {
+  if (stats === undefined) return;
+  const at = stats.lastPromptAt;
+  if (typeof at === 'number' && Number.isFinite(at) && at > 0) {
+    node.lastPromptAt = at;
   }
+  const tokens = stats.tokens;
+  if (typeof tokens === 'number' && Number.isFinite(tokens) && tokens > 0) {
+    node.tokens = tokens;
+  }
+}
+
+/**
+ * Sibling order (§5.6): startedAt ascending with undefined last, then id — a
+ * total order, so the tree never reshuffles between ticks for equal keys, and
+ * never reshuffles at all as a *side effect* of a session's status or
+ * attention changing (P7 — a session waiting on you does not jump the queue;
+ * that is what the dot and the badge are for).
+ *
+ * Two demotions stack on top of that shared key, each checked before it:
+ *
+ *  - hidden sorts after every non-hidden sibling. That IS the "move it to the
+ *    bottom" half of the hide verb — the grey is only how it looks, the order
+ *    is what gets it out of the way. Applied at both levels (children lists
+ *    and the root list), because a root demoted only within its folder row
+ *    would still sit above live work.
+ *  - archived (closed) sorts after every live sibling, exactly once — and no
+ *    longer reshuffles AMONG archived siblings by recency. With
+ *    `lineage.showArchived` on, this machine alone carries 157+ foreign
+ *    closed sessions; keying purely on startedAt keeps their relative order
+ *    stable instead of relitigating it every tick a process happens to exit.
+ */
+function compareByStartThenId(a: SessionNode, b: SessionNode): number {
+  if (a.hidden !== b.hidden) return a.hidden ? 1 : -1;
+  if (a.archived !== b.archived) return a.archived ? 1 : -1;
   const as = a.startedAt;
   const bs = b.startedAt;
   if (as !== bs) {
@@ -492,10 +605,40 @@ function compareByStartThenId(a: SessionNode, b: SessionNode): number {
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
+/**
+ * M12. The unseen verdict for one LIVE session: it finished a turn (`doneAt`,
+ * stamped by the transition detector / Stop hook — or it is WAITING, which is
+ * a standing request for the user whether or not a transition was observed)
+ * and the user has not looked at it since. Tracking off → undefined, which
+ * renderers read as "behave as before M12".
+ */
+export function deriveUnseen(
+  status: SessionStatus,
+  record: EditorialRecord | undefined,
+  notificationsDefault: boolean,
+): boolean | undefined {
+  const enabled = record?.notify ?? notificationsDefault;
+  if (!enabled) return undefined;
+  if (status !== 'waiting' && status !== 'idle') return undefined;
+  const doneAt = record?.doneAt;
+  const seenAt = record?.seenAt;
+  if (status === 'waiting') {
+    // Waiting IS the ask; an un-stamped waiting session is unseen until looked
+    // at, which is also exactly what the pre-M12 green dot said.
+    if (doneAt === undefined) return seenAt === undefined;
+    return seenAt === undefined || seenAt < doneAt;
+  }
+  // idle: only a session with an OBSERVED finish can be unseen — otherwise
+  // every long-idle session on the machine would light up green at install.
+  if (doneAt === undefined) return false;
+  return seenAt === undefined || seenAt < doneAt;
+}
+
 /** Normative assembly rules: SPEC §5.6. */
 export function buildForest(input: BuildForestInput): SessionForest {
   const showGhosts = input?.opts?.showGhosts ?? true;
-  const sortWaitingFirst = input?.opts?.sortWaitingFirst ?? true;
+  const notificationsDefault = input?.opts?.notificationsDefault ?? true;
+  const onlyActive = input?.opts?.onlyActive === true;
   const now = input?.opts?.now ?? Date.now();
   const records = input?.records ?? {};
   const headers = input?.headers;
@@ -548,6 +691,7 @@ export function buildForest(input: BuildForestInput): SessionForest {
       ghost: false,
       archived: false,
       hidden: record?.hidden === true,
+      deleted: record?.deleted === true,
       status,
       attention,
       label,
@@ -557,7 +701,27 @@ export function buildForest(input: BuildForestInput): SessionForest {
     };
     const cwd = nonEmpty(e.cwd) ?? nonEmpty(record?.cwd);
     if (cwd !== undefined) node.cwd = cwd;
+    const summary = nonEmpty(record?.summary);
+    if (summary !== undefined) node.summary = summary;
     if (e.startedAt !== undefined) node.startedAt = e.startedAt;
+    // Age display keys off last activity, not session start — a session
+    // opened this morning and typed in a minute ago should read as "a minute
+    // ago", not "8 hours ago". Undefined (not yet covered by a sweep) leaves
+    // lastActiveAt unset; renderers fall back to startedAt themselves.
+    const la = input?.activityMtimes?.get(id);
+    if (la !== undefined) node.lastActiveAt = la;
+    applyTailStats(node, input?.tailStats?.get(id));
+    // M12. A muted (hidden) row never carries the green dot — hide is how the
+    // user says "stop telling me about this one". Nor does a DELETED one, and
+    // for a harder reason than taste: a deleted session has no row, so a dot
+    // pointing at it can never be cleared by looking at it, and
+    // `notificationItems` drops it from the bell list — which is how the bell
+    // went red over an empty dropdown.
+    if (!node.hidden && !node.deleted) {
+      const unseen = deriveUnseen(status, record, notificationsDefault);
+      if (unseen !== undefined) node.unseen = unseen;
+    }
+    if (record?.notify === false) node.notifyMuted = true;
     nodes.set(id, node);
   }
 
@@ -588,6 +752,7 @@ export function buildForest(input: BuildForestInput): SessionForest {
       archived: true,
       archive: a,
       hidden: record?.hidden === true,
+      deleted: record?.deleted === true,
       status: 'exited',
       attention: 'none',
       label,
@@ -597,17 +762,45 @@ export function buildForest(input: BuildForestInput): SessionForest {
     };
     const cwd = nonEmpty(a.cwd) ?? nonEmpty(record?.cwd);
     if (cwd !== undefined) node.cwd = cwd;
+    const summary = nonEmpty(record?.summary);
+    if (summary !== undefined) node.summary = summary;
     if (a.startedAt !== undefined) node.startedAt = a.startedAt;
     node.endedAt = a.endedAt;
+    // An archived node's transcript is not being appended to anymore, so its
+    // last activity IS the mtime we already stat'ed — no need to consult
+    // activityMtimes (that map is a live-session convenience; ArchivedSession
+    // always carries endedAt).
+    node.lastActiveAt = a.endedAt;
+    applyTailStats(node, input?.tailStats?.get(id));
+    // A closed session can be resumed, and resuming it is exactly when a mute
+    // matters again — the flag says what the record says, live or not.
+    if (record?.notify === false) node.notifyMuted = true;
     nodes.set(id, node);
   }
 
   // (3) Ghosts: every referenced parent with no roster row becomes a
   // synthesized, exited node, so a live fork of a dead session still shows its
   // lineage. Bounded by MAX_GHOST_DEPTH.
+  //
+  // A ghost has no roster row and usually no editorial record, so its only
+  // possible cwd is the one its children are running in — and it NEEDS one: a
+  // ghost is the visible root of its subtree, and grouping keys entirely off
+  // the root's cwd. Without this a fork of a just-closed parent falls out of
+  // its project row into "(unknown)", or disappears altogether under
+  // `lineage.onlyProjectSessions`. Forks inherit the parent's directory, so
+  // the child's cwd is the right answer rather than a guess.
+  const inheritedCwd = new Map<string, string>();
+  const noteInherited = (parentId: string, cwd: string | undefined): void => {
+    if (cwd === undefined || inheritedCwd.has(parentId)) return;
+    inheritedCwd.set(parentId, cwd);
+  };
+
   let frontier: string[] = [];
   for (const n of nodes.values()) {
-    if (n.parentId && !nodes.has(n.parentId)) frontier.push(n.parentId);
+    if (n.parentId && !nodes.has(n.parentId)) {
+      frontier.push(n.parentId);
+      noteInherited(n.parentId, n.cwd);
+    }
   }
   for (let depth = 0; depth < MAX_GHOST_DEPTH && frontier.length > 0; depth++) {
     const next: string[] = [];
@@ -627,6 +820,7 @@ export function buildForest(input: BuildForestInput): SessionForest {
         ghost: true,
         archived: false,
         hidden: record?.hidden === true,
+        deleted: record?.deleted === true,
         status: 'exited',
         attention: 'none',
         label,
@@ -634,10 +828,17 @@ export function buildForest(input: BuildForestInput): SessionForest {
         children: [],
         visibleChildren: [],
       };
-      const cwd = nonEmpty(record?.cwd);
+      const cwd = nonEmpty(record?.cwd) ?? inheritedCwd.get(gid);
       if (cwd !== undefined) ghost.cwd = cwd;
+      const summary = nonEmpty(record?.summary);
+      if (summary !== undefined) ghost.summary = summary;
       nodes.set(gid, ghost);
-      if (parentId && !nodes.has(parentId)) next.push(parentId);
+      if (parentId && !nodes.has(parentId)) {
+        next.push(parentId);
+        // Carry the address up the chain: a ghost of a ghost is still the
+        // visible root of everything below it.
+        noteInherited(parentId, cwd);
+      }
     }
     frontier = next;
   }
@@ -690,18 +891,30 @@ export function buildForest(input: BuildForestInput): SessionForest {
       return compareByStartThenId(na, nb);
     });
   }
-  roots.sort((a, b) => {
-    if (sortWaitingFirst) {
-      const aw = a.attention === 'waiting' ? 0 : 1;
-      const bw = b.attention === 'waiting' ? 0 : 1;
-      if (aw !== bw) return aw - bw;
-    }
-    return compareByStartThenId(a, b);
-  });
+  // Roots share the exact comparator children lists use — no attention-based
+  // float on top of it (P7). A session that starts waiting on you, or
+  // finishes a turn unseen, must not visibly jump the queue: that would be
+  // its own row relocating itself as a side effect of your NOT having looked
+  // at it yet, the opposite of a stable sidebar. See compareByStartThenId's
+  // doc comment for the muting/archived rules this inherits unchanged.
+  roots.sort(compareByStartThenId);
 
-  // (6) Visibility promotion. A hidden node is a recoverable delete: it loses
-  // its row, but its children keep their lineage and surface under the nearest
-  // visible ancestor. A ghost with no visible descendant is noise.
+  // (6) Visibility promotion. A DELETED node loses its row, but its children
+  // keep their lineage and surface under the nearest visible ancestor; nothing
+  // on disk is touched, so restoring it puts the subtree back as it was. A
+  // HIDDEN node is not part of this pass at all — it is merely muted, so it
+  // keeps its row (sorted last, see compareByStartThenId) and its subtree stays
+  // nested under it. A ghost with no visible descendant is noise.
+  //
+  // M19 adds one more way to lose a row and reuses this pass rather than
+  // filtering afterwards, because promotion is the whole point: with
+  // `onlyActive` on, a live fork of a session you closed has to keep its place
+  // in the tree instead of vanishing with its parent. That is precisely what
+  // the delete path already does, and doing it here is also what keeps
+  // `visibleChildren`, `visibleRoots` and `attentionCount` consistent with each
+  // other — three fields every renderer reads as one answer.
+  const isOver = (n: SessionNode): boolean =>
+    n.ghost || n.archived || n.status === 'exited';
   const visibleMemo = new Map<string, boolean>();
   const descendantMemo = new Map<string, boolean>();
 
@@ -726,7 +939,8 @@ export function buildForest(input: BuildForestInput): SessionForest {
     const memo = visibleMemo.get(n.id);
     if (memo !== undefined) return memo;
     let visible: boolean;
-    if (n.hidden) visible = false;
+    if (n.deleted) visible = false;
+    else if (onlyActive && isOver(n)) visible = false;
     else if (n.ghost && (!showGhosts || !hasVisibleDescendant(n))) {
       visible = false;
     } else visible = true;
@@ -766,7 +980,9 @@ export function buildForest(input: BuildForestInput): SessionForest {
     if (n.parentId) {
       edges.push({ childId: n.id, parentId: n.parentId, source: n.source });
     }
-    if (n.attention === 'waiting' && isVisible(n)) attentionCount++;
+    // `!n.hidden`: a muted row is on screen but must not badge the view — see
+    // SessionForest.attentionCount.
+    if (n.attention === 'waiting' && !n.hidden && isVisible(n)) attentionCount++;
   }
 
   return {

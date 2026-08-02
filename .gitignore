@@ -2,3 +2,6 @@ node_modules/
 out/
 dist/
 *.vsix
+
+# Local Claude Code settings — machine-specific, contains absolute paths.
+.claude/settings.local.json

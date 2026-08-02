@@ -7,11 +7,18 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import {
+  RosterFilter,
   RosterPoller,
+  destaleBusyStatus,
   fetchRoster,
+  fetchRosterMulti,
   findClaudeBinary,
+  isProcessAlive,
+  isSpareCommand,
   normalizeStatus,
   parseRoster,
+  reportsBusy,
+  rosterEnvFor,
   rosterSignature,
   sameRoster,
 } from '../src/roster';
@@ -81,6 +88,329 @@ describe('parseRoster: the measured sample', () => {
       status: 'idle',
       attention: 'none',
     });
+  });
+});
+
+// -------------------------------------------------------- the phantom filter
+
+/** The two real command lines measured on this machine, verbatim. */
+const SPARE_CMD =
+  'claude bg-spare --bg-spare /tmp/cc-daemon-501/9c0db7b2/spare/f196e5f7.claim.sock';
+const SESSION_CMD =
+  '/Users/axelh/.local/share/claude/versions/2.1.217 --session-id ' +
+  '0408b335-a2d4-4d3e-a546-aba0937b32be --fork-session --resume /Users/axelh/.claude/projects/x';
+
+const SPARE_ID = '3e6aa079-d114-40be-b788-ab9ba937f9d0';
+const NOPID_ID = '9a5bf57b-1c2d-4e3f-9a8b-7c6d5e4f3a2b';
+const REAL_ID = '1f743713-aa11-4bb2-8cc3-dd44ee55ff66';
+
+/** A filter whose two syscalls are injected: `alive` lists the running pids,
+ *  `cmds` the argv `ps` would report. */
+function filterWith(
+  alive: number[],
+  cmds: Record<number, string>,
+  onPs?: (pids: readonly number[]) => void,
+): RosterFilter {
+  const live = new Set(alive);
+  return new RosterFilter({
+    isAlive: (pid) => live.has(pid),
+    psCommands: (pids) => {
+      onPs?.(pids);
+      const out = new Map<number, string>();
+      for (const pid of pids) {
+        const c = cmds[pid];
+        if (c !== undefined) out.set(pid, c);
+      }
+      return Promise.resolve(out);
+    },
+  });
+}
+
+describe('isSpareCommand', () => {
+  it('matches the measured warm-spare command line', () => {
+    expect(isSpareCommand(SPARE_CMD)).toBe(true);
+    expect(isSpareCommand('claude --bg-spare=/tmp/x.sock')).toBe(true);
+    expect(isSpareCommand('claude --bg-spare')).toBe(true);
+  });
+
+  it('never matches a real session, however suggestive its argv', () => {
+    expect(isSpareCommand(SESSION_CMD)).toBe(false);
+    // The flag form is what makes these safe: a directory or a prompt word
+    // containing "bg-spare" is not a spare.
+    expect(isSpareCommand('claude --resume x /Users/a/bg-spare/notes.md')).toBe(
+      false,
+    );
+    expect(isSpareCommand('claude -p "explain the bg-spare pool"')).toBe(false);
+    expect(isSpareCommand('')).toBe(false);
+    expect(isSpareCommand(undefined as unknown as string)).toBe(false);
+  });
+});
+
+describe('isProcessAlive', () => {
+  it('is true for this very process and false for a reaped pid', () => {
+    expect(isProcessAlive(process.pid)).toBe(true);
+    // pid 0 / negatives are process-GROUP selectors in the kill(2) API and
+    // must never be probed — a bare guard, not a syscall.
+    expect(isProcessAlive(0)).toBe(false);
+    expect(isProcessAlive(-1)).toBe(false);
+    expect(isProcessAlive(1.5)).toBe(false);
+    expect(isProcessAlive(NaN)).toBe(false);
+  });
+
+  it('is true for pid 1, which exists but we may not signal (EPERM)', () => {
+    expect(isProcessAlive(1)).toBe(true);
+  });
+});
+
+describe('RosterFilter', () => {
+  it('drops the warm-spare and the unreaped row, keeps the real session', async () => {
+    const entries = parseRoster(MEASURED_SAMPLE);
+    const kept = await filterWith(
+      [11763, 79378],
+      { 11763: SPARE_CMD, 79378: SESSION_CMD },
+    ).apply(entries);
+
+    expect(kept.map((e) => e.sessionId)).toEqual([REAL_ID]);
+  });
+
+  it('drops a row whose pid has exited', async () => {
+    const entries = parseRoster(MEASURED_SAMPLE);
+    // 11763 is gone; the spare probe never even runs for it.
+    const kept = await filterWith([79378], { 79378: SESSION_CMD }).apply(
+      entries,
+    );
+    expect(kept.map((e) => e.sessionId)).toEqual([REAL_ID]);
+  });
+
+  it('stands down entirely when NO row reports a pid', async () => {
+    // A CLI build that stopped reporting pids must not empty the tree.
+    const entries: RosterEntry[] = [
+      { sessionId: SPARE_ID, name: 'a' },
+      { sessionId: NOPID_ID, name: 'b' },
+    ];
+    const kept = await filterWith([], {}).apply(entries);
+    expect(kept).toBe(entries);
+  });
+
+  it('asks ps once per pid, then answers from cache', async () => {
+    const seen: number[][] = [];
+    const filter = filterWith(
+      [11763, 79378],
+      { 11763: SPARE_CMD, 79378: SESSION_CMD },
+      (pids) => seen.push([...pids]),
+    );
+    const entries = parseRoster(MEASURED_SAMPLE);
+    await filter.apply(entries);
+    await filter.apply(entries);
+    await filter.apply(entries);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].sort()).toEqual([11763, 79378]);
+  });
+
+  it('re-probes a pid after it leaves the roster, so recycling cannot poison it', async () => {
+    const seen: number[][] = [];
+    const cmds: Record<number, string> = { 79378: SPARE_CMD };
+    const filter = filterWith([79378], cmds, (pids) => seen.push([...pids]));
+    const row: RosterEntry[] = [{ sessionId: REAL_ID, pid: 79378 }];
+
+    expect(await filter.apply(row)).toEqual([]); // classified as a spare
+
+    // The roster goes elsewhere, evicting 79378's verdict. (That pass probes
+    // nothing itself: 11763 is not alive, so it is dropped before ps.)
+    await filter.apply([{ sessionId: SPARE_ID, pid: 11763 }]);
+    // ...and the pid comes back as something else entirely.
+    cmds[79378] = SESSION_CMD;
+    expect(await filter.apply(row)).toEqual(row);
+    // Probed on the first pass and again on the third — never served from a
+    // verdict that outlived the pid it was about.
+    expect(seen).toEqual([[79378], [79378]]);
+  });
+
+  // Regression: eviction only ran on the success path, so the two early
+  // returns — an empty roster, and a roster where no row carries a pid — left
+  // stale per-pid verdicts behind. Those are exactly the ticks on which pids
+  // leave the roster, so a spare verdict could outlive its pid and silently
+  // filter out a real session that later landed on the recycled number.
+  it('evicts verdicts on a tick where the roster went empty', async () => {
+    const seen: number[][] = [];
+    const cmds: Record<number, string> = { 79378: SPARE_CMD };
+    const filter = filterWith([79378], cmds, (pids) => seen.push([...pids]));
+    const row: RosterEntry[] = [{ sessionId: REAL_ID, pid: 79378 }];
+
+    expect(await filter.apply(row)).toEqual([]); // classified as a spare
+    await filter.apply([]); // everything closed — must clear the verdict
+
+    cmds[79378] = SESSION_CMD; // the pid is recycled by a real session
+    expect(await filter.apply(row)).toEqual(row);
+    expect(seen).toEqual([[79378], [79378]]);
+  });
+
+  it('evicts verdicts on a tick where no row reports a pid', async () => {
+    const seen: number[][] = [];
+    const cmds: Record<number, string> = { 79378: SPARE_CMD };
+    const filter = filterWith([79378], cmds, (pids) => seen.push([...pids]));
+    const row: RosterEntry[] = [{ sessionId: REAL_ID, pid: 79378 }];
+
+    expect(await filter.apply(row)).toEqual([]);
+    await filter.apply([{ sessionId: NOPID_ID }]); // pid-less build / tick
+
+    cmds[79378] = SESSION_CMD;
+    expect(await filter.apply(row)).toEqual(row);
+    expect(seen).toEqual([[79378], [79378]]);
+  });
+
+  it('keeps a row whose argv ps could not report, rather than guessing', async () => {
+    // A transient ps failure must never permanently whitelist OR drop a row.
+    const seen: number[][] = [];
+    const filter = filterWith([79378], {}, (pids) => seen.push([...pids]));
+    const row: RosterEntry[] = [{ sessionId: REAL_ID, pid: 79378 }];
+    expect(await filter.apply(row)).toEqual(row);
+    // Unclassified, so the next pass asks again instead of caching a guess.
+    await filter.apply(row);
+    expect(seen).toHaveLength(2);
+  });
+
+  it('returns the roster untouched when the probes throw', async () => {
+    const filter = new RosterFilter({
+      isAlive: () => {
+        throw new Error('boom');
+      },
+    });
+    const entries = parseRoster(MEASURED_SAMPLE);
+    expect(await filter.apply(entries)).toBe(entries);
+  });
+
+  it('passes an empty roster straight through', async () => {
+    const empty: RosterEntry[] = [];
+    expect(await filterWith([], {}).apply(empty)).toBe(empty);
+  });
+});
+
+// ----------------------------------------------------------- frozen "busy"
+
+describe('reportsBusy', () => {
+  it('is true exactly for the rows normalizeStatus calls busy', () => {
+    expect(reportsBusy({ sessionId: 'x', status: 'busy' })).toBe(true);
+    expect(reportsBusy({ sessionId: 'x', status: 'working' })).toBe(true);
+    expect(reportsBusy({ sessionId: 'x', state: 'running' })).toBe(true);
+    expect(reportsBusy({ sessionId: 'x', state: 'working' })).toBe(true);
+    // Case / whitespace tolerant, matching normalizeStatus.
+    expect(reportsBusy({ sessionId: 'x', status: '  BUSY ' })).toBe(true);
+  });
+
+  it('is false for waiting/blocked, which win ahead of busy', () => {
+    // A row can carry BOTH — waiting must never be reclassified as stale-busy.
+    expect(reportsBusy({ sessionId: 'x', status: 'waiting', state: 'running' })).toBe(false);
+    expect(reportsBusy({ sessionId: 'x', status: 'busy', state: 'blocked' })).toBe(false);
+  });
+
+  it('is false for idle / unknown / empty', () => {
+    expect(reportsBusy({ sessionId: 'x', status: 'idle' })).toBe(false);
+    expect(reportsBusy({ sessionId: 'x' })).toBe(false);
+    expect(reportsBusy({ sessionId: 'x', state: 'done' })).toBe(false);
+    expect(reportsBusy(null)).toBe(false);
+  });
+});
+
+describe('destaleBusyStatus', () => {
+  const NOW = 1_000_000_000_000;
+  const WINDOW = 5 * 60_000;
+
+  it('rewrites a frozen busy to idle once the transcript is silent past the window', () => {
+    // The measured bug: interactive session, status stuck at busy, transcript
+    // untouched for 22 minutes.
+    const entry: RosterEntry = { sessionId: 'x', pid: 1, status: 'busy' };
+    const out = destaleBusyStatus(entry, NOW - 22 * 60_000, NOW, WINDOW);
+    expect(out).not.toBe(entry); // a clone
+    expect(out.status).toBe('idle');
+    expect(entry.status).toBe('busy'); // input never mutated
+  });
+
+  it('leaves a genuinely busy session alone while its transcript is fresh', () => {
+    const entry: RosterEntry = { sessionId: 'x', pid: 1, status: 'busy' };
+    const out = destaleBusyStatus(entry, NOW - 27_000, NOW, WINDOW);
+    expect(out).toBe(entry); // untouched, same reference
+  });
+
+  it('clears only a busy-inducing state, so the busy branch cannot re-fire', () => {
+    const entry: RosterEntry = { sessionId: 'x', pid: 1, state: 'running' };
+    const out = destaleBusyStatus(entry, NOW - 10 * 60_000, NOW, WINDOW);
+    expect(out.status).toBe('idle');
+    expect(out.state).toBeUndefined();
+    // And the downgraded row now normalises to idle in both tables.
+    expect(normalizeStatus(out)).toEqual({ status: 'idle', attention: 'none' });
+  });
+
+  it('never touches waiting/blocked, idle, or non-busy rows', () => {
+    const waiting: RosterEntry = { sessionId: 'x', status: 'waiting', state: 'blocked' };
+    expect(destaleBusyStatus(waiting, NOW - 99 * 60_000, NOW, WINDOW)).toBe(waiting);
+    const idle: RosterEntry = { sessionId: 'x', status: 'idle' };
+    expect(destaleBusyStatus(idle, NOW - 99 * 60_000, NOW, WINDOW)).toBe(idle);
+  });
+
+  it('keeps the CLI claim when there is no transcript signal', () => {
+    // A busy row with no locatable transcript stays busy — we never invent a
+    // downgrade from the absence of a signal.
+    const entry: RosterEntry = { sessionId: 'x', status: 'busy' };
+    expect(destaleBusyStatus(entry, null, NOW, WINDOW)).toBe(entry);
+  });
+
+  it('is a no-op when the window is zero or negative (disabled)', () => {
+    const entry: RosterEntry = { sessionId: 'x', status: 'busy' };
+    expect(destaleBusyStatus(entry, NOW - 99 * 60_000, NOW, 0)).toBe(entry);
+    expect(destaleBusyStatus(entry, NOW - 99 * 60_000, NOW, -1)).toBe(entry);
+  });
+});
+
+describe('RosterFilter: destaling a frozen busy', () => {
+  const FRESH = '11111111-1111-4111-8111-111111111111';
+  const FROZEN = '22222222-2222-4222-8222-222222222222';
+  const NOW = 1_000_000_000_000;
+
+  /** A filter with both processes alive and NOT spares, plus a controlled
+   *  clock, window, and per-session transcript mtime. */
+  function filter(mtimes: Record<string, number | null>): RosterFilter {
+    return new RosterFilter({
+      isAlive: () => true,
+      psCommands: (pids) =>
+        Promise.resolve(new Map(pids.map((p) => [p, SESSION_CMD]))),
+      transcriptMtime: (sid) => (sid in mtimes ? mtimes[sid] : null),
+      now: () => NOW,
+      busyStaleMs: () => 5 * 60_000,
+    });
+  }
+
+  const rows: RosterEntry[] = [
+    { sessionId: FRESH, pid: 101, status: 'busy' },
+    { sessionId: FROZEN, pid: 102, status: 'busy' },
+  ];
+
+  it('downgrades the silent busy row to idle and leaves the writing one busy', async () => {
+    const kept = await filter({
+      [FRESH]: NOW - 20_000, // wrote 20s ago — genuinely working
+      [FROZEN]: NOW - 22 * 60_000, // silent 22 min — frozen
+    }).apply(rows);
+
+    const byId = Object.fromEntries(kept.map((e) => [e.sessionId, e]));
+    expect(byId[FRESH].status).toBe('busy');
+    expect(byId[FROZEN].status).toBe('idle');
+    // The whole point: the tree now paints a running dot only on FRESH.
+    expect(normalizeStatus(byId[FROZEN])).toEqual({ status: 'idle', attention: 'none' });
+    expect(normalizeStatus(byId[FRESH])).toEqual({ status: 'busy', attention: 'none' });
+  });
+
+  it('is stable across ticks — a destaled row does not churn the signature', async () => {
+    const f = filter({ [FRESH]: NOW - 20_000, [FROZEN]: NOW - 22 * 60_000 });
+    const a = await f.apply(rows);
+    const b = await f.apply(rows);
+    expect(sameRoster(a, b)).toBe(true);
+  });
+
+  it('leaves both busy when the phantom filter stands down (no pids)', async () => {
+    // No row carries a pid → the whole filter, destale included, stays out.
+    const noPids: RosterEntry[] = [{ sessionId: FROZEN, status: 'busy' }];
+    const kept = await filter({ [FROZEN]: NOW - 99 * 60_000 }).apply(noPids);
+    expect(kept).toBe(noPids);
   });
 });
 
@@ -467,5 +797,91 @@ describe('RosterPoller', () => {
     poller.start();
     await vi.advanceTimersByTimeAsync(10_000);
     expect(calls).toBe(1);
+  });
+});
+
+// ═════════════════════════════ M22.3: multi-config-dir roster ═══════════════
+
+describe('rosterEnvFor (M22.3)', () => {
+  it('no dir / blank dir -> the parent env, SAME object, untouched', () => {
+    expect(rosterEnvFor(undefined)).toBe(process.env);
+    expect(rosterEnvFor('')).toBe(process.env);
+    expect(rosterEnvFor('   ')).toBe(process.env);
+  });
+
+  it('a dir -> a COPY with CLAUDE_CONFIG_DIR set; process.env never mutated', () => {
+    const before = process.env['CLAUDE_CONFIG_DIR'];
+    const env = rosterEnvFor('/Users/x/.lineage/profiles/personal');
+    expect(env).not.toBe(process.env);
+    expect(env['CLAUDE_CONFIG_DIR']).toBe('/Users/x/.lineage/profiles/personal');
+    expect(process.env['CLAUDE_CONFIG_DIR']).toBe(before);
+  });
+});
+
+describe('fetchRosterMulti (M22.3)', () => {
+  const RA = '0f0000a1-0000-4000-8000-0000000000a1';
+  const RB = '0f0000b2-0000-4000-8000-0000000000b2';
+  const RC = '0f0000c3-0000-4000-8000-0000000000c3';
+  const entry = (sessionId: string, cwd?: string): RosterEntry =>
+    cwd === undefined ? { sessionId } : { sessionId, cwd };
+  const ok = (...entries: RosterEntry[]): RosterResult => ({
+    ok: true,
+    entries,
+    tookMs: 1,
+  });
+  const bad = (error: string): RosterResult => ({
+    ok: false,
+    entries: [],
+    error,
+    tookMs: 1,
+  });
+
+  it('fetches the default dir FIRST, then each extra once — trimmed, deduped', async () => {
+    const seen: Array<string | undefined> = [];
+    const fetchImpl = vi.fn(async (o: { configDir?: string }): Promise<RosterResult> => {
+      seen.push(o.configDir);
+      return ok();
+    });
+    await fetchRosterMulti(
+      { claudeBin: 'claude', configDirs: ['', ' /a ', '/a', '/b'] },
+      fetchImpl,
+    );
+    expect(seen).toEqual([undefined, '/a', '/b']);
+  });
+
+  it('merges entries across dirs; on a duplicate id the DEFAULT dir wins', async () => {
+    const fetchImpl = async (o: { configDir?: string }): Promise<RosterResult> => {
+      if (o.configDir === undefined) return ok(entry(RA, '/from-default'));
+      if (o.configDir === '/p1') return ok(entry(RA, '/from-profile'), entry(RB));
+      return ok(entry(RC));
+    };
+    const out = await fetchRosterMulti({ configDirs: ['/p1', '/p2'] }, fetchImpl);
+    expect(out.ok).toBe(true);
+    expect(out.entries.map((e) => e.sessionId)).toEqual([RA, RB, RC]);
+    expect(out.entries[0].cwd).toBe('/from-default');
+  });
+
+  it('a failed dir degrades that ACCOUNT, not the tree: ok if ANY succeeded, errors joined', async () => {
+    const fetchImpl = async (o: { configDir?: string }): Promise<RosterResult> =>
+      o.configDir === undefined ? bad('default down') : ok(entry(RB));
+    const out = await fetchRosterMulti({ configDirs: ['/p1'] }, fetchImpl);
+    expect(out.ok).toBe(true);
+    expect(out.entries.map((e) => e.sessionId)).toEqual([RB]);
+    expect(out.error).toContain('default down');
+  });
+
+  it('every dir failing is a failed fetch, entries empty', async () => {
+    const fetchImpl = async (): Promise<RosterResult> => bad('boom');
+    const out = await fetchRosterMulti({ configDirs: ['/p1'] }, fetchImpl);
+    expect(out.ok).toBe(false);
+    expect(out.entries).toEqual([]);
+    expect(out.error).toBe('boom | boom');
+  });
+
+  it('with no configDirs it is ONE fetch of the default dir', async () => {
+    const fetchImpl = vi.fn(async (): Promise<RosterResult> => ok(entry(RA)));
+    const out = await fetchRosterMulti({}, fetchImpl);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(out.entries.map((e) => e.sessionId)).toEqual([RA]);
   });
 });

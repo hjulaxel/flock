@@ -2,14 +2,27 @@
 // FileDecorationProvider on the `lineage-session:` scheme — SPEC.md §4-C1.
 //
 // Imports allowed here: vscode, ./types, ./log.
-// Decorations are gated by the user's explorer.decorations.badges / .colors
-// settings, so the tree must never DEPEND on them — attention state is always
-// ALSO present in the TreeItem.description (tree.ts, statusDescriptor()).
+// The badge is the ONLY thing an extension can put at the right edge of a tree
+// row (the workbench pins `.monaco-icon-label::after` there; a
+// TreeItem.description always renders flush against the label), so this is
+// where the status dot has to live. Decorations are gated by the user's
+// explorer.decorations.badges / .colors settings; what survives them is the
+// age in the description, the tooltip, and the count on the view.
 
 import * as vscode from 'vscode';
-import { SESSION_URI_SCHEME, WAITING_COLOR_ID } from './types';
+import {
+  CLOSED_COLOR_ID,
+  DONE_COLOR_ID,
+  RUNNING_COLOR_ID,
+  SESSION_URI_SCHEME,
+  STATUS_DOT,
+} from './types';
 import type { DecorationDeps, DisposableLike, SessionForest } from './types';
 import { log, logError } from './log';
+// The dot's meaning is defined once, in the pure row model, so the native
+// badge, the inline sidebar's row and the tooltip cannot disagree about what
+// amber means.
+import { statusTone } from './viewmodel';
 
 /** VS Code validates decoration badges grapheme-wise and DROPS (with an
  *  "INVALID decoration" log) anything longer — it never throws. We do the same
@@ -31,6 +44,16 @@ const EMPTY_FOREST: SessionForest = {
  *  behaviour from the workbench. */
 export function sessionUri(sessionId: string): vscode.Uri {
   return vscode.Uri.from({ scheme: SESSION_URI_SCHEME, path: '/' + sessionId });
+}
+
+/** M12. Scheme for PROJECT rows, so the unseen-done dot can bubble up to the
+ *  project the same way cmux rolls a pane's unread badge up to its workspace
+ *  row. Distinct from the session scheme on purpose — a project id is not a
+ *  session id, and the provider must never confuse the two. */
+export const PROJECT_URI_SCHEME = 'lineage-project';
+
+export function projectUri(projectId: string): vscode.Uri {
+  return vscode.Uri.from({ scheme: PROJECT_URI_SCHEME, path: '/' + projectId });
 }
 
 // ---------------------------------------------------------------- graphemes
@@ -84,12 +107,25 @@ function makeDecoration(
 // ----------------------------------------------------------------- provider
 
 /**
- * Badge table (§4-C1):
- *   attention waiting   → '!'  + ThemeColor(lineage.waiting) + `waiting: …`
- *   status busy         → '»'  + tooltip 'busy'
- *   ghost / exited      → colour-only ThemeColor('disabledForeground')
- *   otherwise           → undefined
+ * Badge table (§4-C1, amended M9): ONE mark at the right edge, three lit tones
+ * and one deliberate blank.
+ *   hidden (muted)        → colour-only ThemeColor('disabledForeground'), FIRST
+ *   done (waiting on you) → '●' + ThemeColor(lineage.done)    + `waiting: …`
+ *   running (busy)        → '●' + ThemeColor(lineage.running) + 'running'
+ *   closed / ghost        → colour-only ThemeColor(lineage.closed) + 'closed'/'gone'
+ *   idle                  → NOTHING — no badge, no colour, no decoration
  * `propagate: false` always — a session is not a directory.
+ *
+ * Idle draws nothing because "no mark" is the strongest way to say "nothing to
+ * report", and a tree where every quiet row still carries a dot teaches the eye
+ * to skip dots. It used to draw an uncoloured '●', which competed with the two
+ * lit ones for exactly no information.
+ *
+ * The colour lands on the row's label as well as on the mark: the workbench
+ * gives a decoration one colour for both. That is the deal for a coloured dot,
+ * and it is how the Explorer shows a modified file — and here it is also what
+ * greys a closed row's label, which is the closest the native tree can get to
+ * the inline sidebar's strikethrough.
  */
 export class SessionDecorationProvider implements vscode.FileDecorationProvider {
   private readonly emitter = new vscode.EventEmitter<vscode.Uri[] | undefined>();
@@ -119,7 +155,30 @@ export class SessionDecorationProvider implements vscode.FileDecorationProvider 
 
   provideFileDecoration(uri: vscode.Uri): vscode.FileDecoration | undefined {
     try {
-      if (!uri || uri.scheme !== SESSION_URI_SCHEME) return undefined;
+      if (!uri) return undefined;
+
+      // M12: project rows carry the dot when a session under them is
+      // unseen-done. Colour + dot, exactly like the session row it bubbles
+      // up from.
+      if (uri.scheme === PROJECT_URI_SCHEME) {
+        const path = uri.path ?? '';
+        const projectId = path.startsWith('/') ? path.slice(1) : path;
+        if (!projectId) return undefined;
+        let unseen: ReadonlySet<string> | undefined;
+        try {
+          unseen = this.deps.projectsWithUnseen?.();
+        } catch (err) {
+          logError('decorations.projectsWithUnseen', err);
+        }
+        if (!unseen?.has(projectId)) return undefined;
+        return makeDecoration(
+          STATUS_DOT,
+          'contains a finished session you have not looked at',
+          new vscode.ThemeColor(DONE_COLOR_ID),
+        );
+      }
+
+      if (uri.scheme !== SESSION_URI_SCHEME) return undefined;
       const path = uri.path ?? '';
       const sessionId = path.startsWith('/') ? path.slice(1) : path;
       if (!sessionId) return undefined;
@@ -127,24 +186,56 @@ export class SessionDecorationProvider implements vscode.FileDecorationProvider 
       const node = this.forest().nodes.get(sessionId);
       if (!node) return undefined;
 
-      if (node.attention === 'waiting') {
-        const what = node.roster?.waitingFor ?? 'input';
-        return makeDecoration(
-          '!',
-          `waiting: ${what}`,
-          new vscode.ThemeColor(WAITING_COLOR_ID),
-        );
-      }
-      if (node.status === 'busy') {
-        return makeDecoration('»', 'busy', undefined);
-      }
-      if (node.ghost || node.status === 'exited') {
+      // Checked FIRST, ahead of the dot: a muted row must not carry a lit one,
+      // or hide would fail at the one thing the user asked it to do.
+      // Colour-only, so the row reads as greyed out and nothing shouts.
+      if (node.hidden) {
         return makeDecoration(
           undefined,
-          'exited',
+          'hidden',
           new vscode.ThemeColor('disabledForeground'),
         );
       }
+
+      const tone = statusTone(node);
+      if (tone === 'done') {
+        // An unseen-done IDLE session (M12) finished a turn rather than
+        // blocking on a dialog; say which it is.
+        const tooltip =
+          node.status === 'waiting'
+            ? `waiting: ${node.roster?.waitingFor ?? 'input'}`
+            : 'done — not looked at yet';
+        return makeDecoration(
+          STATUS_DOT,
+          tooltip,
+          new vscode.ThemeColor(DONE_COLOR_ID),
+        );
+      }
+      if (tone === 'running') {
+        return makeDecoration(
+          STATUS_DOT,
+          'running',
+          new vscode.ThemeColor(RUNNING_COLOR_ID),
+        );
+      }
+      if (tone === 'closed') {
+        // COLOUR ONLY (M19), exactly like `hidden` above: the grey label is what
+        // says "this is over", and it says it across the whole row instead of in
+        // one 8px circle. The hollow ring that used to sit here was a second
+        // mark for the same fact, and a column of empty circles beside every
+        // finished session is what trains the eye past the column the two lit
+        // dots live in. The two ways of being over stay distinguishable in the
+        // hover, which is the only place the native tree has left to put them —
+        // an archived session has a transcript and reopens, a ghost is an
+        // inferred ancestor with possibly nothing behind it.
+        return makeDecoration(
+          undefined,
+          node.ghost ? 'gone' : 'closed',
+          new vscode.ThemeColor(CLOSED_COLOR_ID),
+        );
+      }
+      // 'idle' and 'unknown' fall through with no decoration at all: quiet is
+      // the absence of a mark, not a mark of its own.
       return undefined;
     } catch (err) {
       logError('decorations.provideFileDecoration', err);

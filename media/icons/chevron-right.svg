@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" role="img">
+  <title>Show branches</title>
+  <!-- Filled, not stroked, for the same reason as add.svg: the webview paints
+       this as a CSS mask over the theme's icon foreground, and a mask reads
+       ALPHA, so a fill gives a solid predictable one at every zoom level.
+       NB. no double hyphen anywhere in this comment. An svg used as a CSS mask
+       is parsed as strict XML, where a comment containing one is a fatal error
+       and the whole file renders as nothing. -->
+  <path d="M5.97 12.28 4.91 11.22 8.13 8 4.91 4.78 5.97 3.72 10.25 8z"/>
+</svg>

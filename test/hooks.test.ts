@@ -138,12 +138,18 @@ afterEach(() => {
 });
 
 describe('hooks: generated plugin files', () => {
-  it('renders exactly the four events, each running HOOK_COMMAND', () => {
+  it('renders exactly the five events, each running HOOK_COMMAND', () => {
     const parsed = JSON.parse(renderHooksJson()) as {
       hooks: Record<string, Array<{ hooks: Array<Record<string, string>> }>>;
     };
     expect(Object.keys(parsed.hooks).sort()).toEqual(
-      ['Notification', 'SessionEnd', 'SessionStart', 'Stop'].sort(),
+      [
+        'Notification',
+        'SessionEnd',
+        'SessionStart',
+        'Stop',
+        'UserPromptSubmit',
+      ].sort(),
     );
     for (const matchers of Object.values(parsed.hooks)) {
       expect(matchers).toHaveLength(1);
@@ -159,6 +165,15 @@ describe('hooks: generated plugin files', () => {
     // Version-proofing: never an extension install path.
     expect(HOOK_COMMAND).toContain('$HOME/.lineage/events.ndjson');
     expect(HOOK_COMMAND).not.toMatch(/extensions?[/\\]/i);
+  });
+
+  it('v3: the command logs the inherited LINEAGE_NODE_ID envelope', () => {
+    expect(HOOK_COMMAND).toContain('${LINEAGE_NODE_ID:-}');
+    expect(HOOK_COMMAND).toContain('lineage_node_id');
+    // Empty stdin must still produce parseable JSON (payload:null).
+    expect(HOOK_COMMAND).toContain('p=null');
+    // Still exactly one appending redirection — the single-write rule.
+    expect(HOOK_COMMAND.split('>>').length).toBe(2);
   });
 
   it('renders a parseable plugin manifest named lineage-events', () => {
@@ -209,6 +224,79 @@ describe('hooks: parseEventLine', () => {
     expect(parseEventLine('"s"')).toBeNull();
     expect(parseEventLine('null')).toBeNull();
     expect(parseEventLine('[{"session_id":"x"}]')).toBeNull();
+  });
+
+  it('flat v2 lines parse with a null nodeId', () => {
+    const event = parseEventLine(
+      JSON.stringify({ hook_event_name: 'Stop', session_id: SID }),
+    );
+    expect(event).not.toBeNull();
+    expect(event!.nodeId).toBeNull();
+    expect(event!.sessionId).toBe(SID);
+  });
+
+  it('v3: unwraps the lineage_node_id envelope', () => {
+    const NODE = '0e000000-0000-4000-8000-00000000000e';
+    const event = parseEventLine(
+      JSON.stringify({
+        lineage_node_id: NODE,
+        payload: {
+          hook_event_name: 'UserPromptSubmit',
+          session_id: SID,
+          transcript_path: '/tmp/t.jsonl',
+        },
+      }),
+    );
+    expect(event).not.toBeNull();
+    expect(event!.nodeId).toBe(NODE);
+    expect(event!.event).toBe('UserPromptSubmit');
+    expect(event!.sessionId).toBe(SID);
+    expect(event!.transcriptPath).toBe('/tmp/t.jsonl');
+  });
+
+  it('v3: tolerates a blank node id and a null payload (empty stdin)', () => {
+    const event = parseEventLine(
+      JSON.stringify({ lineage_node_id: '', payload: null }),
+    );
+    expect(event).not.toBeNull();
+    expect(event!.nodeId).toBeNull();
+    expect(event!.event).toBeNull();
+    expect(event!.sessionId).toBeNull();
+  });
+
+  it('M11: surfaces SessionStart source so a fork is never chained', () => {
+    const NODE = '0e000000-0000-4000-8000-00000000000e';
+    const forked = parseEventLine(
+      JSON.stringify({
+        lineage_node_id: NODE,
+        payload: {
+          hook_event_name: 'SessionStart',
+          session_id: SID,
+          source: 'fork',
+        },
+      }),
+    );
+    expect(forked!.source).toBe('fork');
+    expect(forked!.nodeId).toBe(NODE);
+
+    const resumed = parseEventLine(
+      JSON.stringify({
+        hook_event_name: 'SessionStart',
+        session_id: SID,
+        source: 'resume',
+      }),
+    );
+    expect(resumed!.source).toBe('resume');
+
+    const none = parseEventLine(
+      JSON.stringify({ hook_event_name: 'Stop', session_id: SID }),
+    );
+    expect(none!.source).toBeNull();
+
+    const malformed = parseEventLine(
+      JSON.stringify({ hook_event_name: 'SessionStart', source: 42 }),
+    );
+    expect(malformed!.source).toBeNull();
   });
 });
 
@@ -600,4 +688,57 @@ describe('hooks: events watcher', () => {
     expect(fs.existsSync(file)).toBe(true);
     expect(fs.existsSync(path.dirname(file))).toBe(true);
   });
+
+  // REGRESSION (P9 #5). MAX_EVENTS_BYTES used to be checked only at
+  // startWatcher() time (a fresh activation), so a window left open for days
+  // grew events.ndjson without bound — reclaimed only by quitting and
+  // relaunching. drain() now truncates in place once the running total
+  // crosses the cap, as long as everything read so far was a complete line.
+  it('truncates the events file once it grows past MAX_EVENTS_BYTES while running', async () => {
+    const home = tempHome();
+    const file = eventsFile(home);
+    const { manager } = makeManager(home, { installed: true });
+    const seen: HookEvent[] = [];
+    manager.startWatcher((e) => seen.push(e));
+
+    // Each line pads out to ~900KB so a handful of appends cross the 5MB
+    // rollover without any single drain's BACKLOG exceeding MAX_DRAIN_BYTES
+    // (4MB) — that skip-the-backlog path is what "skips malformed lines and
+    // survives rotation" above exercises, not this test. A rollover shows up
+    // as the file getting SMALLER than it was a moment ago: ordinary growth
+    // only ever adds to it, so that is the unambiguous signal to watch for
+    // rather than picking a fixed byte total (which, if it truncated a beat
+    // earlier than expected, would then just start growing again from zero).
+    const padding = 'x'.repeat(900_000);
+    let n = 0;
+    let previousSize = 0;
+    let rolledOver = false;
+    while (!rolledOver) {
+      n += 1;
+      if (n > 20) throw new Error('rollover did not happen in time');
+      const line =
+        JSON.stringify({
+          hook_event_name: 'Notification',
+          session_id: SID,
+          padding,
+          n,
+        }) + '\n';
+      fs.appendFileSync(file, line);
+      expect(await until(() => seen.length >= n)).toBe(true);
+      const size = fs.statSync(file).size;
+      if (size < previousSize) rolledOver = true;
+      previousSize = size;
+    }
+
+    expect(rolledOver).toBe(true);
+
+    const seenBefore = seen.length;
+    fs.appendFileSync(
+      file,
+      JSON.stringify({ hook_event_name: 'Stop', session_id: SID }) + '\n',
+    );
+    expect(await until(() => seen.length > seenBefore)).toBe(true);
+    // Nothing already emitted was replayed by the truncation.
+    expect(seen.filter((e) => e.event === 'Stop')).toHaveLength(1);
+  }, 20_000);
 });

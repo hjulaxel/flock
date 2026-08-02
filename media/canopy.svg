@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <!-- NOT IN USE. Parked.
+       The shipped activity bar mark is media/bot.svg; the shipped marketplace
+       icon is media/icon.png, which is the same bot in its solid weight.
+
+       The NAME "Canopy" was adopted in 0.1.0; this tree mark drawn for it was
+       not — the bot stays. This file, media/canopy-logo.svg and
+       media/canopy-mark.png are kept so the tree direction can be picked up
+       later without redrawing it. Nothing in package.json references any of
+       them.
+
+       Canopy — activity bar mark.
+       The activity bar renders this as an alpha mask, so only coverage matters
+       and the theme paints it (grey when inactive, foreground when active).
+       Deliberately a plain silhouette: the logo's interior fork does not
+       survive 24px, and a <mask> is one more thing to go wrong in a glyph
+       that is only ever seen as an alpha channel. -->
+  <g fill="currentColor">
+    <rect x="10.88" y="10.1" width="2.24" height="9.05" rx="1.12"/>
+    <circle cx="12" cy="8.44" r="5.25"/>
+    <circle cx="8.06" cy="10.88" r="3.28"/>
+    <circle cx="15.94" cy="10.88" r="3.28"/>
+    <rect x="8.06" y="9.75" width="7.88" height="4.4" rx="2.06"/>
+  </g>
+</svg>

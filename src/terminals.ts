@@ -1,13 +1,32 @@
 // IMPLEMENTED BY: D (M2) — terminal launch, binding, re-association, rename.
 // Contract: SPEC.md §4-D; plan of record §4 ("Terminals and session lifecycle").
 //
-// Imports allowed here: vscode, ./types, ./log, node:crypto.
+// Imports allowed here: vscode, ./types, ./log, ./tmux, ./accounts (pure — M22
+// borrows its env-var-name guard rather than keeping a second copy of it),
+// node:crypto.
+//
+// M22 — ACCOUNT ENVIRONMENT. `LaunchOptions.env` is the chosen account's
+// environment (CLAUDE_CONFIG_DIR / CODEX_HOME / an API key), and it has to
+// reach the claude process by BOTH routes this module can launch by:
+// `creationOptions.env` for a bare launch, and the tmux wrap's `-e` for a
+// detachable one. A wrapped launch that set only the terminal's env would hand
+// the variables to the tmux CLIENT and leave claude — which lives inside the
+// server — on whatever the SERVER was started with, i.e. on whichever account
+// happened to open the first wrapped session since the last reboot. The stamp
+// is written LAST in both places so a profile can never overwrite the node id
+// the whole binding table is keyed on.
 //
 // Design invariants (empirically established in the plan — do not "improve"):
 //
 //   * claude IS the terminal process: `shellPath: <claude binary>` plus
 //     `shellArgs: ['--session-id', <uuid>, …]`. No shell, no init race, no
 //     half-eaten launch line, and the session id is ours by construction.
+//     DETACH TIER (src/tmux.ts): when the wiring provides a tmux spawn, the
+//     same argv is wrapped in `tmux -L lineage new-session -A -s <name> --`,
+//     so the terminal process is the tmux CLIENT and claude runs inside the
+//     private server. Everything above still holds — direct exec, no shell —
+//     and disposing the terminal then DETACHES instead of killing, which is
+//     what workspace parking rides on.
 //   * Shell integration will NEVER activate for us — the pty host dispatches on
 //     basename(executable) over exactly bash|fish|pwsh|zsh (+3 Windows names)
 //     and otherwise returns `unsupportedShell`; custom shellArgs disqualify it
@@ -42,7 +61,16 @@ import type {
   RosterEntry,
   TerminalBinding,
   TerminalDeps,
+  TerminalLocationPref,
+  TmuxSpawn,
 } from './types';
+import { isEnvVarName } from './accounts';
+import {
+  buildTmuxArgs,
+  sessionIdOfTmuxName,
+  tmuxNameOfTerminal,
+  tmuxSessionName,
+} from './tmux';
 import { log, logError } from './log';
 
 // --------------------------------------------------------------- constants
@@ -53,12 +81,47 @@ export const RENAME_COMMAND = 'workbench.action.terminal.renameWithArg';
 export const MOVE_TO_EDITOR_COMMAND = 'workbench.action.terminal.moveToEditor';
 export const MOVE_TO_PANEL_COMMAND =
   'workbench.action.terminal.moveToTerminalPanel';
+/** Floating-window support (VS Code 1.85+). Absent in older hosts and in
+ *  Cursor builds that predate it — a failed executeCommand just leaves the
+ *  session as an editor tab, which is the sane degradation. */
+export const MOVE_EDITOR_TO_NEW_WINDOW_COMMAND =
+  'workbench.action.moveEditorToNewWindow';
+
+/** `vscode.TerminalLocation` is an enum the unit-test mock does not ship, and
+ *  its values are API-stable. */
+const TERMINAL_LOCATION_PANEL = 1;
+const TERMINAL_LOCATION_EDITOR = 2;
+
+/** Upper bound on any wait for `Terminal.processId` — see `pidOf`. */
+const PID_TIMEOUT_MS = 5000;
+
+/** Detach tier: how long/often the background pane-pid lookup retries. The
+ *  tmux session is created by the command line the terminal is still
+ *  starting, so the first attempts can race it; ten tries over ~3 s is far
+ *  beyond any observed session start. */
+const TMUX_PID_ATTEMPTS = 10;
+const TMUX_PID_RETRY_MS = 300;
+
+/** How long an active-instance-addressed move waits for its terminal to
+ *  actually become the active one (see runOnFocusedTerminal), and how often
+ *  it looks.
+ *
+ *  Three deadlines because there are three attempts, cheapest first. The soft
+ *  one belongs to the reveal that does NOT take focus — it usually confirms
+ *  immediately and, when it does not, giving up on it fast costs less than the
+ *  keyboard jumping around the window for every session a switch stows. The
+ *  last one is generous because by then the workbench is demonstrably busy and
+ *  a skipped move is a session stranded as an editor tab. */
+const ACTIVE_SOFT_WAIT_MS = 250;
+const ACTIVE_WAIT_MS = 600;
+const ACTIVE_LAST_WAIT_MS = 1000;
+const ACTIVE_POLL_MS = 30;
 
 const MISSING_BINARY_MESSAGE =
   'Claude CLI not found — set lineage.claudeBinary to the full path of your ' +
   'claude executable.';
 const RESTRICTED_MESSAGE =
-  'Lineage cannot start a Claude session here: VS Code blocks terminals in ' +
+  'Canopy cannot start a Claude session here: VS Code blocks terminals in ' +
   'Restricted Mode. Trust this workspace and try again.';
 
 /** How a bound terminal ended. `shutdown` = the window closed/reloaded (the
@@ -108,6 +171,36 @@ function showError(message: string): void {
   }
 }
 
+/**
+ * `value`, or `undefined` once `ms` has elapsed. The timer is always cleared,
+ * so a resolved race never holds the host process open.
+ */
+function withTimeout<T>(
+  value: Thenable<T>,
+  ms: number,
+): Promise<T | undefined> {
+  return new Promise<T | undefined>((resolve) => {
+    let done = false;
+    const finish = (v: T | undefined): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(v);
+    };
+    const timer = setTimeout(() => finish(undefined), ms);
+    (timer as unknown as { unref?: () => void }).unref?.();
+    void Promise.resolve(value).then(finish, () => finish(undefined));
+  });
+}
+
+/** Yield for `ms`. Unref'd so a poll in flight never holds the host open. */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    (timer as unknown as { unref?: () => void }).unref?.();
+  });
+}
+
 /** Run `fn` on the next microtask, swallowing anything it throws. Used so that
  *  bind events raised by `reassociate()` still reach listeners the integrator
  *  subscribes immediately AFTER calling it (SPEC §4-I step 4 order). */
@@ -147,18 +240,25 @@ export function mintSessionId(): string {
 /**
  * Pure. Three mutually exclusive forms:
  *
- *  - resume  `['--resume', resumeId]` — reopen a CLOSED session. `--resume`
- *    reuses the original session id (that is precisely why `--fork-session`
- *    exists as a separate flag), so NO `--session-id` is passed: adding one
- *    would ask claude to both keep and replace the id. The caller sets
- *    `sessionId === resumeId` so the LINEAGE_NODE_ID stamp and the binding
- *    still name the session that will actually be running.
+ *  - resume  `['--resume', resumeId]` — reopen a CLOSED session. NO
+ *    `--session-id` is passed: adding one would ask claude to both keep and
+ *    replace the id. The caller sets `sessionId === resumeId` so the
+ *    LINEAGE_NODE_ID stamp and the binding name the session being reopened —
+ *    and when the CLI re-mints the id anyway (it can: a plain resume may
+ *    write a fresh transcript under a fresh id, M10), that stamp is
+ *    precisely what lets the hook re-key the new generation onto this
+ *    conversation instead of it surfacing as a duplicate row.
  *  - fork    `['--fork-session', '--resume', parentId, '--session-id', child]`
  *  - new     `['--session-id', id]`
  *
  * A non-empty `prompt` is APPENDED as the final positional argument.
  * `resumeId` wins if both are somehow set — resuming into a fork would be a
  * silent data-losing surprise, so the narrower intent is honoured.
+ *
+ * ORDERING IS LOAD-BEARING for `--add-dir`, which is VARIADIC: it consumes
+ * every following bare word until the next flag. It therefore goes FIRST, so
+ * one of the mode flags always terminates it. Emitted last it would swallow
+ * the positional prompt as another directory.
  */
 export function buildShellArgs(opts: LaunchOptions): string[] {
   const args: string[] = [];
@@ -166,6 +266,11 @@ export function buildShellArgs(opts: LaunchOptions): string[] {
     typeof opts.resumeId === 'string' && opts.resumeId.length > 0
       ? opts.resumeId
       : null;
+
+  const dirs = (opts.addDirs ?? []).filter(
+    (d) => typeof d === 'string' && d.trim() !== '',
+  );
+  if (dirs.length > 0) args.push('--add-dir', ...dirs);
 
   if (resumeId !== null) {
     args.push('--resume', resumeId);
@@ -176,10 +281,54 @@ export function buildShellArgs(opts: LaunchOptions): string[] {
     args.push('--session-id', opts.sessionId);
   }
 
+  // Both take exactly one value, so they are safe anywhere after the mode
+  // flags and before the positional prompt.
+  if (
+    typeof opts.sessionName === 'string' &&
+    opts.sessionName.trim().length > 0
+  ) {
+    args.push('--name', opts.sessionName);
+  }
+  if (
+    typeof opts.appendSystemPrompt === 'string' &&
+    opts.appendSystemPrompt.trim().length > 0
+  ) {
+    args.push('--append-system-prompt', opts.appendSystemPrompt);
+  }
+
   if (typeof opts.prompt === 'string' && opts.prompt.trim().length > 0) {
     args.push(opts.prompt);
   }
   return args;
+}
+
+/**
+ * M22. The account environment for a launch, cleaned.
+ *
+ * A launch env arrives from the routing resolver, which builds it from a state
+ * file the user can hand-edit, so it is validated here as well: a key that is
+ * not a legal environment variable name, or a value that is not a string,
+ * would be silently dropped by the pty on one path and passed through as a
+ * malformed `-e KEY=VALUE` on the other — the two tiers must agree on exactly
+ * what the process gets.
+ *
+ * A NUL in a value cannot survive an execve, and a value containing a newline
+ * would break the `-e` argument at a shell boundary we do not control; both
+ * are dropped rather than truncated. Never logged: on an API-key profile the
+ * value IS the credential.
+ */
+export function launchEnv(
+  env: Readonly<Record<string, string>> | undefined,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!env || typeof env !== 'object' || Array.isArray(env)) return out;
+  for (const [key, value] of Object.entries(env)) {
+    if (!isEnvVarName(key)) continue;
+    if (typeof value !== 'string') continue;
+    if (value.includes('\0') || value.includes('\n')) continue;
+    out[key] = value;
+  }
+  return out;
 }
 
 /**
@@ -202,6 +351,31 @@ export function nodeIdOfTerminal(terminal: {
 /** Default terminal name for a session. */
 export function defaultTerminalName(sessionId: string): string {
   return `claude · ${shortId(sessionId)}`;
+}
+
+/**
+ * Pure. The numeric `TerminalOptions.location` for a preference, or undefined
+ * to let the host decide.
+ *
+ * A Claude session is a place you work in for an hour, not a command you run —
+ * so it belongs in the editor area as a normal tab (its own title, its own
+ * split, side by side with files), not squeezed into the terminal panel. That
+ * is why 'editor' is the default and why 'newWindow' also starts as an editor
+ * tab: the floating window is produced by MOVING that tab afterwards, which is
+ * the only mechanism the API offers.
+ */
+export function locationValueOf(
+  pref: TerminalLocationPref | undefined,
+): number | undefined {
+  const loc: { Panel?: number; Editor?: number } | undefined =
+    vscode.TerminalLocation;
+  const panel = loc?.Panel ?? TERMINAL_LOCATION_PANEL;
+  const editor = loc?.Editor ?? TERMINAL_LOCATION_EDITOR;
+  if (pref === 'panel') return panel;
+  if (pref === 'editor' || pref === 'newWindow' || pref === undefined) {
+    return editor;
+  }
+  return undefined;
 }
 
 // ------------------------------------------------------------- the registry
@@ -347,6 +521,71 @@ export class TerminalRegistry implements DisposableLike {
     return fresh.length;
   }
 
+  /**
+   * App-restart path for WRAPPED terminals. A revived terminal carries no env
+   * stamp (a window reload keeps creationOptions; a full restart does not),
+   * and `reassociateFromRoster` matches CLAUDE pids — which a wrapped
+   * terminal's own pid (the tmux client's) never is. So a restart used to
+   * leave every wrapped terminal a stranger: tab on screen, session live on
+   * the roster, and a row click insisting it was "running outside this
+   * editor". The tmux server knows exactly which session each client shows,
+   * and the client pid IS `Terminal.processId` — so match through it and
+   * bind under the id the session's name encodes (the launch-time id, the
+   * same key an ordinary launch binds under). Purely additive, like
+   * `reassociateFromRoster`; call it until it returns 0.
+   */
+  async reassociateFromTmux(): Promise<number> {
+    if (this.disposed) return 0;
+    const lookup = this.deps.tmuxClientSessions;
+    if (typeof lookup !== 'function') return 0;
+    const terminals = this.allTerminals();
+    if (!terminals) return 0;
+    const unbound = terminals.filter(
+      (t) => !this.findByTerminal(t) && t.exitStatus === undefined,
+    );
+    if (unbound.length === 0) return 0;
+
+    let clients: ReadonlyMap<number, string>;
+    try {
+      clients = await lookup();
+    } catch (err) {
+      logError('terminals.tmuxClientSessions', err);
+      return 0;
+    }
+    if (clients.size === 0) return 0;
+
+    const fresh: TerminalBinding[] = [];
+    for (const terminal of unbound) {
+      if (this.disposed) break;
+      if (this.findByTerminal(terminal)) continue; // bound meanwhile
+      const pid = await this.pidOf(terminal);
+      if (pid === undefined) continue;
+      const name = clients.get(pid);
+      if (name === undefined) continue;
+      const sessionId = sessionIdOfTmuxName(name);
+      if (sessionId === undefined) continue;
+      if (this.bound.has(sessionId) || this.claiming.has(sessionId)) continue;
+      const binding = this.bind(sessionId, terminal);
+      // creationOptions had nothing to derive from (that is why we are
+      // here), so the name — and the pane-pid lookup it feeds — is set from
+      // the client match instead.
+      if (binding.tmuxName === undefined) {
+        binding.tmuxName = name;
+        this.resolveTmuxPidSoon(binding);
+      }
+      fresh.push(binding);
+    }
+
+    if (fresh.length > 0) {
+      log(
+        `terminals: re-associated ${fresh.length} terminal(s) via tmux clients`,
+      );
+      for (const binding of fresh) this.emitBind(binding);
+      this.syncActive();
+    }
+    return fresh.length;
+  }
+
   // ---------------------------------------------------------------- launch
 
   /**
@@ -385,21 +624,86 @@ export class TerminalRegistry implements DisposableLike {
         ? opts.title
         : defaultTerminalName(sessionId);
 
+    const pref = this.locationPref();
+
+    // M13: the workspace restore path knows which editor group a session tab
+    // lived in. A TerminalEditorLocationOptions only makes sense for editor
+    // tabs; the panel preference keeps winning.
+    const location: vscode.TerminalOptions['location'] =
+      typeof opts.viewColumn === 'number' &&
+      Number.isInteger(opts.viewColumn) &&
+      opts.viewColumn > 0 &&
+      pref !== 'panel'
+        ? ({
+            viewColumn: opts.viewColumn,
+            preserveFocus: true,
+          } as unknown as vscode.TerminalOptions['location'])
+        : (locationValueOf(pref) as vscode.TerminalOptions['location']);
+
+    // M22: the chosen account's environment, cleaned once and used by BOTH
+    // tiers below. `{}` — the default account, and every launch that predates
+    // accounts — must behave exactly as passing no environment at all did.
+    const profileEnv = launchEnv(opts.env);
+
+    // DETACH TIER: wrap the launch in the private tmux server when the wiring
+    // says so. The terminal process becomes the tmux client; claude runs in
+    // the server, and disposing the terminal detaches instead of killing.
+    // `-A` makes the same argv attach-or-create, so the workspace restore
+    // path passes the name recorded at park time (opts.tmuxName) and reuses
+    // this launch verb unchanged to RE-ATTACH a still-running session.
+    const tmux = this.tmuxSpawnOf();
+    let shellPath = binary;
+    let shellArgs = buildShellArgs(opts);
+    let tmuxName: string | undefined;
+    if (tmux) {
+      tmuxName =
+        typeof opts.tmuxName === 'string' && opts.tmuxName !== ''
+          ? opts.tmuxName
+          : tmuxSessionName(sessionId);
+      shellArgs = buildTmuxArgs({
+        name: tmuxName,
+        ...(tmux.confPath !== undefined ? { confPath: tmux.confPath } : {}),
+        ...(typeof opts.cwd === 'string' && opts.cwd !== ''
+          ? { cwd: opts.cwd }
+          : {}),
+        // The hook re-key stamp must reach the CLAUDE process's environment,
+        // and the server keeps the FIRST client's env for every later
+        // session — `-e` (session environment) is what makes each wrap carry
+        // its own id. The terminal's env stamp below still exists, but it
+        // only reaches the tmux client. M22: the account environment rides the
+        // same flags, for exactly the same reason, and is written FIRST so the
+        // stamp always wins a collision.
+        env: { ...profileEnv, [ENV_NODE_ID]: sessionId },
+        command: [binary, ...shellArgs],
+      });
+      shellPath = tmux.binary;
+    }
+
     let terminal: vscode.Terminal;
     this.claiming.add(sessionId);
     try {
       terminal = w.createTerminal({
         name,
-        shellPath: binary,
-        shellArgs: buildShellArgs(opts),
+        shellPath,
+        shellArgs,
         cwd: opts.cwd,
-        // The stamp that survives a window reload inside creationOptions.
-        env: { [ENV_NODE_ID]: sessionId },
+        // The stamp that survives a window reload inside creationOptions —
+        // and, since M22, the account environment beside it. Both are
+        // reconstructed for a revived terminal, so a reloaded window's
+        // re-launch (if any) lands on the same account.
+        env: { ...profileEnv, [ENV_NODE_ID]: sessionId },
         // NEVER strictEnv — claude needs the inherited environment.
-        iconPath: new vscode.ThemeIcon(opts.parentId ? 'git-branch' : 'terminal'),
-        color: opts.parentId
-          ? new vscode.ThemeColor('terminal.ansiCyan')
-          : undefined,
+        location,
+        // A project chat sits among session tabs and must read as a different
+        // KIND of thing at a glance, hence its own icon and colour.
+        iconPath: new vscode.ThemeIcon(
+          opts.chat ? 'comment-discussion' : opts.parentId ? 'git-branch' : 'terminal',
+        ),
+        color: opts.chat
+          ? new vscode.ThemeColor('terminal.ansiMagenta')
+          : opts.parentId
+            ? new vscode.ThemeColor('terminal.ansiCyan')
+            : undefined,
       });
     } catch (err) {
       // Restricted Mode refuses the pty outright; so can a bad cwd.
@@ -420,15 +724,40 @@ export class TerminalRegistry implements DisposableLike {
     }
 
     const binding = this.bind(sessionId, terminal, name);
+    // Authoritative here; bind()'s creationOptions derivation is for revived
+    // terminals, whose launch-time knowledge is gone. On a host that hands
+    // back a terminal with empty creationOptions the derivation found
+    // nothing, so the pane-pid lookup is kicked here instead.
+    if (tmuxName !== undefined && binding.tmuxName === undefined) {
+      binding.tmuxName = tmuxName;
+      this.resolveTmuxPidSoon(binding);
+    }
     this.claiming.delete(sessionId);
-    this.safeShow(terminal, false);
+    this.safeShow(terminal, opts.preserveFocus === true);
     this.emitBind(binding);
 
+    // Await the pid BEFORE the newWindow move. `createTerminal` is a one-way
+    // notification: the instance, its editor input and its tab do not exist
+    // until the main thread has resolved the profile and opened the editor,
+    // and `executeCommand` is not sequenced behind any of that. Firing
+    // moveEditorToNewWindow in the same tick therefore moves whatever editor
+    // was active BEFORE our tab existed — it rips out an unrelated file, or
+    // no-ops when the group was empty, and neither throws. A resolved
+    // processId is proof the instance is up; the wait is bounded (see pidOf),
+    // so a pty that never launches costs a skipped move, not a hang.
     const pid = await this.pidOf(terminal);
-    // The terminal may already have died while we awaited the pid.
-    if (pid !== undefined && this.bound.get(sessionId)?.binding === binding) {
+    // The terminal may already have died while we awaited the pid. For a
+    // WRAPPED launch the resolved pid is the tmux client's and is never
+    // written to the binding — bind() already kicked off the pane-pid lookup
+    // that owns `binding.pid` there, and the client pid would poison the
+    // pid-keyed re-key detection it exists to feed.
+    const stillOurs = this.bound.get(sessionId)?.binding === binding;
+    if (pid !== undefined && stillOurs && tmuxName === undefined) {
       binding.pid = pid;
     }
+
+    if (pref === 'newWindow' && stillOurs) await this.moveToNewWindow(terminal);
+
     return binding;
   }
 
@@ -458,6 +787,13 @@ export class TerminalRegistry implements DisposableLike {
     const active = windowApi().activeTerminal;
     if (!active) return null;
     return this.findByTerminal(active)?.binding.sessionId ?? null;
+  }
+
+  /** Detach tier: the tmux session backing a bound terminal, or undefined for
+   *  a bare launch (or nothing bound here). What workspace parking consults to
+   *  decide detach vs kill. */
+  tmuxNameOf(sessionId: string): string | undefined {
+    return this.bound.get(sessionId)?.binding.tmuxName;
   }
 
   // ---------------------------------------------------------------- verbs
@@ -495,18 +831,42 @@ export class TerminalRegistry implements DisposableLike {
     return true;
   }
 
-  /** Move the bound terminal into an editor group (show(true) + command). */
+  /** Move the bound terminal from the panel into an editor group. Same
+   *  active-instance-addressed workbench command as moveToTerminalPanel (it
+   *  resolves against the active PANEL instance), same cure: reveal, confirm,
+   *  then move — or a loop restoring several sessions strands some in the
+   *  panel.
+   *
+   *  Note for callers: `moveToEditor` is declared with
+   *  `runAfter: i => i.at(-1)?.focus()`, so the terminal it moves takes the
+   *  keyboard on arrival. Anything that restores several sessions must
+   *  therefore make its focus decision LAST — see WorkspaceManager.doSwitch. */
   async moveToEditor(sessionId: string): Promise<boolean> {
     const entry = this.bound.get(sessionId);
     if (!entry) return false;
-    return this.runOnTerminal(entry, MOVE_TO_EDITOR_COMMAND);
+    return this.runOnFocusedTerminal(entry, MOVE_TO_EDITOR_COMMAND);
   }
 
-  /** Move the bound terminal back into the terminal panel. */
+  /**
+   * Move the bound terminal from the editor area into the terminal panel.
+   *
+   * Unlike every other terminal command this one is ACTIVE-INSTANCE-addressed:
+   * the workbench resolves it against the active terminal EDITOR. Revealing
+   * one does set the active instance — `$show` calls setActiveInstance before
+   * and independently of the focus argument — but the reveal and the command
+   * are separate fire-and-forget messages to the renderer, so the command can
+   * still arrive while the workbench considers the PREVIOUS terminal active.
+   * Stowing several terminals in a loop therefore kept re-targeting whichever
+   * tab happened to be active: moving one twice and leaving the rest in place.
+   * The cure was never focus, it was CONFIRMATION — this verb reveals the
+   * terminal, waits until the extension host can see it became the active one,
+   * and only then runs the move. A terminal that never becomes active fails
+   * the verb rather than moving somebody else's tab.
+   */
   async moveToTerminalPanel(sessionId: string): Promise<boolean> {
     const entry = this.bound.get(sessionId);
     if (!entry) return false;
-    return this.runOnTerminal(entry, MOVE_TO_PANEL_COMMAND);
+    return this.runOnFocusedTerminal(entry, MOVE_TO_PANEL_COMMAND);
   }
 
   /** The one sanctioned sendText use is the wrap verb. Never for launching. */
@@ -522,15 +882,57 @@ export class TerminalRegistry implements DisposableLike {
     }
   }
 
-  /** Dispose the bound terminal; the close handler unbinds and emits exit. */
-  closeTerminal(sessionId: string): boolean {
+  /**
+   * M11. The claude process in a bound terminal re-keyed itself: the roster
+   * now reports the SAME pid under a NEW session id (a `/fork` that switched
+   * the terminal over, a plain resume that re-minted, `/clear`). Move the
+   * binding so every verb keeps finding the terminal under the id the tree
+   * now shows. The terminal object, its tab and its pty are untouched.
+   */
+  rebind(oldSessionId: string, newSessionId: string): boolean {
+    if (this.disposed) return false;
+    if (!isSessionId(newSessionId) || oldSessionId === newSessionId) {
+      return false;
+    }
+    const entry = this.bound.get(oldSessionId);
+    if (!entry) return false;
+    if (this.bound.has(newSessionId)) return false; // never clobber a binding
+    this.bound.delete(oldSessionId);
+    entry.binding.sessionId = newSessionId;
+    entry.binding.nodeId = newSessionId;
+    this.bound.set(newSessionId, entry);
+    log(
+      `terminals: re-bound ${shortId(oldSessionId)} -> ` +
+        `${shortId(newSessionId)} (same terminal)`,
+    );
+    this.emitBind(entry.binding);
+    return true;
+  }
+
+  /**
+   * Dispose the bound terminal; the close handler unbinds and emits exit.
+   *
+   * `opts.killTmux` is the CLOSE-vs-PARK intent for wrapped sessions: a
+   * dispose only detaches those (the claude process keeps running), so a
+   * caller that means "end this session" — the close verb — must say so and
+   * the tmux session is killed too. Workspace parking never passes it; that
+   * dispose IS the detach.
+   */
+  closeTerminal(
+    sessionId: string,
+    opts?: { killTmux?: boolean },
+  ): boolean {
     const entry = this.bound.get(sessionId);
     if (!entry) return false;
+    const tmuxName = entry.binding.tmuxName;
     try {
       entry.terminal.dispose();
     } catch (err) {
       logError('terminals.closeTerminal', err);
       return false;
+    }
+    if (opts?.killTmux === true && tmuxName !== undefined) {
+      this.killTmuxSoon(tmuxName, entry.binding.sessionId);
     }
     if (!this.closeWatched) {
       // No onDidCloseTerminal in this host: unbind ourselves so state does not
@@ -591,6 +993,69 @@ export class TerminalRegistry implements DisposableLike {
     if (sub) this.subs.push(sub);
   }
 
+  /** Config-driven, re-read per launch so a settings change needs no reload.
+   *  A dep that is absent or throws means the default: an editor tab. */
+  private locationPref(): TerminalLocationPref {
+    try {
+      return this.deps.terminalLocation?.() ?? 'editor';
+    } catch (err) {
+      logError('terminals.terminalLocation', err);
+      return 'editor';
+    }
+  }
+
+  /** Fire-and-forget kill of a wrapped session — the close verb's second
+   *  half. Absent dep = logged, so a session left running invisibly is at
+   *  least never silent. */
+  private killTmuxSoon(name: string, sessionId: string): void {
+    const kill = this.deps.tmuxKillSession;
+    if (typeof kill !== 'function') {
+      log(
+        `terminals: no tmuxKillSession dep — ${shortId(sessionId)} may keep ` +
+          `running detached as ${name}`,
+      );
+      return;
+    }
+    void Promise.resolve(kill(name)).then(
+      (ok) => {
+        log(
+          `terminals: ${ok ? 'killed' : 'could not kill'} tmux session ` +
+            `${name} (close of ${shortId(sessionId)})`,
+        );
+      },
+      (err: unknown) => {
+        logError('terminals.tmuxKillSession', err);
+      },
+    );
+  }
+
+  /** Detach tier, re-resolved per launch (installing tmux or flipping
+   *  `lineage.tmux` needs no reload). Absent or throwing means bare claude —
+   *  the always-available tier. */
+  private tmuxSpawnOf(): TmuxSpawn | null {
+    try {
+      return this.deps.tmux?.() ?? null;
+    } catch (err) {
+      logError('terminals.tmux', err);
+      return null;
+    }
+  }
+
+  /** Pop the editor terminal out into its own OS window. Only ever called once
+   *  the instance demonstrably exists (launch() awaits its pid first), because
+   *  the command acts on whatever editor is active and cannot report that it
+   *  moved the wrong one. Lost harmlessly on hosts without the command. */
+  private async moveToNewWindow(terminal: vscode.Terminal): Promise<void> {
+    const cmds = commandsApi();
+    if (typeof cmds.executeCommand !== 'function') return;
+    try {
+      terminal.show(false);
+      await cmds.executeCommand(MOVE_EDITOR_TO_NEW_WINDOW_COMMAND);
+    } catch (err) {
+      logError('terminals.moveEditorToNewWindow', err);
+    }
+  }
+
   private allTerminals(): readonly vscode.Terminal[] | null {
     const list: readonly vscode.Terminal[] | undefined = windowApi().terminals;
     if (!list || typeof list.length !== 'number') return null;
@@ -620,8 +1085,61 @@ export class TerminalRegistry implements DisposableLike {
       terminalName,
       createdAt: Date.now(),
     };
+    // Detach tier: recover the tmux session name from creationOptions, which
+    // is how a REVIVED terminal (window reload) keeps it. Losing it would
+    // downgrade the session's next park from detach to kill — the dispose
+    // would only detach, but the record would say the conversation died, and
+    // the switch-back would `--resume` a second claude beside the running one.
+    const tmuxName = tmuxNameOfTerminal(terminal);
+    if (tmuxName !== undefined) binding.tmuxName = tmuxName;
     this.bound.set(sessionId, { terminal, binding });
+    // Wrapped: the pid that matters is CLAUDE's, and only tmux knows it.
+    if (tmuxName !== undefined) this.resolveTmuxPidSoon(binding);
     return binding;
+  }
+
+  /**
+   * Detach tier. A wrapped terminal's own process is the tmux CLIENT, whose
+   * pid matches nothing on the roster — so a wrapped binding must carry the
+   * PANE's root pid (claude itself; the wrap execs it directly) or the two
+   * pid-keyed mechanisms go blind: the M11 re-key detector never notices the
+   * fresh generation id a wrapped `--resume` mints (leaving the session's own
+   * tab on screen while its row claims "running outside this editor"), and
+   * app-restart re-association never matches. Background with retries: the
+   * session is created by the command line the terminal is still starting.
+   * The dep is optional — absent (unit doubles, tmux flipped off) the binding
+   * simply keeps no pid, degrading exactly those two mechanisms.
+   */
+  private resolveTmuxPidSoon(binding: TerminalBinding): void {
+    const name = binding.tmuxName;
+    const lookup = this.deps.tmuxPanePid;
+    if (name === undefined || typeof lookup !== 'function') return;
+    void (async () => {
+      for (let attempt = 0; attempt < TMUX_PID_ATTEMPTS; attempt++) {
+        if (this.disposed) return;
+        // Still current? rebind() moves the same binding object under a new
+        // key, so identity — not the session-id key — is the check.
+        if (![...this.bound.values()].some((e) => e.binding === binding)) {
+          return;
+        }
+        let pid: number | undefined;
+        try {
+          pid = await lookup(name);
+        } catch (err) {
+          logError('terminals.tmuxPanePid', err);
+          return;
+        }
+        if (pid !== undefined) {
+          binding.pid = pid;
+          return;
+        }
+        await delay(TMUX_PID_RETRY_MS);
+      }
+      log(
+        `terminals: no pane pid for ${name} — re-key detection degraded for ` +
+          shortId(binding.sessionId),
+      );
+    })();
   }
 
   private emitBind(binding: TerminalBinding): void {
@@ -633,9 +1151,19 @@ export class TerminalRegistry implements DisposableLike {
     }
   }
 
+  /**
+   * `Terminal.processId` NEVER settles when the pty fails to launch: the ext
+   * host resolves it only from `$acceptTerminalProcessId`, which the main
+   * thread sends only once a process id exists, and neither close nor dispose
+   * settles it. It cannot reject either, so a try/catch is no protection. A
+   * bare await therefore wedges `launch()` forever on a typo'd
+   * `lineage.claudeBinary` — no failure log, no toast, and the caller never
+   * reaches its `if (!binding)` branch. Every wait here is bounded; a missing
+   * pid degrades to `undefined`, which both callers already handle.
+   */
   private async pidOf(terminal: vscode.Terminal): Promise<number | undefined> {
     try {
-      const pid = await terminal.processId;
+      const pid = await withTimeout(terminal.processId, PID_TIMEOUT_MS);
       return typeof pid === 'number' && pid > 0 ? pid : undefined;
     } catch (err) {
       logError('terminals.processId', err);
@@ -674,6 +1202,121 @@ export class TerminalRegistry implements DisposableLike {
     }
   }
 
+  /**
+   * Reveal the terminal, CONFIRM the workbench agrees it is the active one
+   * (`window.activeTerminal`), then run an active-instance-addressed command.
+   * Both the reveal and the command are fire-and-forget IPC to the renderer,
+   * so without the confirmation the command can execute while the workbench
+   * still considers the PREVIOUS terminal active — see moveToTerminalPanel.
+   * Never
+   * runs the command unconfirmed: on a terminal the workbench refuses to
+   * activate, a skipped move is recoverable; a move applied to the wrong tab
+   * is not.
+   *
+   * Three attempts, cheapest first. The first reveals WITHOUT taking focus:
+   * the workbench sets the active instance on any reveal, independently of the
+   * focus argument, so a preserveFocus reveal is usually enough to make this
+   * the instance the command resolves against — and a switch that stows a
+   * dozen sessions must not throw the keyboard around the window a dozen
+   * times. The two fallbacks take focus and wait longer, which is what makes
+   * the polite first attempt safe to try at all.
+   */
+  private async runOnFocusedTerminal(
+    entry: BoundEntry,
+    command: string,
+  ): Promise<boolean> {
+    const cmds = commandsApi();
+    if (typeof cmds.executeCommand !== 'function') return false;
+    const waits = [ACTIVE_SOFT_WAIT_MS, ACTIVE_WAIT_MS, ACTIVE_LAST_WAIT_MS];
+    for (let attempt = 0; attempt < waits.length; attempt++) {
+      this.safeShow(entry.terminal, attempt === 0);
+      if (await this.becameActive(entry.terminal, waits[attempt] ?? ACTIVE_WAIT_MS)) {
+        try {
+          await cmds.executeCommand(command);
+          return true;
+        } catch (err) {
+          logError(`terminals.${command}`, err);
+          return false;
+        }
+      }
+      // Let the workbench settle before the last, longest attempt — the usual
+      // reason the second one failed is that it is still busy reflowing.
+      if (attempt === 1) await delay(ACTIVE_POLL_MS);
+    }
+    log(
+      `terminals: ${command} skipped for ` +
+        `${shortId(entry.binding.sessionId)} — never became the active ` +
+        `terminal after ${waits.length} attempts`,
+    );
+    return false;
+  }
+
+  /** Bounded wait for the workbench to report this terminal as active. On a
+   *  host that does not track an active terminal at all, proceed on faith —
+   *  an unverifiable verb still beats an impossible one.
+   *
+   *  Event-driven where the host offers the event, so a confirmation costs a
+   *  round-trip rather than a poll interval; the interval stays as a backstop
+   *  for a host that changes the active terminal without announcing it. */
+  private async becameActive(
+    terminal: vscode.Terminal,
+    waitMs: number,
+  ): Promise<boolean> {
+    const w = windowApi();
+    // MUST stay first: a host with no notion of an active terminal cannot
+    // confirm anything, and this is also the unit-test mock's escape hatch.
+    if (!('activeTerminal' in w)) return true;
+    if (w.activeTerminal === terminal) return true;
+
+    const onChange = w.onDidChangeActiveTerminal;
+    if (typeof onChange !== 'function') {
+      const deadline = Date.now() + waitMs;
+      for (;;) {
+        if (windowApi().activeTerminal === terminal) return true;
+        if (Date.now() >= deadline) return false;
+        await delay(ACTIVE_POLL_MS);
+      }
+    }
+
+    return new Promise<boolean>((resolve) => {
+      let done = false;
+      let sub: vscode.Disposable | undefined;
+      let poll: ReturnType<typeof setInterval> | undefined;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      // One idempotent exit that always clears both timers and the
+      // subscription — mirrors withTimeout above, for the same reason: a race
+      // left holding a timer keeps the host process alive.
+      const finish = (ok: boolean): void => {
+        if (done) return;
+        done = true;
+        if (poll !== undefined) clearInterval(poll);
+        if (timer !== undefined) clearTimeout(timer);
+        try {
+          sub?.dispose();
+        } catch (err) {
+          logError('terminals.becameActive.dispose', err);
+        }
+        resolve(ok);
+      };
+      try {
+        sub = onChange((active) => {
+          if (active === terminal) finish(true);
+        });
+      } catch (err) {
+        logError('terminals.onDidChangeActiveTerminal', err);
+      }
+      poll = setInterval(() => {
+        if (windowApi().activeTerminal === terminal) finish(true);
+      }, ACTIVE_POLL_MS);
+      (poll as unknown as { unref?: () => void }).unref?.();
+      timer = setTimeout(() => finish(false), waitMs);
+      (timer as unknown as { unref?: () => void }).unref?.();
+      // The reveal may already have landed in the gap between the check above
+      // and the subscription.
+      if (windowApi().activeTerminal === terminal) finish(true);
+    });
+  }
+
   private handleOpen(terminal: vscode.Terminal): void {
     if (this.disposed) return;
     if (this.findByTerminal(terminal)) return; // ours already
@@ -683,6 +1326,9 @@ export class TerminalRegistry implements DisposableLike {
     const binding = this.bind(sessionId, terminal);
     log(`terminals: bound revived terminal for ${shortId(sessionId)}`);
     this.emitBind(binding);
+    // Same wrap rule as launch(): a wrapped terminal's own pid is the tmux
+    // client's — bind() owns the pane-pid lookup for those.
+    if (binding.tmuxName !== undefined) return;
     void this.pidOf(terminal).then((pid) => {
       if (pid !== undefined && this.bound.get(sessionId)?.binding === binding) {
         binding.pid = pid;
@@ -704,6 +1350,15 @@ export class TerminalRegistry implements DisposableLike {
       logError('terminals.exitStatus', err);
     }
     const reason = exitReasonOf(status);
+    // The sidebar contract: closing a tab closes the SESSION. For a wrapped
+    // terminal the dispose the user just caused killed only the tmux client,
+    // so the session must be ended explicitly — reason 'user' is exactly the
+    // tab X / kill action (an extension dispose reports Extension: that is
+    // parking, which detaches on purpose, and a window reload/close reports
+    // Shutdown, which must keep the session for revival).
+    if (reason === 'user' && entry.binding.tmuxName !== undefined) {
+      this.killTmuxSoon(entry.binding.tmuxName, sessionId);
+    }
     log(
       `terminals: ${shortId(sessionId)} closed (reason=${reason}, code=` +
         `${status?.code ?? 'n/a'})`,

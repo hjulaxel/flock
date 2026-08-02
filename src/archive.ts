@@ -26,15 +26,25 @@ import {
   ARCHIVE_HEAD_MAX_BYTES,
   type ArchivedSession,
   type DisposableLike,
+  type EditorialRecord,
   type RosterEntry,
   isSessionId,
   shortId,
 } from './types';
+import type { GenerationFacts } from './generations';
 
 export interface ArchiveScanOptions {
   projectsDir?: string;
   /** Ids known to be live; they are indexed but flagged so callers can skip. */
   liveIds?: ReadonlySet<string>;
+  /** M22.3. Additional projects roots to index — one per account profile with
+   *  its own config dir (`<configDir>/projects`), where that account's
+   *  transcripts actually land. Scanned AFTER the primary root, so on the
+   *  (theoretically impossible) duplicate id the default dir wins — the same
+   *  first-occurrence rule the in-root dedupe already applies. A root that
+   *  cannot be read is skipped silently: a profile that has never run a
+   *  session has no projects dir, and that is a normal day, not an error. */
+  extraProjectsDirs?: readonly string[];
 }
 
 export interface ArchiveResult {
@@ -81,6 +91,14 @@ interface HeadFacts {
   cwd?: string;
   label?: string;
   firstTimestamp?: number;
+  /** The FIRST line's `sessionId` value. In a fork or a plain file this is the
+   *  file's own id; in a plain-`--resume` continuation it is the PREDECESSOR's
+   *  id, because the CLI copies the predecessor's lines verbatim (M10). */
+  firstSessionId?: string;
+  /** A forkedFrom marker was seen in the head window. Forks rewrite their
+   *  copied head to their own id AND write this marker, so its absence is what
+   *  certifies a head-id mismatch as a continuation rather than a fork. */
+  forkMarker?: boolean;
 }
 
 /**
@@ -95,7 +113,7 @@ interface HeadFacts {
  *
  * Pure, bounded, never throws.
  */
-export function readHeadFacts(file: string): HeadFacts {
+export function readHeadFacts(file: string, ownId?: string): HeadFacts {
   const out: HeadFacts = {};
   let text: string;
   try {
@@ -133,10 +151,28 @@ export function readHeadFacts(file: string): HeadFacts {
         if (Number.isFinite(parsed)) out.firstTimestamp = parsed;
       }
     }
+    if (out.firstSessionId === undefined) {
+      const sid = rec['sessionId'];
+      if (isSessionId(sid)) out.firstSessionId = sid;
+    }
+    if (out.forkMarker !== true && isPlainObject(rec['forkedFrom'])) {
+      out.forkMarker = true;
+    }
+    // The early break needs one extra condition (M10): when the first line
+    // names a DIFFERENT session id, the fork-vs-continuation verdict hangs on
+    // whether a forkedFrom marker appears anywhere in the window, so the scan
+    // must run to the limit unless the marker has already been seen.
+    const mismatchOpen =
+      ownId !== undefined &&
+      out.firstSessionId !== undefined &&
+      out.firstSessionId !== ownId &&
+      out.forkMarker !== true;
     if (
       out.label !== undefined &&
       out.cwd !== undefined &&
-      out.firstTimestamp !== undefined
+      out.firstTimestamp !== undefined &&
+      out.firstSessionId !== undefined &&
+      !mismatchOpen
     ) {
       break; // everything we came for
     }
@@ -144,10 +180,28 @@ export function readHeadFacts(file: string): HeadFacts {
   return out;
 }
 
+/** The M10 continuation verdict for one head. Exported for tests. */
+export function continuationOf(
+  ownId: string,
+  facts: HeadFacts,
+): string | undefined {
+  if (facts.forkMarker === true) return undefined;
+  const first = facts.firstSessionId;
+  if (!isSessionId(first) || first === ownId) return undefined;
+  return first;
+}
+
 interface CacheEntry {
   mtimeMs: number;
   size: number;
   session: ArchivedSession;
+  /** The head read was SKIPPED for this entry because the session was live at
+   *  the time. Part of the cache key in effect: without it, the last scan
+   *  before a session closes caches a fact-less row against the transcript's
+   *  final (mtime, size), and since a closed transcript never changes again
+   *  every later scan hits it — the archived row loses its cwd and title for
+   *  the lifetime of the window. */
+  liveAtScan: boolean;
 }
 
 /**
@@ -164,6 +218,12 @@ export class ArchiveIndexer implements DisposableLike {
   private cache = new Map<string, CacheEntry>();
   private last: ArchivedSession[] = [];
   private lastOk = false;
+  /** M10. sessionId → continuation verdict (predecessor id, or null for
+   *  "verified: not a continuation"). A transcript's HEAD is immutable — the
+   *  file is append-only — so this is computed at most once per id per window,
+   *  which is what makes reading it affordable for LIVE transcripts too (whose
+   *  display facts are deliberately never read; see scan()). */
+  private chainVerdicts = new Map<string, string | null>();
 
   constructor(projectsDir?: string) {
     this.projectsDir = projectsDir ?? defaultProjectsDir();
@@ -172,6 +232,19 @@ export class ArchiveIndexer implements DisposableLike {
   /** The most recent successful index. Empty until scan() has run once. */
   current(): ArchivedSession[] {
     return this.last;
+  }
+
+  /**
+   * sessionId → transcript mtime, for EVERY indexed session — live ones
+   * included, same universe as chainFacts(). scan() already statSync's every
+   * live transcript on each pass (a live session's facts are skipped, but its
+   * `endedAt` — the file mtime — is always current), so this is a lookup over
+   * data already collected rather than a new filesystem pass.
+   */
+  transcriptMtimes(): Map<string, number> {
+    const out = new Map<string, number>();
+    for (const s of this.last) out.set(s.sessionId, s.endedAt);
+    return out;
   }
 
   hasIndexed(): boolean {
@@ -201,13 +274,34 @@ export class ArchiveIndexer implements DisposableLike {
       };
     }
 
+    // M22.3: (root, subdir) pairs across every readable root. The primary
+    // root's failure semantics above are untouched — it aborts the scan the
+    // way it always has — while an extra root only ever ADDS pairs.
+    const pairs: Array<{ root: string; sub: string }> = subdirs.map((sub) => ({
+      root: dir,
+      sub,
+    }));
+    const seenRoots = new Set<string>([path.resolve(dir)]);
+    for (const raw of opts?.extraProjectsDirs ?? []) {
+      const extraRoot = typeof raw === 'string' ? raw.trim() : '';
+      if (extraRoot === '' || seenRoots.has(path.resolve(extraRoot))) continue;
+      seenRoots.add(path.resolve(extraRoot));
+      try {
+        for (const sub of fs.readdirSync(extraRoot)) {
+          pairs.push({ root: extraRoot, sub });
+        }
+      } catch {
+        continue; // a profile that never ran a session has no projects dir
+      }
+    }
+
     const nextCache = new Map<string, CacheEntry>();
     const sessions: ArchivedSession[] = [];
     let scanned = 0;
     let reread = 0;
 
-    for (const sub of subdirs) {
-      const subPath = path.join(dir, sub);
+    for (const { root, sub } of pairs) {
+      const subPath = path.join(root, sub);
       let files: string[];
       try {
         files = fs.readdirSync(subPath);
@@ -232,12 +326,16 @@ export class ArchiveIndexer implements DisposableLike {
         if (!st.isFile()) continue;
         scanned++;
 
+        const live = liveIds.has(sessionId);
         const hit = this.cache.get(sessionId);
         if (
           hit &&
           hit.mtimeMs === st.mtimeMs &&
           hit.size === st.size &&
-          hit.session.transcriptPath === full
+          hit.session.transcriptPath === full &&
+          // A fact-less entry cached while the session was live is stale the
+          // moment it stops being live, however unchanged the file is.
+          !(hit.liveAtScan && !live)
         ) {
           nextCache.set(sessionId, hit);
           sessions.push(hit.session);
@@ -246,8 +344,19 @@ export class ArchiveIndexer implements DisposableLike {
 
         // A live session's transcript is being appended to right now; its
         // label and cwd come from the roster, so skip the read entirely.
-        const facts = liveIds.has(sessionId) ? {} : readHeadFacts(full);
-        if (!liveIds.has(sessionId)) reread++;
+        const facts = live ? {} : readHeadFacts(full, sessionId);
+        if (!live) reread++;
+
+        // M10 continuation verdict. For a non-live file it falls out of the
+        // read above; for a live file — whose facts read is skipped every
+        // scan — it is worth ONE dedicated bounded head read, once per id,
+        // because the head never changes after being written.
+        let continuesId = this.chainVerdicts.get(sessionId);
+        if (continuesId === undefined) {
+          const verdictFacts = live ? readHeadFacts(full, sessionId) : facts;
+          continuesId = continuationOf(sessionId, verdictFacts) ?? null;
+          this.chainVerdicts.set(sessionId, continuesId);
+        }
 
         const session: ArchivedSession = {
           sessionId,
@@ -255,6 +364,7 @@ export class ArchiveIndexer implements DisposableLike {
           endedAt: st.mtimeMs,
           bytes: st.size,
         };
+        if (continuesId !== null) session.continuesId = continuesId;
         const startedAt =
           facts.firstTimestamp ??
           (Number.isFinite(st.birthtimeMs) && st.birthtimeMs > 0
@@ -268,6 +378,7 @@ export class ArchiveIndexer implements DisposableLike {
           mtimeMs: st.mtimeMs,
           size: st.size,
           session,
+          liveAtScan: live,
         };
         nextCache.set(sessionId, entry);
         sessions.push(session);
@@ -285,13 +396,41 @@ export class ArchiveIndexer implements DisposableLike {
     return { ok: true, sessions, tookMs, scanned, reread };
   }
 
+  /**
+   * M10. Chain-building facts for EVERY indexed transcript — live ones
+   * included, unlike current(), whose live rows are display-fact-less. This
+   * is the archive's contribution to buildChainIndex; mtime/bytes are the
+   * tip-selection keys, startedAt is P7's chain-root age source. All three
+   * come from the SAME sweep (scan(), above) that computes startedAt
+   * unconditionally for every transcript, so coverage does not depend on
+   * `lineage.showArchived` — buildChainIndex only ever sees the facts it is
+   * handed, and a future caller that filters this list before passing it in
+   * would silently degrade rootStartedAt to "unknown" for the excluded ids.
+   */
+  chainFacts(): GenerationFacts[] {
+    const out: GenerationFacts[] = [];
+    for (const s of this.last) {
+      const fact: GenerationFacts = {
+        sessionId: s.sessionId,
+        mtimeMs: s.endedAt,
+        bytes: s.bytes,
+      };
+      if (s.continuesId !== undefined) fact.continuesId = s.continuesId;
+      if (s.startedAt !== undefined) fact.startedAt = s.startedAt;
+      out.push(fact);
+    }
+    return out;
+  }
+
   /** Drop the cache so the next scan re-reads every head. */
   invalidate(): void {
     this.cache = new Map();
+    this.chainVerdicts = new Map();
   }
 
   dispose(): void {
     this.cache = new Map();
+    this.chainVerdicts = new Map();
     this.last = [];
   }
 }
@@ -310,6 +449,59 @@ export function archivedOnly(
     if (!liveIds.has(s.sessionId)) out.push(s);
   }
   return out;
+}
+
+/**
+ * Tree membership is editorial (M14): every session with a non-deleted
+ * editorial record keeps its row when its terminal closes — the row goes
+ * INACTIVE (archived, resumable), it does not leave the tree. Only an explicit
+ * Delete forgets it. A record is exactly the evidence that the session was
+ * ever the user's: launched here, titled, stamped by a finished turn, parked
+ * by a workspace switch — foreign history on disk has no record and stays
+ * behind the `showArchived` gate.
+ *
+ * Ids are routed through `tipOf` so a record written against a superseded
+ * generation id (M10) keeps the CONVERSATION's row — its chain tip — rather
+ * than a row the collapse is about to drop.
+ *
+ * A CHAT record (M16) is the one kind of record that is explicitly NOT tree
+ * membership. It is a scratch conversation about a project, filtered out of
+ * the live forest by design; without this skip it would come straight back as
+ * an inactive "closed" row the moment its tab shut, which is precisely the
+ * row the feature exists to avoid.
+ */
+export function memberKeepIds(
+  records: Record<string, EditorialRecord>,
+  tipOf: (id: string) => string,
+): Set<string> {
+  const keep = new Set<string>();
+  for (const record of Object.values(records)) {
+    if (record.deleted === true || record.chat === true) continue;
+    keep.add(record.id);
+    keep.add(tipOf(record.id));
+  }
+  return keep;
+}
+
+/**
+ * Which non-live archived sessions the forest should actually receive.
+ *
+ * `showArchived` is the user's "show me ALL history" switch — every transcript
+ * on disk, record or not. With it off (the default), membership is editorial:
+ * `keepIds` (see memberKeepIds) names the sessions whose rows persist.
+ *
+ * Pure and separate from the indexer so the rule is testable without a scan.
+ */
+export function keptArchived(
+  sessions: readonly ArchivedSession[],
+  liveIds: ReadonlySet<string>,
+  opts: { showArchived: boolean; keepIds?: ReadonlySet<string> },
+): ArchivedSession[] {
+  const notLive = archivedOnly(sessions, liveIds);
+  if (opts?.showArchived) return notLive;
+  const keep = opts?.keepIds;
+  if (!keep || keep.size === 0) return [];
+  return notLive.filter((s) => keep.has(s.sessionId));
 }
 
 /**

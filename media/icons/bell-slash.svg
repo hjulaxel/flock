@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" role="img"
+     fill="none" stroke="#000" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+  <title>Notifications hidden</title>
+  <!-- STROKED, not filled, unlike the other glyphs here: a slash only reads if
+       there is something for it to cross, and a solid bell under a solid bar is
+       one solid shape once the webview turns this into a CSS mask (a mask reads
+       ALPHA, and both would be fully opaque). An outline leaves the inside of
+       the bell empty for the stroke to travel through.
+       NB. no double hyphen anywhere in this comment. An svg used as a CSS mask
+       is parsed as strict XML, where a comment containing one is a fatal error
+       and the whole file renders as nothing. -->
+  <path d="M4.2 11.2V6.6a3.8 3.8 0 0 1 7.6 0v4.6"/>
+  <path d="M2.6 11.2h10.8"/>
+  <path d="M6.6 13.4a1.6 1.6 0 0 0 2.8 0"/>
+  <path d="M2.4 2.4L13.6 13.6"/>
+</svg>

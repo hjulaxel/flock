@@ -1,0 +1,806 @@
+// test/projects.test.ts — the M7 project model: path rules, cwd -> project
+// matching, and the grouping pass that produces the top level of the tree.
+//
+// src/projects.ts imports nothing but ./types, so none of this needs the
+// vscode mock.
+
+import { describe, expect, it } from 'vitest';
+
+import {
+  baseName,
+  buildBranches,
+  chatsForProject,
+  computeGrouping,
+  defaultBranchVisibility,
+  BRANCH_AUTOSHOW_LIMIT,
+  isHiddenFolder,
+  isWithin,
+  matchProject,
+  normalizeDir,
+  pathKey,
+  projectDirs,
+  providerOfProject,
+  validateProjectName,
+} from '../src/projects';
+import type { GroupingInput } from '../src/projects';
+import type { EditorialRecord, ProjectRecord } from '../src/types';
+
+// ------------------------------------------------------------------ helpers
+
+function project(
+  id: string,
+  name: string,
+  rootDir: string,
+  over: Partial<ProjectRecord> = {},
+): ProjectRecord {
+  return {
+    id,
+    name,
+    rootDir,
+    dirs: [],
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    ...over,
+  };
+}
+
+function grouping(over: Partial<GroupingInput> = {}) {
+  const cwds: Record<string, string> = over.cwdOf ? {} : {};
+  return computeGrouping({
+    visibleRootIds: [],
+    cwdOf: () => undefined,
+    projects: [],
+    hiddenFolders: [],
+    groupByFolder: true,
+    onlyProjectSessions: false,
+    ...over,
+    ...(Object.keys(cwds).length > 0 ? {} : {}),
+  });
+}
+
+/** cwdOf backed by a plain map, so tests read as `{A: '/tmp/alpha'}`. */
+function cwdMap(map: Record<string, string | undefined>) {
+  return (id: string): string | undefined => map[id];
+}
+
+// -------------------------------------------------------------- path rules
+
+describe('normalizeDir', () => {
+  it('folds separators, collapses repeats and drops the trailing slash', () => {
+    expect(normalizeDir('/tmp/alpha/')).toBe('/tmp/alpha');
+    expect(normalizeDir('/tmp//alpha///')).toBe('/tmp/alpha');
+    expect(normalizeDir('C:\\code\\api\\')).toBe('C:/code/api');
+    expect(normalizeDir('  /tmp/alpha  ')).toBe('/tmp/alpha');
+  });
+
+  it('keeps a bare root and rejects non-strings', () => {
+    expect(normalizeDir('/')).toBe('/');
+    expect(normalizeDir('')).toBe('');
+    expect(normalizeDir(undefined)).toBe('');
+    expect(normalizeDir(42)).toBe('');
+  });
+
+  // Regression: the repeat-collapse used to eat the leading `\\` of a UNC
+  // share, so `\\nas\code` was persisted (and handed to Uri.file and to a
+  // terminal cwd) as the unrelated local path `/nas/code`. Grouping hid it,
+  // because the session cwd was mangled identically.
+  it('preserves the UNC share prefix', () => {
+    expect(normalizeDir('\\\\nas\\code')).toBe('//nas/code');
+    expect(normalizeDir('\\\\nas\\code\\')).toBe('//nas/code');
+    expect(normalizeDir('//nas/code//sub')).toBe('//nas/code/sub');
+    expect(normalizeDir('\\\\nas')).toBe('//nas');
+  });
+
+  it('does not invent a UNC prefix from a plain root', () => {
+    expect(normalizeDir('//')).toBe('/');
+    expect(normalizeDir('///')).toBe('/');
+    expect(normalizeDir('///tmp/alpha')).toBe('/tmp/alpha');
+  });
+
+  it('keeps UNC paths comparable and boundary-aware', () => {
+    expect(isWithin('\\\\nas\\code', '\\\\nas\\code\\api')).toBe(true);
+    expect(isWithin('//nas/code', '//nas/codex')).toBe(false);
+    // The prefix is what distinguishes the share from the local path.
+    expect(isWithin('//nas/code', '/nas/code')).toBe(false);
+  });
+});
+
+describe('isWithin', () => {
+  it('matches a directory and anything under it', () => {
+    expect(isWithin('/tmp/alpha', '/tmp/alpha')).toBe(true);
+    expect(isWithin('/tmp/alpha', '/tmp/alpha/sub/deep')).toBe(true);
+    expect(isWithin('/tmp/alpha/', '/tmp/alpha/sub')).toBe(true);
+  });
+
+  it('respects path boundaries — /a/bc is not inside /a/b', () => {
+    expect(isWithin('/tmp/alpha', '/tmp/alphabet')).toBe(false);
+    expect(isWithin('/tmp/alpha/sub', '/tmp/alpha')).toBe(false);
+  });
+
+  it('compares case-insensitively (macOS and Windows are)', () => {
+    expect(isWithin('/Users/x/Code', '/users/x/code/api')).toBe(true);
+    expect(pathKey('/Users/X/Code')).toBe('/users/x/code');
+  });
+
+  it('never matches on an empty side', () => {
+    expect(isWithin('', '/tmp')).toBe(false);
+    expect(isWithin('/tmp', '')).toBe(false);
+  });
+});
+
+describe('baseName', () => {
+  it('takes the last segment of a normalized path', () => {
+    expect(baseName('/tmp/alpha/')).toBe('alpha');
+    expect(baseName('C:\\code\\api')).toBe('api');
+    expect(baseName('/')).toBe('/');
+  });
+});
+
+// ---------------------------------------------------------- project shape
+
+describe('projectDirs', () => {
+  it('puts rootDir first and dedupes the extras', () => {
+    const p = project('p1', 'API', '/code/api', {
+      dirs: ['/code/shared/', '/code/api', '/CODE/SHARED'],
+    });
+    expect(projectDirs(p)).toEqual(['/code/api', '/code/shared']);
+  });
+
+  it('drops blanks and survives a malformed record', () => {
+    const p = project('p1', 'X', '/code/x', { dirs: ['', '   '] });
+    expect(projectDirs(p)).toEqual(['/code/x']);
+    expect(projectDirs({} as ProjectRecord)).toEqual([]);
+  });
+});
+
+describe('providerOfProject', () => {
+  it('defaults to claude and rejects an unknown id', () => {
+    expect(providerOfProject(undefined)).toBe('claude');
+    expect(providerOfProject(project('p', 'n', '/a'))).toBe('claude');
+    expect(
+      providerOfProject(project('p', 'n', '/a', { provider: 'gemini' })),
+    ).toBe('gemini');
+    expect(
+      providerOfProject(
+        project('p', 'n', '/a', { provider: 'llama' as never }),
+      ),
+    ).toBe('claude');
+  });
+});
+
+describe('validateProjectName', () => {
+  const existing = [project('p1', 'Magma OS', '/a')];
+
+  it('accepts a fresh name', () => {
+    expect(validateProjectName('Canopy', existing)).toBe('');
+  });
+
+  it('rejects empty, over-long and duplicate names', () => {
+    expect(validateProjectName('   ', existing)).toMatch(/empty/);
+    expect(validateProjectName('x'.repeat(61), existing)).toMatch(/60 char/);
+    expect(validateProjectName('magma os', existing)).toMatch(/already exists/);
+  });
+
+  it('lets a project keep its own name while renaming', () => {
+    expect(validateProjectName('Magma OS', existing, 'p1')).toBe('');
+  });
+});
+
+// -------------------------------------------------------------- matching
+
+describe('matchProject', () => {
+  const outer = project('outer', 'Code', '/code');
+  const inner = project('inner', 'API', '/code/api');
+  const extra = project('extra', 'Docs', '/docs', { dirs: ['/notes'] });
+
+  it('claims a session whose cwd is the directory or below it', () => {
+    expect(matchProject([outer], '/code')?.project.id).toBe('outer');
+    expect(matchProject([outer], '/code/deep/deeper')?.project.id).toBe('outer');
+  });
+
+  it('gives a nested directory to the more specific project', () => {
+    expect(matchProject([outer, inner], '/code/api/src')?.project.id).toBe(
+      'inner',
+    );
+    expect(matchProject([inner, outer], '/code/api/src')?.project.id).toBe(
+      'inner',
+    );
+    expect(matchProject([outer, inner], '/code/web')?.project.id).toBe('outer');
+  });
+
+  it('matches extra directories, not only the main one', () => {
+    const m = matchProject([extra], '/notes/2026');
+    expect(m?.project.id).toBe('extra');
+    expect(m?.dir).toBe('/notes');
+  });
+
+  it('returns null for an unknown or missing cwd', () => {
+    expect(matchProject([outer], '/elsewhere')).toBeNull();
+    expect(matchProject([outer], undefined)).toBeNull();
+    expect(matchProject([], '/code')).toBeNull();
+  });
+
+  it('breaks an exact tie deterministically, whatever the input order', () => {
+    const a = project('id-b', 'Alpha', '/shared');
+    const b = project('id-a', 'Beta', '/shared');
+    expect(matchProject([a, b], '/shared/x')?.project.id).toBe('id-b');
+    expect(matchProject([b, a], '/shared/x')?.project.id).toBe('id-b');
+  });
+});
+
+describe('isHiddenFolder', () => {
+  it('covers the directory and everything under it', () => {
+    expect(isHiddenFolder(['/tmp/junk'], '/tmp/junk/run')).toBe(true);
+    expect(isHiddenFolder(['/tmp/junk'], '/tmp/junkyard')).toBe(false);
+    expect(isHiddenFolder([], '/tmp/junk')).toBe(false);
+    expect(isHiddenFolder(['/tmp/junk'], undefined)).toBe(false);
+  });
+});
+
+// -------------------------------------------------------------- grouping
+
+describe('computeGrouping', () => {
+  const cwds = cwdMap({
+    A: '/code/api/src',
+    B: '/code/web',
+    C: '/elsewhere',
+    D: undefined,
+  });
+
+  it('renders every project, sessions or not, sorted by name', () => {
+    const result = grouping({
+      visibleRootIds: ['A'],
+      cwdOf: cwds,
+      projects: [
+        project('p2', 'Zeta', '/zeta'),
+        project('p1', 'Api', '/code/api'),
+      ],
+    });
+    expect(result.projects.map((p) => p.label)).toEqual(['Api', 'Zeta']);
+    expect(result.projects[0].rootIds).toEqual(['A']);
+    expect(result.projects[1].rootIds).toEqual([]);
+  });
+
+  it('exposes the directory list with the main one first', () => {
+    const result = grouping({
+      projects: [project('p1', 'Api', '/code/api', { dirs: ['/shared'] })],
+    });
+    expect(result.projects[0].dirs).toEqual(['/code/api', '/shared']);
+    expect(result.projects[0].rootDir).toBe('/code/api');
+    expect(result.projects[0].provider).toBe('claude');
+  });
+
+  it('drops a hidden project and everything it claims', () => {
+    const result = grouping({
+      visibleRootIds: ['A', 'C'],
+      cwdOf: cwds,
+      projects: [project('p1', 'Api', '/code/api', { hidden: true })],
+    });
+    expect(result.projects).toHaveLength(0);
+    // A is NOT promoted back into a folder row: hiding the project hides it.
+    expect(result.folders).toHaveLength(0);
+    expect(result.loose).toEqual(['C']);
+    expect(result.hiddenCount).toBe(1);
+  });
+
+  it('lets a hidden inner project win over a visible outer one', () => {
+    const result = grouping({
+      visibleRootIds: ['A', 'B'],
+      cwdOf: cwds,
+      projects: [
+        project('outer', 'Code', '/code'),
+        project('inner', 'Api', '/code/api', { hidden: true }),
+      ],
+    });
+    // A is in /code/api/src — the hidden project owns it, so it stays hidden
+    // even though the visible /code project also covers that path.
+    expect(result.projects.map((p) => p.label)).toEqual(['Code']);
+    expect(result.projects[0].rootIds).toEqual(['B']);
+    expect(result.hiddenCount).toBe(1);
+  });
+
+  it('groups whatever no project claims into folder rows', () => {
+    const result = grouping({
+      visibleRootIds: ['A', 'B', 'C'],
+      cwdOf: cwds,
+      projects: [project('p1', 'Api', '/code/api')],
+    });
+    expect(result.projects[0].rootIds).toEqual(['A']);
+    expect(result.folders.map((f) => f.label)).toEqual(['elsewhere', 'web']);
+    expect(result.loose).toEqual([]);
+  });
+
+  it('keeps a lone folder as a bare row when there is no project above it', () => {
+    const result = grouping({
+      visibleRootIds: ['B'],
+      cwdOf: cwds,
+      projects: [],
+    });
+    expect(result.folders).toEqual([]);
+    expect(result.loose).toEqual(['B']);
+  });
+
+  it('promotes that same lone folder to a row once a project exists', () => {
+    const result = grouping({
+      visibleRootIds: ['A', 'B'],
+      cwdOf: cwds,
+      projects: [project('p1', 'Api', '/code/api')],
+    });
+    expect(result.folders.map((f) => f.label)).toEqual(['web']);
+    expect(result.loose).toEqual([]);
+  });
+
+  it('files a session with no cwd under (unknown)', () => {
+    const result = grouping({
+      visibleRootIds: ['B', 'D'],
+      cwdOf: cwds,
+      projects: [],
+    });
+    expect(result.folders.map((f) => f.label)).toEqual(['(unknown)', 'web']);
+  });
+
+  it('leaves everything ungrouped when groupByFolder is off', () => {
+    const result = grouping({
+      visibleRootIds: ['B', 'C'],
+      cwdOf: cwds,
+      groupByFolder: false,
+    });
+    expect(result.folders).toEqual([]);
+    expect(result.loose).toEqual(['B', 'C']);
+  });
+
+  it('removes a hidden folder and counts what it removed', () => {
+    const result = grouping({
+      visibleRootIds: ['B', 'C'],
+      cwdOf: cwds,
+      hiddenFolders: ['/elsewhere'],
+    });
+    expect(result.loose).toEqual(['B']);
+    expect(result.hiddenCount).toBe(1);
+  });
+
+  it('lets an explicit project override a hidden parent folder', () => {
+    // /code is hidden wholesale, but the user said /code/api IS a project —
+    // the specific statement has to beat the blanket one.
+    const result = grouping({
+      visibleRootIds: ['A', 'B'],
+      cwdOf: cwds,
+      projects: [project('p1', 'Api', '/code/api')],
+      hiddenFolders: ['/code'],
+    });
+    expect(result.projects[0].rootIds).toEqual(['A']);
+    expect(result.folders).toEqual([]);
+    expect(result.loose).toEqual([]);
+    expect(result.hiddenCount).toBe(1); // only B
+  });
+
+  it('onlyProjectSessions drops the unclaimed rest', () => {
+    const result = grouping({
+      visibleRootIds: ['A', 'B', 'C'],
+      cwdOf: cwds,
+      projects: [project('p1', 'Api', '/code/api')],
+      onlyProjectSessions: true,
+    });
+    expect(result.projects[0].rootIds).toEqual(['A']);
+    expect(result.folders).toEqual([]);
+    expect(result.loose).toEqual([]);
+    expect(result.hiddenCount).toBe(2);
+  });
+
+  it('ignores onlyProjectSessions while no project exists', () => {
+    // Otherwise the very first thing a new user sees is an empty tree.
+    const result = grouping({
+      visibleRootIds: ['A', 'B', 'C'],
+      cwdOf: cwds,
+      projects: [],
+      onlyProjectSessions: true,
+    });
+    expect(result.folders).toHaveLength(3);
+    expect(result.hiddenCount).toBe(0);
+  });
+
+  it('hands back the SAME row objects when nothing changed', () => {
+    const input: GroupingInput = {
+      visibleRootIds: ['A', 'B', 'C'],
+      cwdOf: cwds,
+      projects: [project('p1', 'Api', '/code/api')],
+      hiddenFolders: [],
+      groupByFolder: true,
+      onlyProjectSessions: false,
+    };
+    const first = computeGrouping(input);
+    const second = computeGrouping(input, first);
+    expect(second.projects[0]).toBe(first.projects[0]);
+    expect(second.folders[0]).toBe(first.folders[0]);
+  });
+
+  it('replaces only the row whose content actually moved', () => {
+    const input: GroupingInput = {
+      visibleRootIds: ['A', 'B', 'C'],
+      cwdOf: cwds,
+      projects: [project('p1', 'Api', '/code/api')],
+      hiddenFolders: [],
+      groupByFolder: true,
+      onlyProjectSessions: false,
+    };
+    const first = computeGrouping(input);
+    const second = computeGrouping(
+      { ...input, projects: [project('p1', 'Renamed', '/code/api')] },
+      first,
+    );
+    expect(second.projects[0]).not.toBe(first.projects[0]);
+    expect(second.folders[0]).toBe(first.folders[0]);
+  });
+
+  it('never throws on a malformed project list', () => {
+    const result = computeGrouping({
+      visibleRootIds: ['A'],
+      cwdOf: cwds,
+      projects: [null as unknown as ProjectRecord],
+      hiddenFolders: [],
+      groupByFolder: true,
+      onlyProjectSessions: false,
+    });
+    expect(result.projects).toEqual([]);
+    expect(result.loose).toEqual(['A']);
+  });
+});
+
+// ------------------------------------------------------- M20 worktrees
+
+// The scenario this whole feature exists for: one repository, three checkouts,
+// one agent in each. Grouped by cwd alone these are three unrelated folder rows.
+const APP_WORKTREES = [
+  { dir: '/code/app', branch: 'main', head: 'aaa', detached: false },
+  { dir: '/code/app-feat-x', branch: 'feat/x', head: 'bbb', detached: false },
+  { dir: '/code/app-spike', branch: '', head: 'ccc', detached: true },
+];
+
+/** `worktreesOf` for a repo whose checkouts are all reachable from /code/app.
+ *  Mirrors git: the same list comes back from ANY checkout of the repo. */
+function appWorktrees(dir: string) {
+  const inRepo = APP_WORKTREES.some((w) => isWithin(w.dir, dir));
+  return inRepo ? APP_WORKTREES : [];
+}
+
+describe('computeGrouping: worktrees (M20)', () => {
+  const projects = [project('p1', 'App', '/code/app')];
+  const cwds = cwdMap({
+    A: '/code/app/src',
+    B: '/code/app-feat-x',
+    C: '/code/app-spike/deep/dir',
+    D: '/somewhere/else',
+  });
+
+  it('claims a session in a sibling worktree for the project', () => {
+    // The point of the feature. `/code/app-feat-x` is not under `/code/app` and
+    // nobody added it to the project — it is only reachable because git says it
+    // is a checkout of the same repository.
+    const out = computeGrouping({
+      visibleRootIds: ['A', 'B', 'C', 'D'],
+      cwdOf: cwds,
+      projects,
+      hiddenFolders: [],
+      groupByFolder: true,
+      onlyProjectSessions: false,
+      worktreesOf: appWorktrees,
+    });
+    expect(out.projects[0].rootIds).toEqual(['A', 'B', 'C']);
+    // D is genuinely elsewhere and still falls through to a folder row.
+    expect(out.folders.map((f) => f.cwd)).toEqual(['/somewhere/else']);
+  });
+
+  it('leaves those sessions as loose folder rows without worktree data', () => {
+    // The pre-M20 behaviour, which is also what a non-git project and a
+    // probe-not-landed-yet both get.
+    const out = computeGrouping({
+      visibleRootIds: ['A', 'B', 'C'],
+      cwdOf: cwds,
+      projects,
+      hiddenFolders: [],
+      groupByFolder: true,
+      onlyProjectSessions: false,
+    });
+    expect(out.projects[0].rootIds).toEqual(['A']);
+    expect(out.folders).toHaveLength(2);
+    expect(out.projects[0].branches).toEqual([]);
+  });
+
+  it('builds one chip per worktree, main first then alphabetical', () => {
+    const out = computeGrouping({
+      visibleRootIds: ['A', 'B', 'C'],
+      cwdOf: cwds,
+      projects,
+      hiddenFolders: [],
+      groupByFolder: true,
+      onlyProjectSessions: false,
+      worktreesOf: appWorktrees,
+    });
+    const branches = out.projects[0].branches ?? [];
+    // '(detached)' sorts before 'feat/x'; `main` holds position 0 regardless
+    // because git listed it first.
+    expect(branches.map((b) => b.name)).toEqual(['main', '(detached)', 'feat/x']);
+    expect(branches.map((b) => b.colorIndex)).toEqual([0, 1, 2]);
+    expect(branches.map((b) => b.primary)).toEqual([true, false, false]);
+  });
+
+  it('files each session under the worktree containing its cwd', () => {
+    const out = computeGrouping({
+      visibleRootIds: ['A', 'B', 'C'],
+      cwdOf: cwds,
+      projects,
+      hiddenFolders: [],
+      groupByFolder: true,
+      onlyProjectSessions: false,
+      worktreesOf: appWorktrees,
+    });
+    const byName = new Map(
+      (out.projects[0].branches ?? []).map((b) => [b.name, b.rootIds]),
+    );
+    expect(byName.get('main')).toEqual(['A']);
+    expect(byName.get('feat/x')).toEqual(['B']);
+    // A cwd deep inside a worktree still resolves to it.
+    expect(byName.get('(detached)')).toEqual(['C']);
+  });
+
+  it('gives a worktree with no sessions a chip anyway', () => {
+    // You make a worktree and THEN start a session in it, so the chip has to
+    // exist before the session does — otherwise the click that creates it has
+    // nowhere to live.
+    const out = computeGrouping({
+      visibleRootIds: [],
+      cwdOf: () => undefined,
+      projects,
+      hiddenFolders: [],
+      groupByFolder: true,
+      onlyProjectSessions: false,
+      worktreesOf: appWorktrees,
+    });
+    const branches = out.projects[0].branches ?? [];
+    expect(branches).toHaveLength(3);
+    expect(branches.every((b) => b.rootIds.length === 0)).toBe(true);
+  });
+
+  it('prefers the deepest worktree when one is nested inside another', () => {
+    const nested = [
+      { dir: '/code/app', branch: 'main', head: 'a', detached: false },
+      { dir: '/code/app/.worktrees/x', branch: 'feat/x', head: 'b', detached: false },
+    ];
+    const out = computeGrouping({
+      visibleRootIds: ['N'],
+      cwdOf: cwdMap({ N: '/code/app/.worktrees/x/src' }),
+      projects,
+      hiddenFolders: [],
+      groupByFolder: true,
+      onlyProjectSessions: false,
+      worktreesOf: () => nested,
+    });
+    const byName = new Map(
+      (out.projects[0].branches ?? []).map((b) => [b.name, b.rootIds]),
+    );
+    // Longest match wins, exactly as project membership does. The containing
+    // checkout must not swallow a session that belongs to the nested one.
+    expect(byName.get('feat/x')).toEqual(['N']);
+    expect(byName.get('main')).toEqual([]);
+  });
+
+  it('dedupes a repo reached through two of a project multi-directory list', () => {
+    const spanning = [project('p1', 'App', '/code/app', { dirs: ['/code/app-feat-x'] })];
+    const out = computeGrouping({
+      visibleRootIds: [],
+      cwdOf: () => undefined,
+      projects: spanning,
+      hiddenFolders: [],
+      groupByFolder: true,
+      onlyProjectSessions: false,
+      worktreesOf: appWorktrees,
+    });
+    // Both directories are checkouts of the same repo and each reports all
+    // three worktrees. `main` twice on the chip row would be worse than no row.
+    expect(out.projects[0].branches).toHaveLength(3);
+  });
+
+  it('survives a worktreesOf that throws', () => {
+    const out = computeGrouping({
+      visibleRootIds: ['A'],
+      cwdOf: cwds,
+      projects,
+      hiddenFolders: [],
+      groupByFolder: true,
+      onlyProjectSessions: false,
+      worktreesOf: () => {
+        throw new Error('git exploded');
+      },
+    });
+    // Degrades to the pre-M20 tree rather than taking the sidebar down.
+    expect(out.projects[0].branches).toEqual([]);
+    expect(out.projects[0].rootIds).toEqual(['A']);
+  });
+
+  it('reuses the project object when the branches are unchanged', () => {
+    const input: GroupingInput = {
+      visibleRootIds: ['A', 'B'],
+      cwdOf: cwds,
+      projects,
+      hiddenFolders: [],
+      groupByFolder: true,
+      onlyProjectSessions: false,
+      worktreesOf: appWorktrees,
+    };
+    const first = computeGrouping(input);
+    const second = computeGrouping(input, first);
+    // Identity reuse is what stops every poll tick from collapsing the tree.
+    expect(second.projects[0]).toBe(first.projects[0]);
+  });
+
+  it('produces a fresh project object when a worktree appears', () => {
+    const base: GroupingInput = {
+      visibleRootIds: ['A'],
+      cwdOf: cwds,
+      projects,
+      hiddenFolders: [],
+      groupByFolder: true,
+      onlyProjectSessions: false,
+      worktreesOf: () => APP_WORKTREES.slice(0, 1),
+    };
+    const first = computeGrouping(base);
+    const second = computeGrouping({ ...base, worktreesOf: appWorktrees }, first);
+    expect(second.projects[0]).not.toBe(first.projects[0]);
+    expect(second.projects[0].branches).toHaveLength(3);
+  });
+});
+
+describe('branch visibility (M20)', () => {
+  const many = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      dir: `/code/w${i}`,
+      branch: i === 0 ? 'main' : `feat/${i}`,
+      head: 'x',
+      detached: false,
+    }));
+
+  it('shows every branch while the list is short enough to read', () => {
+    // Below the threshold there is nothing to curate: hiding two of three
+    // branches to save two rows is a puzzle, not a tidy-up.
+    const branches = buildBranches(many(BRANCH_AUTOSHOW_LIMIT), [], () => undefined);
+    expect(branches.every((b) => b.shown)).toBe(true);
+  });
+
+  it('folds most of a long list away, keeping main', () => {
+    const branches = buildBranches(many(12), [], () => undefined);
+    expect(branches.filter((b) => b.shown).map((b) => b.name)).toEqual(['main']);
+  });
+
+  it('always surfaces a branch something is running on', () => {
+    // A live agent whose row you cannot see is the worst outcome this feature
+    // could produce, so an active branch shows even in a repo with fifty.
+    const branches = buildBranches(many(12), ['S'], () => '/code/w7');
+    expect(branches.filter((b) => b.shown).map((b) => b.name).sort()).toEqual([
+      'feat/7',
+      'main',
+    ]);
+  });
+
+  it('lets an explicit show beat the policy', () => {
+    const p = project('p1', 'App', '/code/w0', { shownBranches: ['feat/9'] });
+    const branches = buildBranches(many(12), [], () => undefined, p);
+    expect(branches.find((b) => b.name === 'feat/9')?.shown).toBe(true);
+  });
+
+  it('lets an explicit hide beat the policy, even for a busy branch', () => {
+    // The reason ProjectRecord keeps TWO lists: with one, "I hid this" and "the
+    // policy has not picked it yet" would be the same state, and a branch you
+    // hid would come back the moment somebody started a session on it.
+    const p = project('p1', 'App', '/code/w0', { hiddenBranches: ['feat/7'] });
+    const branches = buildBranches(many(12), ['S'], () => '/code/w7', p);
+    expect(branches.find((b) => b.name === 'feat/7')?.shown).toBe(false);
+  });
+
+  it('lets an explicit hide beat the short-list default too', () => {
+    const p = project('p1', 'App', '/code/w0', { hiddenBranches: ['feat/1'] });
+    const branches = buildBranches(many(3), [], () => undefined, p);
+    expect(branches.find((b) => b.name === 'feat/1')?.shown).toBe(false);
+    expect(branches.find((b) => b.name === 'main')?.shown).toBe(true);
+  });
+
+  it('keeps main visible under the default policy whatever else happens', () => {
+    expect(
+      defaultBranchVisibility({ primary: true, rootIds: [] }, 50),
+    ).toBe(true);
+    expect(
+      defaultBranchVisibility({ primary: false, rootIds: [] }, 50),
+    ).toBe(false);
+  });
+
+  it('re-derives visibility every render rather than remembering it', () => {
+    // Not a memory: a branch that goes quiet drops back out of the default set,
+    // which is exactly why shownBranches exists for the ones you want kept.
+    const busy = buildBranches(many(12), ['S'], () => '/code/w3');
+    expect(busy.find((b) => b.name === 'feat/3')?.shown).toBe(true);
+    const quiet = buildBranches(many(12), [], () => undefined);
+    expect(quiet.find((b) => b.name === 'feat/3')?.shown).toBe(false);
+  });
+});
+
+// ------------------------------------------------------- M24: chat history
+
+describe('chatsForProject', () => {
+  const chat = (
+    id: string,
+    cwd: string | undefined,
+    over: Partial<EditorialRecord> = {},
+  ): EditorialRecord => ({
+    id,
+    chat: true,
+    cwd,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    ...over,
+  });
+
+  const API = project('p1', 'API', '/code/api');
+  const WEB = project('p2', 'Web', '/code/web');
+
+  it('claims the chats whose cwd the project owns, and no others', () => {
+    const records = {
+      a: chat('a', '/code/api'),
+      b: chat('b', '/code/api/src'),
+      c: chat('c', '/code/web'),
+      d: chat('d', '/somewhere/else'),
+    };
+    expect(
+      chatsForProject(records, [API, WEB], 'p1').map((r) => r.id).sort(),
+    ).toEqual(['a', 'b']);
+  });
+
+  it('is not fooled by a session that merely runs in the same directory', () => {
+    const records = {
+      a: chat('a', '/code/api'),
+      s: chat('s', '/code/api', { chat: false }),
+    };
+    expect(chatsForProject(records, [API], 'p1').map((r) => r.id)).toEqual(['a']);
+  });
+
+  it('skips a deleted record and a record with no cwd at all', () => {
+    const records = {
+      a: chat('a', '/code/api'),
+      gone: chat('gone', '/code/api', { deleted: true }),
+      nowhere: chat('nowhere', undefined),
+    };
+    expect(chatsForProject(records, [API], 'p1').map((r) => r.id)).toEqual(['a']);
+  });
+
+  it('files a chat under the LONGEST matching project, like every session', () => {
+    // The nested project owns its own subtree even though the outer one
+    // contains it — the same rule matchProject applies to sessions.
+    const outer = project('p1', 'Code', '/code');
+    const inner = project('p2', 'API', '/code/api');
+    const records = { a: chat('a', '/code/api/src') };
+    expect(chatsForProject(records, [outer, inner], 'p2')).toHaveLength(1);
+    expect(chatsForProject(records, [outer, inner], 'p1')).toHaveLength(0);
+  });
+
+  it('answers for a CLOSED project too — closing hides rows, not history', () => {
+    const closed = project('p1', 'API', '/code/api', { hidden: true });
+    const records = { a: chat('a', '/code/api') };
+    expect(chatsForProject(records, [closed], 'p1')).toHaveLength(1);
+  });
+
+  it('orders newest first, and breaks ties on id so a repaint cannot shuffle', () => {
+    const records = {
+      old: chat('old', '/code/api', { createdAt: '2026-01-01T00:00:00.000Z' }),
+      new: chat('new', '/code/api', { createdAt: '2026-03-01T00:00:00.000Z' }),
+      tie: chat('tie', '/code/api', { createdAt: '2026-03-01T00:00:00.000Z' }),
+    };
+    expect(chatsForProject(records, [API], 'p1').map((r) => r.id)).toEqual([
+      'new',
+      'tie',
+      'old',
+    ]);
+  });
+
+  it('survives an empty store', () => {
+    expect(chatsForProject(undefined, [API], 'p1')).toEqual([]);
+    expect(chatsForProject({}, [], 'p1')).toEqual([]);
+  });
+});

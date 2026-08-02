@@ -18,11 +18,17 @@ import {
   COMMANDS,
   SESSION_URI_SCHEME,
   TREE_DND_MIME,
-  WAITING_COLOR_ID,
+  CLOSED_COLOR_ID,
+  DONE_COLOR_ID,
+  RUNNING_COLOR_ID,
+  STATUS_DOT,
 } from '../src/types';
 import type {
   DecorationDeps,
   GroupNode,
+  ProjectGroupNode,
+  ProjectRecord,
+  ProviderId,
   SessionForest,
   SessionNode,
   SessionRef,
@@ -50,6 +56,7 @@ function node(id: string, over: Partial<SessionNode> = {}): SessionNode {
     ghost: false,
     archived: false,
     hidden: false,
+    deleted: false,
     status: 'idle',
     attention: 'none',
     label: id.slice(0, 8),
@@ -66,7 +73,8 @@ function forestOf(nodes: SessionNode[]): SessionForest {
   return {
     nodes: map,
     roots,
-    visibleRoots: roots.filter((id) => !map.get(id)?.hidden),
+    // `deleted`, not `hidden` (M8): a hidden row is muted, still on screen.
+    visibleRoots: roots.filter((id) => !map.get(id)?.deleted),
     edges: nodes
       .filter((n) => n.parentId !== null)
       .map((n) => ({
@@ -79,21 +87,53 @@ function forestOf(nodes: SessionNode[]): SessionForest {
   };
 }
 
+function project(
+  id: string,
+  name: string,
+  rootDir: string,
+  over: Partial<ProjectRecord> = {},
+): ProjectRecord {
+  return {
+    id,
+    name,
+    rootDir,
+    dirs: [],
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    ...over,
+  };
+}
+
 interface Harness {
   deps: TreeDeps & DecorationDeps;
   reparented: Array<[string, string | null]>;
+  assigned: Array<[string, string]>;
   setForest(f: SessionForest): void;
   setGrouping(on: boolean): void;
   setBound(ids: string[]): void;
+  setProjects(list: ProjectRecord[]): void;
+  setHiddenFolders(list: string[]): void;
+  setOnlyProjectSessions(on: boolean): void;
+  setProvider(id: ProviderId): void;
+  setMediaPath(fn: (relative: string) => string | undefined): void;
 }
 
 function harness(forest: SessionForest): Harness {
   let current = forest;
   let grouping = true;
   let bound = new Set<string>();
+  let projects: ProjectRecord[] = [];
+  let hiddenFolders: string[] = [];
+  let onlyProjectSessions = false;
+  let provider: ProviderId = 'claude';
+  // Default: no media on disk, so the tree takes its codicon fallback. Tests
+  // that care about the svg path install their own.
+  let mediaPath: (relative: string) => string | undefined = () => undefined;
   const reparented: Array<[string, string | null]> = [];
+  const assigned: Array<[string, string]> = [];
   return {
     reparented,
+    assigned,
     setForest: (f) => {
       current = f;
     },
@@ -103,6 +143,21 @@ function harness(forest: SessionForest): Harness {
     setBound: (ids) => {
       bound = new Set(ids);
     },
+    setProjects: (list) => {
+      projects = list;
+    },
+    setHiddenFolders: (list) => {
+      hiddenFolders = list;
+    },
+    setOnlyProjectSessions: (on) => {
+      onlyProjectSessions = on;
+    },
+    setProvider: (id) => {
+      provider = id;
+    },
+    setMediaPath: (fn) => {
+      mediaPath = fn;
+    },
     deps: {
       getForest: () => current,
       onDidChangeData: () => ({ dispose: () => undefined }),
@@ -111,6 +166,14 @@ function harness(forest: SessionForest): Harness {
         reparented.push([childId, newParentId]);
       },
       groupByFolder: () => grouping,
+      projects: () => projects,
+      hiddenFolders: () => hiddenFolders,
+      onlyProjectSessions: () => onlyProjectSessions,
+      providerFor: () => provider,
+      mediaPath: (relative) => mediaPath(relative),
+      assignToProject: async (sessionId, projectId) => {
+        assigned.push([sessionId, projectId]);
+      },
     },
   };
 }
@@ -146,21 +209,28 @@ describe('statusDescriptor', () => {
           roster: { sessionId: A, waitingFor: 'dialog open' },
         }),
       ),
-    ).toBe('● dialog open');
-    expect(statusDescriptor(node(A, { status: 'waiting' }))).toBe('● waiting');
-    expect(statusDescriptor(node(A, { status: 'busy' }))).toBe('▶ busy');
-    expect(statusDescriptor(node(A, { status: 'idle' }))).toBe('○ idle');
-    expect(statusDescriptor(node(A, { status: 'exited' }))).toBe('✕ gone');
+    ).toBe('dialog open');
+    // Nothing to say when the roster does not name what it is waiting for — the
+    // dot already says "waiting on you".
+    expect(statusDescriptor(node(A, { status: 'waiting' }))).toBe('');
+    // busy / idle are the dot's job: two rows differing only in state should
+    // differ only in the colour of one dot.
+    expect(statusDescriptor(node(A, { status: 'busy' }))).toBe('');
+    expect(statusDescriptor(node(A, { status: 'idle' }))).toBe('');
+    // Being over is the dimmed row's job, not a word's — same reason as busy
+    // and idle.
+    expect(statusDescriptor(node(A, { status: 'exited' }))).toBe('');
     expect(statusDescriptor(node(A, { status: 'unknown' }))).toBe('');
   });
 
-  it('distinguishes an archived (reopenable) row from a ghost', () => {
-    // Both are 'exited', but only one has a transcript behind it.
-    expect(
-      statusDescriptor(node(A, { status: 'exited', archived: true })),
-    ).toBe('⏻ closed');
+  it('names a ghost, because dimming cannot tell it from an archived row', () => {
+    // Both are 'exited' and both read as over, but only one has a transcript
+    // behind it. 'gone' is what stops a ghost reading as something to resume.
+    expect(statusDescriptor(node(A, { status: 'exited', archived: true }))).toBe(
+      '',
+    );
     expect(statusDescriptor(node(A, { status: 'exited', ghost: true }))).toBe(
-      '✕ gone',
+      'gone',
     );
   });
 });
@@ -172,19 +242,19 @@ describe('sessionContextValue', () => {
         node(A, { status: 'waiting', attention: 'waiting', parentId: B }),
         false,
       ),
-    ).toBe(';session;live;waiting;forked;');
+    ).toBe(';session;shown;notified;live;waiting;forked;');
 
     expect(sessionContextValue(node(A, { status: 'idle' }), true)).toBe(
-      ';session;live;idle;bound;root;',
+      ';session;shown;notified;live;idle;bound;root;',
     );
 
     expect(
       sessionContextValue(node(A, { ghost: true, status: 'exited' }), false),
-    ).toBe(';session;ghost;exited;root;');
+    ).toBe(';session;shown;notified;ghost;exited;root;');
 
     expect(
       sessionContextValue(node(A, { status: 'busy', source: 'minted' }), false),
-    ).toBe(';session;live;busy;ours;root;');
+    ).toBe(';session;shown;notified;live;busy;ours;root;');
 
     // Archived rows must NOT carry ;live;, or every live-gated verb
     // (fork inline, close, ask) would light up on a closed session.
@@ -193,7 +263,21 @@ describe('sessionContextValue', () => {
         node(A, { archived: true, status: 'exited' }),
         false,
       ),
-    ).toBe(';session;archived;exited;root;');
+    ).toBe(';session;shown;notified;archived;exited;root;');
+  });
+
+  // M19. Exactly one of the pair, always — the two mute menu entries are
+  // complementary `when` clauses and each needs a positive token to match.
+  it('names which half of the notification mute a row offers', () => {
+    expect(
+      sessionContextValue(node(A, { status: 'idle', notifyMuted: true }), false),
+    ).toContain(';silenced;');
+    expect(
+      sessionContextValue(node(A, { status: 'idle', notifyMuted: true }), false),
+    ).not.toContain(';notified;');
+    expect(sessionContextValue(node(A, { status: 'idle' }), false)).toContain(
+      ';notified;',
+    );
   });
 
   it('is delimited on both sides so /;live;/ cannot match ;livewire;', () => {
@@ -287,7 +371,22 @@ describe('LineageTreeProvider.getTreeItem', () => {
         }),
       ]),
     );
-    expect(p.getTreeItem(ref(A)).description).toBe('now · ● dialog open');
+    expect(p.getTreeItem(ref(A)).description).toBe('now · dialog open');
+  });
+
+  // P5: mirrors the viewmodel regression — a session started hours ago but
+  // typed in seconds ago must read as "just now" in the native tree too.
+  it('ages a row off lastActiveAt, not startedAt', () => {
+    h.setForest(
+      forestOf([
+        node(A, {
+          status: 'idle',
+          startedAt: Date.now() - 7_200_000,
+          lastActiveAt: Date.now() - 30_000,
+        }),
+      ]),
+    );
+    expect(p.getTreeItem(ref(A)).description).toBe('now');
   });
 
   it('is Expanded iff it has visibleChildren', () => {
@@ -361,6 +460,90 @@ describe('LineageTreeProvider.getParent', () => {
     const p = new LineageTreeProvider(h.deps);
     expect(p.getParent(ref(A))).toBeUndefined();
   });
+
+  // Regression: the parent index used to be built by walking EVERY node and
+  // reading its visibleChildren. buildForest fills that list in on invisible
+  // nodes too, so a hidden ancestor claimed the child it had been spliced out
+  // of — handing reveal() a path through a row getChildren() never returns.
+  it('never reports a hidden ancestor as the visible parent', () => {
+    const f = forestOf([
+      node(A, { hidden: true, cwd: '/tmp/alpha', children: [C], visibleChildren: [C] }),
+      node(C, { parentId: A, cwd: '/tmp/alpha' }),
+    ]);
+    // A is hidden, so C is promoted to a visible root.
+    f.visibleRoots = [C];
+    const h = harness(f);
+    h.setGrouping(false);
+    const p = new LineageTreeProvider(h.deps);
+
+    expect(p.getChildren().map((n) => (n as SessionRef).id)).toEqual([C]);
+    expect(p.getParent(ref(C))).toBeUndefined();
+  });
+
+  it('splices a hidden node out of the middle of a chain', () => {
+    // A (visible) -> B (hidden) -> C (visible, promoted under A).
+    const f = forestOf([
+      node(A, { cwd: '/tmp/alpha', children: [B], visibleChildren: [C] }),
+      node(B, { parentId: A, hidden: true, children: [C], visibleChildren: [C] }),
+      node(C, { parentId: B, cwd: '/tmp/alpha' }),
+    ]);
+    f.visibleRoots = [A];
+    const h = harness(f);
+    h.setGrouping(false);
+    const p = new LineageTreeProvider(h.deps);
+
+    expect(p.getChildren(ref(A)).map((n) => (n as SessionRef).id)).toEqual([C]);
+    // Not B — that row is not in the tree at all.
+    expect(p.getParent(ref(C))).toEqual(ref(A));
+  });
+});
+
+// -------------------------------------------------------------- attention
+
+describe('LineageTreeProvider.attentionCount', () => {
+  const waiting = (id: string, cwd: string): SessionNode =>
+    node(id, { cwd, status: 'waiting', attention: 'waiting' });
+
+  it('counts the waiting sessions that are actually rendered', () => {
+    const h = harness(forestOf([waiting(A, '/tmp/alpha'), node(B, { cwd: '/tmp/beta' })]));
+    const p = new LineageTreeProvider(h.deps);
+    expect(p.attentionCount()).toBe(1);
+  });
+
+  it('counts waiting descendants of a rendered root', () => {
+    const f = forestOf([
+      node(A, { cwd: '/tmp/alpha', children: [C], visibleChildren: [C] }),
+      { ...waiting(C, '/tmp/alpha'), parentId: A },
+    ]);
+    const h = harness(f);
+    const p = new LineageTreeProvider(h.deps);
+    expect(p.attentionCount()).toBe(1);
+  });
+
+  // Regression: the badge read forest.attentionCount, which buildForest
+  // computes without ever seeing the projects or the hidden-folder list. A
+  // waiting session in a hidden folder pinned a badge with no row behind it.
+  it('ignores a waiting session inside a hidden folder', () => {
+    const h = harness(forestOf([waiting(A, '/tmp/alpha')]));
+    h.setHiddenFolders(['/tmp/alpha']);
+    const p = new LineageTreeProvider(h.deps);
+    expect(p.attentionCount()).toBe(0);
+  });
+
+  it('ignores a waiting session dropped by onlyProjectSessions', () => {
+    const h = harness(forestOf([waiting(A, '/tmp/alpha')]));
+    h.setProjects([project('p1', 'Beta', '/tmp/beta')]);
+    h.setOnlyProjectSessions(true);
+    const p = new LineageTreeProvider(h.deps);
+    expect(p.attentionCount()).toBe(0);
+  });
+
+  it('ignores a waiting session belonging to a hidden project', () => {
+    const h = harness(forestOf([waiting(A, '/tmp/alpha')]));
+    h.setProjects([project('p1', 'Alpha', '/tmp/alpha', { hidden: true })]);
+    const p = new LineageTreeProvider(h.deps);
+    expect(p.attentionCount()).toBe(0);
+  });
 });
 
 // ------------------------------------------------------------ resolveTreeItem
@@ -378,13 +561,325 @@ describe('LineageTreeProvider.resolveTreeItem', () => {
     expect(tip.value).toContain('/tmp/alpha');
     expect(tip.value).toContain('parent: none (root)');
   });
+
+  it('spells out last active alongside started, when both are known', () => {
+    const h = harness(
+      forestOf([
+        node(A, {
+          cwd: '/tmp/alpha',
+          startedAt: 1_700_000_000_000,
+          lastActiveAt: 1_700_003_600_000,
+        }),
+      ]),
+    );
+    const p = new LineageTreeProvider(h.deps);
+    const item = p.resolveTreeItem(p.getTreeItem(ref(A)), ref(A));
+    const tip = item.tooltip as { value: string; isTrusted: boolean };
+    expect(tip.value).toContain(`started: ${new Date(1_700_000_000_000).toISOString()}`);
+    expect(tip.value).toContain(
+      `last active: ${new Date(1_700_003_600_000).toISOString()}`,
+    );
+  });
+});
+
+// ---------------------------------------------------------------- projects
+
+describe('LineageTreeProvider projects (M7)', () => {
+  const forest = (): SessionForest =>
+    forestOf([
+      node(A, { cwd: '/code/api/src' }),
+      node(B, { cwd: '/code/web' }),
+      node(C, { cwd: '/elsewhere' }),
+    ]);
+
+  it('puts project rows above folder rows at the top level', () => {
+    const h = harness(forest());
+    h.setProjects([project('p1', 'API', '/code/api')]);
+    const p = new LineageTreeProvider(h.deps);
+
+    const roots = p.getChildren();
+    expect(roots.map((r) => r.type)).toEqual(['project', 'group', 'group']);
+    const projectRow = roots[0] as ProjectGroupNode;
+    expect(projectRow.label).toBe('API');
+    expect(projectRow.rootIds).toEqual([A]);
+    expect(p.getChildren(projectRow)).toEqual([ref(A)]);
+  });
+
+  it('renders a project row with its extra-dir count and nothing else', () => {
+    const h = harness(forest());
+    h.setProjects([project('p1', 'API', '/code/api', { dirs: ['/shared'] })]);
+    const p = new LineageTreeProvider(h.deps);
+
+    const item = p.getTreeItem(p.getChildren()[0]);
+    expect(item.id).toBe('project:p1');
+    expect(item.label).toBe('API');
+    expect(item.description).toBe('+1 dir');
+    expect(item.contextValue).toBe(';project;');
+    // A project is not a session — it must never take a SESSION decoration.
+    // Since M12 it carries its own scheme, which decorates only the bubbled-up
+    // unseen dot and renders nothing otherwise.
+    const uri = item.resourceUri as { scheme: string; path: string };
+    expect(uri.scheme).toBe('lineage-project');
+    expect(uri.path).toBe('/p1');
+  });
+
+  // Both root kinds read as the same "this is a container" shape — a project
+  // is not a fancier folder, it just also carries the M12 unseen-dot
+  // decoration exercised above, which this icon change leaves untouched.
+  it('gives a folder row the same unbranded root-folder icon as a project row', () => {
+    const h = harness(forest());
+    h.setProjects([project('p1', 'API', '/code/api')]);
+    const p = new LineageTreeProvider(h.deps);
+
+    const roots = p.getChildren();
+    expect(roots.map((r) => r.type)).toEqual(['project', 'group', 'group']);
+    const projectIcon = p.getTreeItem(roots[0]).iconPath as unknown as {
+      id: string;
+      color?: unknown;
+    };
+    const folderIcon = p.getTreeItem(roots[1]).iconPath as unknown as {
+      id: string;
+      color?: unknown;
+    };
+    expect(projectIcon.id).toBe('root-folder');
+    expect(projectIcon.color).toBeUndefined();
+    expect(folderIcon.id).toBe('root-folder');
+    expect(folderIcon.color).toBeUndefined();
+  });
+
+  it('marks an empty project so its menu can differ', () => {
+    const h = harness(forestOf([]));
+    h.setProjects([project('p1', 'API', '/code/api')]);
+    const p = new LineageTreeProvider(h.deps);
+
+    const item = p.getTreeItem(p.getChildren()[0]);
+    // No description at all: a project row no longer restates its session
+    // count, and "no sessions" is what the absence of child rows already says.
+    expect(item.description).toBeUndefined();
+    // `;empty;` is what the menu keys off, and it is still there.
+    expect(item.contextValue).toBe(';project;empty;');
+    // Still expandable: collapsing it would hide the only affordance it has.
+    expect(item.collapsibleState).toBe(TreeItemCollapsibleState.Expanded);
+  });
+
+  it('walks a session up to its project row via getParent', () => {
+    const h = harness(forest());
+    h.setProjects([project('p1', 'API', '/code/api')]);
+    const p = new LineageTreeProvider(h.deps);
+
+    const roots = p.getChildren();
+    expect(p.getParent(ref(A))).toBe(roots[0]);
+    expect(p.getParent(roots[0])).toBeUndefined();
+  });
+
+  it('removes a hidden folder from the tree entirely', () => {
+    const h = harness(forest());
+    h.setHiddenFolders(['/elsewhere']);
+    const p = new LineageTreeProvider(h.deps);
+
+    const labels = (p.getChildren() as GroupNode[]).map((g) => g.label);
+    expect(labels).toEqual(['src', 'web']); // C's /elsewhere row is gone
+  });
+
+  it('honours onlyProjectSessions once a project exists', () => {
+    const h = harness(forest());
+    h.setProjects([project('p1', 'API', '/code/api')]);
+    h.setOnlyProjectSessions(true);
+    const p = new LineageTreeProvider(h.deps);
+
+    const roots = p.getChildren();
+    expect(roots).toHaveLength(1);
+    expect((roots[0] as ProjectGroupNode).rootIds).toEqual([A]);
+  });
+
+  it('recomputes when a project changes even though the forest did not', () => {
+    const h = harness(forest());
+    const p = new LineageTreeProvider(h.deps);
+    expect(p.getChildren().map((r) => r.type)).toEqual([
+      'group',
+      'group',
+      'group',
+    ]);
+
+    h.setProjects([project('p1', 'API', '/code/api')]);
+    expect(p.getChildren().map((r) => r.type)).toEqual([
+      'project',
+      'group',
+      'group',
+    ]);
+  });
+
+  it('keeps rendering when every project dependency throws', () => {
+    const h = harness(forest());
+    const broken: TreeDeps & DecorationDeps = {
+      ...h.deps,
+      projects: () => {
+        throw new Error('boom');
+      },
+      hiddenFolders: () => {
+        throw new Error('boom');
+      },
+      onlyProjectSessions: () => {
+        throw new Error('boom');
+      },
+      providerFor: () => {
+        throw new Error('boom');
+      },
+      mediaPath: () => {
+        throw new Error('boom');
+      },
+    };
+    const p = new LineageTreeProvider(broken);
+    expect(p.getChildren()).toHaveLength(3);
+    expect(p.getTreeItem(ref(A)).label).toBe(node(A).label);
+  });
+});
+
+// --------------------------------------------------------- provider icons
+
+describe('provider icons', () => {
+  it('uses the provider svg from the extension install', () => {
+    const h = harness(forestOf([node(A, { cwd: '/code/api' })]));
+    h.setProvider('gemini');
+    h.setMediaPath((relative) => `/ext/${relative}`);
+    const p = new LineageTreeProvider(h.deps);
+
+    const icon = p.getTreeItem(ref(A)).iconPath as unknown as Uri;
+    expect(icon.scheme).toBe('file');
+    expect(icon.path).toBe('/ext/media/providers/gemini.svg');
+  });
+
+  it('falls back to a codicon when no media path is available', () => {
+    const h = harness(forestOf([node(A)]));
+    const p = new LineageTreeProvider(h.deps);
+    const icon = p.getTreeItem(ref(A)).iconPath as unknown as { id: string };
+    expect(icon.id).toBe('sparkle'); // PROVIDERS.claude.fallbackIcon
+  });
+
+  it('falls back to claude for an unknown provider id', () => {
+    const h = harness(forestOf([node(A)]));
+    h.setProvider('llama' as ProviderId);
+    h.setMediaPath((relative) => `/ext/${relative}`);
+    const p = new LineageTreeProvider(h.deps);
+    const icon = p.getTreeItem(ref(A)).iconPath as unknown as Uri;
+    expect(icon.path).toBe('/ext/media/providers/claude.svg');
+  });
+
+  it('gives an archived session the provider glyph too', () => {
+    const h = harness(forestOf([node(A, { archived: true, status: 'exited' })]));
+    h.setMediaPath((relative) => `/ext/${relative}`);
+    const p = new LineageTreeProvider(h.deps);
+    const item = p.getTreeItem(ref(A));
+    expect((item.iconPath as unknown as Uri).path).toBe(
+      '/ext/media/providers/claude.svg',
+    );
+    // And "closed" is NOT in the description — it is the decoration's ring and
+    // the grey label its colour brings with it.
+    expect(item.description).not.toContain('closed');
+  });
+
+  it('keeps circle-slash for a ghost — an inferred node has no provider', () => {
+    const h = harness(forestOf([node(A, { ghost: true, status: 'exited' })]));
+    h.setMediaPath((relative) => `/ext/${relative}`);
+    const p = new LineageTreeProvider(h.deps);
+    const icon = p.getTreeItem(ref(A)).iconPath as unknown as { id: string };
+    expect(icon.id).toBe('circle-slash');
+  });
+
+  // A project is a container, not a session — it claims no provider's logo,
+  // regardless of what a session underneath it would resolve to. Unbranded
+  // ThemeIcon, no ThemeColor: the section-header treatment in webtree.css
+  // (native parity has none, hence no colour here either) carries "this is a
+  // root" instead of a mark.
+  it('gives a project row an unbranded root-folder icon, not its provider glyph', () => {
+    const h = harness(forestOf([]));
+    h.setProjects([project('p1', 'Codex work', '/code', { provider: 'codex' })]);
+    h.setMediaPath((relative) => `/ext/${relative}`);
+    const p = new LineageTreeProvider(h.deps);
+    const icon = p.getTreeItem(p.getChildren()[0]).iconPath as unknown as {
+      id: string;
+      color?: unknown;
+    };
+    expect(icon.id).toBe('root-folder');
+    expect(icon.color).toBeUndefined();
+  });
+
+  // The codex half-pair-missing case above pushes providerIcon() down its
+  // single-file fallback branch for a SESSION row; a project row must not
+  // reach providerIcon() at all, in either branch, so the same unbranded icon
+  // comes out here too.
+  it('gives a project row the same unbranded icon when its provider media is only half present', () => {
+    const h = harness(forestOf([]));
+    h.setProjects([project('p1', 'Codex work', '/code', { provider: 'codex' })]);
+    h.setMediaPath((relative) =>
+      relative.includes('codex-dark') ? undefined : `/ext/${relative}`,
+    );
+    const p = new LineageTreeProvider(h.deps);
+    const icon = p.getTreeItem(p.getChildren()[0]).iconPath as unknown as {
+      id: string;
+      color?: unknown;
+    };
+    expect(icon.id).toBe('root-folder');
+    expect(icon.color).toBeUndefined();
+  });
+});
+
+// --------------------------------------------------------------- M8: hidden
+
+describe('hidden (muted) rows', () => {
+  it('greys the row with eye-closed instead of the brand glyph', () => {
+    const h = harness(forestOf([node(A, { hidden: true })]));
+    h.setMediaPath((relative) => `/ext/${relative}`);
+    const p = new LineageTreeProvider(h.deps);
+    const item = p.getTreeItem(ref(A));
+    const icon = item.iconPath as unknown as { id: string; color?: unknown };
+    // A file iconPath is never recoloured by the workbench, so the brand svg
+    // cannot be greyed — a themed codicon can.
+    expect(icon.id).toBe('eye-closed');
+  });
+
+  it('says "hidden" in the description, not only in the colour', () => {
+    const h = harness(forestOf([node(A, { hidden: true })]));
+    const p = new LineageTreeProvider(h.deps);
+    // FileDecoration colours are user-gated; the description never is.
+    expect(p.getTreeItem(ref(A)).description).toContain('hidden');
+  });
+
+  it('carries a ;hidden; token so the menu can offer Unhide', () => {
+    const h = harness(forestOf([node(A, { hidden: true })]));
+    const p = new LineageTreeProvider(h.deps);
+    const cv = p.getTreeItem(ref(A)).contextValue;
+    expect(cv).toContain(';hidden;');
+    expect(cv).not.toContain(';shown;');
+  });
+
+  it('carries the complementary ;shown; token on a normal row', () => {
+    // Exactly one of the pair, always — so neither menu entry needs a negated
+    // `when` clause.
+    const h = harness(forestOf([node(A)]));
+    const p = new LineageTreeProvider(h.deps);
+    const cv = p.getTreeItem(ref(A)).contextValue;
+    expect(cv).toContain(';shown;');
+    expect(cv).not.toContain(';hidden;');
+  });
+
+  it('does not badge the view for a muted session that is waiting', () => {
+    const h = harness(
+      forestOf([
+        node(A, { hidden: true, attention: 'waiting', status: 'waiting' }),
+        node(B, { attention: 'waiting', status: 'waiting' }),
+      ]),
+    );
+    const p = new LineageTreeProvider(h.deps);
+    expect(p.attentionCount()).toBe(1);
+  });
 });
 
 // ------------------------------------------------------------------- drag/drop
 
 async function drop(
   p: LineageTreeProvider,
-  target: SessionRef | GroupNode | undefined,
+  target: SessionRef | GroupNode | ProjectGroupNode | undefined,
   ids: string[],
 ): Promise<void> {
   const dt = new DataTransfer();
@@ -436,6 +931,38 @@ describe('LineageTreeProvider drag and drop', () => {
     ]);
   });
 
+  it('assigns to the project instead of reparenting when dropped on one', async () => {
+    h.setProjects([project('p1', 'Alpha', '/tmp/alpha')]);
+    const roots = p.getChildren();
+    const projectRow = roots.find((r) => r.type === 'project');
+    expect(projectRow).toBeDefined();
+
+    await drop(p, projectRow as ProjectGroupNode, [B]);
+    expect(h.assigned).toEqual([[B, 'p1']]);
+    // Canopy is untouched — this gesture is about addresses, not ancestry.
+    expect(h.reparented).toEqual([]);
+  });
+
+  it('ignores a non-root session dropped on a project', async () => {
+    // A project row renders visible ROOTS only, so assigning a nested fork
+    // could never move it on screen — it would just append its cwd to the
+    // project's directory list and look like the gesture had failed.
+    h.setProjects([project('p1', 'Alpha', '/tmp/alpha')]);
+    const projectRow = p.getChildren().find((r) => r.type === 'project');
+
+    await drop(p, projectRow as ProjectGroupNode, [C]);
+    expect(h.assigned).toEqual([]);
+    expect(h.reparented).toEqual([]);
+  });
+
+  it('assigns only the roots when a mixed selection is dropped', async () => {
+    h.setProjects([project('p1', 'Alpha', '/tmp/alpha')]);
+    const projectRow = p.getChildren().find((r) => r.type === 'project');
+
+    await drop(p, projectRow as ProjectGroupNode, [B, C]);
+    expect(h.assigned).toEqual([[B, 'p1']]);
+  });
+
   it('reparents onto another session', async () => {
     await drop(p, ref(B), [C]);
     expect(h.reparented).toEqual([[C, B]]);
@@ -454,7 +981,7 @@ describe('SessionDecorationProvider.provideFileDecoration', () => {
     return new SessionDecorationProvider(deps);
   };
 
-  it('badges a waiting session with ! in the lineage.waiting color', () => {
+  it('lights the dot in the done colour for a session waiting on you', () => {
     const p = build([
       node(A, {
         status: 'waiting',
@@ -463,30 +990,74 @@ describe('SessionDecorationProvider.provideFileDecoration', () => {
       }),
     ]);
     const d = p.provideFileDecoration(sessionUri(A) as never);
-    expect(d?.badge).toBe('!');
-    expect((d?.color as unknown as { id: string }).id).toBe(WAITING_COLOR_ID);
+    expect(d?.badge).toBe(STATUS_DOT);
+    expect((d?.color as unknown as { id: string }).id).toBe(DONE_COLOR_ID);
     expect(d?.tooltip).toBe('waiting: dialog open');
     expect(d?.propagate).toBe(false);
   });
 
-  it('badges a busy session with »', () => {
+  it('lights the dot in the running colour for a busy session', () => {
     const p = build([node(A, { status: 'busy' })]);
-    expect(p.provideFileDecoration(sessionUri(A) as never)?.badge).toBe('»');
+    const d = p.provideFileDecoration(sessionUri(A) as never);
+    expect(d?.badge).toBe(STATUS_DOT);
+    expect((d?.color as unknown as { id: string }).id).toBe(RUNNING_COLOR_ID);
   });
 
-  it('dims a ghost with color only', () => {
+  // M19: greys the ghost, draws no mark. The empty ring that used to sit here
+  // said what the grey label already says, on every dead row in the tree.
+  it('greys a ghost without marking it', () => {
     const p = build([node(A, { ghost: true, status: 'exited' })]);
     const d = p.provideFileDecoration(sessionUri(A) as never);
     expect(d?.badge).toBeUndefined();
-    expect((d?.color as unknown as { id: string }).id).toBe('disabledForeground');
+    expect((d?.color as unknown as { id: string }).id).toBe(CLOSED_COLOR_ID);
+    // The hover is the only place left to say which kind of dead this is.
+    expect(d?.tooltip).toBe('gone');
   });
 
-  it('leaves an idle session, an unknown id and a foreign scheme alone', () => {
+  it('greys an archived session, with the word only in the hover', () => {
+    const p = build([node(A, { archived: true, status: 'exited' })]);
+    const d = p.provideFileDecoration(sessionUri(A) as never);
+    expect(d?.badge).toBeUndefined();
+    expect((d?.color as unknown as { id: string }).id).toBe(CLOSED_COLOR_ID);
+    expect(d?.tooltip).toBe('closed');
+  });
+
+  it('draws nothing at all for an idle session', () => {
+    // Quiet is the absence of a mark, not a mark of its own: a tree where every
+    // idle row carries a dot teaches the eye to skip dots.
     const p = build([node(A, { status: 'idle' })]);
     expect(p.provideFileDecoration(sessionUri(A) as never)).toBeUndefined();
+  });
+
+  it('leaves an unknown id and a foreign scheme alone', () => {
+    const p = build([node(A, { status: 'idle' })]);
     expect(p.provideFileDecoration(sessionUri(B) as never)).toBeUndefined();
     expect(
       p.provideFileDecoration(Uri.file('/tmp/alpha/file.ts') as never),
     ).toBeUndefined();
+  });
+
+  it('dims a hidden session with color only', () => {
+    const p = build([node(A, { hidden: true })]);
+    const d = p.provideFileDecoration(sessionUri(A) as never);
+    expect(d?.badge).toBeUndefined();
+    expect((d?.color as unknown as { id: string }).id).toBe('disabledForeground');
+    expect(d?.tooltip).toBe('hidden');
+  });
+
+  it('leaves a hidden session no dot at all, even when it is waiting', () => {
+    // Hide is checked ahead of attention: a muted row that keeps shouting
+    // would fail at the one thing the user hid it to achieve.
+    const p = build([
+      node(A, {
+        hidden: true,
+        status: 'waiting',
+        attention: 'waiting',
+        roster: { sessionId: A, waitingFor: 'dialog open' },
+      }),
+    ]);
+    const d = p.provideFileDecoration(sessionUri(A) as never);
+    expect(d?.badge).toBeUndefined();
+    expect((d?.color as unknown as { id: string }).id).toBe('disabledForeground');
   });
 });

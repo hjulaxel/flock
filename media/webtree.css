@@ -1,0 +1,946 @@
+/* M9 — the inline-rename sidebar.
+ *
+ * Every colour is a VS Code theme variable, never a literal: the webview has to
+ * be indistinguishable from a native view in any theme the user installs, and a
+ * hard-coded colour is the one thing that gives a webview away.
+ *
+ * Metrics match the workbench list — 22px rows, the same focus/hover/selection
+ * treatments — everywhere except the indent, which is 12px rather than 8px to
+ * make room for the spine that replaced the chevron. See --indent below. */
+
+:root {
+  --row-height: 22px;
+
+  /* ------------------------------------------------------------ the spine
+   *
+   * The tree draws its structure instead of leaving it to indentation and a
+   * chevron: a rail per open ancestor, a rounded elbow hanging each row off its
+   * parent's rail, and a node at the end of it — a ⊕/⊖ ring where there is
+   * something to open, a small filled dot where the lineage stops. In a view
+   * whose entire subject is what forked from what, "which row is this one's
+   * parent" is the question being asked on every glance, and a line answers it
+   * without the eye having to measure two indents against each other.
+   *
+   * These four are duplicated as plain numbers at the top of webtree.js, which
+   * positions every piece: this file paints, that one places, and the pair must
+   * move together. --indent is one nesting level; --rail-col is the node's own
+   * column, kept at the workbench's 16px so the logo and the label sit exactly
+   * where they always have.
+   *
+   * --indent is 12px rather than the workbench's 8px, and it buys the elbow
+   * somewhere to happen. The corner has a radius, and the node it lands in is
+   * --node-size across: at 8px per level the turn would begin under the ring it
+   * is turning into, leaving a smudge instead of a corner. 12px leaves a few
+   * clear pixels on either side of the curve — the smallest step at which the
+   * elbow reads as a line joining two things. */
+  --indent: 12px;
+  --rail-col: 16px;
+  --node-size: 11px;
+  --dot-size: 5px;
+
+  /* The weight of every line in the spine, and the one metric here the CLIENT
+   * overwrites: webtree.js replaces it with a whole number of DEVICE pixels
+   * expressed in CSS px, because VS Code's zoom steps are x1.2 and a 1px line
+   * under a fractional scale is painted across two device pixels at partial
+   * strength — a soft double-width rail where a crisp single one was asked for.
+   * The 1px here is the fallback and the value on every whole-number scale;
+   * see "the device grid" at the top of webtree.js for why the widths and the
+   * offsets both have to be snapped for either to help. */
+  --hairline: 1px;
+
+  /* ONE ink for the whole spine — rails, elbows, stems, rings and dots alike —
+   * and it is the workbench's own `tree.indentGuidesStroke`, the colour every
+   * theme already publishes for exactly this line. A spine drawn in two greys
+   * reads as two systems; drawn in one, it reads as a diagram, which is what it
+   * is. It lands well below a label's contrast and well above the background,
+   * which is the whole requirement: legible as structure, never competing with
+   * a session name for the eye.
+   *
+   * NOT `tree.inactiveIndentGuidesStroke`, the obvious-looking pick. That token
+   * is the workbench's ~40%-alpha "this guide is not on the active path", and
+   * at that strength on a stock dark sidebar the rails are a rumour — the tree
+   * looks like floating dots with nothing joining them, which is the one thing
+   * this design exists to fix. Every rail here is on some row's path.
+   *
+   * The lit tone is the icon foreground: what a control looks like when the
+   * pointer is on it, borrowed from every other glyph in the workbench.
+   *
+   * Both fallbacks are mixed from the sidebar's own foreground rather than
+   * named, so a host that is not VS Code still gets a visible line — see
+   * --root-band above for why a mix of a foreground cannot come out invisible. */
+  --rail-ink: var(
+    --vscode-tree-indentGuidesStroke,
+    color-mix(
+      in srgb,
+      var(--vscode-sideBar-foreground, var(--vscode-foreground)) 42%,
+      transparent
+    )
+  );
+  --rail-ink-lit: var(
+    --vscode-icon-foreground,
+    var(--vscode-sideBar-foreground, var(--vscode-foreground))
+  );
+
+  /* Two tints derived from the theme rather than named: a foreground is
+   * guaranteed to contrast with the surface it is read on, so a tenth of it is
+   * guaranteed to be a visible shade of that surface — darker on a light theme,
+   * lighter on a dark one — in every theme anyone installs. This is how a root
+   * row gets a band that is actually there on the stock themes; see .row.project
+   * below for why the semantic token alone is not enough. */
+  --root-band: color-mix(
+    in srgb,
+    var(--vscode-sideBar-foreground, var(--vscode-foreground)) 10%,
+    transparent
+  );
+  --root-rule: color-mix(
+    in srgb,
+    var(--vscode-sideBar-foreground, var(--vscode-foreground)) 22%,
+    transparent
+  );
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+  font-weight: var(--vscode-font-weight);
+  color: var(--vscode-sideBar-foreground, var(--vscode-foreground));
+  background: transparent;
+  user-select: none;
+  cursor: default;
+}
+
+#tree {
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  outline: none;
+}
+
+/* ------------------------------------------------------------------- rows */
+
+/* One left padding for every row, header and session alike, and the client sets
+ * no per-row indent on top of it (see renderRow). All the nesting that is left
+ * lives inside the gutter, which only a session draws: a project heads a
+ * section rather than a lineage, so nothing hangs off it and nothing has to
+ * clear it. */
+.row {
+  display: flex;
+  align-items: center;
+  height: var(--row-height);
+  line-height: var(--row-height);
+  padding-left: 4px;
+  padding-right: 6px;
+  white-space: nowrap;
+  position: relative;
+}
+
+/* Root rows (projects and folders) read as section headers, the way the
+ * Explorer treats a workspace folder: a band and a bold label, so the eye can
+ * find "where does this group start" before reading anything under it.
+ *
+ * The band is TWO layers, and that split is what makes it visible at all.
+ * `sideBarSectionHeader.background` is the semantically right colour and is
+ * kept as the base, but Dark Modern and Light Modern — the stock defaults, so
+ * what most users are looking at — set it to exactly `sideBar.background`. A
+ * band painted with that alone is a band nobody can see; it only shows up on
+ * the classic Dark+/Light+ themes. The second layer is --root-band, mixed from
+ * the sidebar's own foreground, which cannot be invisible against the surface
+ * that foreground is read on.
+ *
+ * The tint is a background-IMAGE, not a colour, and that is deliberate: hover
+ * and selection below set background-COLOR, so they replace the header colour
+ * and the tint stays layered over the result. A root row therefore keeps its
+ * band AND gets the full hover/selection delta every other row gets, instead of
+ * the two treatments fighting over one property — which, with a band this close
+ * in value to list.hoverBackground, would have left root rows with no visible
+ * hover at all.
+ *
+ * ORDER-DEPENDENT: this block must stay BEFORE .row:hover / .row.selected /
+ * .row.drop-target. All of them are specificity (0,2,0), and source order is
+ * what lets those three win the background-color they share with it.
+ *
+ * The top rule is an INSET SHADOW, not a border. A border inside a fixed
+ * `height: 22px` with `box-sizing: border-box` eats a pixel out of the content
+ * box, which drops the label 1px against every session row below it; a shadow
+ * paints in the same place for no layout at all. */
+.row.project,
+.row.folder {
+  background-color: var(--vscode-sideBarSectionHeader-background, transparent);
+  background-image: linear-gradient(var(--root-band), var(--root-band));
+  box-shadow: inset 0 1px 0
+    var(--vscode-sideBarSectionHeader-border, var(--root-rule));
+}
+
+/* No rule above the very first row: it has nothing to separate itself from. */
+#tree > .row.project:first-child,
+#tree > .row.folder:first-child {
+  box-shadow: none;
+}
+
+/* No text-transform and no colour override here: a project's label is an
+ * arbitrary user-chosen string, not a fixed heading, and some themes already
+ * dim sideBarSectionHeader.foreground — doubling that on top of a bold weight
+ * would make long names unreadable. */
+.row.project .name,
+.row.folder .name {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+/* background-COLOR rather than the `background` shorthand, here and in the two
+ * rules under it: the shorthand also resets background-image, which would take
+ * the root-row band off any root row the pointer touches. Setting the one
+ * longhand each of them actually means leaves the band layered on top, so a
+ * root row hovers and selects exactly as far as a session row does. */
+.row:hover {
+  background-color: var(--vscode-list-hoverBackground);
+  color: var(--vscode-list-hoverForeground, inherit);
+}
+
+/* Selected AND the tree has focus. */
+#tree:focus-within .row.selected {
+  background-color: var(--vscode-list-activeSelectionBackground);
+  color: var(--vscode-list-activeSelectionForeground);
+}
+/* On the active selection the spine takes the selection's own foreground: the
+ * indent-guide greys are mixed to read against the SIDEBAR, and the selection
+ * band is not the sidebar. The elbow and the stem come with it — they are this
+ * row's own two lines — while the rails, which belong to rows above, keep their
+ * quiet ink and pass through the band unchanged. */
+#tree:focus-within .row.selected .node,
+#tree:focus-within .row.selected .desc {
+  color: inherit;
+}
+
+/* Two properties, not one shorthand on both: the elbow is a pair of BORDERS
+ * (the corner has to be a single rounded stroke) and the stem is a filled box,
+ * so a background on the elbow would flood the square the corner is drawn in.
+ *
+ * Mixed down to 60%, not taken at full strength. The selection foreground is
+ * chosen to carry TEXT on the selection band — at full weight a 1px line in it
+ * is brighter than any other line on screen, and the selected row's elbow ends
+ * up shouting over the label it belongs to. 60% keeps the line clearly on the
+ * band while leaving the name the loudest thing in the row. */
+#tree:focus-within .row.selected .elbow {
+  border-color: color-mix(in srgb, currentColor 60%, transparent);
+}
+
+#tree:focus-within .row.selected .stem {
+  background-color: color-mix(in srgb, currentColor 60%, transparent);
+}
+
+/* Selected while focus is elsewhere — the workbench dims it the same way. */
+.row.selected {
+  background-color: var(--vscode-list-inactiveSelectionBackground);
+  color: var(--vscode-list-inactiveSelectionForeground, inherit);
+}
+
+#tree:focus-within .row.focused {
+  outline: 1px solid var(--vscode-list-focusOutline);
+  outline-offset: -1px;
+}
+
+.row.drop-target {
+  background-color: var(--vscode-list-dropBackground);
+}
+
+.row.dragging {
+  opacity: 0.5;
+}
+
+/* --------------------------------------------------------------- the spine */
+
+/* The gutter holds one row's worth of the tree's structure. Its width is set
+ * per row by the client (--rail-col + depth * --indent) and everything inside
+ * is absolutely positioned against it: a spine costs no layout, so no amount of
+ * nesting can push a label around, and the row stays one flex line whatever it
+ * is drawing.
+ *
+ * The whole coordinate system is one line of arithmetic — column k's centre is
+ * 8px + k * --indent from the gutter's left edge — and the client does that
+ * arithmetic. Nothing below sets a `left`; they only say how wide, how tall and
+ * what colour. */
+.gutter {
+  flex: 0 0 auto;
+  height: 100%;
+  position: relative;
+}
+
+/* A rail, an elbow's vertical, and a stem are all THE SAME 1px column of
+ * pixels: a rail at column k and the elbow's border-left at column k both
+ * occupy [x, x+1), so where a rail runs past a row that also hangs off it the
+ * two coincide exactly instead of doubling into a 2px smear. That is why the
+ * elbow is a bordered box rather than two separate bars — the corner has to be
+ * one continuous stroke with the rail above it, and a border with a radius is
+ * the only way to get a rounded join that is guaranteed to be on the same
+ * pixel. */
+.rail,
+.stem {
+  position: absolute;
+  width: var(--hairline, 1px);
+  background: var(--rail-ink);
+}
+
+.rail {
+  top: 0;
+  bottom: 0;
+}
+
+/* This row's own rail, from the bottom of its node to the row's bottom edge,
+ * where the first child's elbow takes over. It starts at exactly the node's
+ * lower edge (50% + half of --node-size) rather than at the row's middle: a
+ * stem that started at the centre would draw a line down the inside of the ring
+ * it belongs to, and the ring has to stay transparent so the row's hover and
+ * selection colours run underneath it unbroken. */
+.stem {
+  top: calc(50% + var(--node-size) / 2 - 0.5px);
+  bottom: 0;
+}
+
+/* The elbow: down the parent's column, then a rounded turn right into this
+ * row's node. Two borders of one box, so the corner is a single stroke.
+ *
+ * Height is exactly 50%, which puts the horizontal at [10px, 11px) on a 22px
+ * row — the same pixel row the node's centre line falls on, so the line meets
+ * the ring dead centre with nothing to antialias. Width comes from the client:
+ * it stops the line at the ring's edge (or the dot's), never under it. */
+.elbow {
+  position: absolute;
+  top: 0;
+  height: 50%;
+  border-left: var(--hairline, 1px) solid var(--rail-ink);
+  border-bottom: var(--hairline, 1px) solid var(--rail-ink);
+  border-bottom-left-radius: 4px;
+}
+
+/* The elbow belongs to the row you are pointing at, so it lifts with it — the
+ * one line on screen that says "this is the row's parent" is worth brightening
+ * at the moment someone is looking for it. The rails do not: they belong to
+ * other rows, and lighting up a column because the pointer crossed one of the
+ * rows it passes would be a claim about the wrong row. */
+.row:hover .elbow {
+  border-color: var(--rail-ink-lit);
+}
+
+/* The node — the endpoint, and the twisty. A full-height 16px box, all of it
+ * clickable: the ring inside is 11px across, which is a small target for the
+ * gesture a tree is used with most, and the box is free to be bigger than what
+ * it draws. `color` is set here and inherited by both marks, so one rule moves
+ * the ring, its two bars and the leaf dot together. */
+.node {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: var(--rail-col);
+  color: var(--rail-ink);
+}
+
+.node.toggle {
+  cursor: pointer;
+}
+
+.row:hover .node,
+.node:hover {
+  color: var(--rail-ink-lit);
+}
+
+/* Ring and dot both centre on the same point, so a row that gains or loses
+ * children does not shift its spine sideways or up by a pixel.
+ *
+ * That point is the CENTRE OF THE RAIL'S PIXEL, not the geometric centre of the
+ * column: a 1px rail placed at x covers [x, x+1) and is therefore centred on
+ * x + 0.5. Both offsets below carry that half pixel — +0.5px across, -0.5px
+ * down (the elbow's horizontal lands on [10px, 11px) of a 22px row, centred on
+ * 10.5) — and the whole spine comes out on whole pixels with the stem leaving
+ * the bottom of the ring exactly where it entered the top. Drop either one and
+ * every ring sits half a pixel off its own rail, which at 1x is a visibly
+ * soft-edged circle hanging off a crisp line. */
+.ring,
+.dot {
+  position: absolute;
+}
+
+/* TRANSPARENT inside, always. A ring filled with the sidebar's background would
+ * punch a hole in every hover, selection and root-row band it sat on — and the
+ * stem is already routed around it (see .stem), so there is nothing left for a
+ * fill to hide. */
+.ring {
+  width: var(--node-size);
+  height: var(--node-size);
+  left: calc((var(--rail-col) - var(--node-size)) / 2 + 0.5px);
+  top: calc(50% - var(--node-size) / 2 - 0.5px);
+  border: 1px solid currentColor;
+  border-radius: 50%;
+}
+
+/* The ⊕/⊖ itself: two bars, both 5x1 inside the ring's 9x9 padding box, and the
+ * expanded state ROTATES the upright one onto the horizontal instead of hiding
+ * it. Same shape either way, and the transition is the sign turning from a plus
+ * into a minus — which is the gesture, drawn. A collapsed row says "there is
+ * more here" with the one glyph everybody already reads that way. */
+.ring::before,
+.ring::after {
+  content: '';
+  position: absolute;
+  background: currentColor;
+}
+
+.ring::before {
+  left: 2px;
+  top: 4px;
+  width: 5px;
+  height: 1px;
+}
+
+.ring::after {
+  left: 4px;
+  top: 2px;
+  width: 1px;
+  height: 5px;
+  transition: transform 0.14s ease;
+}
+
+/* Rotating about its own centre, which sits on the ring's centre, lands it
+ * exactly on top of ::before. */
+.node.expanded .ring::after {
+  transform: rotate(90deg);
+}
+
+/* A leaf: the lineage stops here, and the mark says so by being solid and small
+ * — a full stop rather than a control. Nothing to click, so the box under it
+ * lets the row's own handlers have the event. */
+.dot {
+  width: var(--dot-size);
+  height: var(--dot-size);
+  left: calc((var(--rail-col) - var(--dot-size)) / 2 + 0.5px);
+  top: calc(50% - var(--dot-size) / 2 - 0.5px);
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.node.leaf {
+  pointer-events: none;
+}
+
+/* ------------------------------------------------------------- row pieces */
+
+.icon {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  margin-right: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.icon img {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+.icon .codicon {
+  font-size: 16px;
+  color: var(--vscode-icon-foreground);
+}
+
+.icon .codicon.brand {
+  color: var(--lineage-brand, var(--vscode-textLink-foreground));
+}
+
+.icon .codicon.muted {
+  color: var(--vscode-disabledForeground);
+}
+
+/* A root row has no per-row mark to show — see pushProject()'s icon:'none' —
+ * so the column it would sit in is dropped rather than left as dead space. With
+ * the gutter gone from header rows too, the bold label now starts at the row's
+ * own 4px: a section heading, hard against the edge, with everything filed
+ * under it indented by its own spine. */
+.row.project .icon,
+.row.folder .icon {
+  display: none;
+}
+
+/* A row's marks: small glyphs that state a FACT about the session, drawn just
+ * right of its name. Not buttons and not hover-revealed — a mark you can only
+ * see by pointing at the row is a mark that cannot answer "why is this one
+ * quiet?" while you are scanning the tree.
+ *
+ * Painted as a mask over the theme's icon colour, exactly like .action-glyph,
+ * and dimmed: it is a footnote to the name, not a competitor for it. */
+.marks {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 5px;
+  flex: 0 0 auto;
+}
+
+.mark {
+  width: 13px;
+  height: 13px;
+  background-color: var(--vscode-icon-foreground);
+  opacity: 0.65;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+}
+
+.name {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Right-hand column: how long ago, then the dot. The spacer is emitted BEFORE
+ * both, so they sit against the right edge instead of trailing the label.
+ *
+ * With the dot AFTER the age you can align the ages or align the dots, never
+ * both: an age is 'now' / '5m' / '12h' / '3d', so where it starts moves with its
+ * own width. The dots win. They are what you scan a whole sidebar for, and a
+ * column of them is only a column if every one sits at the same x. The two
+ * possible age positions differ by exactly the 16px a dotless row vacates.
+ * Tabular figures keep the remaining wander down to whole characters.
+ *
+ * flex-shrink: 0 — the age NEVER shrinks. It is four characters at most, and
+ * ellipsizing it produces '1…', which is not a shorter age but a wrong one. The
+ * label is the piece that gives way in a narrow sidebar: it shrinks (flex:0 1
+ * auto) and ellipsizes, which is what truncating a name is supposed to look
+ * like. The ellipsis properties stay here as a floor for the pathological case
+ * where the label has already collapsed to nothing and the age still does not
+ * fit. */
+.desc {
+  flex: 0 0 auto;
+  margin-left: 8px;
+  opacity: 0.7;
+  font-size: 0.9em;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  text-align: right;
+}
+
+.spacer {
+  flex: 1 1 auto;
+  min-width: 6px;
+}
+
+/* The reserved slot for a row's action buttons (project rows only, for now —
+ * see renderRow()'s conditional append). `visibility`, never `display`: the
+ * age column and the dot column must not shift by the button strip's width
+ * the instant the pointer enters a row, and only `visibility` leaves the
+ * layout box in place while hiding its contents. Because the element is only
+ * appended for rows that HAVE actions, a plain session row reserves no width
+ * for it at all — the dot column's alignment arithmetic above never has to
+ * account for a slot most rows do not carry.
+ *
+ * The strip is packed from the right edge, so its x is set by whatever sits to
+ * its RIGHT: the row's 6px padding plus the dot's slot, and nothing else. That
+ * is why the dot's slot is held open on a project row whether the dot is lit or
+ * not (see .row.project .badge.none below) — it is the whole of the arithmetic
+ * that keeps every project's chat button in the same column. */
+.actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: 4px;
+  flex: 0 0 auto;
+  visibility: hidden;
+}
+
+.row:hover .actions,
+.row.focused .actions {
+  visibility: visible;
+}
+
+/* `all: unset` first, because a <button> arrives with a user-agent border,
+ * background, font and padding that have nothing to do with a toolbar icon and
+ * would otherwise have to be unset one property at a time. */
+.action {
+  all: unset;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.action:hover {
+  background: var(--vscode-toolbar-hoverBackground);
+}
+
+/* Only on keyboard focus: a ring drawn after every mouse click would be noise
+ * on a button whose whole job is to be clicked and forgotten. */
+.action:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+}
+
+/* MASK, not <img>. The svg's own colour is thrown away and the box is painted
+ * with the theme's icon foreground showing through the mask — which is the
+ * only way one monochrome file reads correctly in both a light and a dark
+ * theme. An <img> would keep whatever colour the file was authored in and be
+ * invisible against one of the two backgrounds. The mask-image URL itself is
+ * set per element by renderActions(). */
+.action-glyph {
+  width: 14px;
+  height: 14px;
+  background-color: var(--vscode-icon-foreground);
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+}
+
+/* The mark is DRAWN, not typed. A '●' sits on the text baseline at whatever size
+ * the font hands it and cannot be given an outline at all; an 8px box with a 50%
+ * radius is the same shape on every platform, centres on the row rather than the
+ * baseline, and can be filled OR ringed. `box-sizing: border-box` (top of this
+ * file) is what makes the ringed one the same outer diameter as the filled. */
+.badge {
+  flex: 0 0 8px;
+  width: 8px;
+  height: 8px;
+  margin-left: 8px;
+  border-radius: 50%;
+}
+
+/* Idle, closed, and no state at all all collapse the column instead of
+ * reserving it: a row with nothing to report carries no mark, and holding the
+ * slot open for a mark that never comes is what pushed every age away from the
+ * edge.
+ *
+ * CLOSED joined them in M19. It used to draw a hollow ring, on the argument
+ * that a dead row left bare could be mistaken for a live quiet one — but it
+ * never could: a closed row is dimmed and its logo greyed, which says "over"
+ * across the whole row instead of in one 8px circle. What the ring actually did
+ * was put an empty dot beside every finished session in the tree, and a column
+ * that is mostly empty circles is a column the eye learns to skip — including
+ * past the two lit dots that are the only reason it exists. */
+.badge.idle,
+.badge.closed,
+.badge.none {
+  flex-basis: 0;
+  width: 0;
+  margin-left: 0;
+}
+
+/* Project rows are the exception: they keep the slot whether their rolled-up
+ * dot is lit or not. Everything to the LEFT of the dot is pushed by the dot's
+ * width, and a project row is the one row that carries a button there — so a
+ * collapsing slot would sit the chat button 16px further left on a project with
+ * nothing unseen than on a project with something unseen, and would slide it
+ * sideways under the pointer the moment that roll-up lit or cleared. A button
+ * that moves is a button you miss.
+ *
+ * Only project rows. Session rows keep the collapse, which is what lets an idle
+ * session's age sit flush against the right edge, and a folder row has neither
+ * a roll-up dot nor a button to line up — reserving 16px there would be 16px of
+ * nothing.
+ *
+ * Specificity (0,3,0) on purpose: it has to beat .badge.idle/.badge.none (0,2,0)
+ * above on weight rather than on where it happens to sit in the file. */
+.row.project .badge.idle,
+.row.project .badge.none {
+  flex-basis: 8px;
+  width: 8px;
+  margin-left: 8px;
+}
+
+.badge.running {
+  background: var(--lineage-running, var(--vscode-charts-yellow));
+}
+
+/* Red, not green: this is the row that wants something from you. Green is what
+ * every other surface on the screen uses for "resolved, nothing to do". */
+.badge.done {
+  background: var(--lineage-done, var(--vscode-charts-red));
+}
+
+/* ------------------------------------------------------------- branches */
+/* The branch block (M20): one row per git worktree, stacked, sharing the
+ * project header's band so header + branches read as ONE box.
+ *
+ * ORDER-DEPENDENT, like the root-row band above: these rules must stay BEFORE
+ * .row:hover / .row.selected, which share background-color with them. */
+
+/* Same two-layer band as .row.project, minus the top rule — that rule is what
+ * separates one project's block from the last one's, and a branch row is INSIDE
+ * a block, not the start of one. Repeating it would draw a line between the
+ * project's name and its own branches, which is precisely the seam this is
+ * trying not to have. */
+.row.branch {
+  background-color: var(--vscode-sideBarSectionHeader-background, transparent);
+  background-image: linear-gradient(var(--root-band), var(--root-band));
+  /* Aligned with the session NAMES below, not with the project title above: the
+   * branches label the rows they sit over. The sum tracks the geometry it
+   * mirrors — 4px (.row's own padding) + the gutter + the icon box and its
+   * margin — rather than being a number somebody re-measures when the gutter
+   * moves. */
+  padding-left: calc(4px + var(--rail-col));
+  /* THE GUARD. This row has a fixed height and #tree is a plain block flow with
+   * no per-row stacking context, so anything that escapes paints over its
+   * neighbours, unstyled and unclickable. A long branch name did exactly that
+   * once. Clipping here means the worst a future layout bug can do is hide part
+   * of a label, never scribble on the tree. Safe HERE and not on `.row` at
+   * large: the inline rename's .validation box deliberately hangs outside its
+   * row, and a branch row never renames. */
+  overflow: hidden;
+  cursor: pointer;
+}
+
+/* The colour, as a solid block, in the column where a session's provider logo
+ * sits. Tinted text at 11px is not enough to read as a key — the eye needs one
+ * saturated patch of the colour to tie the row to the session names under it. */
+.branch-swatch {
+  flex: 0 0 8px;
+  width: 8px;
+  height: 8px;
+  margin-right: 14px;
+  border-radius: 2px;
+  background: var(--chip-color, var(--vscode-foreground));
+}
+
+/* "Others" has no colour of its own — it stands for several branches. The box
+ * still occupies the column, which is what keeps its label in line with the
+ * branches above and makes it read as the tail of that list. */
+.branch-swatch.blank {
+  background: none;
+}
+
+/* Not bold, unlike the project label above it: these are contents, and a block
+ * of five bold rows under a bold heading has no heading.
+ *
+ * Truncation is HERE, and it cuts from the end like every other label in the
+ * tree. It is also the only truncation left: the viewmodel used to pre-cut the
+ * name to a character budget from the FRONT, which made sense when branches
+ * shared one horizontal strip and each had four characters, and made every row
+ * read as `…ror-locale-ticket` once they were stacked and had the whole sidebar
+ * to themselves. Letting CSS do it means the cut happens at the actual
+ * available pixels rather than at a guessed character count, and the beginning
+ * of the ref — the part that says which family it belongs to — survives.
+ *
+ * `min-width: 0` is what makes the ellipsis reachable at all: this is a flex
+ * item, and the default `min-width: auto` floors it at its content width, so
+ * without it the name pushes the row wider instead of clipping. */
+.branch-name {
+  color: var(--chip-color, var(--vscode-foreground));
+  font-size: 0.95em;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A worktree with nothing running in it. Dimmed rather than hidden — it is the
+ * one you are most likely to be about to click, so it stays legible, but it is
+ * not telling you anything about work in flight. */
+.row.branch.empty .branch-name,
+.row.branch.empty .branch-swatch {
+  opacity: 0.65;
+}
+
+.row.branch.others .branch-name {
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+
+/* Right-aligned, in the branch's own colour at a lower weight: the count
+ * belongs to the row, and a neutral grey number would read as a separate fact
+ * sitting next to it. Same column as a session's age, so the two line up. */
+.branch-count {
+  color: var(--chip-color, var(--vscode-descriptionForeground));
+  opacity: 0.75;
+  font-size: 0.9em;
+  font-variant-numeric: tabular-nums;
+  margin-right: 6px;
+}
+
+.row.branch.others .branch-count {
+  color: var(--vscode-descriptionForeground);
+}
+
+/* The branch tint on a SESSION's name. A custom property set by the client
+ * (renderRow) rather than a class per colour, so the palette can grow without a
+ * matching rule here for every entry. */
+.name.branch-tinted {
+  color: var(--name-color, inherit);
+}
+
+/* A muted (hidden) row: greyed, exactly like an Explorer file excluded by
+ * .gitignore. The word "hidden" is in the description too, because colour alone
+ * is not an accessible signal.
+ *
+ * This selector is (0,2,0), the same as .name.branch-tinted, and wins on source
+ * order — which is why the branch tint is declared ABOVE it. "Put away"
+ * outranks "on feat/x": a hidden row must go grey whatever branch it is on.
+ *
+ * A CLOSED row goes grey for the same reason, in its own rule below: a colour
+ * is a claim about live work, and a session that is over is not on a branch any
+ * more in any sense that matters — it is history. Letting the tint survive at
+ * reduced opacity made a column of finished sessions read as a column of quiet
+ * live ones, which is precisely the distinction the dimming exists to draw. */
+.row.muted .name,
+.row.muted .desc {
+  color: var(--vscode-disabledForeground);
+}
+
+/* The spine goes quiet with the row it belongs to. A put-away session is still
+ * part of the lineage — its rails and its elbow have to stay, or the rows under
+ * it would hang off nothing — so the mark at the end of them is what dims. */
+.row.muted .node {
+  color: var(--vscode-disabledForeground);
+}
+
+/* A closed row: the session is over. Dimmed, with its provider mark desaturated
+ * — a file-backed <img> cannot be recoloured, which is why the native tree has
+ * no equivalent of this, but it can be drained, and a grey logo beside a quiet
+ * name says "this ran, and it is done" in one glance.
+ *
+ * Deliberately NOT struck through. A closed row is not a finished TODO: it is a
+ * conversation you resume with one click, and a line through its name reads as
+ * "cancelled / no longer valid" on the one row kind whose whole point is that it
+ * is still good. The hollow ring at the right edge already says "over", and the
+ * name has to stay readable — it is what you scan the tree for. */
+.row.closed .name {
+  opacity: 0.75;
+}
+
+/* M20. A closed row drops its branch tint. (0,3,0) — above both
+ * .name.branch-tinted and the inline custom property the client sets, which is
+ * why this can be a plain declaration rather than a re-definition of
+ * --name-color. See the note above .row.muted .name for why "over" outranks
+ * "on feat/x". */
+.row.closed .name.branch-tinted {
+  color: var(--vscode-descriptionForeground, var(--vscode-disabledForeground));
+}
+
+.row.closed .icon img {
+  filter: grayscale(1);
+  opacity: 0.55;
+}
+
+.row.closed .icon .codicon {
+  color: var(--vscode-disabledForeground);
+}
+
+/* -------------------------------------------------------- inline rename */
+/* The whole point of the webview. Mirrors the Explorer's rename box: it
+ * replaces the label in place, inherits the row's metrics, and validates
+ * inline. */
+
+/* Everything the row was showing gets out of the way for the duration of the
+ * edit — the age, the status dot (lit or not, so the box is the same width on
+ * every row) and the action buttons, which would otherwise sit over the end of
+ * the name being typed. `display: none` rather than `visibility: hidden`,
+ * because here the point IS to give the width back to the input.
+ *
+ * Specificity (0,2,0) beats the .desc/.badge/.actions base rules (0,1,0) on
+ * weight, so none of this depends on where in the file it sits. It draws with
+ * .badge.idle (0,2,0) and loses to the root-row slot rule (0,3,0) — neither
+ * matters, because both of those set width and margin, and a box that is
+ * `display: none` has neither. */
+.row.renaming .desc,
+.row.renaming .badge,
+.row.renaming .marks,
+.row.renaming .actions {
+  display: none;
+}
+
+.rename {
+  flex: 1 1 auto;
+  min-width: 40px;
+  height: 20px;
+  padding: 0 4px;
+  margin: 0;
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-focusBorder);
+  border-radius: 2px;
+  outline: none;
+}
+
+.rename.invalid {
+  border-color: var(--vscode-inputValidation-errorBorder);
+  background: var(--vscode-inputValidation-errorBackground);
+}
+
+/* Hung off the row, below it by default — the quick input does the same thing
+ * under its own box. */
+.validation {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: var(--row-height);
+  z-index: 10;
+  padding: 2px 6px;
+  font-size: 0.9em;
+  color: var(--vscode-inputValidation-errorForeground, inherit);
+  background: var(--vscode-inputValidation-errorBackground);
+  border: 1px solid var(--vscode-inputValidation-errorBorder);
+  border-top: none;
+  white-space: normal;
+}
+
+/* Flipped above the row when there is no room under it, which is the case on
+ * the bottom row of the view: #tree is the scroll container, so a box hung
+ * below that row is clipped by it and the user is told nothing at all. The
+ * borders swap ends with the box so the message still reads as attached to the
+ * input it belongs to. showRefusal() measures the room and sets this class.
+ * Specificity (0,2,0) over .validation's (0,1,0), so it wins on weight. */
+.validation.above {
+  top: auto;
+  bottom: var(--row-height);
+  border-top: 1px solid var(--vscode-inputValidation-errorBorder);
+  border-bottom: none;
+}
+
+/* ------------------------------------------------------------ empty state */
+
+.empty {
+  padding: 12px 16px;
+  color: var(--vscode-descriptionForeground);
+  white-space: normal;
+  line-height: 1.5;
+  user-select: text;
+}
+
+.empty button {
+  margin-top: 8px;
+  width: 100%;
+  padding: 4px 8px;
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+  border: none;
+  border-radius: 2px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.empty button:hover {
+  background: var(--vscode-button-hoverBackground);
+}

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="none"
+     stroke="#8B8B8B" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+  <title>Agent</title>
+  <rect x="2.8" y="4.5" width="18.4" height="15" rx="2.4"/>
+  <path d="M7.4 9.6 10.4 12l-3 2.4"/>
+  <path d="M12.6 15h4"/>
+</svg>

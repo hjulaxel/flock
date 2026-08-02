@@ -1,11 +1,15 @@
 // test/windows.test.ts — owner F (SPEC.md §9).
-// Pure-function coverage only: registerFocusIntegration talks to the real
-// workbench (registerUriHandler / asExternalUri / openExternal) and is never
-// exercised under vitest.
+// Pure-function coverage, plus (P9 #2/#3) the publish() RPC's timeout and
+// retry-floor behaviour. registerFocusIntegration talks to the real
+// workbench for registerUriHandler / openExternal — those stay untested — but
+// asExternalUri is the one call publish() itself bounds, so it is worth
+// reaching.
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as vscodeMock from 'vscode';
 
-import { withSessionQuery } from '../src/windows';
+import { registerFocusIntegration, withSessionQuery } from '../src/windows';
+import type { WindowDeps, WindowRecord } from '../src/types';
 
 const SESSION = '0f0000a1-0000-4000-8000-0000000000a1';
 const HANDLE_WITH_QUERY =
@@ -113,5 +117,91 @@ describe('withSessionQuery', () => {
     expect(withSessionQuery('not a uri', SESSION)).toBe(
       `not a uri?session=${SESSION}`,
     );
+  });
+});
+
+// --------------------------------------- publish()'s bounded asExternalUri
+//
+// The frozen mock (test/mocks/vscode.ts, SPEC §8.5) exports neither `env` nor
+// `workspace` at all — "window and commands are intentionally empty" is true
+// one level further up too. Both tests below only ever exercise publish()'s
+// FAILURE paths (a handle that never arrives, or never resolves at all), and
+// on both of those paths `vscode.workspace.workspaceFolders` is never
+// reached — publish() returns before constructing the WindowRecord that
+// reads it — so only `env` needs a stand-in. It is added the same way
+// test/hooks.test.ts hangs a stub off `vscode.window`: extending the mock's
+// already-exported (empty) namespace object at runtime, never editing the
+// frozen file.
+
+interface EnvStub {
+  uriScheme: string;
+  asExternalUri: (uri: unknown) => Thenable<{ toString(): string }>;
+}
+
+function stubEnv(asExternalUri: EnvStub['asExternalUri']): void {
+  (vscodeMock as unknown as { env: EnvStub }).env = {
+    uriScheme: 'vscode',
+    asExternalUri,
+  };
+}
+
+function makeDeps(): WindowDeps & { calls: WindowRecord[] } {
+  const calls: WindowRecord[] = [];
+  return {
+    calls,
+    publishWindow: async (rec) => {
+      calls.push(rec);
+    },
+    onFocusRequest: () => undefined,
+  };
+}
+
+afterEach(() => {
+  delete (vscodeMock as unknown as { env?: EnvStub }).env;
+  vi.useRealTimers();
+});
+
+describe('registerFocusIntegration: publish() bounds the asExternalUri RPC', () => {
+  // REGRESSION (P9 #2). activate() awaits registerFocusIntegration(), so an
+  // asExternalUri that never answers — a dead tunnel, an unsupported remote
+  // target — used to mean NOTHING after it ever ran: no tree, no webview, no
+  // commands. This is the fix, isolated from the rest of activate().
+  it('a never-settling asExternalUri still lets publish() resolve inside the timeout', async () => {
+    vi.useFakeTimers();
+    stubEnv(() => new Promise<{ toString(): string }>(() => undefined));
+    const deps = makeDeps();
+
+    const done = registerFocusIntegration(deps);
+    await vi.advanceTimersByTimeAsync(5_000); // PUBLISH_TIMEOUT_MS
+    await done; // must have resolved, not hung forever
+
+    // No handle ever arrived, so nothing was published — the timeout
+    // degrades exactly like a host that plainly cannot produce one.
+    expect(deps.calls).toHaveLength(0);
+  });
+
+  // REGRESSION (P9 #3). lastPublishedAt was only ever set on SUCCESS, so a
+  // host that can never produce a handle re-ran the RPC on every
+  // refreshPublication() call — on the roster poll's ~3s cadence, forever.
+  it('a handle-less host calls asExternalUri at most once per FAILED_PUBLISH_RETRY_MS across many refreshPublication() calls', async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    stubEnv(() => {
+      calls += 1;
+      return Promise.reject(new Error('this host cannot produce a handle'));
+    });
+    const deps = makeDeps();
+
+    const integration = await registerFocusIntegration(deps);
+    expect(calls).toBe(1); // the initial publish() inside registerFocusIntegration
+
+    for (let i = 0; i < 5; i++) {
+      await integration.refreshPublication();
+    }
+    expect(calls).toBe(1); // still inside the retry floor — no re-attempt
+
+    await vi.advanceTimersByTimeAsync(10 * 60_000); // FAILED_PUBLISH_RETRY_MS
+    await integration.refreshPublication();
+    expect(calls).toBe(2);
   });
 });
