@@ -150,6 +150,48 @@ close on switch and are not remembered. With
 layouts are files only and switching leaves your terminals exactly where they
 are.
 
+### Why tmux is required
+
+Parking a session means hiding it because you switched to another project. There
+are two ways Flock can do that, and which one you get depends only on whether
+`tmux` is on your `PATH`.
+
+| | **With tmux** | **Without** |
+| --- | --- | --- |
+| Switching away | the client detaches, the process keeps running | the terminal is closed |
+| Coming back | reattach, live state intact | `--resume` from the transcript |
+| A session mid-turn | detaches and keeps working while hidden | never closed, so it stays on screen instead |
+| What it costs you | nothing | whatever the session was in the middle of |
+
+This is why tmux is listed as required rather than recommended. The fallback is
+real and fully wired, and it will not close a busy session rather than interrupt
+one. But it cannot hide a working session either, so a busy tab from another
+project just stays where it is, and coming back replays a transcript instead of
+picking up a live process. Neither is what the feature is for.
+
+```sh
+brew install tmux          # macOS
+sudo apt install tmux      # Debian / Ubuntu
+sudo dnf install tmux      # Fedora
+sudo pacman -S tmux        # Arch
+```
+
+`lineage.tmux` defaults to `auto`, and the binary is looked up on every launch.
+Installing tmux takes effect on the next session you start. No reload, nothing to
+switch on. Check it with `tmux -V`.
+
+Sessions run under a private server, `tmux -L lineage`, with a generated config
+that keeps it out of sight: no status bar, no prefix key. That is a separate
+socket from your own tmux, so your sessions, keybindings and config are never
+touched and `tmux ls` will not list Flock's. Sessions you started outside Flock
+are never wrapped either way.
+
+Windows always uses the fallback. `findTmuxBinary` returns null there no matter
+what. Set `lineage.tmux` to `off` to force the fallback anywhere else.
+
+Flock says this once, in a notice you can dismiss, if it finds you without tmux
+while workspaces are on. It never asks twice.
+
 ## Close and delete
 
 The tree is a map of your work, and **tab state is not tree membership**: a

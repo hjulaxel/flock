@@ -6,9 +6,38 @@ All notable changes to Flock are recorded here. The format follows
 
 ## [0.1.1] — unreleased
 
-No user-visible change yet. The three fixes previously listed here shipped in
-0.1.0 and have been moved under it — they were written before that release and
-the heading was never updated.
+### Added
+
+- **Flock now tells you that it needs tmux.** Without tmux, switching projects
+  closes the other project's sessions instead of hiding them, and anything a
+  session was in the middle of is lost. Nothing in the product said so, because
+  nothing looks broken when it happens — parking still works, it just works the
+  worse way. You now get one notice, which you can dismiss, when workspaces are
+  on and tmux is missing. If you have tmux but switched it off by hand, it
+  offers to turn it back on instead.
+
+  It stays quiet where it would be noise: on Windows, which has no tmux tier at
+  all; with workspaces off, which is the only feature tmux serves; and when tmux
+  is both missing and switched off, because two things to fix in one notice is a
+  worse message than none. It asks once per install, never on a timer.
+
+### Changed
+
+- **tmux is now listed as required, not optional.** The README and
+  `docs/reference.md` say how to install it on each platform, what the two
+  parking paths actually differ on, and why the private `tmux -L lineage` server
+  cannot disturb your own tmux.
+
+### Fixed
+
+- Typos and broken markdown in the README, including an unclosed bold marker
+  that swallowed a bullet's heading.
+
+### Notes
+
+- The three fixes previously listed here shipped in 0.1.0 and have been moved
+  under it. They were written before that release and the heading was never
+  updated.
 
 ## [0.1.0] — 2026-08-03
 

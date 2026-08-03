@@ -18,6 +18,8 @@ import {
   buildTmuxArgs,
   ensureTmuxConf,
   findTmuxBinary,
+  tmuxAdvice,
+  tmuxInstallHint,
   parseClientSessions,
   parsePanePid,
   resolveTmuxSpawn,
@@ -261,5 +263,56 @@ describe('findTmuxBinary / resolveTmuxSpawn', () => {
   it("respects 'off' without even probing the PATH", () => {
     process.env['PATH'] = '';
     expect(resolveTmuxSpawn('off', '/store/tmux.conf')).toBeNull();
+  });
+});
+
+// The nudge matrix. This is the whole reason tmuxAdvice() is pure: the tier is
+// INVISIBLE when it is absent — parking still works, it just kills and resumes
+// instead of detaching — so the only thing standing between a user and a lost
+// in-flight turn is whether this function speaks up at the right moment.
+describe('tmuxAdvice', () => {
+  const base = {
+    platform: 'darwin',
+    mode: 'auto' as string | undefined,
+    binary: null as string | null,
+    workspacesEnabled: true,
+    dismissed: false,
+  };
+
+  it('advises installing when the tier is unavailable and unconfigured', () => {
+    expect(tmuxAdvice(base)).toBe('install');
+  });
+
+  it('says nothing once tmux is on the PATH — auto already used it', () => {
+    expect(tmuxAdvice({ ...base, binary: '/opt/homebrew/bin/tmux' })).toBe('none');
+  });
+
+  it("advises enabling when tmux exists but the gate was switched off", () => {
+    expect(tmuxAdvice({ ...base, mode: 'off', binary: '/usr/bin/tmux' })).toBe('enable');
+  });
+
+  it("stays quiet when off AND absent — two fixes in one toast is worse than none", () => {
+    expect(tmuxAdvice({ ...base, mode: 'off', binary: null })).toBe('none');
+  });
+
+  it('never speaks on Windows, where the tier does not exist', () => {
+    expect(tmuxAdvice({ ...base, platform: 'win32' })).toBe('none');
+  });
+
+  it('stays quiet with workspaces off — parking is the only feature it serves', () => {
+    expect(tmuxAdvice({ ...base, workspacesEnabled: false })).toBe('none');
+  });
+
+  it('is asked once per install, not on a timer', () => {
+    expect(tmuxAdvice({ ...base, dismissed: true })).toBe('none');
+    expect(tmuxAdvice({ ...base, mode: 'off', binary: '/usr/bin/tmux', dismissed: true })).toBe(
+      'none',
+    );
+  });
+
+  it('hints the package manager, and nothing at all where it cannot help', () => {
+    expect(tmuxInstallHint('darwin')).toBe('brew install tmux');
+    expect(tmuxInstallHint('linux')).toBe('sudo apt install tmux');
+    expect(tmuxInstallHint('win32')).toBeUndefined();
   });
 });

@@ -5,23 +5,22 @@
 <h1 align="center">Flock for Claude Code</h1>
 
 <p align="center">
-  See every Claude Code session you're running as one live tree —<br>
-  who forked from whom, who's working, and who's waiting on you.
+  See every Claude Code session you're running as one live tree, a flock.
 </p>
 
 ---
 
-When you run one coding agent, a terminal tab is enough. When you run six, the
-hard part stops being the code and starts being the bookkeeping: which of these
-is still thinking, which one finished twenty minutes ago and has been waiting
-since, which three came from the same conversation, and which worktree each of
-them is standing in.
+Hello, and welcome to Flock.
 
-Flock puts all of it in the sidebar as a single live tree. Fork ancestry is
-drawn, not guessed. A finished session gets an unread mark that clears when you
-look at it. Sessions group under projects you define, colour-coded by git
-branch. And it is read-only where it counts — no daemon, no network, and nothing
-written to your repository.
+The aim of this project is a better environment for AI-related workflow. When
+you're running many agents, the hard part stops being the code — the work
+becomes the bookkeeping.
+
+Flock puts all of it in the sidebar as a tree, to keep track of everything. From
+there, sessions fork and branch out. Around that sits a variety of nice-to-have
+features: notifications for finished sessions, sessions grouped under
+user-defined projects, colour-coding by git branch, LLM account management,
+temporary chats, and much more.
 
 <!-- TODO(launch): screenshot of the sidebar — a project with three or four
      sessions, one amber, one red, branch chips visible. This is the single
@@ -29,87 +28,91 @@ written to your repository.
 
 ## What it does
 
-- **A tree of sessions, not a list.** See which session was forked from which —
-  the branch points every other tool throws away. Native in-session `/fork`s
-  count too: they write no transcript marker at all, and are recovered from the
-  CLI daemon's own dispatch log and nested under their parent.
+- **A tree of sessions, not a list.** See which session was forked from which.
+  Use the UI or native in-session `/fork`.
 
-- **Attention routing, unread-style.** One mark at the right edge of the row,
-  and only two things ever draw it: **amber** is working, **red** is finished
-  and not yet looked at. Everything else draws nothing, because a column of
-  marks nobody needs is a column the eye learns to skip. Look at a finished
-  session and its dot goes quiet; the dot also rolls up to the project row, and
-  the view badge counts exactly the red dots on screen.
+- **Attention routing.** A dot at the right edge of the row: **amber** means
+  working, **red** means finished. It's that easy.
 
-- **A bell over the tree.** The latest finished sessions, unseen first, each
-  with its project and age. Click one to jump there and mark it read, dismiss a
-  single entry, or mark all read at once. Plus a per-session mute that puts a
-  struck-through bell on the row.
+- **A notifications bell.** The latest finished sessions, unseen first, each with
+  its project and age. Click one to jump there. Dismiss a single entry, or mark
+  all read at once. Plus a per-session mute that puts the bell to rest.
 
-- **Ages you can trust.** The time on a row is how long since *you* last
-  prompted that session — read from the transcript, not the file's modification
-  time — so a session churning away unattended does not sit there reporting
-  "now".
+- **Session age.** The time on a row is how long since you last prompted that
+  session.
 
-- **Branches, when there are branches.** Running one agent per `git worktree` is
-  how parallel work actually gets done, and grouping by directory throws away
-  the only fact that mattered: that five checkouts are one repository. Flock
-  reads `git worktree list`, files every checkout of a project's repo under that
-  project wherever it sits on disk, and gives each branch a colour-coded row.
-  Click a branch to start a session in that worktree. Turn on
-  `lineage.groupSessionsByBranch` and each branch becomes a container instead:
-  its sessions hang under it and the whole branch folds shut.
+- **Branches, if there are any.** Running one agent per `git worktree` is how
+  parallel work actually gets done. Flock reads `git worktree list`, files every
+  checkout of a project's repo under that project wherever it sits on disk, and
+  gives each branch a colour-coded row. Click a branch to start a session in
+  that worktree. Turn on `lineage.groupSessionsByBranch` and each branch becomes
+  a container instead.
 
-- **Several accounts, one window.** A row per subscription you can launch on —
-  work plan, personal plan, an API key — each showing how much of its five-hour
-  and weekly windows is gone. Every account keeps its own config directory, so
-  you sign in **once per account, ever**. New sessions are routed automatically,
-  and a session is then pinned to its account for life.
+- **Use several accounts.** A row per subscription, whether it's a work plan, a
+  personal plan, or an API key. Each account shows its current usage. An account
+  also keeps its own config directory, so you only need to sign in **once per
+  account**. New sessions are routed automatically, and a session is then pinned
+  to its account.
 
 - **Project workspaces.** Scope a window to one project. Switching saves the tab
   layout you leave and restores the target's. With tmux installed, other
   projects' sessions keep running while hidden and reattach instantly; without
   it they close and resume from transcript. Unsaved editors are never touched.
 
-- **Orchestration verbs.** New, fork, **fork and compact** (branch a long
-  conversation and let the *branch* squash its history — the parent keeps
-  everything), rename in place, close with an optional summary, and drag to
-  re-parent.
+- **Orchestration verbs.** New, fork, **fork and compact**, rename in place,
+  close, **close with summary**.
 
-- **Chats, as many as you have questions.** The chat button on a project row
-  opens a scratch conversation about that project — every directory it owns on
-  `--add-dir`, no row in the tree, nothing to name. Every click opens a **new**
-  one, so a question that occurs to you mid-answer never interrupts the answer.
-  Right-click the project → **View Chat History…** for the list of every chat
-  it has had, newest first, labelled with what you opened it with. Pick one to
-  come back to it.
+- **Temporary chats.** The chat button on a project row opens a scratch
+  conversation about that project. Right-click the project and **View Chat
+  History** for the list of past chats.
 
-- **Projects inside projects.** A monorepo is not one project and neither is it
-  six: file `api`, `web` and `infra` under `app` and the sidebar reads like an
-  Explorer, to whatever depth you want. Each subproject keeps its own
-  directories, provider and account. Drag a project row onto another to file it
-  there, or onto empty space to bring it back out. Membership never moves with
-  it — a session belongs to whichever project's directory is the longest match
-  for where it is running, exactly as before.
+- **Projects inside projects.** For larger projects, subprojects keep track of
+  separate concerns. Each keeps its own directories, provider and account.
 
 - **Open and close projects.** A project you are not working on this month
-  doesn't have to be deleted to get out of the way: **Close Project** takes its
-  row and its sessions' rows out of the tree and changes nothing else — no
-  process is signalled, nothing is deleted, whatever was running is still
-  running. The `$(folder-opened)` button at the top of the view lists every
-  closed project, with how many sessions each still has, and puts one back.
+  doesn't have to be deleted to get out of the way: **Close Project** takes it
+  out of the tree and changes nothing else. The `$(folder-opened)` button at the
+  top of the view lists every closed project.
 
-- **Nothing is lost.** Closing a tab does not remove its row — it dims and stays
-  one click from resuming. Only **Delete** removes a row, and that is undoable.
-  No transcript is ever touched.
+- **Nothing is lost.** Closing a tab does not remove its row. It's dimmed and
+  stays one click from resuming. Only **Delete** removes a row, and that is also
+  undoable.
 
 ## Requirements
 
+- **tmux.** See below. Install it before you start.
 - The `claude` CLI on your `PATH`, or `lineage.claudeBinary` set to its full path.
-- VS Code 1.94 or newer. Also runs in Cursor, Windsurf and VSCodium — Flock
-  uses no proposed APIs.
+- VS Code 1.94 or newer. Also runs in Cursor, Windsurf and VSCodium. Flock uses
+  no proposed APIs.
 - A trusted workspace. Restricted Mode blocks terminal creation, which Flock
   needs.
+
+## Install tmux
+
+You need tmux. Flock runs your sessions inside it, and that is what lets a
+session keep working while you look at something else.
+
+```sh
+brew install tmux          # macOS
+sudo apt install tmux      # Debian / Ubuntu
+sudo dnf install tmux      # Fedora
+sudo pacman -S tmux        # Arch
+```
+
+Check it worked with `tmux -V`. That is all you have to do. Flock looks for tmux
+on your `PATH` every time it starts a session, so there is no reload and no
+setting to turn on.
+
+Flock uses its own private server, `tmux -L lineage`. You will never see it. No
+status bar, no prefix key, and your own tmux sessions and config are left alone.
+`tmux ls` will not even list Flock's.
+
+Skip it and Flock still runs, but switching projects closes the other project's
+sessions instead of hiding them. They come back when you switch back, resumed
+from their transcripts. Anything a session was in the middle of is gone.
+
+Windows does not get this, sorry. Sessions there always close and resume.
+[Other platforms →](https://github.com/tmux/tmux/wiki/Installing)
 
 ## Documentation
 
@@ -119,10 +122,10 @@ written to your repository.
 
 ## Privacy
 
-Nothing leaves your machine. Flock makes no network requests. It reads the
-local session roster and local transcript files, and writes only to its own
-extension storage — plus, if you explicitly opt in, the hooks plugin directory
-and `~/.lineage/events.ndjson`.
+Nothing leaves your machine. Flock makes no network requests. It reads the local
+session roster and local transcript files, and writes only to its own extension
+storage — plus, if you explicitly opt in, the hooks plugin directory and
+`~/.lineage/events.ndjson`.
 
 ## Development
 
@@ -136,8 +139,8 @@ npm run watch       # rebuild on change
 
 Press **F5** to open an Extension Development Host with Flock loaded. There are
 no runtime dependencies — the extension is Node builtins plus the `vscode` API,
-bundled into a single file by esbuild. See
-[CONTRIBUTING.md](CONTRIBUTING.md) for the rest.
+bundled into a single file by esbuild. See [CONTRIBUTING.md](CONTRIBUTING.md)
+for the rest.
 
 ## Credits
 

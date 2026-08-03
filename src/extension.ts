@@ -62,12 +62,15 @@ import type {
   TreeDeps,
 } from './types';
 import {
+  type TmuxAdvice,
   ensureTmuxConf,
   findTmuxBinary,
   killTmuxSession,
   queryClientSessions,
   queryPanePid,
   resolveTmuxSpawn,
+  tmuxAdvice,
+  tmuxInstallHint,
 } from './tmux';
 import {
   matchProject,
@@ -167,6 +170,15 @@ const ACTIVE_WORKSPACE_KEY = 'lineage.activeWorkspace';
 /** workspaceState key counting extension-host activations in this window — the
  *  restart probe. See the log line in `activate`. */
 const ACTIVATION_COUNT_KEY = 'lineage.activationCount';
+
+/** globalState, not the editorial store: this is a per-install "already asked",
+ *  it needs no change event and no cross-window merge. Same reasoning as the
+ *  activation counter above. */
+const TMUX_NOTICE_KEY = 'lineage.tmuxNoticeShown';
+/** Long enough that the tree has drawn and the user is looking at their
+ *  sessions rather than at an empty sidebar with a toast over it. */
+const TMUX_NOTICE_DELAY_MS = 12_000;
+const TMUX_INSTALL_URL = 'https://github.com/tmux/tmux/wiki/Installing';
 /** One turn end can be reported twice (Stop hook + the poll transition); a
  *  second doneAt stamp inside this window is the same turn, not a new one. */
 const DONE_DEDUPE_MS = 15_000;
@@ -230,6 +242,74 @@ export async function activate(
   const tmuxConfPath = ensureTmuxConf(context.globalStorageUri.fsPath);
   const tmuxSpawn = (): TmuxSpawn | null =>
     resolveTmuxSpawn(cfg().get<string>(CONFIG_KEYS.tmux), tmuxConfPath);
+
+  // One-time nudge about the detach tier. Deferred off the activation path: it
+  // is advice, and nothing about startup should wait on a toast. The decision
+  // itself is `tmuxAdvice` in src/tmux.ts, which is pure and tested; this only
+  // supplies the world and acts on the answer.
+  const tmuxNoticeShown = (): boolean =>
+    context.globalState.get<boolean>(TMUX_NOTICE_KEY) === true;
+  const suppressTmuxNotice = (): void => {
+    void context.globalState.update(TMUX_NOTICE_KEY, true);
+  };
+  setTimeout(() => {
+    let advice: TmuxAdvice;
+    try {
+      advice = tmuxAdvice({
+        platform: process.platform,
+        mode: cfg().get<string>(CONFIG_KEYS.tmux),
+        binary: findTmuxBinary(),
+        workspacesEnabled: boolCfg(CONFIG_KEYS.workspacesEnabled, true),
+        dismissed: tmuxNoticeShown(),
+      });
+    } catch (err) {
+      logError('tmux.notice', err);
+      return;
+    }
+    if (advice === 'none') return;
+
+    const NEVER = "Don't remind me";
+    if (advice === 'enable') {
+      const TURN_ON = 'Turn it on';
+      void vscode.window
+        .showWarningMessage(
+          'Flock needs tmux to keep sessions running while you work elsewhere. ' +
+            'You have tmux, but it is switched off, so switching projects ' +
+            'closes the other project’s sessions instead of hiding them.',
+          TURN_ON,
+          NEVER,
+        )
+        .then((choice) => {
+          if (choice === TURN_ON) {
+            void cfg().update(CONFIG_KEYS.tmux, 'auto', vscode.ConfigurationTarget.Global);
+            suppressTmuxNotice();
+          } else if (choice === NEVER) {
+            suppressTmuxNotice();
+          }
+        });
+      return;
+    }
+
+    const hint = tmuxInstallHint(process.platform);
+    const HOW = 'How to install';
+    void vscode.window
+      .showWarningMessage(
+        'Flock needs tmux. Without it, switching projects closes the other ' +
+          'project’s sessions instead of hiding them, and anything a session ' +
+          'was in the middle of is lost.' +
+          (hint === undefined ? '' : ` Run: ${hint}`),
+        HOW,
+        NEVER,
+      )
+      .then((choice) => {
+        if (choice === HOW) {
+          void vscode.env.openExternal(vscode.Uri.parse(TMUX_INSTALL_URL));
+          suppressTmuxNotice();
+        } else if (choice === NEVER) {
+          suppressTmuxNotice();
+        }
+      });
+  }, TMUX_NOTICE_DELAY_MS);
 
   /** Absolute path to a file inside the extension install. `extensionUri` is
    *  a Uri because a remote/web host may serve the extension over a non-file

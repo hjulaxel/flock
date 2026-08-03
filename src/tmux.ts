@@ -383,3 +383,53 @@ export function resolveTmuxSpawn(
   if (binary === null) return null;
   return confPath !== undefined ? { binary, confPath } : { binary };
 }
+
+/** What, if anything, to tell the user about tmux once per install.
+ *  `install` — the detach tier is unavailable and they probably do not know.
+ *  `enable`  — they HAVE tmux and have switched the tier off by hand. */
+export type TmuxAdvice = 'none' | 'install' | 'enable';
+
+/**
+ * Whether to nudge about tmux, and which way. Pure so the matrix is testable
+ * without a workbench — the wiring in extension.ts only supplies the inputs.
+ *
+ * The nudge exists because the detach tier is invisible when it is missing:
+ * parking still works, so nothing looks broken. It just kills and resumes
+ * instead of detaching, which loses a busy session's in-flight turn. Someone
+ * who never installed tmux has no way to learn that from the product.
+ *
+ * It stays quiet in every case where it would be noise:
+ *  - Windows, where the tier does not exist at all (see findTmuxBinary).
+ *  - Workspaces off, which is the only feature the tier serves — no parking,
+ *    no reason to care how parking is implemented.
+ *  - `lineage.tmux: off` on a machine with no tmux: two problems to fix in one
+ *    toast is a worse message than none, and this user has opted out anyway.
+ *  - Already dismissed. Asked once per install, never on a timer.
+ */
+export function tmuxAdvice(opts: {
+  platform: string;
+  /** `lineage.tmux`. */
+  mode: string | undefined;
+  /** findTmuxBinary(), injected so tests need no PATH. */
+  binary: string | null;
+  /** `lineage.workspaces.enabled`. */
+  workspacesEnabled: boolean;
+  dismissed: boolean;
+}): TmuxAdvice {
+  if (opts.dismissed) return 'none';
+  if (opts.platform === 'win32') return 'none';
+  if (!opts.workspacesEnabled) return 'none';
+  // Switched off by hand. Worth one reminder if the tier is actually available,
+  // silence otherwise.
+  if (opts.mode === 'off') return opts.binary === null ? 'none' : 'enable';
+  return opts.binary === null ? 'install' : 'none';
+}
+
+/** Install line for the host, or undefined where we should not advise one.
+ *  Deliberately the package manager and nothing else — a curl-to-shell in a
+ *  toast is not something a session manager should be teaching. */
+export function tmuxInstallHint(platform: string): string | undefined {
+  if (platform === 'darwin') return 'brew install tmux';
+  if (platform === 'linux') return 'sudo apt install tmux';
+  return undefined;
+}
