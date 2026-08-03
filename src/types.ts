@@ -1330,7 +1330,7 @@ export interface HookInstallState {
  *
  * Written from two sources, both exact: a hook event whose inherited
  * LINEAGE_NODE_ID differs from its session_id (the terminal we launched is
- * now running a new generation — the creemux re-key), and the transcript
+ * now running a new generation — the re-key), and the transcript
  * continuation signal (ArchivedSession.continuesId). Never inferred from
  * anything weaker.
  */

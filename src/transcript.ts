@@ -2,7 +2,7 @@
 // src/transcript.ts — locating and reading session transcripts under
 // ~/.claude/projects. Public surface frozen by SPEC §4-A2. Direct port of the
 // Python `transcript_file` / `has_transcript` / `fork_parent_from_transcript`
-// (creemux/core.py).
+// of the prototype this extension replaced.
 //
 // Imports allowed here: ./types, ./log, node:fs, node:path, node:os.
 // NEVER import vscode. Never cache, never watch files.

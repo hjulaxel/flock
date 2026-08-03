@@ -2,7 +2,8 @@
 //
 // Tree row menus -> extension commands -> DIRECT function calls on CommandDeps.
 // No HTTP, no subprocess-the-CLI, no marker channel: every bit of that
-// machinery from the Python creemux daemon is deleted by this port.
+// machinery belonged to the Python daemon this extension replaced, and is
+// deleted by the port.
 //
 // Imports allowed here: vscode, ./types, ./log, node:crypto, and the PURE
 // helper modules the verbs share with the views (./projects, and since M22

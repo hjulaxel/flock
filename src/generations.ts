@@ -8,8 +8,8 @@
 // the fork resolver reads. Rendered naively, that is N same-named root rows,
 // and a fork of the row the user recognises by name forks an OLD generation.
 //
-// The fix is creemux's identity model: the CONVERSATION is the durable entity
-// and a session id is a mutable pointer onto it. A chain groups every id one
+// The fix separates identity from address: the CONVERSATION is the durable
+// entity and a session id is a mutable pointer onto it. A chain groups every id one
 // conversation has worn; the tree shows exactly ONE row per chain (its TIP —
 // the current generation), and every verb that targets a chain member acts on
 // the tip.

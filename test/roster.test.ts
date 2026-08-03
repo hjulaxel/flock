@@ -41,7 +41,7 @@ const MEASURED_SAMPLE = `[
     "startedAt": 1783901749542,
     "sessionId": "9a5bf57b-1c2d-4e3f-9a8b-7c6d5e4f3a2b",
     "name": "second background agent", "state": "blocked" },
-  { "pid": 79378, "cwd": "/Users/axelh/Documents/creemux-addon", "kind": "interactive",
+  { "pid": 79378, "cwd": "/Users/dev/Documents/legacy-addon", "kind": "interactive",
     "startedAt": 1784792414124, "sessionId": "1f743713-aa11-4bb2-8cc3-dd44ee55ff66",
     "name": "Let's start working on this project. (Branch)", "status": "idle" }
 ]`;

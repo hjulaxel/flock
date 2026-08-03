@@ -577,16 +577,17 @@ function sanitizeHookState(value: unknown): HookInstallState | undefined {
 // ------------------------------------------------------------------ migration
 
 /**
- * v0 → v1. "v0" is any blob without a numeric `version` — in practice either
- * a pre-release file of ours or a creemux (Python) project state, whose
- * `nodes` map holds the same editorial fields under different names.
+ * v0 → v1. "v0" is any blob without a numeric `version`: a pre-release file of
+ * ours, or a state file from the Python prototype this extension replaced,
+ * whose `nodes` map holds the same editorial fields under different names.
+ * The fold is keyed on shape, not provenance, so it handles both.
  *
  * Only editorial fields are carried across. Legacy `parent` edges are
- * deliberately NOT imported: in creemux they could come from lineage
- * inference, and SPEC §5.5 forbids persisting an inferred edge — freezing one
- * into `parentSource: 'minted'` would make a guess permanent. The legacy
- * `nodes` key itself is left in place (unknown top-level keys are preserved),
- * so nothing is destroyed by the fold.
+ * deliberately NOT imported: in the older format they could have come from
+ * lineage inference, and SPEC §5.5 forbids persisting an inferred edge —
+ * freezing one into `parentSource: 'minted'` would make a guess permanent. The
+ * legacy `nodes` key itself is left in place (unknown top-level keys are
+ * preserved), so nothing is destroyed by the fold.
  */
 function migrateV0ToV1(src: Record<string, unknown>): Record<string, unknown> {
   if (isPlainObject(src.records)) return src; // already our shape
@@ -1202,7 +1203,7 @@ export class StateStore implements DisposableLike {
 
   /**
    * Record that `newId` is a NEW GENERATION of the conversation `anchorId`
-   * belongs to (M10) — the creemux re-key. `anchorId` may be any member of an
+   * belongs to (M10) — the re-key. `anchorId` may be any member of an
    * existing chain (typically the LINEAGE_NODE_ID a hook event inherited);
    * when it belongs to none, a fresh chain rooted at it is created. If the
    * two ids turn out to already sit in different chains, the chains are

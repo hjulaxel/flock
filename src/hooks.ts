@@ -55,7 +55,9 @@ export const PLUGIN_NAME = 'lineage-events';
  *  v2: HOOK_COMMAND became a single-write append (see below).
  *  v3 (M10): the append wraps the payload with the LINEAGE_NODE_ID the hook
  *  inherited, and UserPromptSubmit joined the event list — together these are
- *  the creemux-style enrollment channel (see HookEvent.nodeId). */
+ *  the enrollment channel: a hook event carries the id of the conversation the
+ *  terminal was launched for, so a session whose id has churned can be re-keyed
+ *  from an exact signal rather than a guess (see HookEvent.nodeId). */
 export const PLUGIN_VERSION = 3;
 /** semver stamped into plugin.json (the plugin loader wants a semver). */
 const PLUGIN_SEMVER = '0.1.0';
@@ -131,8 +133,8 @@ export const HOOK_COMMAND =
 
 /** The hook events we listen for. Every one is a pure accelerator.
  *  UserPromptSubmit (v3) is the freshness beat: it fires on every prompt, so
- *  a conversation whose id churned is re-keyed within one user action —
- *  exactly the cadence that kept creemux's tree current. */
+ *  a conversation whose id churned is re-keyed within one user action, which is
+ *  the tightest cadence available without polling. */
 const HOOK_EVENTS = [
   'SessionStart',
   'SessionEnd',

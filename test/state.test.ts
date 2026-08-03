@@ -364,9 +364,9 @@ describe('migrateState', () => {
     expect(migrateState({ hookInstall: 'installed' }).hookInstall).toBeUndefined();
   });
 
-  it('folds a legacy (v0) creemux node map into records without importing guessed edges', () => {
+  it('folds a legacy (v0) node map into records without importing guessed edges', () => {
     const migrated = migrateState({
-      slug: 'creemux-addon',
+      slug: 'legacy-addon',
       nodes: {
         [S1]: {
           id: S1,
@@ -397,7 +397,7 @@ describe('migrateState', () => {
     expect(migrated.records[S1]?.parentSource).toBeUndefined();
     // the legacy blob is preserved verbatim, nothing is destroyed by the fold
     expect(migrated.nodes).toBeTruthy();
-    expect(migrated.slug).toBe('creemux-addon');
+    expect(migrated.slug).toBe('legacy-addon');
   });
 
   it('does not re-fold once records already exist', () => {
