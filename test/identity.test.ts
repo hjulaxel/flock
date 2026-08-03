@@ -8,25 +8,23 @@
 // every configured account is still on disk, but under a directory nothing
 // reads any more. The sidebar comes back looking factory-new.
 //
-// That is not hypothetical. It happened twice on 2026-08-03 — once when
-// `lineage-sessions` became `canopy` (ffdd08c), and again when the `creemux`
-// placeholder publisher became `hjulaxel` (88796e4) — and both times the state
-// had to be merged across by hand with the editor shut down, because
-// `mergeStates` is newest-clock-wins per record (`src/state.ts`) and a running
-// window holding the empty state wins on write.
+// That is not hypothetical: it happened twice during the rename that settled on
+// the current id, once for the extension name and once for the publisher. Both
+// times the state had to be merged across by hand with the editor shut down,
+// because `mergeStates` is newest-clock-wins per record (`src/state.ts`) and a
+// running window holding the empty state wins on write.
 //
-// Pre-publication that was survivable: the population was one machine. Once
-// `vsce publish` has run it is not, because a user whose store is orphaned has
-// no way back from inside the product — `lineage.reopenProject` only lists
-// projects with `hidden === true`, so an empty store just says "no closed
-// projects".
+// Before the first release that was survivable — the population was one machine.
+// After it is not, because a user whose store is orphaned has no way back from
+// inside the product: `lineage.reopenProject` only lists projects with
+// `hidden === true`, so an empty store just says "no closed projects".
 //
-// Why the scaffold test does not already cover this: `test/scaffold.test.ts`
-// asserts `EXTENSION_ID === `${pkg.publisher}.${pkg.name}``. That catches
-// types.ts and the manifest DRIFTING APART — the bug that silently broke
-// cross-window focus — but it passes happily when both sides are renamed
-// together, which is exactly the change that orphans the store. A guard has to
-// restate the literal to catch that, which is why this one does.
+// Why `test/scaffold.test.ts` does not already cover this: it asserts
+// `EXTENSION_ID === `${pkg.publisher}.${pkg.name}``. That catches types.ts and
+// the manifest DRIFTING APART — the bug that silently broke cross-window focus
+// — but it passes happily when both sides are renamed together, which is
+// exactly the change that orphans the store. A guard has to restate the literal
+// to catch that, which is why this one does.
 //
 // If this test is failing because you deliberately want a new id: that is a
 // migration, not a rename. Ship a one-time legacy import at activation (adopt
@@ -41,7 +39,7 @@ import { EXTENSION_ID, EXTENSION_NAME, PUBLISHER } from '../src/types';
 
 const ROOT = path.join(__dirname, '..');
 
-/** Frozen at 0.1.0 — SPEC.md §Identity, "permanent once published". */
+/** The published identity. Permanent: see the note at the top of this file. */
 const FROZEN_PUBLISHER = 'hjulaxel';
 const FROZEN_NAME = 'canopy';
 const FROZEN_ID = `${FROZEN_PUBLISHER}.${FROZEN_NAME}`;

@@ -1,4 +1,5 @@
-// Owner A. Roster parsing / normalisation / binary discovery / poller.
+// test/roster.test.ts — reading the CLI's own session roster: parsing,
+// normalisation, binary discovery and the poller.
 // No test here ever runs the real `claude` binary.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -800,9 +801,9 @@ describe('RosterPoller', () => {
   });
 });
 
-// ═════════════════════════════ M22.3: multi-config-dir roster ═══════════════
+// ═══════════════════════════ multi-config-dir roster ════════════════════════
 
-describe('rosterEnvFor (M22.3)', () => {
+describe('rosterEnvFor', () => {
   it('no dir / blank dir -> the parent env, SAME object, untouched', () => {
     expect(rosterEnvFor(undefined)).toBe(process.env);
     expect(rosterEnvFor('')).toBe(process.env);
@@ -818,7 +819,7 @@ describe('rosterEnvFor (M22.3)', () => {
   });
 });
 
-describe('fetchRosterMulti (M22.3)', () => {
+describe('fetchRosterMulti', () => {
   const RA = '0f0000a1-0000-4000-8000-0000000000a1';
   const RB = '0f0000b2-0000-4000-8000-0000000000b2';
   const RC = '0f0000c3-0000-4000-8000-0000000000c3';

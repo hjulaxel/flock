@@ -1,10 +1,11 @@
-// Owner G (M5). Covers SPEC.md §9's `test/hooks.test.ts` bullets plus the
-// filesystem-side behavior that must degrade rather than break: the safety-
-// gated remove, activate-time self-heal, and the incremental events tail.
+// test/hooks.test.ts — the hook plugin Canopy writes into the user's
+// ~/.claude, and the filesystem-side behaviour that must degrade rather than
+// break: the safety-gated remove, activate-time self-heal, and the incremental
+// events tail.
 //
 // Nothing here touches the real $HOME (every manager gets a mkdtemp home) and
 // nothing here needs a vscode host: the module's UI calls are optional shims,
-// so with the frozen `window = {}` mock they are silent no-ops.
+// so against the mock's empty `window` they are silent no-ops.
 
 import { afterEach, describe, expect, it } from 'vitest';
 import * as fs from 'node:fs';
@@ -74,11 +75,10 @@ async function until(
 }
 
 // ------------------------------------------------------- consent-modal shim
-// The frozen mock exports `window = {}` (SPEC §8.5), so hooks.ts's optional
-// message shims are silent no-ops by default — which is why install() had no
-// coverage at all. Hanging a stub off that same object lets the consent modal
-// be answered without registering anything with a workbench. Torn down after
-// every test.
+// The vscode mock exports `window = {}`, so hooks.ts's optional message shims
+// are silent no-ops by default — which left install() with no coverage at all.
+// Hanging a stub off that same object lets the consent modal be answered
+// without registering anything with a workbench. Torn down after every test.
 
 interface MessageStub {
   showInformationMessage?: (
@@ -264,7 +264,7 @@ describe('hooks: parseEventLine', () => {
     expect(event!.sessionId).toBeNull();
   });
 
-  it('M11: surfaces SessionStart source so a fork is never chained', () => {
+  it('surfaces SessionStart source so a fork is never chained', () => {
     const NODE = '0e000000-0000-4000-8000-00000000000e';
     const forked = parseEventLine(
       JSON.stringify({
@@ -316,7 +316,7 @@ describe('hooks: install writes the plugin after exactly one confirmation', () =
 
     const state = await manager.install();
 
-    // REGRESSION (review finding #1): the write must land the moment install()
+    // REGRESSION. The write must land the moment install()
     // resolves. Routing it through a WorkspaceEdit with needsConfirmation used
     // to raise VS Code's bulk-edit "Refactor Preview" as a SECOND consent step
     // after this modal, and dismissing that preview silently wrote nothing.
@@ -689,7 +689,7 @@ describe('hooks: events watcher', () => {
     expect(fs.existsSync(path.dirname(file))).toBe(true);
   });
 
-  // REGRESSION (P9 #5). MAX_EVENTS_BYTES used to be checked only at
+  // REGRESSION. MAX_EVENTS_BYTES used to be checked only at
   // startWatcher() time (a fresh activation), so a window left open for days
   // grew events.ndjson without bound — reclaimed only by quitting and
   // relaunching. drain() now truncates in place once the running total

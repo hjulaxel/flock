@@ -1,4 +1,4 @@
-// test/subprojects.test.ts — M26, the two view features.
+// test/subprojects.test.ts — two view features that share a mechanism.
 //
 //   1. SUBPROJECTS: a project may be filed under another project, to any depth
 //      and any breadth.
@@ -815,9 +815,9 @@ describe('buildViewModel: branch grouping', () => {
   });
 });
 
-// A worktree list shared by a project and a subproject inside it — the exact
-// shape M26 introduces, and the one place the two features meet in the
-// grouping pass rather than in the renderer.
+// A worktree list shared by a project and a subproject inside it — the one
+// place the two features above meet, and they meet in the grouping pass rather
+// than in the renderer.
 describe('subprojects inside a repository with worktrees', () => {
   const parent = project('app', 'app', '/code/app');
   const child = project('api', 'api', '/code/app/api', { parentId: 'app' });

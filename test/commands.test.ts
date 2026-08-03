@@ -1,11 +1,11 @@
-// SPEC.md §9 — test/commands.test.ts (nominally owner E; written by the
-// INTEGRATOR because owner E was scoped to src/commands.ts only).
+// test/commands.test.ts — src/commands.ts's pure surface, plus the two
+// exported flows.
 //
-// Pure surface, plus the two exported flows: registerCommands() talks to the
-// real workbench and is never exercised. `chatFlow` needs no workbench at all;
-// `configureProjectFlow` opens a QuickPick, so the two host entry points it
-// calls are scripted onto the mock's (deliberately empty) `window`/`commands`
-// for the length of a test and removed again — see that describe block.
+// registerCommands() talks to the real workbench and is mostly never exercised.
+// `chatFlow` needs no workbench at all; `configureProjectFlow` opens a
+// QuickPick, so the two host entry points it calls are scripted onto the mock's
+// (deliberately empty) `window`/`commands` for the length of a test and removed
+// again — see that describe block.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -161,7 +161,7 @@ describe('isSessionId (the gate every verb resolves through)', () => {
   });
 });
 
-// M22 — the three shapes a multi-row verb is invoked with. This is the whole of
+// The three shapes a multi-row verb is invoked with. This is the whole of
 // the argument handling for "delete the rows I have selected", and each shape
 // comes from a different surface.
 describe('selectedSessionIds', () => {
@@ -335,7 +335,7 @@ describe('staleCandidates', () => {
     expect(only.stale).toBe(false);
   });
 
-  // REGRESSION (M5 / plan §4). The age came off `startedAt` for anything not
+  // REGRESSION. The age came off `startedAt` for anything not
   // archived, so a session worked on every day for a month was pre-ticked for
   // DELETION on the strength of when it was opened.
   it('ages a live row from its last activity, never from its start', () => {
@@ -389,7 +389,7 @@ describe('staleCandidates', () => {
   });
 });
 
-// ------------------------------------------------------------- M8: naming
+// ----------------------------------------------------------------- naming
 // A new branch is NAMED at birth (pre-filled, pre-selected) instead of being
 // asked for an opening prompt, so the default name has to be worth accepting.
 
@@ -584,7 +584,7 @@ describe('defaultSessionTitle: de-duplication', () => {
   });
 });
 
-// ------------------------------------------------------------- chat (M16)
+// --------------------------------------------------------------- the chat
 
 describe('chatSystemPrompt', () => {
   const project: ProjectRecord = {
@@ -622,7 +622,7 @@ interface ChatCalls {
   records: Array<{ id: string; patch: Partial<EditorialRecord> }>;
   launches: LaunchOptions[];
   projectPatches: Array<{ id: string; patch: Partial<ProjectRecord> }>;
-  /** M26. Every setProjectParent this double was asked for. */
+  /** Every setProjectParent this double was asked for. */
   projectMoves: Array<[string, string | null]>;
   focused: string[];
   reveals: string[];
@@ -637,11 +637,11 @@ function chatDeps(
     tipOf?: (id: string) => string;
     beginInlineRename?: (id?: string) => boolean;
     beginInlineRenameProject?: (id: string) => boolean;
-    /** M24. The store the chat history and the chat ordinal read. */
+    /** The store the chat history and the chat ordinal read. */
     records?: Record<string, EditorialRecord>;
-    /** M26. Whether the store accepts a re-file (it refuses cycles). */
+    /** Whether the store accepts a re-file (it refuses cycles). */
     setProjectParent?: (id: string, parentId: string | null) => boolean;
-    /** M26. Every project the flows can see, not just the one under test. */
+    /** Every project the flows can see, not just the one under test. */
     projects?: ProjectRecord[];
   } = {},
 ): { deps: CommandDeps; calls: ChatCalls } {
@@ -689,10 +689,10 @@ function chatDeps(
       calls.launches.push(opts);
       return null;
     },
-    // beginInlineRename is untouched by any existing test — default stays the
-    // same hardcoded `false` it always was; M22's own tests opt into `true`
-    // so a just-created row's fallback (`vscode.commands.executeCommand`)
-    // never has to be scripted onto the mock's empty `commands`.
+    // Defaults to `false`, which is what almost every test wants. The account
+    // blocks below opt into `true` so that a just-created row's fallback
+    // (`vscode.commands.executeCommand`) never has to be scripted onto the
+    // mock's empty `commands`.
     beginInlineRename: async (id) =>
       over.beginInlineRename ? over.beginInlineRename(id) : false,
     focusSession: (id) => {
@@ -755,7 +755,8 @@ function projectOf(over: Partial<ProjectRecord> = {}): ProjectRecord {
 }
 
 /** A chat record in `projectOf()`'s root directory — which is what makes it
- *  that project's chat, since M24 derives the membership from the cwd. */
+ *  that project's chat: membership is derived from the cwd, not from a
+ *  pointer on the project record. */
 function chatRecord(
   id: string,
   over: Partial<EditorialRecord> = {},
@@ -801,8 +802,9 @@ describe('chatFlow', () => {
     ]);
     expect(launch.appendSystemPrompt).toContain('magma-os');
 
-    // M24: the project record is not touched at all. `chatSessionId` was the
-    // one-chat-per-project pointer and there is no longer one chat to point at.
+    // The project record is not touched at all: `chatSessionId` was the
+    // one-chat-per-project pointer, and a project can now hold many chats, so
+    // there is no longer one chat to point at.
     expect(calls.projectPatches).toEqual([]);
   });
 
@@ -812,12 +814,12 @@ describe('chatFlow', () => {
     expect(calls.order).not.toContain('recordLaunch');
   });
 
-  // M24 — THE change. Every one of these used to be a resume.
+  // Each of these used to be a resume, back when a project had one chat.
 
   it('mints a NEW chat even when one is already open in this window', async () => {
     const { deps, calls } = chatDeps(projectOf(), {
       records: { [VALID]: chatRecord(VALID) },
-      // Would have been focused instead of launched, pre-M24.
+      // A one-chat-per-project build would have focused this instead of launching.
       focusSession: () => true,
     });
     await chatFlow(deps, 'p1');
@@ -886,7 +888,7 @@ describe('chatFlow', () => {
   });
 });
 
-// ------------------------------------------------ M24: the chat history
+// ---------------------------------------------------- the chat history
 
 /**
  * The picker over a project's chats. Needs a workbench for the same reason the
@@ -1014,7 +1016,7 @@ describe('chatHistoryFlow', () => {
   });
 });
 
-// -------------------------------------------- M24: close / open a project
+// ------------------------------------------------- close / open a project
 
 describe('closeProjectFlow', () => {
   beforeEach(() => {
@@ -1104,7 +1106,7 @@ describe('reopenProject', () => {
   });
 });
 
-// ------------------------------------------- M17: Configure Project → Rename…
+// ------------------------------------------ Configure Project → Rename…
 
 /**
  * The one flow in this file that needs a workbench: it opens a QuickPick, and
@@ -1122,11 +1124,11 @@ type QuickPickHost = {
 type CommandHost = {
   executeCommand?: (id: string, ...rest: unknown[]) => Promise<unknown>;
 };
-/** M24. The status-bar breadcrumb Close Project leaves behind. */
+/** The status-bar breadcrumb Close Project leaves behind. */
 type StatusHost = {
   setStatusBarMessage?: (text: string, ms?: number) => void;
 };
-/** M24. The modal behind Close Project. */
+/** The modal behind Close Project. */
 type WarningHost = {
   showWarningMessage?: (
     message: string,
@@ -1160,7 +1162,7 @@ describe('configureProjectFlow: the Rename… branch', () => {
     return state;
   }
 
-  // REGRESSION (M3). The rename branch used to fire the verb and `continue`,
+  // REGRESSION. The rename branch used to fire the verb and `continue`,
   // and the verb resolves as soon as the `beginRename` message is DELIVERED —
   // not when the user finishes typing. So the QuickPick reopened in the same
   // tick, took the keyboard back, blurred the input, and the client's
@@ -1378,11 +1380,11 @@ describe('detach tier: resumeFlow is the attach verb for hidden sessions', () =>
   });
 });
 
-// ---------------------------------------------------------------- M22: accounts
+// -------------------------------------------------------------- accounts
 //
-// `forkFlow`/`newSessionFlow`/`newSessionInProjectFlow` went module-private in
-// M22 (only reachable through their registered commands — see the note beside
-// `AccountCommandDeps` in src/commands.ts) precisely so nothing outside
+// `forkFlow`/`newSessionFlow`/`newSessionInProjectFlow` are module-private —
+// only reachable through their registered commands, see the note beside
+// `AccountCommandDeps` in src/commands.ts — precisely so nothing outside
 // commands.ts can drift from the account handling every launch origin shares.
 // `resumeFlow` above is the one exported entry point and already proves the
 // PIN wins over routing for an existing conversation; the two blocks below
@@ -1460,8 +1462,9 @@ function fakeAccountDeps(
 }
 
 /**
- * `registerCommands()` is documented (top of this file) as never exercised —
- * true until M22 pushed the launch flows behind it. Scripting
+ * `registerCommands()` is documented (top of this file) as never exercised,
+ * and that holds everywhere except here: the launch flows live behind it.
+ * Scripting
  * `vscode.commands.registerCommand` to capture handlers by id is the one way
  * to reach them without widening commands.ts's exported surface just for
  * tests.
@@ -1493,7 +1496,7 @@ function withRegisteredCommands(deps: AccountCommandDeps): {
   };
 }
 
-describe('M22: fork inherits the PARENT pin, never the routing choice of the day', () => {
+describe('fork inherits the PARENT pin, never the routing choice of the day', () => {
   afterEach(() => {
     delete (mockCommands as { registerCommand?: unknown }).registerCommand;
   });
@@ -1544,7 +1547,7 @@ describe('M22: fork inherits the PARENT pin, never the routing choice of the day
     ]);
   });
 
-  it('with no pin recorded (a pre-M22 conversation), forks with no env at all', async () => {
+  it('with no pin recorded (a conversation started before accounts existed), forks with no env at all', async () => {
     const PARENT = uuid(1);
     const WORK = accountProfile('work', { configDir: '/work/.claude' });
     const { accounts, calls: acctCalls } = fakeAccountDeps([WORK], {
@@ -1760,7 +1763,7 @@ describe('fork falls back to the parent of a branch that never took a turn', () 
   });
 });
 
-describe('M22: a new session (newSessionInBranch) is routed and its pin recorded', () => {
+describe('a new session (newSessionInBranch) is routed and its pin recorded', () => {
   const PROJECT = 'p1';
 
   afterEach(() => {
@@ -1863,7 +1866,7 @@ describe('M22: a new session (newSessionInBranch) is routed and its pin recorded
     ]);
   });
 
-  it('with no accounts wiring at all, launches exactly as before M22 — no env, no pin', async () => {
+  it('with no accounts wiring at all, launches plainly — no env, no pin', async () => {
     const { project, branchArg } = projectAndBranch();
     const { deps, calls } = chatDeps(project, { beginInlineRename: () => true });
     const withoutAccounts: AccountCommandDeps = {
@@ -1880,7 +1883,7 @@ describe('M22: a new session (newSessionInBranch) is routed and its pin recorded
           createdAt: 0,
         };
       },
-      // deps.accounts intentionally left undefined — the pre-M22 wiring.
+      // deps.accounts intentionally left undefined: a host with no accounts.
     };
 
     const harness = withRegisteredCommands(withoutAccounts);
@@ -1897,7 +1900,7 @@ describe('M22: a new session (newSessionInBranch) is routed and its pin recorded
 // `claude` on the machine's DEFAULT login while the pin, the row and the
 // status line all named the other account — so the verbs refuse it out loud
 // instead, and the router never offers it in the first place.
-describe('M22: a session never starts on an account no session can run on', () => {
+describe('a session never starts on an account no session can run on', () => {
   afterEach(() => {
     delete (mockCommands as { registerCommand?: unknown }).registerCommand;
     delete (mockWindow as { showWarningMessage?: unknown }).showWarningMessage;
@@ -1983,7 +1986,7 @@ describe('M22: a session never starts on an account no session can run on', () =
   });
 });
 
-describe('M22: removeAccount removes only the list entry, never the config directory', () => {
+describe('removeAccount removes only the list entry, never the config directory', () => {
   afterEach(() => {
     delete (mockCommands as { registerCommand?: unknown }).registerCommand;
     delete (mockWindow as { showWarningMessage?: unknown }).showWarningMessage;
@@ -2062,7 +2065,7 @@ describe('M22: removeAccount removes only the list entry, never the config direc
   });
 });
 
-// ---------------------------------------------------------------------- M25
+// --------------------------------------------------- adopting a native /fork
 //
 // `/fork` ≡ Fork Session. A native /fork dispatches a BACKGROUND JOB — a live
 // process holding the child id, parked on "send a prompt to start", whose pty
@@ -2201,7 +2204,7 @@ describe('adoptBackgroundJob', () => {
   });
 });
 
-// -------------------------------------------------------- M26: moveProject
+// ------------------------------------------------------------- moveProject
 //
 // The picker is the whole verb: what it OFFERS is the feature (a list you can
 // trust has no illegal move in it), and what it does with the answer is one

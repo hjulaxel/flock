@@ -1,4 +1,4 @@
-// M9 — the inline-rename sidebar, client half.
+// The webview tree, client half.
 //
 // A DUMB PAINTER. It owns no model: the extension posts a flat, ordered row list
 // and this file turns it into DOM. Every decision about what is visible, in what
@@ -51,7 +51,7 @@
   /** Row key being renamed, or null. */
   let editingKey = null;
   /**
-   * M26. The row key a drag started on, or null.
+   * The row key a drag started on, or null.
    *
    * `text/plain` carries the dragged SESSION's id, which is what every existing
    * drop path reads — but a project has no session id, and its uuid would be
@@ -422,7 +422,7 @@
     return box;
   }
 
-  /** M26. The project nesting a row is filed under, as plain left padding.
+  /** The project nesting a row is filed under, as plain left padding.
    *  Read by webtree.css, which adds it to whatever padding that row kind
    *  already has — so a branch row keeps its own extra offset and a session row
    *  keeps its gutter, both simply shifted right by the same amount. */
@@ -467,7 +467,7 @@
       'var(--lineage-branch-' + (Number(chip.colorIndex) || 0) + ', var(--vscode-foreground))',
     );
 
-    // M26. Under branch grouping the row OPENS, so it needs the one thing every
+    // Under branch grouping the row OPENS, so it needs the one thing every
     // other openable row in this tree has: a twisty. Drawn as a small chevron in
     // its own column ahead of the swatch — not as the session spine's ⊕ ring,
     // which means "a lineage continues here" and would claim the sessions below
@@ -502,16 +502,13 @@
 
     el.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
 
-    // NO session count. It was the obvious number and it earned its place for
-    // about a day: the sessions on a branch are already on screen, in that
-    // branch's colour, directly underneath — so the number restated what the
-    // rows below it were already saying, in the column the eye scans for the
-    // one thing they cannot say. The width goes back to the branch NAME, which
-    // is what a long ref actually needed.
-    //
-    // Grouped, the branch says how many sessions it holds — the number is the
-    // only content a collapsed row has. Flat, `description` is empty and this
-    // draws nothing (see branchRow in src/viewmodel.ts).
+    // The session count, and ONLY where it says something. Grouped, a collapsed
+    // branch row has no other content — the number is all it can report about
+    // what is inside. Flat, the sessions are already on screen underneath in
+    // that branch's colour, so a count restates the rows below it in the column
+    // the eye scans for the one thing they cannot say, and the width is better
+    // spent on a long ref. `description` is empty in that case and this draws
+    // nothing (see branchRow in src/viewmodel.ts).
     if (row.description) {
       const count = document.createElement('span');
       count.className = 'branch-count';
@@ -589,7 +586,7 @@
     el.addEventListener('click', (e) => {
       if (editing) return;
       e.preventDefault();
-      // M26. An openable branch row is a container: clicking it opens and shuts
+      // An openable branch row is a container: clicking it opens and shuts
       // it, the way clicking a project header does, and the `+` on the row is
       // what starts a session there. Ungrouped it has no children to show and
       // the click keeps its original meaning.
@@ -621,7 +618,7 @@
     const el = document.createElement('div');
     el.className =
       'row ' + row.kind + (row.muted ? ' muted' : '') + (row.closed ? ' closed' : '');
-    // M26. A project row standing inside another project's block. The class
+    // A project row standing inside another project's block. The class
     // carries the whole visual difference (no top rule, a lighter label weight)
     // — see webtree.css — because the row is otherwise exactly a project row and
     // should stay one.
@@ -643,7 +640,7 @@
     el.setAttribute('data-vscode-context', JSON.stringify(row.context));
 
     if (row.canDrag) el.draggable = true;
-    // M26. The project a row is filed under, as padding. Everything else about
+    // The project a row is filed under, as padding. Everything else about
     // the row's geometry is unchanged — see applyIndent.
     applyIndent(el, row);
 
@@ -1218,18 +1215,15 @@
 
   // -------------------------------------------------------- keyboard navigation
 
-  /** Rows the focus ring can land on. The branch strip is a group of buttons,
-   *  not a treeitem: it has nothing to select, no verb keyed to it and no name
-   *  to read out, so arrow-keying onto it would be a dead stop between a
-   *  project and its first session. Tab still reaches the chips themselves,
-   *  which is how a strip of buttons is supposed to be entered. */
+  /** Rows the focus ring can land on — every row kind, today. Every row in this
+   *  tree has something the ring is good for: a session opens, a header toggles,
+   *  a branch row starts a session and carries a context menu.
+   *
+   *  Kept as a named predicate rather than inlined as `true` because all three
+   *  walkers below (moveFocus, Home/End, ArrowLeft's parent hop) route through
+   *  it, so a row kind that must NOT take the ring has exactly one place to say
+   *  so — and no walker can be updated and another forgotten. */
   function focusable(row) {
-    // Every row kind is focusable again. The strip that had to be skipped was a
-    // group of buttons with nothing to select; a branch row is a row — it takes
-    // the ring, Enter starts a session on it, and the context menu is the point
-    // of it. Kept as a named predicate rather than deleted because the walkers
-    // below all route through it, and the next non-focusable row kind should
-    // have exactly one place to declare itself.
     return !!row;
   }
 
@@ -1298,7 +1292,7 @@
     reportSelection();
   }
 
-  // M26. Empty space below the last row is where a project goes to stop being
+  // Empty space below the last row is where a project goes to stop being
   // a subproject. Guarded on `e.target === root` rather than by not registering
   // it: the listener is on the scroll container, so every row's drop bubbles
   // through here, and the row handlers stop propagation for exactly that
@@ -1348,9 +1342,9 @@
         return;
       }
       // Both ends look for the outermost FOCUSABLE row rather than simply the
-      // first or last one: the branch strip is a group of buttons with nothing
-      // to select, and End landing on it would leave the ring somewhere no verb
-      // applies. findIndex/the reverse walk skip it the same way moveFocus does.
+      // first or last one, so that a row kind excluded from the ring (see
+      // `focusable`) is skipped here exactly the way moveFocus skips it, rather
+      // than leaving the ring somewhere no verb applies.
       case 'Home': {
         e.preventDefault();
         const first = rows.findIndex(focusable);
@@ -1385,9 +1379,9 @@
         // Jump to the parent: the nearest row above at a shallower depth.
         const i = indexOfKey(row.key);
         for (let j = i - 1; j >= 0; j--) {
-          // `focusable` as well as the depth test: the branch strip sits at the
-          // sessions' own depth (it labels them, it does not contain them), so a
-          // depth test alone could stop the walk on a row that holds no ring.
+          // `focusable` as well as the depth test: a row can sit at a shallower
+          // depth without being able to hold the ring, and a depth test alone
+          // would stop the walk there and drop the cursor.
           if (rows[j].depth < row.depth && focusable(rows[j])) {
             focusRow(rows[j].key);
             break;

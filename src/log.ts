@@ -1,6 +1,6 @@
-// src/log.ts — vscode-free logging sink. Frozen; written by the scaffold
-// agent from SPEC.md §8.3. extension.ts routes this into an OutputChannel;
-// under vitest it stays a no-op unless a test installs a sink.
+// src/log.ts — the logging sink, deliberately vscode-free so every module can
+// log without depending on the editor. extension.ts routes this into an
+// OutputChannel; under vitest it stays a no-op unless a test installs a sink.
 
 export type LogSink = (line: string) => void;
 

@@ -1,4 +1,5 @@
-// test/workspaces.test.ts — project workspaces (M13), the pure rules.
+// test/workspaces.test.ts — project workspaces: the pure rules behind saving a
+// project's editor layout and restoring it on a switch.
 //
 // The manager's vscode plumbing (tab capture, closing, vscode.open) can only
 // be exercised in a live host; what is unit-tested here is every DECISION:
@@ -30,7 +31,7 @@ import type {
 
 const S1 = '0f0000a1-0000-4000-8000-0000000000a1';
 const S2 = '0f0000a2-0000-4000-8000-0000000000a2';
-/** The project chat (M16) — one of ours, project-scoped, in no layout. */
+/** A project chat — one of ours, project-scoped, in no layout. */
 const CHAT = '0f0000c0-0000-4000-8000-0000000000c0';
 
 function fileTab(fsPath: string, over: Partial<TabFacts> = {}): TabFacts {
@@ -157,7 +158,7 @@ describe('workspaces: planSwitch', () => {
   });
 
   it('a foreign project CHAT is parked like any other session of ours', () => {
-    // REGRESSION (W2). A chat left out of the plan entirely falls through to
+    // REGRESSION. A chat left out of the plan entirely falls through to
     // "a terminal is never closed", and project A's chat then sits in project
     // B's window forever — the exact complaint workspaces exist to answer.
     const chat = sessionTab(CHAT, { chat: true, label: 'Chat · Web' });
@@ -216,7 +217,7 @@ describe('workspaces: layoutFacts', () => {
   });
 
   it('a project chat is in the window but in no layout', () => {
-    // REGRESSION (W2). The chat is planned, stowed and unstowed like any other
+    // REGRESSION. The chat is planned, stowed and unstowed like any other
     // session — this filter, and not an absence from the facts, is the whole
     // of "a chat is not part of a layout".
     const chat = sessionTab(CHAT, { chat: true });
@@ -275,7 +276,7 @@ describe('workspaces: layoutIdentities', () => {
   });
 
   it('speaks the same identity language as tabIdentity', () => {
-    // REGRESSION (W1). The spare set and the close set are matched by identity
+    // REGRESSION. The spare set and the close set are matched by identity
     // string; the moment the two formulas drift the spare set spares nothing
     // and the verify pass is free to close a restored tab again.
     const open = fileTab('/home/me/.zshrc');
@@ -288,7 +289,7 @@ describe('workspaces: layoutIdentities', () => {
   });
 
   it("spares a foreign-looking file that is in the target's own layout", () => {
-    // REGRESSION (W1). ~/.zshrc lives outside every one of the project's
+    // REGRESSION. ~/.zshrc lives outside every one of the project's
     // directories, so planSwitch calls it foreign — but it is in the layout the
     // switch is about to restore. Closing it means the user watches it flash,
     // the summary counts it twice, and the verify pass can close it for good.
@@ -497,7 +498,7 @@ describe('workspaces: captureTabs honours lineage.terminalLocation', () => {
   });
 
   it('captures a chat as a session, flagged — not as an anonymous terminal', () => {
-    // REGRESSION (W2). Dropping the chat here is what left its terminal tab to
+    // REGRESSION. Dropping the chat here is what left its terminal tab to
     // the "a terminal is never closed" branch: project A's chat then stayed on
     // screen in project B, forever.
     const facts = capture(
@@ -528,11 +529,12 @@ describe('workspaces: captureTabs honours lineage.terminalLocation', () => {
 });
 
 // ------------------------------------------------- the switch, end to end
-// The frozen mock (test/mocks/vscode.ts) ships an empty `window` and
-// `commands` and no test may edit it — but a test may hang stand-ins off those
-// already-exported objects for its own duration, exactly as test/windows.test.ts
-// does for `env`. That is the only way to reach the close → restore → verify
-// round trip, and the round trip is where a tab gets closed twice.
+// The vscode mock (test/mocks/vscode.ts) ships an empty `window` and
+// `commands`. Rather than widen the shared mock, a test hangs stand-ins off
+// those already-exported objects for its own duration, exactly as
+// test/windows.test.ts does for `env`. That is the only way to reach the
+// close -> restore -> verify round trip, and the round trip is where a tab gets
+// closed twice.
 
 const ISO = '2026-07-31T00:00:00.000Z';
 
@@ -706,7 +708,7 @@ afterEach(() => {
 
 describe('workspaces: a switch never undoes its own restore', () => {
   it("keeps a foreign-looking file that is in the target's saved layout", async () => {
-    // REGRESSION (W1). ~/.zshrc sits outside every one of the project's
+    // REGRESSION. ~/.zshrc sits outside every one of the project's
     // directories but is part of its layout. It used to be closed by the plan,
     // reopened by the restore, and closed AGAIN by the verify pass — the user
     // watched it flash, the summary counted it twice, and the restored layout
@@ -787,7 +789,7 @@ describe('workspaces: a project chat travels with its project', () => {
   });
 
   it('parks the chat of the project being left, and snapshots it nowhere', async () => {
-    // REGRESSION (W2). A chat that is not planned as a session falls through to
+    // REGRESSION. A chat that is not planned as a session falls through to
     // "a terminal we do not own is never closed", so project A's chat stayed
     // visible in project B's workspace forever.
     const groups: FakeGroup[] = [
@@ -839,7 +841,7 @@ describe('workspaces: a project chat travels with its project', () => {
     // An older build parked by stowing into the terminal panel, so a chat can
     // be parked AND still live. That one is moved home, never duplicated.
     //
-    // M24: found by scanning the RECORDS for parked chats in the project's
+    // Found by scanning the RECORDS for parked chats in the project's
     // directories, not by reading one id off the project — a project has as
     // many chats as you have opened.
     const records: Record<string, EditorialRecord> = {
@@ -1256,7 +1258,7 @@ describe('workspaces: the detach tier (tmux)', () => {
   });
 });
 
-describe('workspaces: the Explorer follows the switch (M21)', () => {
+describe('workspaces: the Explorer follows the switch', () => {
   it('hands the TARGET project to the Explorer, before the restore reopens a thing', async () => {
     const groups: FakeGroup[] = [{ viewColumn: 1, isActive: true, tabs: [] }];
     const opened: string[] = [];

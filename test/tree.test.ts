@@ -1,5 +1,5 @@
-// SPEC.md §9 — test/tree.test.ts (nominally owner C; written by the
-// INTEGRATOR because owner C shipped src/tree.ts + src/decorations.ts only).
+// test/tree.test.ts — the native TreeDataProvider (src/tree.ts) and the file
+// decorations that badge its rows (src/decorations.ts).
 //
 // Everything here goes through test/mocks/vscode.ts. registerTree() /
 // registerDecorations() touch the real workbench (`window` is empty in the
@@ -73,7 +73,7 @@ function forestOf(nodes: SessionNode[]): SessionForest {
   return {
     nodes: map,
     roots,
-    // `deleted`, not `hidden` (M8): a hidden row is muted, still on screen.
+    // `deleted`, not `hidden`: a hidden row is muted, still on screen.
     visibleRoots: roots.filter((id) => !map.get(id)?.deleted),
     edges: nodes
       .filter((n) => n.parentId !== null)
@@ -183,7 +183,7 @@ const ref = (id: string): SessionRef => ({ type: 'session', id });
 // ------------------------------------------------------------------- pure
 
 describe('formatAge', () => {
-  it('honours the §4-C2 boundaries', () => {
+  it('rounds at the boundaries the sidebar is read at', () => {
     expect(formatAge(0)).toBe('now');
     expect(formatAge(89_999)).toBe('now');
     expect(formatAge(90_000)).toBe('1m');
@@ -266,7 +266,7 @@ describe('sessionContextValue', () => {
     ).toBe(';session;shown;notified;archived;exited;root;');
   });
 
-  // M19. Exactly one of the pair, always — the two mute menu entries are
+  // Exactly one of the pair, always — the two mute menu entries are
   // complementary `when` clauses and each needs a positive token to match.
   it('names which half of the notification mute a row offers', () => {
     expect(
@@ -584,7 +584,7 @@ describe('LineageTreeProvider.resolveTreeItem', () => {
 
 // ---------------------------------------------------------------- projects
 
-describe('LineageTreeProvider projects (M7)', () => {
+describe('LineageTreeProvider projects', () => {
   const forest = (): SessionForest =>
     forestOf([
       node(A, { cwd: '/code/api/src' }),
@@ -616,16 +616,16 @@ describe('LineageTreeProvider projects (M7)', () => {
     expect(item.description).toBe('+1 dir');
     expect(item.contextValue).toBe(';project;');
     // A project is not a session — it must never take a SESSION decoration.
-    // Since M12 it carries its own scheme, which decorates only the bubbled-up
-    // unseen dot and renders nothing otherwise.
+    // It carries its own scheme, which decorates only the bubbled-up unseen
+    // dot and renders nothing otherwise.
     const uri = item.resourceUri as { scheme: string; path: string };
     expect(uri.scheme).toBe('lineage-project');
     expect(uri.path).toBe('/p1');
   });
 
   // Both root kinds read as the same "this is a container" shape — a project
-  // is not a fancier folder, it just also carries the M12 unseen-dot
-  // decoration exercised above, which this icon change leaves untouched.
+  // is not a fancier folder, it just also carries the unseen-dot decoration
+  // exercised above, which this icon change leaves untouched.
   it('gives a folder row the same unbranded root-folder icon as a project row', () => {
     const h = harness(forest());
     h.setProjects([project('p1', 'API', '/code/api')]);
@@ -824,7 +824,7 @@ describe('provider icons', () => {
   });
 });
 
-// --------------------------------------------------------------- M8: hidden
+// ------------------------------------------------------------------- hidden
 
 describe('hidden (muted) rows', () => {
   it('greys the row with eye-closed instead of the brand glyph', () => {
@@ -1003,8 +1003,8 @@ describe('SessionDecorationProvider.provideFileDecoration', () => {
     expect((d?.color as unknown as { id: string }).id).toBe(RUNNING_COLOR_ID);
   });
 
-  // M19: greys the ghost, draws no mark. The empty ring that used to sit here
-  // said what the grey label already says, on every dead row in the tree.
+  // Greys the ghost, draws no mark: an empty ring here would say what the grey
+  // label already says, on every dead row in the tree.
   it('greys a ghost without marking it', () => {
     const p = build([node(A, { ghost: true, status: 'exited' })]);
     const d = p.provideFileDecoration(sessionUri(A) as never);
@@ -1062,14 +1062,14 @@ describe('SessionDecorationProvider.provideFileDecoration', () => {
   });
 });
 
-// ---------------------------------------------------------- M26: nesting
+// ---------------------------------------------------------------- nesting
 //
 // The native tree's half of subprojects and branch grouping. It renders the
 // same grouping the inline sidebar does (that is the point — the two views
 // must never disagree about what a project contains), but through TreeNodes
 // rather than a flat row list, so the walk is what has to be tested here.
 
-describe('LineageTreeProvider: subprojects (M26)', () => {
+describe('LineageTreeProvider: subprojects', () => {
   const APP = project('app', 'app', '/code/app');
   const API = project('api', 'api', '/code/app/api', { parentId: 'app' });
 
@@ -1166,7 +1166,7 @@ describe('LineageTreeProvider: subprojects (M26)', () => {
   });
 });
 
-describe('LineageTreeProvider: branch grouping (M26)', () => {
+describe('LineageTreeProvider: branch grouping', () => {
   const APP = project('app', 'app', '/code/app');
   const WORKTREES = [
     { dir: '/code/app', branch: 'main', head: 'aaa', detached: false },

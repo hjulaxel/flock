@@ -1,9 +1,8 @@
-// IMPLEMENTED BY: C
-// TreeDataProvider + TreeView + drag-and-drop reparenting — SPEC.md §4-C2.
+// src/tree.ts — TreeDataProvider + TreeView + drag-and-drop reparenting.
 //
-// Imports allowed here: vscode, ./types, ./log, ./decorations (same owner).
-// Must NOT: fire onDidChangeTreeData with [] (fire undefined), mutate the
-// forest, execute any command, or import terminals/state/lineage.
+// A view layer and nothing more: it must not fire onDidChangeTreeData with []
+// (fire undefined), mutate the forest, execute any command, or import
+// terminals/state/lineage.
 
 import * as vscode from 'vscode';
 import {
@@ -62,7 +61,7 @@ const EMPTY_FOREST: SessionForest = {
 // ------------------------------------------------------------ pure helpers
 
 // formatAge / statusDescriptor / sessionContextValue / projectContextValue moved
-// to ./viewmodel (M9): the native tree and the inline webview must render a row
+// to ./viewmodel: the native tree and the inline webview must render a row
 // identically, and two copies of "how a row reads" would diverge on the first
 // change. Re-exported so importers and tests keep their existing entry point.
 import {
@@ -137,7 +136,7 @@ function groupingSignature(
   const p = projects
     .map(
       (x) =>
-        // `parentId` is in here (M26) for the same reason every other field is:
+        // `parentId` is in here for the same reason every other field is:
         // this string is what decides whether the cached grouping can be
         // reused, and a project that was re-filed changes nothing else about
         // itself — so without it, moving a project would leave the tree drawing
@@ -174,7 +173,7 @@ export class LineageTreeProvider
    *  and selection cheap and stable. */
   private readonly refs = new Map<string, SessionRef>();
 
-  /** M26. The same interning for branch container rows, keyed
+  /** The same interning for branch container rows, keyed
    *  `<projectId>\u0000<branch>`. See branchRef(). */
   private readonly branchRefs = new Map<string, BranchTreeNode>();
 
@@ -272,7 +271,7 @@ export class LineageTreeProvider
         hiddenFolders,
         groupByFolder,
         onlyProjectSessions,
-        // M20. The native tree draws no chips — a TreeItem has one label, one
+        // The native tree draws no chips — a TreeItem has one label, one
         // icon and no room for a strip of buttons — but it must still CLAIM
         // worktree sessions for their project, or the two view styles would
         // disagree about which rows a project contains. Grouping is shared;
@@ -360,7 +359,7 @@ export class LineageTreeProvider
         seen.add(id);
         const node = forest.nodes.get(id);
         if (!node) continue;
-        // The badge counts exactly the GREEN dots on screen (M12): unseen-done
+        // The badge counts exactly the GREEN dots on screen: unseen-done
         // where tracking is on, waiting where it is off. statusTone already
         // withholds the dot from muted rows — hiding a session is exactly how
         // the user says "stop telling me about this one".
@@ -400,7 +399,7 @@ export class LineageTreeProvider
         // then bare sessions. An empty root list (NOT a placeholder node) is
         // what makes the contributes.viewsWelcome empty state render.
         //
-        // M26: only the TOP-LEVEL projects. `grouping.projects` is a preorder
+        // Only the TOP-LEVEL projects. `grouping.projects` is a preorder
         // list of the whole forest, and a subproject is returned by its
         // parent's getChildren instead — returning them all here would draw
         // every project at the root AND again under its parent.
@@ -560,7 +559,7 @@ export class LineageTreeProvider
     // (a fake `lineage-project:` scheme with no extension) through whatever
     // file-icon theme is active, which is unpredictable rather than absent.
     // `providerIcon()` stays reserved for sessionItem(), below.
-    // M26. A SUBPROJECT gets the plain folder glyph and a top-level project
+    // A SUBPROJECT gets the plain folder glyph and a top-level project
     // keeps the root marker. The native tree indents by 8px per level and
     // draws no band, so the icon is the only thing left to say which rows are
     // the roots of the view — with one glyph for both, a four-project tree
@@ -569,7 +568,7 @@ export class LineageTreeProvider
       (el.depth ?? 0) > 0 ? 'folder-library' : 'root-folder',
     );
     item.contextValue = projectContextValue(el);
-    // A project row IS decorated since M12 — but only under its own scheme,
+    // A project row IS decorated — but only under its own scheme,
     // which lights the attention dot when a session beneath it is unseen-done
     // and renders nothing otherwise.
     item.resourceUri = projectUri(el.projectId);
@@ -577,7 +576,7 @@ export class LineageTreeProvider
   }
 
   /**
-   * A branch CONTAINER row (M26, `lineage.groupSessionsByBranch` only).
+   * A branch CONTAINER row (`lineage.groupSessionsByBranch` only).
    *
    * Deliberately plain next to the inline sidebar's version: a TreeItem has one
    * label, one icon and one description, and no way to draw a coloured swatch —
@@ -815,7 +814,7 @@ export class LineageTreeProvider
   getParent(el: TreeNode): TreeNode | undefined {
     try {
       const forest = this.forest();
-      // M26. A subproject's parent is the project it is filed under, and
+      // A subproject's parent is the project it is filed under, and
       // reveal() walks upward through this — without it, revealing a session in
       // a nested project could not materialise the path to it.
       if (el.type === 'project') {
@@ -948,7 +947,7 @@ export class LineageTreeProvider
       }
       if (iso !== '') lines.push(`started: ${iso}`);
     }
-    // Both stamps, in the order the age falls back through them (M18), so a row
+    // Both stamps, in the order the age falls back through them, so a row
     // whose age looks wrong shows WHICH source it came from.
     for (const [what, at] of [
       ['last prompt', node.lastPromptAt],
@@ -990,8 +989,8 @@ export class LineageTreeProvider
     }
 
     // The close-with-summary text. Without this the only place it exists is
-    // state.json — the prompt says it is "recorded on the node", so the node
-    // is where it has to be readable.
+    // state.json — and the input box that collects it promises it is "recorded
+    // on the node", so the node is where it has to be readable.
     if (node.summary) lines.push(`summary: ${mdEscape(node.summary)}`);
 
     for (const line of lines) md.appendMarkdown(`- ${line}\n`);
@@ -1023,7 +1022,7 @@ export class LineageTreeProvider
       const ids: string[] = [];
       for (const el of source) {
         if (el.type === 'session') ids.push(el.id);
-        // M26. A project row drags too, to be filed under another one. It rides
+        // A project row drags too, to be filed under another one. It rides
         // the SAME payload under a `project:` prefix rather than a second mime
         // type: the array has always been read through a uuid-shaped filter
         // (parseDraggedIds), so a prefixed entry is invisible to every existing
@@ -1049,7 +1048,7 @@ export class LineageTreeProvider
 
       const raw = await transferred.asString();
 
-      // M26. A PROJECT drag first, and never mixed with the session path: onto
+      // A PROJECT drag first, and never mixed with the session path: onto
       // a project row it becomes that project's subproject, onto a folder row
       // or empty space it goes back to the top level, onto a session row
       // nothing happens (a project cannot be filed under a conversation).
@@ -1219,7 +1218,7 @@ export function registerTree(deps: TreeDeps): TreeController {
     treeDataProvider: provider,
     dragAndDropController: provider,
     showCollapseAll: true,
-    // M22. Shift- and ctrl-click select several rows, and the workbench then
+    // Shift- and ctrl-click select several rows, and the workbench then
     // hands every row menu command its whole selection as a second argument —
     // which is the entire native half of multi-delete. The webview has to build
     // the same thing by hand (see media/webtree.js).

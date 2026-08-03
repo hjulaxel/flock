@@ -1,4 +1,4 @@
-// test/projects.test.ts — the M7 project model: path rules, cwd -> project
+// test/projects.test.ts — the project model: path rules, cwd -> project
 // matching, and the grouping pass that produces the top level of the tree.
 //
 // src/projects.ts imports nothing but ./types, so none of this needs the
@@ -452,7 +452,7 @@ describe('computeGrouping', () => {
   });
 });
 
-// ------------------------------------------------------- M20 worktrees
+// ----------------------------------------------------------- worktrees
 
 // The scenario this whole feature exists for: one repository, three checkouts,
 // one agent in each. Grouped by cwd alone these are three unrelated folder rows.
@@ -469,7 +469,7 @@ function appWorktrees(dir: string) {
   return inRepo ? APP_WORKTREES : [];
 }
 
-describe('computeGrouping: worktrees (M20)', () => {
+describe('computeGrouping: worktrees', () => {
   const projects = [project('p1', 'App', '/code/app')];
   const cwds = cwdMap({
     A: '/code/app/src',
@@ -497,8 +497,7 @@ describe('computeGrouping: worktrees (M20)', () => {
   });
 
   it('leaves those sessions as loose folder rows without worktree data', () => {
-    // The pre-M20 behaviour, which is also what a non-git project and a
-    // probe-not-landed-yet both get.
+    // What a non-git project and a probe-that-has-not-landed-yet both get.
     const out = computeGrouping({
       visibleRootIds: ['A', 'B', 'C'],
       cwdOf: cwds,
@@ -618,7 +617,7 @@ describe('computeGrouping: worktrees (M20)', () => {
         throw new Error('git exploded');
       },
     });
-    // Degrades to the pre-M20 tree rather than taking the sidebar down.
+    // Degrades to a tree with no branch rows rather than taking the sidebar down.
     expect(out.projects[0].branches).toEqual([]);
     expect(out.projects[0].rootIds).toEqual(['A']);
   });
@@ -656,7 +655,7 @@ describe('computeGrouping: worktrees (M20)', () => {
   });
 });
 
-describe('branch visibility (M20)', () => {
+describe('branch visibility', () => {
   const many = (n: number) =>
     Array.from({ length: n }, (_, i) => ({
       dir: `/code/w${i}`,
@@ -728,7 +727,7 @@ describe('branch visibility (M20)', () => {
   });
 });
 
-// ------------------------------------------------------- M24: chat history
+// ------------------------------------------------------------ chat history
 
 describe('chatsForProject', () => {
   const chat = (

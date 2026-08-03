@@ -1,5 +1,5 @@
-// src/profileConfig.ts — M22.2: a profile shares the machine's configuration,
-// it isolates only the LOGIN.
+// src/profileConfig.ts — a profile shares the machine's configuration; it
+// isolates only the LOGIN.
 //
 // Why this file exists: a profile's config dir (accounts.ts, CLAUDE_CONFIG_DIR)
 // isolates credentials — that is the feature — but the CLI keeps everything
@@ -147,7 +147,8 @@ function seedKeys(
 /**
  * Make `profileDir` share the machine's configuration. Idempotent, additive,
  * never throws — a profile that cannot be wired up simply stays a little
- * blanker than its siblings, which is the pre-M22.2 status quo, not a failure.
+ * blanker than its siblings, which is how every profile looked before this
+ * module existed, not a failure.
  */
 export async function ensureProfileConfig(
   profileDir: string,

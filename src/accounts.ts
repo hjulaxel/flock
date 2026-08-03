@@ -1,28 +1,30 @@
-// IMPLEMENTED BY: M22 — accounts.
+// src/accounts.ts — what an AI account is: its id, its label, its place in the
+// list, and the environment a session launched on it runs under.
 //
-// Pure. Imports ./types and NOTHING else — no vscode, no node:os, no fs — so
-// every rule in here is unit-testable without a workbench and can be called
+// Pure: it imports ./types and nothing else — no vscode, no node:os, no fs —
+// so every rule in here is unit-testable without a workbench and can be called
 // from the command layer, the view and the launcher alike.
 //
-// The one idea this file encodes: AN ACCOUNT IS A CONFIG DIRECTORY. Both CLIs
+// The one idea this file encodes: an account IS a config directory. Both CLIs
 // keep their OAuth token, their `settings.json` and their history under one
 // root that an environment variable relocates — `CLAUDE_CONFIG_DIR` for Claude
 // Code, `CODEX_HOME` for Codex. Point a launch at a different root and it is a
 // different signed-in account, with no shared state whatsoever: you log in once
 // per profile and never again, switching costs nothing, and two sessions on two
-// accounts can run side by side in the same window. Everything else in M22 —
-// routing, pinning, the usage meters — is bookkeeping on top of that one fact.
+// accounts can run side by side in the same window. Everything else about
+// accounts — routing, pinning, the usage meters — is bookkeeping on top of that
+// one fact.
 //
 // The DEFAULT ACCOUNT is the profile with neither a configDir nor extraEnv. It
 // resolves to an empty env and therefore inherits `~/.claude` exactly as every
-// session did before this milestone existed. That is why a user who wants none
-// of this pays nothing for it: their one profile is a no-op wrapper around the
+// session did before accounts existed. That is why a user who wants none of
+// this pays nothing for it: their one profile is a no-op wrapper around the
 // behaviour they already had.
 //
-// SECRETS: `extraEnv` is where an API-key account keeps its key. Nothing in
-// this file logs, formats or otherwise reproduces those VALUES — the validation
+// Secrets: `extraEnv` is where an API-key account keeps its key. Nothing in
+// this file logs, formats or otherwise reproduces those values — the validation
 // below inspects key names and value types only, and every helper that has to
-// reject something says which KEY was rejected and never what was in it.
+// reject something says which key was rejected and never what was in it.
 
 import {
   DEFAULT_PROVIDER,
@@ -116,7 +118,7 @@ export function isEnvVarName(v: unknown): v is string {
  * dir is saying "use this store, but authenticate with this key", and the
  * explicit variable has to win. A profile with neither resolves to `{}` — the
  * default account — and `{}` must behave in every consumer exactly as passing
- * no environment at all did before M22.
+ * no environment at all did before accounts existed.
  *
  * Returns a fresh mutable object every call: callers merge it into
  * `process.env`-shaped records and into tmux argv, and handing out a shared
@@ -400,12 +402,12 @@ export interface SeedOptions {
   /** Epoch ms for the createdAt/updatedAt stamps. Injectable so a test can
    *  assert on them; defaults to now. */
   now?: number;
-  /** M22.1. Ids that exist as TOMBSTONES in the store. A seed whose id is in
-   *  here is one the user deliberately deleted, and it must stay deleted: a
-   *  removed "Codex — default" that reappears on every reload is a row that
-   *  cannot be gotten rid of. Once the tombstone expires (30 days) the id
-   *  stops appearing here and the seed returns — acceptable, because by then
-   *  the deletion is an old decision, not an open argument with the UI. */
+  /** Ids that exist as TOMBSTONES in the store. A seed whose id is in here is
+   *  one the user deliberately deleted, and it must stay deleted: a removed
+   *  "Codex — default" that reappears on every reload is a row that cannot be
+   *  gotten rid of. Once the tombstone expires (30 days) the id stops appearing
+   *  here and the seed returns — acceptable, because by then the deletion is an
+   *  old decision, not an open argument with the UI. */
   tombstonedIds?: readonly string[];
 }
 
@@ -440,8 +442,8 @@ export function seedDefaultProfiles(
   ).toISOString();
 
   const taken = new Set(live.map((p) => p.id));
-  // A tombstoned seed id is a deletion the user meant (M22.1) — folding these
-  // into `taken` is what stops the next activation from arguing about it.
+  // A tombstoned seed id is a deletion the user meant — folding these into
+  // `taken` is what stops the next activation from arguing about it.
   for (const id of opts?.tombstonedIds ?? []) {
     if (typeof id === 'string' && id !== '') taken.add(id);
   }

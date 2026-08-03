@@ -1,7 +1,11 @@
-// SCAFFOLD-owned smoke test. It exists so `npm test` is green from the first
-// commit and so the two things every implementer depends on — the frozen
-// types contract and the nine verbatim transcript fixtures — are pinned.
-// Implementers: do not edit; add your own test/<module>.test.ts instead.
+// The two things every other suite in here builds on top of, pinned in one
+// place: the shared contract in src/types.ts (command ids, state schema
+// version, id shapes, provider table) and the nine transcript fixtures the
+// parsing tests read verbatim.
+//
+// Nothing here exercises a feature. It exists so that a contract change shows
+// up as one obvious failure in this file rather than as a scatter of confusing
+// failures in the suites that assume the contract holds.
 
 import { describe, expect, it } from 'vitest';
 import * as fs from 'node:fs';
@@ -50,7 +54,7 @@ describe('scaffold: transcript fixtures', () => {
   });
 });
 
-describe('scaffold: frozen types contract', () => {
+describe('scaffold: the shared types contract', () => {
   // Cross-checked against the manifest, NOT against a copy of the literals in
   // types.ts. VS Code resolves `vscode://<publisher>.<name>/focus` by extension
   // id, so if these drift apart cross-window focus breaks and nothing else
@@ -61,35 +65,30 @@ describe('scaffold: frozen types contract', () => {
       fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'),
     ) as { publisher: string; name: string };
     expect(EXTENSION_ID).toBe(`${pkg.publisher}.${pkg.name}`);
-    // v2 added `projects` and `hiddenFolders` (M7); v3 added `chains` (M10);
-    // v4 added `workspaces` (M13); v5 added `accounts` and `accountSettings`
-    // (M22).
+    // Pinned so that bumping the schema is a deliberate two-part edit. Every
+    // bump has to be paired with a step in `migrateState`'s ladder
+    // (src/state.ts); a bump on its own stamps an old-shaped file as the new
+    // version without materialising the maps that version promises, and the
+    // reader then finds them missing on a file it believes is current.
     expect(STATE_SCHEMA_VERSION).toBe(5);
   });
 
   it('declares every contributed command id under the lineage. prefix', () => {
     const ids = Object.values(COMMANDS);
-    // 15 + resumeSession (M1.5) + 8 project/visibility verbs (M7)
-    // + deleteSession/restoreSession (M8) + renameSessionInline (M9)
-    // + 4 notification verbs (M12) + switchWorkspace (M13)
-    // + deleteStale (M14; replaced M7.1's hideStale)
-    // − hideSession/unhideSession (M14: hide verb retired)
-    // + chatInProject (M16)
-    // + renameProject/renameProjectInline (M17)
-    // + forkAndCompact, newSessionIn (M18)
-    // + showOnlyActiveSessions/showAllSessions (M19 filter toggle)
-    // + mute/unmuteSessionNotifications (M19; replaced toggleSessionNotifications)
-    // + followInExplorer/stopFollowingInExplorer (M21 explorer header)
-    // + newSessionInBranch (M20 branch chips)
-    // + deleteSessions (multi-select plural verb)
-    // + 7 branch-curation verbs (M20: hide/showBranches, fold/unfold,
-    //   reveal, copy name, copy path)
-    // + 10 account verbs (M22)
-    // − askSession (M24: the third fork verb, retired)
-    // + chatHistory, closeProject, reopenProject (M24)
-    // + newSubproject, moveProject (M26 subprojects)
+    // The count is pinned so that gaining or losing a verb cannot happen by
+    // accident. The manifest cross-check below only proves the two SIDES agree
+    // — a bad merge that drops a verb from COMMANDS and its package.json entry
+    // together, or a copy-paste that adds one to both, passes it happily. The
+    // number is the thing that makes either show up in review.
+    //
+    // Bump it in the same commit as the verb, and check the new id reaches a
+    // menu: a command nobody can invoke is not a feature.
     expect(ids).toHaveLength(64);
+    // Duplicate values would make one of them unreachable — the later key wins
+    // at registration and the earlier verb's menu entry fires the wrong flow.
     expect(new Set(ids).size).toBe(ids.length);
+    // The `lineage.` prefix is what namespaces us in the global command
+    // palette; an unprefixed id can collide with another extension's.
     for (const id of ids) expect(id.startsWith('lineage.')).toBe(true);
   });
 

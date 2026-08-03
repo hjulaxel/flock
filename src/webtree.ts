@@ -1,4 +1,4 @@
-// IMPLEMENTED BY: M9 — the inline-rename sidebar, extension half.
+// src/webtree.ts — the inline-rename sidebar, extension half.
 //
 // A WebviewViewProvider that renders the same forest the native TreeView does,
 // for exactly one reason the TreeView API cannot give us: an editable row.
@@ -16,7 +16,9 @@
 // What IS re-implemented here: rows, expand/collapse, selection, arrow-key
 // navigation, drag-to-reparent, the attention badges, and reveal.
 //
-// Imports allowed here: vscode, ./types, ./log, ./viewmodel, ./projects.
+// This module depends only on vscode, ./types, ./log, ./viewmodel and
+// ./projects: the row model is built by viewmodel.ts, and this file renders it
+// and routes what the page sends back.
 
 import * as vscode from 'vscode';
 
@@ -24,7 +26,6 @@ import {
   ATTENTION_BADGE_ENABLED,
   BRAND_COLOR_ID,
   COMMANDS,
-  DEFAULT_PROVIDER,
   DONE_COLOR_ID,
   PROVIDERS,
   PROVIDER_IDS,
@@ -35,7 +36,6 @@ import {
 import type {
   BranchInfo,
   DisposableLike,
-  ProviderId,
   SessionForest,
   TreeDeps,
 } from './types';
@@ -59,7 +59,7 @@ export const INLINE_VIEW_ID = 'lineageSessionsInline';
 /** Cap on the collapsed-key set, mirroring the native tree's shadow state. */
 const CACHE_SOFT_LIMIT = 2000;
 
-/** M26. The target key the client reports for a drop on empty space below the
+/** The target key the client reports for a drop on empty space below the
  *  last row — the gesture that takes a project back to the top level. Not a row
  *  key and deliberately unparseable as one. */
 export const BACKGROUND_DROP_KEY = 'background';
@@ -94,7 +94,7 @@ const ROW_GLYPH_FILES: Record<string, string> = {
   chat: 'chat.svg',
   add: 'add.svg',
   'bell-slash': 'bell-slash.svg',
-  // M20. The branch block's fold, in its two states.
+  // The branch block's fold, in its two states.
   'chevron-down': 'chevron-down.svg',
   'chevron-right': 'chevron-right.svg',
 };
@@ -107,7 +107,7 @@ const ROW_GLYPH_FILES: Record<string, string> = {
 const PROJECT_ROW_ACTIONS: Record<string, keyof typeof COMMANDS | undefined> = {
   chat: 'chatInProject',
   newSession: 'newSessionInProject',
-  // M20. Two ids for one toggle, not one id that flips: a contributed icon
+  // Two ids for one toggle, not one id that flips: a contributed icon
   // cannot change at runtime, so the row emits whichever half currently
   // applies and each half has its own glyph — the same shape the bell and the
   // active-only filter already use.
@@ -299,7 +299,7 @@ interface ClientMessage {
   keys?: unknown;
   name?: unknown;
   sessionId?: unknown;
-  /** M26. The row a drag STARTED on, which for a project drag is the only thing
+  /** The row a drag STARTED on, which for a project drag is the only thing
    *  identifying it — `sessionId` is a session's id and a project's is not one. */
   sourceKey?: unknown;
   targetKey?: unknown;
@@ -622,9 +622,9 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
        workbench publishes every contributed id as --vscode-<id with dots as
        dashes>, so a user's theme override reaches this view too. The status dot
        has exactly TWO lit tones here: idle draws no dot at all, and neither does
-       closed since M19 — a closed row is dimmed instead, which needs no colour
-       of its own (the contributed lineage.closed still colours the native
-       tree's row, where there is no way to dim one). See webtree.css. */
+       a closed row — that one is dimmed instead, which needs no colour of its
+       own (the contributed lineage.closed still colours the native tree's row,
+       where there is no way to dim one). See webtree.css. */
     --lineage-brand: var(--vscode-${BRAND_COLOR_ID.replace(/\./g, '-')});
     --lineage-running: var(--vscode-${RUNNING_COLOR_ID.replace(/\./g, '-')});
     --lineage-done: var(--vscode-${DONE_COLOR_ID.replace(/\./g, '-')});
@@ -633,7 +633,7 @@ ${branchPaletteCss()}  }
 <title>Canopy</title>
 </head>
 <body>
-<!-- M24. The BACKGROUND context, carried by the tree container itself, so a
+<!-- The BACKGROUND context, carried by the tree container itself, so a
      right-click on empty space below the last row has a menu of its own — which
      is the only place a verb about NO row can live, and where the project
      history has to be reachable from: a closed project has no row to
@@ -726,7 +726,7 @@ ${branchPaletteCss()}  }
     for (const id of forest.nodes.keys()) live.add(sessionRowKey(id));
     for (const p of grouping.projects) {
       live.add(projectRowKey(p.projectId));
-      // M26. Branch rows collapse too once `groupSessionsByBranch` is on, and
+      // Branch rows collapse too once `groupSessionsByBranch` is on, and
       // a branch that is deleted (or a project that stops being a repository)
       // would otherwise leave its key here until the whole set was wiped.
       for (const b of p.branches ?? []) {
@@ -756,8 +756,8 @@ ${branchPaletteCss()}  }
     for (const id of chain) {
       if (this.collapsed.delete(sessionRowKey(id))) changed = true;
     }
-    // The group holding it, too — and since M26 that can be a project nested
-    // inside another project, so every ancestor of it has to open as well. A
+    // The group holding it, too — and that can be a project nested inside
+    // another project, so every ancestor of it has to open as well. A
     // reveal that expands the row's own project and leaves its grandparent
     // folded selects a key the client never rendered, which is a no-op it does
     // not retry.
@@ -794,13 +794,13 @@ ${branchPaletteCss()}  }
     await this.selectRow(sessionRowKey(sessionId));
   }
 
-  /** Select a PROJECT row. Project rows are always at depth 0, so there are no
-   *  ancestors to expand first and this is the select half of `reveal` alone. */
+  /** Select a PROJECT row, opening whatever it is filed under first so the row
+   *  exists in the flattened model at all. */
   async revealProject(projectId: string): Promise<void> {
     if (projectId === '') return;
-    // M26. A project row is no longer always at depth 0: a subproject only
-    // exists in the flattened model while every project above it is expanded,
-    // so the walk up has to happen here too.
+    // A project row is not always at depth 0: a subproject only exists in the
+    // flattened model while every project above it is expanded, so the walk up
+    // has to happen here too.
     try {
       const grouping = this.grouping(this.forest());
       const byId = new Map(
@@ -1046,7 +1046,7 @@ ${branchPaletteCss()}  }
           // compromised or buggy page cannot invoke a command the extension
           // never offered on a row.
           //
-          // M26. A BRANCH row carries one too, once grouping is on and a click
+          // A BRANCH row carries one too, once grouping is on and a click
           // on the row toggles it instead of starting a session. It resolves
           // through the rendered model exactly as the branch click does — the
           // page names a row, never a directory.
@@ -1122,7 +1122,7 @@ ${branchPaletteCss()}  }
     const targetKey = typeof msg.targetKey === 'string' ? msg.targetKey : '';
     if (targetKey === '') return;
 
-    // M26. A PROJECT was dragged: onto another project it becomes its
+    // A PROJECT was dragged: onto another project it becomes its
     // subproject, onto the background (or a folder row, which belongs to no
     // project) it goes back to the top level. Handled before the session path
     // and never mixed with it — a project id and a session id are both bare
@@ -1224,7 +1224,7 @@ export function sessionIdFromKey(key: unknown): string | undefined {
 }
 
 /**
- * M22. A reported selection — row keys — as the session ids a verb can act on.
+ * A reported selection — row keys — as the session ids a verb can act on.
  *
  * Everything that is not a `session:<uuid>` key is dropped rather than
  * rejected: a selection is allowed to contain a project or a folder row (the
@@ -1301,7 +1301,7 @@ export interface WebtreeController extends DisposableLike {
   focusView(): Promise<boolean>;
   beginRename(sessionId?: string): Promise<boolean>;
   beginRenameProject(projectId: string): Promise<boolean>;
-  /** M20. The branches this view is currently SHOWING for a project. The
+  /** The branches this view is currently SHOWING for a project. The
    *  chip-click verb resolves against this rather than re-probing git, so it can
    *  only ever start a session in a worktree the user was looking at. */
   branchesOf(projectId: string): readonly BranchInfo[];
@@ -1359,6 +1359,3 @@ export function registerWebtree(
     },
   };
 }
-
-/** Kept for parity with the native tree's fallback icon path. */
-export const DEFAULT_PROVIDER_ID: ProviderId = DEFAULT_PROVIDER;

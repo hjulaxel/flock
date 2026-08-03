@@ -1,4 +1,4 @@
-// test/profileConfig.test.ts — the M22.2 shared-config wiring (src/profileConfig.ts).
+// test/profileConfig.test.ts — the shared-config wiring (src/profileConfig.ts).
 //
 // The contract under test: a profile shares the machine's configuration and
 // isolates only the login. Concretely — shareable items become symlinks, never

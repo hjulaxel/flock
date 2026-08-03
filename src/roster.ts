@@ -1,17 +1,16 @@
-// IMPLEMENTED BY: A
 // src/roster.ts — `claude agents --json` fetch / parse / normalise, claude
-// binary discovery, and the polling loop. Public surface frozen by SPEC §4-A1.
+// binary discovery, and the polling loop.
 //
-// Imports allowed here: ./types, ./log, node:child_process, node:fs,
-// node:path, node:process. NEVER import vscode.
+// Dependencies are deliberately minimal — ./types, ./log and node builtins,
+// never vscode — so this module stays unit-testable outside the editor.
 //
-// Design note (plan risk #3): `claude agents --json` is an UNDOCUMENTED
-// contract. Its help text says "for scripting", which implies intent, but the
-// field set can churn between CLI releases — and the measured output already
-// disagrees with itself row to row: `pid`, `id`, `status`, `waitingFor` and
-// `state` are each absent on some real rows. So every field except `sessionId`
-// is optional and defensively coerced, unrecognised shapes are dropped rather
-// than trusted, and nothing here throws. The tree must degrade, never break.
+// Design note: `claude agents --json` is an UNDOCUMENTED contract. Its help
+// text says "for scripting", which implies intent, but the field set can churn
+// between CLI releases — and the measured output already disagrees with itself
+// row to row: `pid`, `id`, `status`, `waitingFor` and `state` are each absent
+// on some real rows. So every field except `sessionId` is optional and
+// defensively coerced, unrecognised shapes are dropped rather than trusted,
+// and nothing here throws. The tree must degrade, never break.
 
 import { execFile } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -63,7 +62,7 @@ function str(v: unknown): string | undefined {
 }
 
 function normalizeKind(v: unknown): SessionKind | undefined {
-  if (v === undefined) return undefined; // absent stays absent (§4-A1 rule 3)
+  if (v === undefined) return undefined; // absent stays absent
   if (v === 'interactive' || v === 'background') return v;
   return 'unknown'; // present but unrecognised — a kind we don't know yet
 }
@@ -86,7 +85,7 @@ function parseRosterDetailed(raw: string): ParseOutcome {
   }
   if (!Array.isArray(parsed)) {
     // Valid JSON of an unexpected shape: the CLI answered, so this is not a
-    // transport failure (§4-A1 rule 1 — ok:false is reserved for a throw).
+    // transport failure — `ok: false` is reserved for a throw.
     log('roster: expected a JSON array, got', typeof parsed);
     return { ok: true, entries: [] };
   }
@@ -140,16 +139,16 @@ function parseRosterDetailed(raw: string): ParseOutcome {
 
 /**
  * Pure parse of `claude agents --json` stdout. Never throws; every deviation
- * is logged and the offending row dropped. See SPEC §4-A1 for the four
- * normative rules (JSON.parse guard, uuid sessionId gate, field coercion,
- * dedupe-first-wins).
+ * is logged and the offending row dropped. Four rules, all enforced below:
+ * guard JSON.parse, gate every row on a uuid `sessionId`, coerce every other
+ * field defensively, and dedupe with the first occurrence winning.
  */
 export function parseRoster(raw: string): RosterEntry[] {
   return parseRosterDetailed(raw).entries;
 }
 
 /**
- * Decision table (first match wins) from SPEC §4-A1:
+ * Decision table (first match wins):
  * waiting/blocked -> waiting+waiting; busy/working/running -> busy+none;
  * idle -> idle+none; otherwise unknown+none.
  *
@@ -283,8 +282,8 @@ export function destaleBusyStatus(
  *     — a permanent attention badge on the view, pointing at a non-session.
  *
  * Dropping (1) loses nothing: a dead session that has a transcript is exactly
- * what the M1.5 archive renders, and it belongs there — dimmed, sorted below
- * the live rows, resumable — rather than masquerading as running.
+ * what the archive renders, and it belongs there — dimmed, sorted below the
+ * live rows, resumable — rather than masquerading as running.
  */
 
 /**
@@ -330,7 +329,7 @@ export function psCommands(
 ): Promise<Map<number, string>> {
   const out = new Map<number, string>();
   // No `ps` contract on Windows — the filter's spare branch does not exist
-  // there, exactly like the argv walk in lineage.ts (SPEC §11.5).
+  // there, exactly like the argv walk in lineage.ts.
   if (process.platform === 'win32' || pids.length === 0) {
     return Promise.resolve(out);
   }
@@ -369,9 +368,9 @@ export interface RosterFilterIO {
   isAlive?: (pid: number) => boolean;
   psCommands?: (pids: readonly number[]) => Promise<Map<number, string>>;
   /** Transcript mtime (epoch ms) for a session, or null when none is located.
-   *  Injected rather than imported: roster.ts may not depend on ./transcript
-   *  (SPEC §4-A1 import budget), so the composition root wires the real locator
-   *  in. Absent → a filter that never destales, i.e. the pre-fix behaviour. */
+   *  Injected rather than imported: roster.ts deliberately does not depend on
+   *  ./transcript, so the composition root wires the real locator in. Absent →
+   *  a filter that never destales, i.e. the behaviour before the fix. */
   transcriptMtime?: (sessionId: string) => number | null;
   /** Clock, injectable for tests. Default Date.now. */
   now?: () => number;
@@ -546,7 +545,7 @@ export class RosterFilter {
 export interface FetchRosterOptions {
   claudeBin?: string; // default 'claude'
   timeoutMs?: number; // default 10_000
-  /** M22.3. Run the fetch AS this config dir (`CLAUDE_CONFIG_DIR` in the child
+  /** Run the fetch AS this config dir (`CLAUDE_CONFIG_DIR` in the child
    *  env). The agents registry is per config dir — the same isolation that
    *  keeps account logins apart keeps their live rosters apart — so a tree
    *  that only ever asks the default dir simply cannot see a session running
@@ -554,10 +553,11 @@ export interface FetchRosterOptions {
   configDir?: string;
 }
 
-/** The child environment for a roster fetch (M22.3). Exported for the test
- *  lane: the env is the entire mechanism, so its exact shape is the contract.
- *  With no dir the parent env is passed through UNTOUCHED — same object, not a
- *  copy — so the default fetch stays byte-identical to pre-M22.3. */
+/** The child environment for a roster fetch. Exported for the test lane: the
+ *  env is the entire mechanism, so its exact shape is the contract. With no dir
+ *  the parent env is passed through UNTOUCHED — same object, not a copy — so
+ *  the default fetch stays byte-identical to what it was before per-account
+ *  config dirs existed. */
 export function rosterEnvFor(configDir?: string): NodeJS.ProcessEnv {
   const dir = typeof configDir === 'string' ? configDir.trim() : '';
   if (dir === '') return process.env;
@@ -663,7 +663,7 @@ export function fetchRoster(opts?: FetchRosterOptions): Promise<RosterResult> {
 }
 
 /**
- * M22.3: one roster across every account (fetchRoster × config dirs, merged).
+ * One roster across every account (fetchRoster × config dirs, merged).
  *
  * The default dir is ALWAYS fetched and always fetched FIRST in the merge
  * order: a session id can only appear once (they are uuids, but a defensive
@@ -768,9 +768,9 @@ export function findClaudeBinary(configured?: string): string | null {
  * with the same signature are indistinguishable to the tree, so the caller
  * can skip a rebuild.
  *
- * The poller itself deliberately holds no roster state (SPEC §4-A1: caching
- * is the caller's job); these helpers give the caller change detection
- * without smuggling a cache into the poller.
+ * The poller itself deliberately holds no roster state — caching is the
+ * caller's job — so these helpers give the caller change detection without
+ * smuggling a cache into the poller.
  */
 export function rosterSignature(entries: RosterEntry[]): string {
   const rows = entries.map((e) =>
@@ -845,8 +845,8 @@ export class RosterPoller implements DisposableLike {
     void this.tick();
   }
 
-  /** Suspend polling (the integrator calls this when the view is hidden).
-   *  A later pokeNow() still works; only the timer chain stops. */
+  /** Suspend polling — called when the view is hidden. A later pokeNow() still
+   *  works; only the timer chain stops. */
   stop(): void {
     this.running = false;
     this.clearTimer();

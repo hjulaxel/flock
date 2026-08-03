@@ -1,21 +1,22 @@
-// IMPLEMENTED BY: E  (M3 — the verbs)
+// src/commands.ts — the command verbs, and their registration.
 //
 // Tree row menus -> extension commands -> DIRECT function calls on CommandDeps.
 // No HTTP, no subprocess-the-CLI, no marker channel: every bit of that
 // machinery belonged to the Python daemon this extension replaced, and is
 // deleted by the port.
 //
-// Imports allowed here: vscode, ./types, ./log, node:crypto, and the PURE
-// helper modules the verbs share with the views (./projects, and since M22
-// ./accounts + ./routing, plus the dependency interface and command ids that
-// live beside the accounts view in ./accountsView).
-// Must NOT: import terminals/state/windows/hooks (everything goes through
-// CommandDeps), talk to the tree directly, or run `claude` itself.
+// This module depends only on vscode, ./types, ./log, node:crypto and the pure
+// helper modules the verbs share with the views (./projects, ./accounts and
+// ./routing, plus the dependency interface and command ids that live beside the
+// accounts view in ./accountsView). It deliberately does NOT import
+// terminals/state/windows/hooks, talk to the tree directly, or run `claude`
+// itself: everything with a side effect goes through CommandDeps, which is what
+// lets the whole verb layer be tested against a plain object.
 // Every handler wraps its body in try/catch -> logError + showErrorMessage.
 //
-// M22 — ACCOUNTS. Every launch origin in this file now answers one extra
-// question before it starts a process: whose subscription. There are exactly
-// two answers and they are not interchangeable:
+// ACCOUNTS. Every launch origin in this file answers one extra question
+// before it starts a process: whose subscription. There are exactly two
+// answers and they are not interchangeable:
 //
 //   NEW conversation      routing decides (project override -> global default
 //                         -> auto), and the chosen id is PINNED to the session.
@@ -29,7 +30,7 @@
 //
 // No launch is ever BLOCKED by any of this: with no accounts configured, a
 // dangling pin, or a wiring that has no accounts at all, the resolution is an
-// empty environment — which is exactly the pre-M22 behaviour.
+// empty environment — i.e. whatever login the CLI would have used on its own.
 
 import { randomUUID } from 'node:crypto';
 
@@ -331,7 +332,7 @@ export function sessionIdFromArg(arg: unknown): string | undefined {
 }
 
 /**
- * M22. Every session a multi-row verb was invoked on, in display order.
+ * Every session a multi-row verb was invoked on, in display order.
  *
  * Three shapes reach it, because the same command is on three surfaces:
  *
@@ -655,7 +656,7 @@ export function staleCandidates(
 
 // ---------------------------------------------------------- notifications
 
-/** One bell-dropdown row (M12). Pure data; ordering rules live in
+/** One bell-dropdown row. Pure data; ordering rules live in
  *  `notificationItems`, where the tests bite. */
 export interface NotificationItem {
   sessionId: string;
@@ -670,11 +671,11 @@ export interface NotificationItem {
 }
 
 /**
- * The bell's content: latest finished sessions, cmux-style — unseen first
- * (they are what the bell exists for), then already-seen history, both newest
- * finish first. Muted (`notify: false`), hidden and deleted sessions never
- * appear; ghosts have nothing to report. Neither does a session the user has
- * taken off the list with its × — see `dismissed` below.
+ * The bell's content: latest finished sessions, ordered like an unread inbox —
+ * unseen first (they are what the bell exists for), then already-seen history,
+ * both newest finish first. Muted (`notify: false`), hidden and deleted
+ * sessions never appear; ghosts have nothing to report. Neither does a session
+ * the user has taken off the list with its × — see `dismissed` below.
  */
 export function notificationItems(
   forest: SessionForest,
@@ -690,7 +691,7 @@ export function notificationItems(
     const unseen = node.unseen === true;
     const doneAt = record?.doneAt;
     if (!unseen && doneAt === undefined) continue; // nothing ever finished here
-    // Dismissed (M18), and only for the finish it was dismissed FOR: a newer
+    // Dismissed, and only for the finish it was dismissed FOR: a newer
     // `doneAt` is a new thing to report and outranks the ×. Compared as ISO
     // strings, which sort lexicographically iff they are the same shape — both
     // are written by nowIso(), so they are. A session with no `doneAt` at all
@@ -1033,7 +1034,7 @@ interface ActionPick extends vscode.QuickPickItem {
 async function pickDirectory(
   openLabel: string,
   title?: string,
-  /** M26. Where the dialog opens. A path, not a Uri, so this module keeps its
+  /** Where the dialog opens. A path, not a Uri, so this module keeps its
    *  one vscode dependency (the dialog itself) and the callers keep handing
    *  round plain strings. Ignored when the host's Uri.file is unavailable —
    *  the unit-test double — or when the path is empty. */
@@ -1076,7 +1077,7 @@ async function pickProject(
     );
     return undefined;
   }
-  // M26. Listed in TREE order and indented, not alphabetically flat: with
+  // Listed in TREE order and indented, not alphabetically flat: with
   // nesting, two projects can legitimately be called "api" and the only thing
   // telling them apart in a picker is what they are filed under.
   const tree = buildProjectTree(projects);
@@ -1149,7 +1150,7 @@ async function newProjectFlow(
   deps: CommandDeps,
   seed?: { rootDir?: string; name?: string; parentId?: string },
 ): Promise<string | undefined> {
-  // M26. A subproject starts its directory pick INSIDE its parent, because
+  // A subproject starts its directory pick INSIDE its parent, because
   // that is where it is going to be nine times out of ten — `~/code/app` then
   // `api`, not `~/code/app` then a walk back up from wherever the last dialog
   // happened to be. The dialog is still a full picker; only its opening
@@ -1272,7 +1273,7 @@ async function newSessionFlow(
     cwd === undefined ? [] : namesUnder(deps, [cwd]),
   );
 
-  // M22: routed by the project this directory belongs to, if any — a folder
+  // Routed by the project this directory belongs to, if any — a folder
   // that is part of a project inherits that project's account even when the
   // launch came from the folder rather than from the project's row.
   const routed = routeNewSession(deps, projectIdForCwd(deps, cwd), account);
@@ -1307,15 +1308,15 @@ async function newSessionFlow(
  * A session in a project, started from the project's own row.
  *
  * The project's MAIN directory, with nothing asked. This verb is the `+` on a
- * project row (M18) and a `+` that opens a dialog is not a `+`: the session is
+ * project row, and a `+` that opens a dialog is not a `+`: the session is
  * meant to exist by the time the click finishes, named on its own row. A
  * multi-directory project starts in its rootDir — which is what "main" means,
  * and what every other project verb already uses — and `claude --add-dir` is
  * not needed for the others to be reachable. Choosing a different directory is
  * what "New Claude Session in Folder…" is for.
  *
- * Extracted from the command handler in M22 so "New Session From…" — the same
- * launch with the account picked by hand — cannot drift from it.
+ * Extracted from the command handler so "New Session From…" — the same launch
+ * with the account picked by hand — cannot drift from it.
  */
 async function newSessionInProjectFlow(
   deps: AccountCommandDeps,
@@ -1451,10 +1452,10 @@ async function forkFlow(
   parentIdArg: string,
   opts?: { prompt?: string; title?: string },
 ): Promise<string | undefined> {
-  // M10: fork the conversation's CURRENT generation, whatever id the caller
-  // held. A row can be superseded between render and click (a resume that
-  // re-minted the id, a /clear, a compaction), and forking the id as-clicked
-  // is exactly the fork-an-older-version bug this milestone removes.
+  // Fork the conversation's CURRENT generation, whatever id the caller held. A
+  // row can be superseded between render and click (a resume that re-minted
+  // the id, a /clear, a compaction), and forking the id as-clicked is exactly
+  // the fork-an-older-version bug the tip lookup exists to prevent.
   const clickedId = deps.tipOf(parentIdArg);
   // Claude writes a transcript lazily; there is nothing to resume until it has.
   // An unstarted BRANCH is the exception, and the common one — see
@@ -1524,7 +1525,7 @@ async function forkFlow(
 
   const childId = randomUUID();
 
-  // M22: a fork INHERITS its parent's account, never a routed one. The launch
+  // A fork INHERITS its parent's account, never a routed one. The launch
   // is `--fork-session --resume <parent>`, so it has to read the parent's
   // transcript — which lives inside the parent account's config directory and
   // nowhere else. Routing a fork would break it, not merely misbill it. This
@@ -1567,14 +1568,14 @@ async function forkFlow(
 }
 
 /**
- * M25. Adopt a native `/fork` — finish turning it into the session that
- * clicking **Fork Session** would have produced.
+ * Adopt a native `/fork` — finish turning it into the session that clicking
+ * **Fork Session** would have produced.
  *
  * `/fork` does not open a tab anywhere. It dispatches a BACKGROUND JOB: a live
  * process holding the child's session id, parked on "send a prompt to start",
- * whose pty lives on a daemon socket no editor can attach to. M11 taught the
- * tree to NEST such a child; this is what makes it OPEN. The user typed the
- * fork verb, so they get the fork verb's result.
+ * whose pty lives on a daemon socket no editor can attach to. The tree already
+ * knows how to NEST such a child; this is what makes it OPEN. The user typed
+ * the fork verb, so they get the fork verb's result.
  *
  * Adoption is a HAND-OFF, not a copy. The job is stopped and the SAME session
  * id is relaunched here under our own terminal, so the row that was clicked is
@@ -1652,7 +1653,7 @@ export async function adoptBackgroundJob(
   await deps.recordLaunch(sessionId, parentId, cwd);
   await deps.upsertRecord(sessionId, { title });
 
-  // M22: a fork inherits its parent's account, never a routed one — the launch
+  // A fork inherits its parent's account, never a routed one — the launch
   // reads the parent's transcript, which lives in that account's config dir.
   const routed = pinnedLaunch(deps, parentId);
 
@@ -1749,7 +1750,7 @@ export async function resumeFlow(
   deps: AccountCommandDeps,
   sessionIdArg: string,
 ): Promise<boolean> {
-  // M10: same tip routing as forkFlow — resuming a superseded generation
+  // Same tip routing as forkFlow — resuming a superseded generation
   // would branch the conversation's history without the user asking for it.
   const sessionId = deps.tipOf(sessionIdArg);
   const node = deps.getForest().nodes.get(sessionId);
@@ -1791,7 +1792,7 @@ export async function resumeFlow(
     ...(detached !== undefined ? [`(attach: ${detached})`] : []),
   );
 
-  // M22: the account this conversation started on, re-injected. Passed even on
+  // The account this conversation started on, re-injected. Passed even on
   // the ATTACH path, where the already-running process keeps the environment
   // it was launched with and the `-e` flags are ignored — because `-A` falls
   // through to a fresh `--resume` when the detached session died while parked,
@@ -1888,7 +1889,7 @@ export async function configureProjectFlow(
         action: 'provider',
       },
       {
-        // M24: the same flag, said the way the verbs on the row now say it.
+        // The same flag, said the way the verbs on the row say it.
         // "Hide" and "Show" described a filter; this is a project you put away
         // and take back out, and calling it two different things in two menus
         // is how a user ends up believing they are two features.
@@ -2027,7 +2028,7 @@ export async function configureProjectFlow(
 }
 
 /**
- * M24. CLOSE a project — the put-away that is not a delete.
+ * CLOSE a project — the put-away that is not a delete.
  *
  * What it does is small and is meant to be: the row leaves the tree and takes
  * its sessions' rows with it. Nothing is deleted, no transcript is touched, no
@@ -2053,7 +2054,7 @@ export async function closeProjectFlow(
   project: ProjectRecord,
 ): Promise<boolean> {
   const running = runningInProject(deps, project);
-  // M26. Closing a parent closes everything under it (computeGrouping), so the
+  // Closing a parent closes everything under it (computeGrouping), so the
   // dialog has to say so — a project putting four other projects away with it
   // is exactly the surprise a confirmation exists to prevent.
   const nested = subprojectCount(deps, project.id);
@@ -2095,7 +2096,7 @@ export async function closeProjectFlow(
 }
 
 /**
- * M26. Re-file a project: pick where it goes, or Top Level.
+ * Re-file a project: pick where it goes, or Top Level.
  *
  * The picker lists every project the move is LEGAL for and nothing else — the
  * subtree being moved is absent (you cannot file something under itself), and
@@ -2206,7 +2207,7 @@ function runningInProject(deps: CommandDeps, project: ProjectRecord): number {
   return count;
 }
 
-/** M26. How many projects are filed under this one, at any depth. */
+/** How many projects are filed under this one, at any depth. */
 function subprojectCount(deps: CommandDeps, projectId: string): number {
   const tree = buildProjectTree(deps.allProjects());
   // The subtree includes the project itself, which is not a subproject of
@@ -2245,7 +2246,7 @@ async function confirmDeleteProject(
   deps: CommandDeps,
   project: ProjectRecord,
 ): Promise<boolean> {
-  // M26. Deleting a parent does NOT delete its children — they are re-rooted
+  // Deleting a parent does NOT delete its children — they are re-rooted
   // at the top level by the tree builder, which treats a parent pointer at
   // nothing as no pointer at all. Said out loud here because the close verb
   // right above does take the subtree with it, and two neighbouring verbs that
@@ -2311,7 +2312,7 @@ async function addDirectoryToProject(
  * needs a workbench. The handler keeps only the quick-pick that picks the
  * project.
  *
- * M24 — ALWAYS NEW, never a resume. M16 shipped one chat per project: the
+ * ALWAYS NEW, never a resume. Earlier versions gave a project one chat: the
  * button focused the terminal if it was open, `--resume`d the conversation if
  * it was not, and minted only when there had never been one. Which meant the
  * second question you thought of while the first was still answering had
@@ -2358,9 +2359,9 @@ export async function chatFlow(
   // bookkeeping applies. NOT recordLaunch — that one mints tree membership,
   // which is exactly what a chat must not have.
   //
-  // `title` is persisted (M24) because it is now the only durable name a chat
-  // has: the history picker labels rows with it until the transcript has a
-  // first prompt to show instead, and a terminal title dies with its terminal.
+  // `title` is persisted because it is the only durable name a chat has: the
+  // history picker labels rows with it until the transcript has a first prompt
+  // to show instead, and a terminal title dies with its terminal.
   await deps.upsertRecord(sessionId, {
     chat: true,
     cwd,
@@ -2369,9 +2370,9 @@ export async function chatFlow(
     notify: false,
   });
 
-  // M22: a NEW conversation routes (project override -> global default ->
-  // auto). Every chat is new now, so this is the only branch left — the pin
-  // path moved to the history picker, which is where a chat gets resumed.
+  // A NEW conversation routes (project override -> global default -> auto).
+  // Every chat is new, so this is the only branch left — the pin path lives in
+  // the history picker, which is where a chat gets resumed.
   const routed = routeNewSession(deps, project.id);
 
   log('chat:', shortId(sessionId), 'in project', project.name, cwd);
@@ -2385,7 +2386,7 @@ export async function chatFlow(
     appendSystemPrompt: chatSystemPrompt(project, dirs),
     ...launchAccountOptions(routed),
   });
-  // M22: a launch that never started is not pinned and not announced. The pin
+  // A launch that never started is not pinned and not announced. The pin
   // is write-once, so a failed id would hold that account for good, and a
   // status line naming the subscription a chat did not start on is worse than
   // silence.
@@ -2544,14 +2545,14 @@ async function closeFlow(
   }
 }
 
-// -------------------------------------------------------------- M22 accounts
+// ------------------------------------------------------------------ accounts
 // The account half of every verb: which subscription a launch lands on, and
 // the ten verbs that manage the list itself.
 //
 // `deps.accounts` is OPTIONAL throughout. A wiring without it (an older host,
-// every unit double in test/) behaves exactly as this file did before M22 —
-// no environment, no pin, no dialogs — which is what makes the whole feature
-// additive rather than a second code path through every launch.
+// every unit double in test/) gets no environment, no pin and no dialogs —
+// which is what makes the whole feature additive rather than a second code
+// path through every launch.
 
 /**
  * The account half of a LaunchOptions, plus the note to show once the launch
@@ -2569,7 +2570,7 @@ interface RoutedLaunch {
 
 /** The LaunchOptions fragment. Spread, so an empty resolution adds no keys at
  *  all and a launch on a machine with no accounts is byte-for-byte the launch
- *  this file made before M22. */
+ *  this file made before accounts existed. */
 function launchAccountOptions(
   routed: RoutedLaunch,
 ): { env?: Readonly<Record<string, string>>; profileId?: string } {
@@ -3214,9 +3215,9 @@ async function setProjectAccountFlow(
 type Handler = (...args: unknown[]) => void | Promise<void>;
 
 /**
- * M22. `CommandDeps` plus the accounts wiring, which is optional because the
- * accounts feature is: a host (or a test) that never wires it gets a file that
- * behaves exactly as it did before this milestone.
+ * `CommandDeps` plus the accounts wiring, which is optional because the
+ * accounts feature is: a host (or a test) that never wires it gets a file with
+ * no account behaviour at all.
  *
  * It stays a separate type rather than an optional member of `CommandDeps`.
  * `AccountDeps` is declared in accountsView.ts — beside the view that is half
@@ -3297,7 +3298,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       return;
     }
 
-    // M25. A native `/fork` parked in a background job: live, unowned, and no
+    // A native `/fork` parked in a background job: live, unowned, and no
     // pty any editor can attach to — the shape that used to fall all the way
     // through to the "another app or terminal" dead end on a branch the user
     // had just asked for. Adopt it in place: same id, same row, our terminal.
@@ -3404,7 +3405,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     },
   );
 
-  // REMOVED — `lineage.askSession`, "Ask in a Fork…" (M3–M23).
+  // REMOVED — `lineage.askSession`, "Ask in a Fork…".
   //
   // It was a fork whose opening turn came from an input box, and the question
   // it answered is one nothing else in the sidebar asks: a fork already opens
@@ -3521,7 +3522,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     });
     if (!id) return;
     const label = labelFor(deps, id);
-    // No confirmation (M14): the row stays in the tree as an inactive session,
+    // No confirmation: the row stays in the tree as an inactive session,
     // so a close is always one click from undone — resuming picks up from the
     // last saved turn. A modal in front of a recoverable verb costs more than
     // the mistake it prevents.
@@ -3588,7 +3589,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     vscode.window.setStatusBarMessage(`Copied session id ${shortId(id)}…`, 2000);
   });
 
-  // ------------------------------------------------ close / delete (M14)
+  // ------------------------------------------------------ close / delete
   //
   // Two verbs on a row, deliberately no third:
   //
@@ -3600,10 +3601,10 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   //          to the nearest visible ancestor so no lineage is lost. Fully
   //          restorable — a view-level delete, nothing on disk is touched.
   //
-  // M8's hide verb (grey the row, sort it last) is retired: rows persisting
-  // after close made "put away but keep" exactly what CLOSE does, and the
-  // remaining "get it out of the tree" is DELETE. Old hidden records read as
-  // deleted (state.sanitizeRecord).
+  // An earlier hide verb (grey the row, sort it last) is retired: rows
+  // persisting after close made "put away but keep" exactly what CLOSE does,
+  // and the remaining "get it out of the tree" is DELETE. Hidden records
+  // written by older versions read as deleted (state.sanitizeRecord).
 
   /**
    * Delete one or more rows, then offer one Undo for the lot.
@@ -3767,7 +3768,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     await newProjectFlow(deps);
   });
 
-  // M26 — the two nesting verbs. Both take a project row's argument shape and
+  // The two nesting verbs. Both take a project row's argument shape and
   // both fall back to a picker, so each is equally usable from the palette
   // (where a subproject of nothing is the one thing they must not create —
   // hence the pick, not a silent top-level project).
@@ -3788,7 +3789,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     await moveProjectFlow(deps, id);
   });
 
-  // M24 — the open/close pair. Two verbs and not one toggle, for the reason
+  // The open/close pair. Two verbs and not one toggle, for the reason
   // every other pair in this manifest is two (the bell, the active filter): a
   // contributed command has one title and one icon, and "Close Project" on a
   // project that is already closed is a menu entry that lies about what it is
@@ -3920,7 +3921,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     },
   );
 
-  // M20 — the branch chips. One click starts a session in a specific WORKTREE
+  // The branch chips. One click starts a session in a specific WORKTREE
   // of a project, which is the whole point of the strip: `+` on the project row
   // has to guess a directory and guesses rootDir, and for somebody running one
   // agent per worktree that is the checkout they least often mean.
@@ -3961,7 +3962,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         namesUnder(deps, [...projectDirs(project), known.dir]),
       );
 
-      // M22: a worktree belongs to the project whose chip row it came from, so
+      // A worktree belongs to the project whose chip row it came from, so
       // the routing question is already answered — no directory lookup.
       const routed = routeNewSession(deps, project.id);
 
@@ -3987,7 +3988,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     },
   );
 
-  // M20 branch curation. Every one of these resolves the branch against the
+  // Branch curation. Every one of these resolves the branch against the
   // grouping the VIEW rendered (deps.getBranches) rather than trusting the
   // argument, for the same reason newSessionInBranch does: a registered command
   // can be reached from the palette, a keybinding, or another extension, and
@@ -4105,12 +4106,12 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     await copyToClipboard(parsed.dir, 'Copied worktree path');
   });
 
-  // M16 — the chat. Deliberately NOT a session verb: a chat has no row, no
-  // name to confirm, no directory to pick and no reveal afterwards. Always at
-  // the project's rootDir with the extra directories added.
+  // The chat. Deliberately NOT a session verb: a chat has no row, no name to
+  // confirm, no directory to pick and no reveal afterwards. Always at the
+  // project's rootDir with the extra directories added.
   //
-  // M24: every click is a NEW chat (see chatFlow), and the ones before it are
-  // in `chatHistory` rather than behind the same button.
+  // Every click is a NEW chat (see chatFlow), and the ones before it are in
+  // `chatHistory` rather than behind the same button.
   register(COMMANDS.chatInProject, 'chat in project', async (arg?: unknown) => {
     const id =
       projectIdFromArg(arg) ?? (await pickProject(deps, 'Chat in which project?'));
@@ -4169,8 +4170,8 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   // Still lists closed projects as well as hidden folders, and deliberately:
   // this is the "what have I put away" door, and a user who does not yet know
   // about the Open Project button has to be able to find a project from it.
-  // M24 only changed what the rows are CALLED — a project is closed, a folder
-  // is hidden, and the two menus must not describe one flag two ways.
+  // A project is closed and a folder is hidden: two words for the same flag,
+  // and the two menus must not describe it two different ways.
   register(COMMANDS.showHidden, 'show hidden', async () => {
     const folders = deps.hiddenFolders();
     const projects = deps.allProjects().filter((p) => p.hidden === true);
@@ -4212,7 +4213,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     deps.refresh();
   });
 
-  // -------------------------------------------------- notifications (M12)
+  // -------------------------------------------------------- notifications
 
   const MARK_ALL_SENTINEL = '__lineage_mark_all__';
 
@@ -4224,9 +4225,9 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
    * cached, because the list is rebuilt in place after every dismissal — the
    * whole point of the × is that the row goes away while the popup stays open.
    *
-   * Separators divide unseen from already-seen the way cmux divides its
-   * popover. The mock (and a slim host) may not ship QuickPickItemKind — then
-   * the list is simply undivided.
+   * Separators divide unseen from already-seen, the way a mail client divides
+   * unread from read. The mock (and a slim host) may not ship
+   * QuickPickItemKind — then the list is simply undivided.
    */
   const notificationPicks = (
     items: readonly NotificationItem[],
@@ -4260,7 +4261,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         detail: i.projectName !== undefined ? `in ${i.projectName}` : undefined,
         sessionId: i.sessionId,
       };
-      // The × (M18). Item buttons only exist on a QuickPick built with
+      // The ×. Item buttons only exist on a QuickPick built with
       // createQuickPick — showQuickPick has no event to report one — so this is
       // set unconditionally and the fallback path below simply ignores it.
       const button = dismissButton();
@@ -4322,7 +4323,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     deps.refresh();
   };
 
-  /** The pre-M18 popup, kept for a host without `createQuickPick`: same rows,
+  /** The older popup, kept for a host without `createQuickPick`: same rows,
    *  same verbs, no × (item buttons need the object-shaped API). */
   const showNotificationsSimple = async (
     picks: NotificationPick[],
@@ -4491,7 +4492,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   );
 
   /**
-   * The per-session mute (M19), as a SET rather than a toggle.
+   * The per-session mute, as a SET rather than a toggle.
    *
    * Two commands with complementary `when` clauses (`;silenced;` / `;notified;`
    * on the row's context value), because one entry reading "Mute / Unmute
@@ -4553,7 +4554,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     vscode.window.setStatusBarMessage('Canopy: showing closed sessions too', 4000);
   });
 
-  // ------------------------------------------------------ workspaces (M13)
+  // ------------------------------------------------------------ workspaces
 
   register(COMMANDS.switchWorkspace, 'switch workspace', async (arg?: unknown) => {
     const direct = projectIdFromArg(arg);
@@ -4603,7 +4604,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     if (chosen.payload) await deps.switchWorkspace(chosen.payload);
   });
 
-  // ------------------------------------------- the Explorer follows (M21)
+  // ------------------------------------------------- the Explorer follows
   //
   // Both verbs RELOAD the window — that is what `vscode.openFolder` on the
   // current window means — so both confirm first, modally. This is the one

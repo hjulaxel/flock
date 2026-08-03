@@ -1,4 +1,4 @@
-// test/viewmodel.test.ts — M9, the inline-rename sidebar's model.
+// test/viewmodel.test.ts — the webview sidebar's model.
 //
 // This is where the whole rendering decision lives, so it is where the tests
 // live: the webview client is a dumb painter with no model of its own.
@@ -333,10 +333,9 @@ describe('buildViewModel: row content', () => {
     expect(rows[0].description).toBe('2h');
   });
 
-  // P5, the filed bug and the reason this batch exists: a session started
-  // hours ago but typed in seconds ago must read as "just now", not "hours
-  // ago". Direct regression coverage for the age basis switching from
-  // startedAt to lastActiveAt.
+  // REGRESSION. A session started hours ago but typed into seconds ago must
+  // read as "just now", not "hours ago" — the age basis is lastActiveAt, never
+  // startedAt.
   it('ages a busy row off its last activity, not its start time', () => {
     const rows = buildViewModel(
       input(
@@ -363,7 +362,7 @@ describe('buildViewModel: row content', () => {
     expect(rows[0].description).toBe('2h');
   });
 
-  // M18. The transcript's mtime moves for every token Claude writes, so a
+  // The transcript's mtime moves for every token Claude writes, so a
   // session left running unattended kept reporting "now" however long ago you
   // had last said anything to it. The age means "how long since I spoke to
   // this", and lastPromptAt is the only source that actually says so.
@@ -386,7 +385,7 @@ describe('buildViewModel: row content', () => {
 
   it('falls back through mtime, then start, when no prompt is visible', () => {
     // The bounded tail read can miss a prompt buried behind a long tool run —
-    // that row must degrade to what it showed before M18, not to blank.
+    // that row must degrade to the mtime or the start time, not to blank.
     const rows = buildViewModel(
       input(
         forestOf([
@@ -528,7 +527,7 @@ describe('buildViewModel: row content', () => {
     }
   });
 
-  it('gives a dead row a tone but no mark of its own (M19)', () => {
+  it('gives a dead row a tone but no mark of its own', () => {
     // The ring it used to carry is gone: a closed row is dimmed and its logo
     // greyed, so the circle was a second mark for something the row already
     // said — and an empty circle beside every finished session is what teaches
@@ -657,13 +656,13 @@ describe('buildViewModel: row content', () => {
   it('badgeGlyph gives only the lit tones a character', () => {
     expect(badgeGlyph('running')).toBe(STATUS_DOT);
     expect(badgeGlyph('done')).toBe(STATUS_DOT);
-    // Nothing for the quiet tones — including 'closed' since M19.
+    // Nothing for the quiet tones, 'closed' included.
     expect(badgeGlyph('closed')).toBeUndefined();
     expect(badgeGlyph('idle')).toBeUndefined();
     expect(badgeGlyph(undefined)).toBeUndefined();
   });
 
-  // M19 — the struck-through bell, right of the name.
+  // The struck-through bell, right of the name.
   describe('the notification mark', () => {
     const marksOf = (over: Partial<SessionNode>): unknown =>
       buildViewModel(input(forestOf([node(A, over)]), { loose: [A] }))[0].marks;
@@ -914,7 +913,7 @@ describe('attentionCountOf', () => {
   });
 });
 
-// ---------------------------------------------------- M20 branch rows
+// ------------------------------------------------------------ branch rows
 
 import {
   branchRowKey,
@@ -966,7 +965,7 @@ const rowsFor = (branches: BranchInfo[], over: Partial<ProjectGroupNode> = {}) =
     input(forest2(), { projects: [projectNode(branches, [A, B], over)] }),
   );
 
-describe('buildViewModel: branch rows (M20)', () => {
+describe('buildViewModel: branch rows', () => {
   it('stacks one row per branch between the header and the sessions', () => {
     // The strip this replaced put every branch on one line, which lost to the
     // fact that branch names are long. Stacked, each gets the sidebar's width.
@@ -980,7 +979,7 @@ describe('buildViewModel: branch rows (M20)', () => {
   });
 
   it('draws nothing below the threshold', () => {
-    // An ordinary repository with no worktrees sees the pre-M20 tree exactly.
+    // An ordinary repository with no worktrees sees no branch rows at all.
     expect(keys(rowsFor([MAIN]))).toEqual([
       projectRowKey('p1'),
       sessionRowKey(A),

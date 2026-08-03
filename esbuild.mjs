@@ -1,5 +1,5 @@
 // esbuild.mjs — bundles src/extension.ts into dist/extension.js.
-// SCAFFOLD-owned. `node esbuild.mjs` for a one-shot build, `--watch` to watch.
+// `node esbuild.mjs` for a one-shot build, `--watch` to rebuild on change.
 //
 // The extension host loads CommonJS and provides `vscode` at runtime, so
 // `vscode` is marked external and the output format is cjs.

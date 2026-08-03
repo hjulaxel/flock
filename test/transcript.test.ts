@@ -1,5 +1,6 @@
-// Owner A. Transcript location + the fork scan + header metadata.
-// Every row of the SPEC §6 fixture/branch traceability table is pinned here.
+// test/transcript.test.ts — locating a session's transcript, scanning its head
+// for a fork marker, and reading the metadata in its header. Every transcript
+// fixture in test/fixtures/transcripts is exercised by one of the cases below.
 
 import { afterAll, describe, expect, it } from 'vitest';
 import * as fs from 'node:fs';
@@ -273,9 +274,9 @@ describe('readTranscriptHeader', () => {
   });
 });
 
-// ═════════════════════════ M22.3: extra projects roots ══════════════════════
+// ═══════════════════════════ extra projects roots ═══════════════════════════
 
-describe('transcriptFile: extraProjectsDirs (M22.3)', () => {
+describe('transcriptFile: extraProjectsDirs', () => {
   const ID = '0f0000d7-0000-4000-8000-0000000000d7';
 
   function writeAt(projectsRoot: string, sessionId: string, body: string): string {

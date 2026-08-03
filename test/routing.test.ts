@@ -1,4 +1,4 @@
-// test/routing.test.ts — the M22 CONTRACT under test: src/routing.ts.
+// test/routing.test.ts — the CONTRACT under test: src/routing.ts.
 //
 // Pure module: a Map literal for usage and a fixed `now` stand in for the
 // limits fetcher, so every rule here is deterministic and network-free.

@@ -1,4 +1,4 @@
-// test/accounts.test.ts — the M22 CONTRACT under test: src/accounts.ts.
+// test/accounts.test.ts — the CONTRACT under test: src/accounts.ts.
 //
 // Pure module, no vscode, no fs, no node builtins on the import side (only in
 // this file's helpers). The contract worth pinning:
@@ -67,7 +67,7 @@ describe('envForProfile', () => {
     expect(envForProfile(profile('claude-default'))).toEqual({});
   });
 
-  it('null/undefined profile resolves to {} — pre-M22 behaviour', () => {
+  it('null/undefined profile resolves to {} — an unpinned session gets no overrides', () => {
     expect(envForProfile(null)).toEqual({});
     expect(envForProfile(undefined)).toEqual({});
   });
@@ -553,7 +553,7 @@ describe('seedDefaultProfiles', () => {
     expect(second).toEqual([]);
   });
 
-  it('a tombstoned seed id stays deleted — the user meant it (M22.1)', () => {
+  it('a tombstoned seed id stays deleted — the user meant it', () => {
     const seeded = seedDefaultProfiles([], {
       hasCodexAuth: true,
       tombstonedIds: [DEFAULT_CODEX_PROFILE_ID],

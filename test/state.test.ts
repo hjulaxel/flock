@@ -1,6 +1,6 @@
-// test/state.test.ts — owner B. Covers SPEC §9's state-migration suite plus
-// the four properties the design actually stands on: concurrent-write merge,
-// corrupt-file recovery, schema migration, and reload/watcher debouncing.
+// test/state.test.ts — the editorial store. The four properties the design
+// stands on: concurrent-write merge, corrupt-file recovery, schema migration,
+// and reload/watcher debouncing.
 //
 // Everything here runs against real temp directories: the store's whole job
 // is the fs dance (same-dir temp file, fsync, verify, rename), and a mocked fs
@@ -90,7 +90,7 @@ function state(partial: Partial<LineageState> = {}): LineageState {
     hiddenFolders: {},
     chains: {},
     workspaces: {},
-    // v5 (M22). `migrateState` materialises both on every load, so a state
+    // `migrateState` materialises both on every load, so a state
     // this helper builds has to carry them or every deep-equality against a
     // migrated blob fails on two empty objects.
     accounts: {},
@@ -386,7 +386,7 @@ describe('migrateState', () => {
       id: S1,
       title: 'old title',
       summary: 'old summary',
-      // hidden in the legacy blob: the hide verb is retired (M14), so the
+      // hidden in the legacy blob: the hide verb is retired, so the
       // put-away state folds to deleted — off the tree, restorable.
       deleted: true,
       cwd: '/repo',
@@ -623,7 +623,7 @@ describe('StateStore: concurrent writers', () => {
     });
   });
 
-  // M8: `hidden` (muted) and `deleted` (removed from view) are independent
+  // `hidden` (muted) and `deleted` (removed from view) are independent
   // flags, so both have to survive a round-trip and be clearable back to false.
   it('persists hidden and deleted independently', async () => {
     const dir = tempDir();
@@ -972,7 +972,7 @@ describe('StateStore.reloadFromDisk', () => {
   });
 });
 
-// ------------------------------------------------------------ projects (M7)
+// ----------------------------------------------------------------- projects
 
 describe('StateStore: projects', () => {
   it('writes a project and reads it back sorted by name', async () => {
@@ -1151,7 +1151,7 @@ describe('StateStore: projects', () => {
   });
 });
 
-// ------------------------------------------------------- subprojects (M26)
+// -------------------------------------------------------------- subprojects
 
 describe('StateStore: subprojects', () => {
   it('stores a parent pointer and clears it with null', async () => {
@@ -1320,9 +1320,9 @@ describe('migrateState: v1 -> v2', () => {
   });
 });
 
-// --------------------------------------------------- generation chains (M10)
+// --------------------------------------------------------- generation chains
 
-describe('state: generation chains (M10)', () => {
+describe('state: generation chains', () => {
   const chain = (
     rootId: string,
     members: string[],
@@ -1434,9 +1434,9 @@ describe('state: generation chains (M10)', () => {
   });
 });
 
-// --------------------------------------------------------------- M11 + M12 + M13
+// ------------------------------- fork edges, notifications, workspaces
 
-describe('state: daemon fork edges persist (M11)', () => {
+describe('state: daemon fork edges persist', () => {
   it('parentSource "daemon" survives upsert and a reload round trip', async () => {
     const dir = tempDir();
     const store = makeStore(dir);
@@ -1462,12 +1462,12 @@ describe('state: daemon fork edges persist (M11)', () => {
   });
 });
 
-describe('state: hide verb retired (M14)', () => {
+describe('state: hide verb retired', () => {
   it('a persisted hidden:true reads as deleted, and the flag is dropped', () => {
     const migrated = migrateState({
       version: STATE_SCHEMA_VERSION,
       records: {
-        // Written by an M8–M13 window: put away, but explicitly not deleted.
+        // Written by an older window: put away, but explicitly not deleted.
         [S1]: {
           id: S1,
           hidden: true,
@@ -1486,7 +1486,7 @@ describe('state: hide verb retired (M14)', () => {
   });
 });
 
-describe('state: notification fields sanitize (M12)', () => {
+describe('state: notification fields sanitize', () => {
   it('doneAt/seenAt/notify round-trip; junk types are dropped', () => {
     const migrated = migrateState({
       version: STATE_SCHEMA_VERSION,
@@ -1521,7 +1521,7 @@ describe('state: notification fields sanitize (M12)', () => {
     expect(migrated.records[S2]?.parked).toBeUndefined();
   });
 
-  it('chat round-trips as a boolean; a junk type is dropped (M16)', () => {
+  it('chat round-trips as a boolean; a junk type is dropped', () => {
     // The whole chat feature rides on this flag surviving a load: it is the
     // only thing that keeps a chat from rendering as a tree row.
     const migrated = migrateState({
@@ -1546,7 +1546,7 @@ describe('state: notification fields sanitize (M12)', () => {
   });
 });
 
-describe('state: workspaces (M13)', () => {
+describe('state: workspaces', () => {
   it('saves, reads back, and survives a reload', async () => {
     const dir = tempDir();
     const store = makeStore(dir);
@@ -1634,7 +1634,7 @@ describe('state: workspaces (M13)', () => {
   });
 });
 
-describe('state: accounts (M22)', () => {
+describe('state: accounts', () => {
   it('writes an account and reads it back — canonical order (arrival order via nextOrder here)', async () => {
     const dir = tempDir();
     const store = makeStore(dir);
@@ -1706,8 +1706,8 @@ describe('state: accounts (M22)', () => {
     expect(store.getAccount('work')).toBeUndefined();
 
     const blob = readFile(dir) as LineageState;
-    // Non-null: LineageState.accounts is typed optional only for source
-    // compatibility with pre-M22 literals — the store itself always writes it.
+    // Non-null: LineageState.accounts is typed optional only so that older
+    // object literals still compile — the store itself always writes it.
     expect(blob.accounts!['work']?.deleted).toBe(true);
 
     const reader = makeStore(dir);
@@ -1817,7 +1817,7 @@ describe('state: accounts (M22)', () => {
     expect(store.getSessionProfile(S1)).toBeUndefined();
   });
 
-  it('migrateState materialises accounts/accountSettings on a pre-M22 (v4) file', () => {
+  it('migrateState materialises accounts/accountSettings on a v4 file', () => {
     const migrated = migrateState({
       version: 4,
       records: {},

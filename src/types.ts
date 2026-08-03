@@ -1,14 +1,18 @@
-// src/types.ts — THE shared contract for the Canopy extension.
-// Originally frozen from SPEC.md §3. It imports nothing (not even vscode).
+// src/types.ts — the shared type contract for the Canopy extension.
+// It imports nothing (not even vscode), so every layer can depend on it.
 //
-// AMENDED (M7, 2026-07-27) for the project-first rework. Everything added is
-// ADDITIVE — no existing symbol changed meaning — except STATE_SCHEMA_VERSION,
-// which goes 1 -> 2 because state.json gains two top-level maps. A v1 file
-// loads unchanged (the migration just adds the empty maps), and a v1 build
-// reading a v2 file preserves them verbatim via the unknown-key rule.
+// SCHEMA VERSIONS. Every bump of STATE_SCHEMA_VERSION is additive: no existing
+// symbol changes meaning, the migration only materialises the maps the newer
+// version adds, and a build reading a state.json newer than itself preserves
+// the keys it does not recognise verbatim (the unknown-key rule). That pair of
+// properties is what lets an old and a new build share one state file on the
+// same machine without either of them losing data.
 //
-//   * ProviderId / PROVIDERS  — the tree's leading glyph is now the LLM
-//     provider's logo, so the provider has to be a first-class value.
+// The project-first rework (state.json 1 -> 2, gaining two top-level maps)
+// added:
+//
+//   * ProviderId / PROVIDERS  — the tree's leading glyph is the LLM provider's
+//     logo, so the provider has to be a first-class value.
 //   * ProjectRecord           — a project is a NAME plus one main directory
 //     and any number of extra directories. Folders are no longer the unit of
 //     organisation; they are just the addresses a project lives at.
@@ -17,11 +21,8 @@
 //   * TerminalLocationPref    — new sessions open as editor tabs, not in the
 //     terminal panel.
 //
-// AMENDED (M22, 2026-08-02) for ACCOUNTS. Additive again, except
-// STATE_SCHEMA_VERSION, which goes 4 -> 5 because state.json gains an
-// `accounts` map and an `accountSettings` singleton. A v4 file loads unchanged
-// (the migration materialises both) and a v4 build reading a v5 file preserves
-// them verbatim via the unknown-key rule.
+// Accounts (4 -> 5, gaining an `accounts` map and an `accountSettings`
+// singleton) added:
 //
 //   * AccountProfile   — one AI account you can launch sessions on. On this
 //     machine an account IS a config directory: CLAUDE_CONFIG_DIR /
@@ -37,18 +38,18 @@
 
 // These two MUST equal `publisher` and `name` in package.json: the extension id
 // is what VS Code resolves `vscode://<id>/focus` against, so a mismatch breaks
-// cross-window focus silently — the URI simply never reaches us. The scaffold
-// test cross-checks both against the manifest rather than against a copy of
-// these literals, which is the only version of that test that can fail.
+// cross-window focus silently — the URI simply never reaches us. A test
+// cross-checks both against the manifest rather than against a copy of these
+// literals, which is the only version of that test that can fail.
 export const PUBLISHER = 'hjulaxel';
 export const EXTENSION_NAME = 'canopy';
 export const EXTENSION_ID = `${PUBLISHER}.${EXTENSION_NAME}`;
 
 export const VIEW_CONTAINER_ID = 'lineage';
 export const VIEW_ID = 'lineageSessions';
-/** M21. The project header, contributed into the BUILT-IN explorer container
- *  rather than ours — it names the project the folder tree beneath it is
- *  showing, which is a caption for the Explorer and belongs beside it. */
+/** The project header, contributed into the BUILT-IN explorer container rather
+ *  than ours — it names the project the folder tree beneath it is showing,
+ *  which is a caption for the Explorer and belongs beside it. */
 export const PROJECT_VIEW_ID = 'lineageProject';
 /** Intra-tree DnD mime: application/vnd.code.tree.<lowercased view id>. */
 export const TREE_DND_MIME = 'application/vnd.code.tree.lineagesessions';
@@ -72,7 +73,7 @@ export const CLOSED_COLOR_ID = 'lineage.closed';
  *  capped at two graphemes by the workbench, which is the whole reason status
  *  is a dot and not a word. */
 export const STATUS_DOT = '●';
-/** RETIRED (M19). The hollow ring a closed row used to carry at its right edge.
+/** RETIRED. The hollow ring a closed row used to carry at its right edge.
  *  Nothing paints it now: a closed row is already dimmed, its logo greyed and
  *  (in the native tree) its label greyed by the decoration's colour, so the ring
  *  was a second mark saying what the row said anyway — and a column of empty
@@ -95,21 +96,21 @@ export const CLOSED_DOT = '○';
  *  live and tested; only the publish is switched off. */
 export const ATTENTION_BADGE_ENABLED = false;
 export const CONTEXT_HOOKS_INSTALLED = 'lineage.hooksInstalled';
-/** True while any rendered session is done-and-not-looked-at (M12). Drives
- *  the bell icon in the view title: `bell-dot` when set, plain `bell` when
- *  not — two menu entries with complementary `when` clauses, because an icon
+/** True while any rendered session is done-and-not-looked-at. Drives the bell
+ *  icon in the view title: `bell-dot` when set, plain `bell` when not — two
+ *  menu entries with complementary `when` clauses, because an icon
  *  contribution cannot change at runtime. */
 export const CONTEXT_HAS_UNSEEN = 'lineage.hasUnseen';
 /** True when the user chose the built-in tree widget over the inline (webview)
  *  sidebar. The two views' `when` clauses are complements of this, so exactly
  *  one is ever on screen. */
 export const CONTEXT_NATIVE_TREE = 'lineage.nativeTree';
-/** M19. Mirrors `lineage.onlyActiveSessions` into a context key, because the
- *  filter is a TOGGLE in the view title and a contributed button has no state:
- *  the on and off halves are two commands with complementary `when` clauses and
+/** Mirrors `lineage.onlyActiveSessions` into a context key, because the filter
+ *  is a TOGGLE in the view title and a contributed button has no state: the on
+ *  and off halves are two commands with complementary `when` clauses and
  *  different icons, the same shape the bell already uses (CONTEXT_HAS_UNSEEN). */
 export const CONTEXT_ONLY_ACTIVE = 'lineage.onlyActive';
-/** M22. TWO OR MORE session rows are selected in whichever view is on screen.
+/** TWO OR MORE session rows are selected in whichever view is on screen.
  *
  *  It exists to make a menu entry honest. The workbench opens a row's context
  *  menu on the row you right-clicked and hands the command that row alone, so
@@ -118,7 +119,7 @@ export const CONTEXT_ONLY_ACTIVE = 'lineage.onlyActive';
  *  one that says how many it is about to take — the same complementary-`when`
  *  shape the bell and the active-only filter already use. */
 export const CONTEXT_MULTI_SELECT = 'lineage.multiSelect';
-/** M21. Gates the project header view inside the BUILT-IN Explorer container.
+/** Gates the project header view inside the BUILT-IN Explorer container.
  *
  *  NOT simply "this window is a Canopy workspace". It is "this window has
  *  something to say up there", which is: the feature is enabled AND the window
@@ -134,11 +135,11 @@ export const CONTEXT_EXPLORER_FOLLOW = 'lineage.explorerFollow';
 // ------------------------------------------------------------------ schema
 
 /** Version of the persisted globalStorage state.json blob.
- *  v2 adds `projects` and `hiddenFolders`. v3 adds `chains` (M10 generation
- *  chains). v4 adds `workspaces` (M13 project workspaces). v5 adds `accounts`
- *  and `accountSettings` (M22); every step is additive — the migration just
- *  adds the empty map, and an older build reading a newer file preserves it
- *  verbatim via the unknown-key rule. */
+ *  v2 adds `projects` and `hiddenFolders`. v3 adds `chains` (generation
+ *  chains). v4 adds `workspaces` (project workspaces). v5 adds `accounts` and
+ *  `accountSettings`. Every step is additive — the migration just adds the
+ *  empty map, and an older build reading a newer file preserves it verbatim
+ *  via the unknown-key rule. */
 export const STATE_SCHEMA_VERSION = 5;
 
 // ------------------------------------------------------------------ lineage
@@ -159,9 +160,9 @@ export const NEGATIVE_RESOLUTION_TTL_MS = 60_000;
 export const MAX_GHOST_DEPTH = 10;
 
 // ------------------------------------------------------------------ archive
-// M1.5: `claude agents --json` is live-only, so a closed session used to leave
-// the tree entirely. The archive index reads ~/.claude/projects so closed
-// sessions stay visible, keep their lineage, and can be resumed.
+// `claude agents --json` is live-only, so a closed session used to leave the
+// tree entirely. The archive index reads ~/.claude/projects so closed sessions
+// stay visible, keep their lineage, and can be resumed.
 
 /** Lines of a transcript head read for archived display facts (cwd first
  *  appears at median line 3 / p90 line 11 / max 36 in real data). */
@@ -257,10 +258,10 @@ export const PROVIDER_MEDIA_DIR = 'media/providers';
 
 // ----------------------------------------------------------------- projects
 // A project is the unit of organisation: a user-chosen NAME, one main
-// directory, and any number of extra directories (the multi-directory project
-// shape magma-os wants). Sessions attach to a project by cwd — longest
-// matching directory wins — never the other way round, so a project can be
-// created, renamed or re-pointed without touching a single session record.
+// directory, and any number of extra directories, so one project can span
+// several checkouts. Sessions attach to a project by cwd — longest matching
+// directory wins — never the other way round, so a project can be created,
+// renamed or re-pointed without touching a single session record.
 
 export interface ProjectRecord {
   id: string;              // uuid, minted at creation
@@ -268,7 +269,7 @@ export interface ProjectRecord {
   rootDir: string;         // the main directory
   dirs: string[];          // EXTRA directories; never contains rootDir
   /**
-   * M26 SUBPROJECTS. The project this one is filed under, or absent for a
+   * SUBPROJECTS. The project this one is filed under, or absent for a
    * top-level project. Arbitrary depth and breadth: a subproject is an ordinary
    * ProjectRecord in every other respect — its own name, its own directories,
    * its own provider and routing — and the only thing this field changes is
@@ -299,22 +300,22 @@ export interface ProjectRecord {
    *  is signalled, and `reopenProject` brings the whole thing back exactly as
    *  it was.
    *
-   *  M7 shipped this field as a recoverable delete with no verb of its own,
-   *  reachable only through "Show Hidden Folders and Projects…". M24 gives it
-   *  the pair it always needed — Close Project on the row, Open Project… at
-   *  the top of the view — and keeps the FIELD NAME so that every project any
-   *  older build put away is already closed, with no migration and no window
-   *  disagreeing with the one beside it. */
+   *  Earlier versions shipped this field as a recoverable delete with no verb
+   *  of its own, reachable only through "Show Hidden Folders and Projects…".
+   *  It now has the pair it always needed — Close Project on the row, Open
+   *  Project… at the top of the view — and keeps the FIELD NAME so that every
+   *  project an older build put away is already closed, with no migration and
+   *  no window disagreeing with the one beside it. */
   hidden?: boolean;
-  /** RETIRED (M24). M16's one-chat-per-project pointer: the chat button read
-   *  it to decide whether to focus, resume or mint. The button now always
-   *  mints (see COMMANDS.chatInProject) and the history picker derives a
-   *  project's chats from the editorial records — the same cwd-matching every
-   *  other kind of membership uses — so nothing reads or writes this any
-   *  more. Still typed because state files written before M24 carry it, and a
-   *  field that vanishes from the type is a field the loader would drop. */
+  /** RETIRED. The old one-chat-per-project pointer: the chat button read it to
+   *  decide whether to focus, resume or mint. The button now always mints (see
+   *  COMMANDS.chatInProject) and the history picker derives a project's chats
+   *  from the editorial records — the same cwd-matching every other kind of
+   *  membership uses — so nothing reads or writes this any more. Still typed
+   *  because state files written by older versions carry it, and a field that
+   *  vanishes from the type is a field the loader would drop. */
   chatSessionId?: string;
-  /** M22. Which ACCOUNT this project's new sessions launch on, overriding the
+  /** Which ACCOUNT this project's new sessions launch on, overriding the
    *  global default. Optional and additive: absent means "follow the global
    *  default", which is what every project did before accounts existed.
    *
@@ -325,7 +326,7 @@ export interface ProjectRecord {
    *  EditorialRecord.profileId; this only decides what a NEW session gets. */
   routing?: RoutingChoice;
   /**
-   * M20 branch curation. Both lists hold BRANCH NAMES, not worktree paths: a
+   * Branch curation. Both lists hold BRANCH NAMES, not worktree paths: a
    * worktree can be removed and re-added at a different path for the same
    * branch, and the user's decision was about the branch.
    *
@@ -342,9 +343,9 @@ export interface ProjectRecord {
    */
   shownBranches?: string[];
   hiddenBranches?: string[];
-  /** M20. The branch block is folded shut. Per project and persisted, because
-   *  it is a statement about how much room this project's branches deserve,
-   *  which does not change between sessions the way a scroll position does. */
+  /** The branch block is folded shut. Per project and persisted, because it is
+   *  a statement about how much room this project's branches deserve, which
+   *  does not change between sessions the way a scroll position does. */
   branchesCollapsed?: boolean;
   /** TOMBSTONE. A deleted project keeps its key so the record-level
    *  newest-wins merge can express the delete: dropping the key outright makes
@@ -373,8 +374,7 @@ export interface HiddenFolder {
 export const MAX_PROJECT_NAME_LEN = 60;
 
 /**
- * M26. How deep the subproject tree may go before the renderer stops
- * descending.
+ * How deep the subproject tree may go before the renderer stops descending.
  *
  * A cap rather than "as deep as you like", because the depth is read out of
  * user-editable state that several windows write: the cycle guard already stops
@@ -389,9 +389,9 @@ export const MAX_PROJECT_NAME_LEN = 60;
 export const MAX_PROJECT_DEPTH = 8;
 
 // ----------------------------------------------------------------- accounts
-// M22. An ACCOUNT is an AI subscription you can launch sessions on. Somebody
-// with a work Max plan, a personal Pro plan and an API key has three, and the
-// only thing standing between them today is logging out and back in.
+// An ACCOUNT is an AI subscription you can launch sessions on. Somebody with a
+// work Max plan, a personal Pro plan and an API key has three, and the only
+// thing standing between them otherwise is logging out and back in.
 //
 // The unit is a CONFIG DIRECTORY, because that is the one thing the CLIs give
 // us that isolates credentials completely: `CLAUDE_CONFIG_DIR` and `CODEX_HOME`
@@ -441,8 +441,8 @@ export interface AccountProfile {
   order: number;
   createdAt: string;  // ISO
   /** ISO; record-level merge key (newest wins), exactly as on every other map
-   *  in state.json. Not in the original design sketch — the merge needs a clock
-   *  per record or two windows editing different accounts lose one of them. */
+   *  in state.json. Not optional: the merge needs a clock per record, or two
+   *  windows editing different accounts lose one of them. */
   updatedAt: string;
   /** TOMBSTONE, for the reason ProjectRecord.deleted carries one: a dropped key
    *  is indistinguishable from "the other window has not heard of this account
@@ -528,10 +528,10 @@ export interface UsageSnapshot {
   fetchedAt: number;
   stale?: boolean;
   error?: 'no-credentials' | 'expired' | 'http' | 'parse';
-  /** M22.1. Who the profile's config dir says is signed in (`oauthAccount.
-   *  emailAddress` from its `.claude.json`). Identity, not credential — shown
-   *  in the view on purpose, so a row whose usage cannot be read still names
-   *  its account instead of claiming "not logged in". */
+  /** Who the profile's config dir says is signed in
+   *  (`oauthAccount.emailAddress` from its `.claude.json`). Identity, not
+   *  credential — shown in the view on purpose, so a row whose usage cannot be
+   *  read still names its account instead of claiming "not logged in". */
   signedInAs?: string;
 }
 
@@ -574,21 +574,21 @@ export const COMMANDS = {
   refresh: 'lineage.refresh',
   focusSession: 'lineage.focusSession',
   newSession: 'lineage.newSession',
-  /** M18. `newSession` with the folder question forced back on. `newSession`
-   *  itself now defaults to the project this window is open on and asks
-   *  nothing, which is right for the `+` in the view title and wrong exactly
-   *  once: when the folder you want is one no session has ever run in. This is
-   *  that door, and it is palette-only — no icon, no menu. */
+  /** `newSession` with the folder question forced back on. `newSession` itself
+   *  defaults to the project this window is open on and asks nothing, which is
+   *  right for the `+` in the view title and wrong exactly once: when the
+   *  folder you want is one no session has ever run in. This is that door, and
+   *  it is palette-only — no icon, no menu. */
   newSessionIn: 'lineage.newSessionIn',
   forkSession: 'lineage.forkSession',
-  /** M18. A fork that opens on `/compact`: same exact `--fork-session --resume`
-   *  edge as forkSession, with the compaction handed to the CHILD as its first
-   *  turn. Branching and compacting are the two things you do to a conversation
-   *  that has got long, and doing them separately means either compacting the
+  /** A fork that opens on `/compact`: same exact `--fork-session --resume` edge
+   *  as forkSession, with the compaction handed to the CHILD as its first turn.
+   *  Branching and compacting are the two things you do to a conversation that
+   *  has got long, and doing them separately means either compacting the
    *  history you wanted to keep, or forking a context that is already too big
    *  to work in. The parent is never touched. */
   forkAndCompact: 'lineage.forkAndCompact',
-  /** REMOVED (M24) — `lineage.askSession`, "Ask in a Fork…". A fork whose
+  /** REMOVED — `lineage.askSession`, "Ask in a Fork…". A fork whose
    *  first turn came out of an input box. Every fork already opens a terminal
    *  with a cursor in it, so the verb's whole contribution was moving the
    *  typing into a modal — at the price of a THIRD fork entry in the session
@@ -597,18 +597,18 @@ export const COMMANDS = {
    *  CHAT is, and a chat needs no parent and leaves no row. The id is recorded
    *  here, not resurrected: nothing may re-use the string. */
   renameSession: 'lineage.renameSession',
-  /** M9: start an inline edit on the row in the webview sidebar. Falls back to
+  /** Start an inline edit on the row in the webview sidebar. Falls back to
    *  `renameSession`'s quick input when the inline view is not available. */
   renameSessionInline: 'lineage.renameSessionInline',
   closeSession: 'lineage.closeSession',
   closeWithSummary: 'lineage.closeWithSummary',
   wrapSession: 'lineage.wrapSession',
   copySessionId: 'lineage.copySessionId',
-  // M14 — TWO verbs on a row, no third: CLOSE ends the tab (the row stays,
-  // inactive), DELETE removes the row (restorable). The M8 hide verb is
+  // TWO verbs on a row, no third: CLOSE ends the tab (the row stays,
+  // inactive), DELETE removes the row (restorable). The old hide verb is
   // retired; old `hidden` records read as deleted (see state.sanitizeRecord).
   deleteSession: 'lineage.deleteSession',
-  /** M22. The same verb over a MULTI-SELECTION. A separate id rather than a
+  /** The same verb over a MULTI-SELECTION. A separate id rather than a
    *  widened `deleteSession` because the two have to say different things in a
    *  menu — "Delete Session" over four selected rows is a lie — and a
    *  contributed command has exactly one title. Their `when` clauses are
@@ -619,10 +619,10 @@ export const COMMANDS = {
   installHooks: 'lineage.installHooks',
   removeHooks: 'lineage.removeHooks',
   resumeSession: 'lineage.resumeSession',
-  // M7 — projects and visibility
+  // Projects and visibility
   newProject: 'lineage.newProject',
   configureProject: 'lineage.configureProject',
-  /** M17: start an inline edit on the project's row in the webview sidebar.
+  /** Start an inline edit on the project's row in the webview sidebar.
    *  Falls back to `renameProject`'s quick input when the inline view is not
    *  available — the same pairing `renameSessionInline`/`renameSession` uses.
    *  Deliberately NOT the same verb as the session pair: `isSessionId` is a
@@ -632,36 +632,36 @@ export const COMMANDS = {
   renameProjectInline: 'lineage.renameProjectInline',
   renameProject: 'lineage.renameProject',
   deleteProject: 'lineage.deleteProject',
-  /** M24. CLOSE a project: it leaves the tree, taking its sessions' rows with
-   *  it, and nothing else happens — no process is signalled, no record is
-   *  deleted, no directory is touched. The put-away that is not a delete, and
-   *  the reason `deleteProject` can stay as blunt as it is. Writes
-   *  `ProjectRecord.hidden`, which is the flag M7 already shipped for exactly
-   *  this and never gave a verb of its own. */
+  /** CLOSE a project: it leaves the tree, taking its sessions' rows with it,
+   *  and nothing else happens — no process is signalled, no record is deleted,
+   *  no directory is touched. The put-away that is not a delete, and the reason
+   *  `deleteProject` can stay as blunt as it is. Writes
+   *  `ProjectRecord.hidden`, the flag that already existed for exactly this and
+   *  never had a verb of its own. */
   closeProject: 'lineage.closeProject',
-  /** M24. The door back in: a picker over every CLOSED project — the project
+  /** The door back in: a picker over every CLOSED project — the project
    *  history — at the top level of the view, where a closed project has no row
-   *  to right-click. Deliberately NOT `openProject`, which is a different verb
-   *  that has existed since M7 (open a project's DIRECTORY in a new VS Code
+   *  to right-click. Deliberately NOT `openProject`, which is an older and
+   *  entirely different verb (open a project's DIRECTORY in a new VS Code
    *  window) and which a closed project cannot be reached from either. */
   reopenProject: 'lineage.reopenProject',
-  /** M26. A project filed UNDER this one. The same create flow as
-   *  `newProject`, with the parent pre-answered — which is the whole difference
-   *  between "make a project and then go and find where it belongs" and the
-   *  gesture people actually make, which is "this repo has an api and a web
-   *  and I want them under it". */
+  /** A project filed UNDER this one. The same create flow as `newProject`,
+   *  with the parent pre-answered — which is the whole difference between
+   *  "make a project and then go and find where it belongs" and the gesture
+   *  people actually make, which is "this repo has an api and a web and I want
+   *  them under it". */
   newSubproject: 'lineage.newSubproject',
-  /** M26. Re-file a project: pick a new parent, or Top Level. The keyboard (and
+  /** Re-file a project: pick a new parent, or Top Level. The keyboard (and
    *  palette) half of dragging a project row onto another one — and the only
    *  half a closed project or a collapsed parent can be reached through. */
   moveProject: 'lineage.moveProject',
   newSessionInProject: 'lineage.newSessionInProject',
-  /** M20 — a session in one specific git WORKTREE of a project. What the branch
+  /** A session in one specific git WORKTREE of a project. What the branch
    *  chips run. Not offered in the palette: its argument is a directory that
    *  only the rendered chip row knows, and a palette entry would have to open a
    *  picker for something the tree already shows as one click. */
   newSessionInBranch: 'lineage.newSessionInBranch',
-  /** M20 branch curation. `hideBranch` folds one branch away into "Others";
+  /** Branch curation. `hideBranch` folds one branch away into "Others";
    *  `showBranches` is the picker behind that row, and the only way back. The
    *  fold pair collapses the whole block — two ids for one toggle because a
    *  contributed icon cannot change at runtime. */
@@ -672,31 +672,31 @@ export const COMMANDS = {
   revealBranch: 'lineage.revealBranch',
   copyBranchName: 'lineage.copyBranchName',
   copyBranchPath: 'lineage.copyBranchPath',
-  /** M16 — a scratch conversation ABOUT a project: opened at the project's
-   *  rootDir with every extra directory added, and deliberately absent from
-   *  the tree (see EditorialRecord.chat).
+  /** A scratch conversation ABOUT a project: opened at the project's rootDir
+   *  with every extra directory added, and deliberately absent from the tree
+   *  (see EditorialRecord.chat).
    *
-   *  M24: ALWAYS A NEW ONE. M16 shipped this as one chat per project that the
-   *  button re-focused or `--resume`d, which made the second question you
-   *  wanted to ask an interruption of the first: the only way to have two open
-   *  was to not have asked the first. A chat is the cheapest thing in the
+   *  ALWAYS A NEW ONE. Earlier versions shipped this as one chat per project
+   *  that the button re-focused or `--resume`d, which made the second question
+   *  you wanted to ask an interruption of the first: the only way to have two
+   *  open was to not have asked the first. A chat is the cheapest thing in the
    *  extension — no row, no parent, no name to invent — so the button mints
    *  one every time and the ones before it are reached through
    *  `chatHistory`. */
   chatInProject: 'lineage.chatInProject',
-  /** M24. The picker over a project's chats — every one it has ever had,
-   *  newest first, whether still open or long finished. The chat's answer to
-   *  the tree: a session has a row to click and a chat does not, so without
-   *  this list a chat you closed is a conversation you can only find by id. */
+  /** The picker over a project's chats — every one it has ever had, newest
+   *  first, whether still open or long finished. The chat's answer to the tree:
+   *  a session has a row to click and a chat does not, so without this list a
+   *  chat you closed is a conversation you can only find by id. */
   chatHistory: 'lineage.chatHistory',
   addProjectDirectory: 'lineage.addProjectDirectory',
   projectFromFolder: 'lineage.projectFromFolder',
   hideFolder: 'lineage.hideFolder',
   showHidden: 'lineage.showHidden',
-  // M14 — bulk housekeeping for a tree whose rows persist until deleted.
-  // Replaces M7.1's `lineage.hideStale` (hide is retired).
+  // Bulk housekeeping for a tree whose rows persist until deleted. Replaces an
+  // earlier `lineage.hideStale` (hide is retired).
   deleteStale: 'lineage.deleteStale',
-  // M12 — notifications
+  // Notifications
   showNotifications: 'lineage.showNotifications',
   /** The SAME verb as showNotifications, contributed twice because a command
    *  has exactly one icon: this id carries `bell-dot` and is shown while
@@ -704,7 +704,7 @@ export const COMMANDS = {
    *  the time. Their `when` clauses are complements. */
   showNotificationsUnread: 'lineage.showNotificationsUnread',
   markAllNotificationsRead: 'lineage.markAllNotificationsRead',
-  /** M19. The per-session mute, split in two. It used to be one command titled
+  /** The per-session mute, split in two. It used to be one command titled
    *  "Mute / Unmute Notifications", which is a menu entry that cannot tell you
    *  which way it is about to go — the row already knows, so the row's own
    *  context value (`;silenced;` / `;notified;`) picks the half that applies and
@@ -712,27 +712,27 @@ export const COMMANDS = {
    *  showNotifications/showNotificationsUnread. */
   muteSessionNotifications: 'lineage.muteSessionNotifications',
   unmuteSessionNotifications: 'lineage.unmuteSessionNotifications',
-  // M13 — project workspaces
+  // Project workspaces
   switchWorkspace: 'lineage.switchWorkspace',
-  /** M21. One-time opt-in: converts this window into a Canopy workspace (a
+  /** One-time opt-in: converts this window into a Canopy workspace (a
    *  generated `.code-workspace` with an anchor at folder[0]) so the Explorer
    *  can be repointed in place from then on. Costs ONE window reload, here and
    *  never again — which is exactly why it is a verb the user runs rather than
    *  something the extension does to their window on activation. */
   followInExplorer: 'lineage.followInExplorer',
-  /** M21. Leave workspace mode: reopen the active project's main directory as
-   *  a plain folder. Also one reload, and the door back out. */
+  /** Leave workspace mode: reopen the active project's main directory as a
+   *  plain folder. Also one reload, and the door back out. */
   stopFollowingInExplorer: 'lineage.stopFollowingInExplorer',
-  // M19 — the active-only filter, a view-title toggle. Two ids for one
-  // setting, for the reason above: a contributed button carries one icon and
-  // one title, so a switch needs one command per position.
+  // The active-only filter, a view-title toggle. Two ids for one setting, for
+  // the reason above: a contributed button carries one icon and one title, so
+  // a switch needs one command per position.
   showOnlyActiveSessions: 'lineage.showOnlyActiveSessions',
   showAllSessions: 'lineage.showAllSessions',
-  // M22 — ACCOUNTS. Ten verbs, and they live here rather than in a table of
-  // their own next to the view for the reason every other id does: the scaffold
-  // test cross-checks THIS object against the manifest in both directions, so a
-  // second table is a set of commands nothing checks — invisible when it is
-  // missing from `contributes`, "command not found" when it is missing here.
+  // ACCOUNTS. Ten verbs, and they live here rather than in a table of their own
+  // next to the view for the reason every other id does: a test cross-checks
+  // THIS object against the manifest in both directions, so a second table is a
+  // set of commands nothing checks — invisible when it is missing from
+  // `contributes`, "command not found" when it is missing here.
   /** Create a profile: pick a provider, name it, mint `~/.lineage/profiles/<id>`
    *  as its config dir, then offer the sign-in. */
   addAccount: 'lineage.addAccount',
@@ -773,42 +773,40 @@ export const CONFIG_KEYS = {
   groupByFolder: 'groupByFolder',
   showGhosts: 'showGhosts',
   showArchived: 'showArchived',
-  /** M19. Hide every session that is over — closed, exited, or an inferred
+  /** Hide every session that is over — closed, exited, or an inferred
    *  ancestor — leaving only what is still running. A FILTER, not a delete:
    *  their children are promoted the way a deleted row's are, so a live fork of
    *  a session you closed keeps its place in the tree. */
   onlyActiveSessions: 'onlyActiveSessions',
   hooksEnabled: 'hooks.enabled',
-  // M7
   terminalLocation: 'terminalLocation',
   onlyProjectSessions: 'onlyProjectSessions',
-  // M7.1 — staleness
+  // Staleness
   showPhantomRows: 'showPhantomRows',
-  // M9
   viewStyle: 'viewStyle',
-  /** M18. Show a session's token count left of its age. Off by default: it is a
+  /** Show a session's token count left of its age. Off by default: it is a
    *  second number on every row, and the row already carries an age and a dot. */
   showTokens: 'showTokens',
-  /** M20. Override the branch-chip palette. Empty = the built-in muted one. */
+  /** Override the branch-chip palette. Empty = the built-in muted one. */
   branchColors: 'branchColors',
-  /** M26. Nest a project's sessions UNDER the branch they are running on,
-   *  instead of listing the branches and then the sessions as two flat blocks.
-   *  OFF by default: it re-homes every row in a project the moment it goes on,
-   *  and the flat list is right for the common case of one checkout with a
-   *  handful of forks in it. See viewmodel.buildViewModel. */
+  /** Nest a project's sessions UNDER the branch they are running on, instead
+   *  of listing the branches and then the sessions as two flat blocks. OFF by
+   *  default: it re-homes every row in a project the moment it goes on, and the
+   *  flat list is right for the common case of one checkout with a handful of
+   *  forks in it. See viewmodel.buildViewModel. */
   groupSessionsByBranch: 'groupSessionsByBranch',
   staleAfterHours: 'staleAfterHours',
   busyStaleMinutes: 'busyStaleMinutes',
-  // M12 — notifications
+  // Notifications
   notificationsEnabled: 'notifications.enabled',
   notificationsPopup: 'notifications.popup',
-  // M13 — workspaces
+  // Workspaces
   workspacesEnabled: 'workspaces.enabled',
   workspacesResumeSessions: 'workspaces.resumeSessions',
   workspacesAutoSwitch: 'workspaces.autoSwitch',
-  // M21 — the Explorer follows the project
+  // The Explorer follows the project
   explorerFollowProject: 'explorer.followProject',
-  /** M22. Show the Accounts view. The VERBS stay registered when this is off —
+  /** Show the Accounts view. The VERBS stay registered when this is off —
    *  turning it off means "I do not want a second list in my sidebar", not
    *  "unregister ten commands so the palette reports them missing". The
    *  manifest's view contribution matches on `config.lineage.accounts.enabled`,
@@ -834,11 +832,12 @@ export const DEFAULT_BUSY_STALE_MINUTES = 5;
 export type SessionKind = 'interactive' | 'background' | 'unknown';
 export type SessionStatus = 'busy' | 'waiting' | 'idle' | 'exited' | 'unknown';
 export type NodeAttention = 'none' | 'waiting';
-/** How a parent edge was established. Precedence order is §5's cascade. */
+/** How a parent edge was established, listed in the order the resolver tries
+ *  them: the first source that answers wins (see the cascade in lineage.ts). */
 export type ParentSource =
   | 'minted'      // we launched it: --fork-session --resume P --session-id C
   | 'reparent'    // user drag-and-drop; may set parentId null (detach)
-  /** M11. The CLI daemon's own dispatch record for a native `/fork`:
+  /** The CLI daemon's own dispatch record for a native `/fork`:
    *  `launch.fork === true` naming the parent transcript. Exact by
    *  construction — the daemon logged which session it forked — and PERSISTED
    *  (unlike the inferred sources), because the daemon roster is ephemeral and
@@ -884,7 +883,7 @@ export interface ArchivedSession {
   startedAt?: number;   // first record timestamp, else birthtimeMs
   cwd?: string;         // from the head scan, never from the lossy dir name
   label?: string;       // custom-title header record
-  /** M10. The transcript's OWN head names a different session id and carries
+  /** The transcript's OWN head names a different session id and carries
    *  no forkedFrom marker: this file is a plain-`--resume` CONTINUATION of
    *  that session, not a fork of it. Verified against real data: every fork
    *  transcript rewrites its copied head to its own id and writes forkedFrom,
@@ -929,7 +928,7 @@ export interface SessionNode {
   source: ParentSource;
   roster?: RosterEntry;       // absent on ghosts and archived nodes
   ghost: boolean;             // synthesized ancestor with no live roster row
-  /** A real closed session read from disk (M1.5). Distinct from `ghost`: a
+  /** A real closed session read from disk. Distinct from `ghost`: a
    *  ghost is INFERRED from a child's edge and may have no transcript at all,
    *  whereas an archived node has one and is therefore resumable. */
   archived: boolean;
@@ -946,13 +945,13 @@ export interface SessionNode {
    *  so the tooltip can show it — otherwise the text the user typed would be
    *  reachable only by hand-reading state.json. */
   summary?: string;
-  /** M12. The session finished a turn (`doneAt`) and the user has not looked
-   *  at it since — the attention dot. Computed per build from the editorial
-   *  record; `undefined` means "not tracked" (notifications off for this
-   *  session, or a node kind that has no unseen state), which the renderers
-   *  treat as the pre-M12 behaviour. */
+  /** The session finished a turn (`doneAt`) and the user has not looked at it
+   *  since — the attention dot. Computed per build from the editorial record;
+   *  `undefined` means "not tracked" (notifications off for this session, or a
+   *  node kind that has no unseen state), which the renderers treat as the
+   *  older, unseen-blind behaviour. */
   unseen?: boolean;
-  /** M19. This session's notifications are EXPLICITLY off (`record.notify ===
+  /** This session's notifications are EXPLICITLY off (`record.notify ===
    *  false`) — the row draws a struck-through bell to say so. Only the explicit
    *  per-session mute sets it, never the global `lineage.notifications.enabled`
    *  being off: a bell on every row at once says nothing about any of them, and
@@ -966,7 +965,7 @@ export interface SessionNode {
    *  archived. Undefined means the session is too new for the last sweep to
    *  have covered it yet; renderers fall back to `startedAt` in that case. */
   lastActiveAt?: number;
-  /** M18. When the USER last sent this session a request, read out of the
+  /** When the USER last sent this session a request, read out of the
    *  transcript tail (see usage.ts). This — not `lastActiveAt` — is what the
    *  age column means: the transcript's mtime moves for every token Claude
    *  writes and for a resume that only reopened the tab, so a session left
@@ -974,15 +973,15 @@ export interface SessionNode {
    *  spoken to in a day read as fresh. Undefined when no prompt is visible in
    *  the bounded tail; renderers then fall back to `lastActiveAt`. */
   lastPromptAt?: number;
-  /** M18. Tokens the last assistant turn ran with — prompt + cache + output,
-   *  i.e. the size of the conversation, not a running bill. Shown only when
+  /** Tokens the last assistant turn ran with — prompt + cache + output, i.e.
+   *  the size of the conversation, not a running bill. Shown only when
    *  `lineage.showTokens` is on. Undefined when the transcript has no usage
    *  record in its tail (a session that has not answered yet, a foreign row
    *  whose transcript is never deep-read). */
   tokens?: number;
   kind: SessionKind;
-  children: string[];         // ALL children ids, sorted per §5.6
-  visibleChildren: string[];  // hidden/pruned-ghost promotion applied, §5.6
+  children: string[];         // ALL children ids, in sibling order
+  visibleChildren: string[];  // hidden/pruned-ghost promotion applied
 }
 
 export interface SessionForest {
@@ -1047,7 +1046,7 @@ export interface BranchInfo {
   rootIds: string[];
   /** True for the repository's main worktree (git lists it first). */
   primary: boolean;
-  /** M20. On screen, versus folded away into "Others". Computed per render from
+  /** On screen, versus folded away into "Others". Computed per render from
    *  the project's curation lists and the default policy — never stored on the
    *  branch, which is a fact about git, not about the user. */
   shown: boolean;
@@ -1063,24 +1062,23 @@ export interface ProjectGroupNode {
   dirs: string[];
   provider: ProviderId;
   rootIds: string[];       // visible root sessions living in this project
-  /** M20. The branches checked out across this project's worktrees, in chip
-   *  order (main first, then alphabetical). Empty for a project that is not a
-   *  git repository, or whose probe has not landed yet — both of which render
-   *  as no chip row at all, exactly as the tree looked before M20.
+  /** The branches checked out across this project's worktrees, in chip order
+   *  (main first, then alphabetical). Empty for a project that is not a git
+   *  repository, or whose probe has not landed yet — both of which render as
+   *  no chip row at all, the way the tree looked before branch chips existed.
    *
-   *  OPTIONAL, like every other post-freeze addition to this file: a node built
-   *  by a caller that predates worktree awareness is a valid node, and every
-   *  reader here treats absent and empty identically. */
+   *  OPTIONAL so that a node built by a caller that predates worktree awareness
+   *  is still a valid node; every reader here treats absent and empty
+   *  identically. */
   branches?: BranchInfo[];
-  /** M20. The user has folded this project's branch block shut. */
+  /** The user has folded this project's branch block shut. */
   branchesCollapsed?: boolean;
   /**
-   * M26 SUBPROJECTS. Where this row sits in the project tree.
+   * SUBPROJECTS. Where this row sits in the project tree.
    *
-   * All three are OPTIONAL, like every other post-freeze addition to this file:
-   * a node built by a caller that predates nesting is a valid node, and every
-   * reader treats absent as "top level, no children" — which is exactly the
-   * pre-M26 tree.
+   * All three are OPTIONAL so that a node built by a caller that predates
+   * nesting is still a valid node: every reader treats absent as "top level, no
+   * children", which is exactly the tree before nesting existed.
    *
    * `depth` is the RESOLVED depth (cycles broken, unknown parents re-rooted, cap
    * applied), not a count of `parentId` hops through the raw records: the
@@ -1097,7 +1095,7 @@ export interface SessionRef {
   id: string;
 }
 /**
- * M26. One branch, as a CONTAINER row in the native tree.
+ * One branch, as a CONTAINER row in the native tree.
  *
  * Exists only under `lineage.groupSessionsByBranch`. The inline sidebar draws
  * its branch rows from the view model (which has a row kind for them and a
@@ -1132,14 +1130,14 @@ export type ContextToken =
   | 'session' | 'group' | 'project' | 'ghost' | 'live' | 'exited' | 'archived'
   | 'waiting' | 'busy' | 'idle' | 'ours' | 'bound' | 'root' | 'forked'
   | 'empty'
-  /** M8 visibility pair, always exactly one of the two on a session row.
+  /** Visibility pair, always exactly one of the two on a session row.
    *  Complementary tokens rather than a negated `when` clause: the manifest only
    *  ever negates plain context keys (`!lineage.hooksInstalled`), and
    *  `!(viewItem =~ /…/)` would lean on parenthesised negation in the
    *  when-clause parser for no benefit. */
   | 'hidden'
   | 'shown'
-  /** M19 notification pair, always exactly one of the two on a session row, for
+  /** Notification pair, always exactly one of the two on a session row, for
    *  the same reason as the pair above: the mute verb is two complementary menu
    *  entries and each needs a positive clause to match on. Deliberately not
    *  'muted' — that word already means "put away and greyed" everywhere else in
@@ -1147,34 +1145,34 @@ export type ContextToken =
    *  another in the renderer is a trap. */
   | 'silenced'
   | 'notified'
-  /** M20. One branch row under a project. Its own token rather than reusing
+  /** One branch row under a project. Its own token rather than reusing
    *  'project': the two rows carry the same projectId and would otherwise match
    *  each other's `when` clauses, putting the project's whole context menu —
    *  rename, add directory, hide — on a row none of those verbs apply to. */
   | 'branch'
-  /** M20. The repository's MAIN worktree. A second token on a branch row, never
+  /** The repository's MAIN worktree. A second token on a branch row, never
    *  alone, and used for exactly one thing: Hide Branch is withheld from it. A
    *  block whose primary branch can be hidden is a block you can empty by
    *  accident and then have to go find the picker to repair. */
   | 'primary'
-  /** M20. The "Others (N)" tail row. Distinct from 'branch' because none of the
+  /** The "Others (N)" tail row. Distinct from 'branch' because none of the
    *  branch verbs apply — there is no single worktree behind it. */
   | 'branchOthers'
-  /** M26. A project row that is filed under another project. A SECOND token on
-   *  the row, never alone, so `viewItem =~ /;project;/` keeps matching every
+  /** A project row that is filed under another project. A SECOND token on the
+   *  row, never alone, so `viewItem =~ /;project;/` keeps matching every
    *  project row while a verb that only makes sense on a nested one (Move to
    *  Top Level) can single it out positively — the manifest never negates a
-   *  viewItem regex; see the M8 note above. */
+   *  viewItem regex; see the visibility-pair note above. */
   | 'subproject'
-  /** M26. A project row with children under it. Its own token because the two
+  /** A project row with children under it. Its own token because the two
    *  facts are independent: a middle project is both, a leaf under a root is
    *  only `subproject`, and a root with children is only this. */
   | 'parentProject'
-  /** M22. A row in the Accounts view, and — as a SECOND token on the same row —
-   *  the one of them the default routing names. Two tokens rather than two
-   *  values of one, so that `viewItem =~ /;account;/` keeps matching every row
-   *  while a verb that belongs only on the default one can single it out
-   *  positively (the manifest never negates a viewItem regex; see the M8 note
+  /** A row in the Accounts view, and — as a SECOND token on the same row — the
+   *  one of them the default routing names. Two tokens rather than two values
+   *  of one, so that `viewItem =~ /;account;/` keeps matching every row while a
+   *  verb that belongs only on the default one can single it out positively
+   *  (the manifest never negates a viewItem regex; see the visibility-pair note
    *  above). No contributed verb needs it yet — the row's own ★ is what the
    *  user reads — but the row is where the fact lives, and inventing the token
    *  later would mean changing a contextValue every `when` clause matches. */
@@ -1193,20 +1191,20 @@ export interface EditorialRecord {
   title?: string;                // user rename; wins over roster name
   summary?: string;              // close-with-summary text
   closed?: string | null;        // ISO timestamp
-  /** RETIRED (M14). The M8 hide verb is gone: tree membership is editorial
-   *  and DELETE is the one put-away verb. sanitizeRecord reads a persisted
-   *  `hidden: true` (written by M8–M13) as `deleted: true` and drops the
-   *  field, so no record ever carries it past a load. The field stays typed
+  /** RETIRED. The old hide verb is gone: tree membership is editorial and
+   *  DELETE is the one put-away verb. sanitizeRecord reads a persisted
+   *  `hidden: true` (written by older versions) as `deleted: true` and drops
+   *  the field, so no record ever carries it past a load. The field stays typed
    *  because SessionNode.hidden and its rendering (greyed, sorted last) are
    *  still exercised directly by tests and tolerated on foreign state files
    *  written by older windows. */
   hidden?: boolean;
-  /** REMOVED FROM VIEW (M8). No row at all; children are promoted to the
-   *  nearest visible ancestor. Nothing on disk is touched — the transcript
-   *  survives and `restoreSession` brings the row back — so this is a
-   *  view-level delete, not a data delete. Since M14 this is the ONLY way a
-   *  session with an editorial record leaves the tree: closing its tab merely
-   *  flips the row to inactive (archived). */
+  /** REMOVED FROM VIEW. No row at all; children are promoted to the nearest
+   *  visible ancestor. Nothing on disk is touched — the transcript survives and
+   *  `restoreSession` brings the row back — so this is a view-level delete, not
+   *  a data delete. It is now the ONLY way a session with an editorial record
+   *  leaves the tree: closing its tab merely flips the row to inactive
+   *  (archived). */
   deleted?: boolean;
   launchedByUs?: boolean;
   boundWindowId?: string | null; // window whose terminal hosts this session
@@ -1215,7 +1213,7 @@ export interface EditorialRecord {
   /** Per-session override of the provider glyph. Normally unset — the
    *  provider comes from the owning project, else DEFAULT_PROVIDER. */
   provider?: ProviderId;
-  /** M22. THE PIN: the AccountProfile.id this conversation was launched on,
+  /** THE PIN: the AccountProfile.id this conversation was launched on,
    *  written once at launch and never rewritten.
    *
    *  A session belongs to the account that started it for life. Every resume,
@@ -1232,7 +1230,7 @@ export interface EditorialRecord {
    *  existed, or launched on the default login" — both of which resolve to an
    *  empty env, which is exactly what those sessions already ran with. */
   profileId?: string;
-  // ---- M12 notifications --------------------------------------------------
+  // ---- notifications ------------------------------------------------------
   /** ISO. When the session last FINISHED a turn (busy → waiting/idle observed
    *  on the roster, or a Stop hook event). The "there is something new here"
    *  half of the unseen pair. */
@@ -1246,14 +1244,14 @@ export interface EditorialRecord {
    *  `lineage.notifications.enabled`. Inherited across a generation chain —
    *  muting names the conversation, not one physical id. */
   notify?: boolean;
-  /** M18. ISO. The user took this session off the bell's list with the row's ×.
+  /** ISO. The user took this session off the bell's list with the row's ×.
    *  Scoped to that FINISH, not to the session: a row is suppressed only while
    *  `doneAt <= notifyDismissedAt`, so the next turn this session completes
    *  brings it straight back. "I have dealt with this one" — permanently
    *  silencing a session is what `notify: false` is for, and conflating the two
    *  would make a one-click × the most destructive control in the popup. */
   notifyDismissedAt?: string;
-  // ---- M13 workspaces -----------------------------------------------------
+  // ---- workspaces ---------------------------------------------------------
   /** Put away by a WORKSPACE SWITCH: its terminal was closed — the claude
    *  process ended; the conversation lives on in its transcript — to clear
    *  the window for another project, and switching back RESUMES it
@@ -1262,7 +1260,7 @@ export interface EditorialRecord {
    *  one from those days is moved home as a one-shot migration. The row
    *  renders normally — parking is bookkeeping, not a user verb, so it must
    *  not grey anything. Membership needs no special case: any non-deleted
-   *  record survives the `showArchived` gate (M14). */
+   *  record survives the `showArchived` gate. */
   parked?: boolean;
   /** DETACH-tier parking (see src/tmux.ts). The private tmux session
    *  (`tmux -L lineage …`) this conversation was detached into when a switch
@@ -1274,7 +1272,7 @@ export interface EditorialRecord {
    *  `new-session -A` under this name — a plain `--resume` would start a
    *  second claude beside the one still running. */
   tmux?: string | null;
-  // ---- M16 project chat ---------------------------------------------------
+  // ---- project chat -------------------------------------------------------
   /** This session is a project CHAT — a scratch conversation about the project
    *  — and therefore has no row in the tree at all. Persisted rather than kept
    *  in a per-window Set because the roster is machine-wide: every other VS
@@ -1284,7 +1282,7 @@ export interface EditorialRecord {
    *  the conversation, not one physical id, so a `--resume` that mints a fresh
    *  generation must stay a chat.
    *
-   *  M24: there are now MANY of these per project and they are listed by the
+   *  There are MANY of these per project, and they are listed by the
    *  chat-history picker, which is the only place a chat is enumerated. That
    *  list is derived exactly the way every other membership question is
    *  answered — the project owning `cwd` (projects.chatsForProject) — and NOT
@@ -1319,8 +1317,8 @@ export interface HookInstallState {
 }
 
 /**
- * M10. One GENERATION CHAIN: a single logical conversation whose id was
- * re-minted one or more times (plain `--resume`, `/clear`, compaction). The
+ * One GENERATION CHAIN: a single logical conversation whose id was re-minted
+ * one or more times (plain `--resume`, `/clear`, compaction). The
  * key of the `chains` map is `rootId` — the first generation's id, which is
  * the stable identity of the conversation. `members` is every session id the
  * conversation has worn, oldest first, ROOT INCLUDED. The chain says nothing
@@ -1342,7 +1340,7 @@ export interface ChainRecord {
 }
 
 /**
- * M13. One remembered editor tab inside a project's workspace snapshot.
+ * One remembered editor tab inside a project's workspace snapshot.
  *
  *   file    — a text/notebook/custom editor; `uri` is its Uri.toString().
  *   session — one of OUR session terminals; identified by session id, so the
@@ -1362,7 +1360,7 @@ export interface WorkspaceTabRecord {
   pinned?: boolean;
 }
 
-/** M13. A project's saved window layout: what was open while working on it.
+/** A project's saved window layout: what was open while working on it.
  *  Keyed by project id in `LineageState.workspaces`; merged newest-wins on
  *  `updatedAt` like every other record — the layout is one value, not a set. */
 export interface WorkspaceSnapshot {
@@ -1381,22 +1379,22 @@ export interface LineageState {
   projects: Record<string, ProjectRecord>;
   /** v2. Keyed by normalized directory path. */
   hiddenFolders: Record<string, HiddenFolder>;
-  /** v3 (M10). Keyed by chain root id. */
+  /** v3. Keyed by chain root id. */
   chains: Record<string, ChainRecord>;
-  /** v4 (M13). Keyed by project id. */
+  /** v4. Keyed by project id. */
   workspaces: Record<string, WorkspaceSnapshot>;
-  /** v5 (M22). Keyed by account id.
+  /** v5. Keyed by account id.
    *
    *  OPTIONAL where `projects` and `workspaces` are required, and deliberately
-   *  so: this file was frozen with those fields, and every literal that builds
-   *  a LineageState by hand (the store's own emptyState, the merge tests)
-   *  predates accounts. `migrateState` materialises both v5 maps on every load,
-   *  so nothing at runtime ever sees them missing — the optionality buys
+   *  so: every literal that builds a LineageState by hand (the store's own
+   *  emptyState, the merge tests) predates accounts and would stop compiling if
+   *  these were required. `migrateState` materialises both v5 maps on every
+   *  load, so nothing at runtime ever sees them missing — the optionality buys
    *  source compatibility, not a second code path. Readers still spell it
    *  `state.accounts ?? {}`, which is what state.ts does for every map. */
   accounts?: Record<string, AccountProfile>;
-  /** v5 (M22). The singleton settings record — one value, merged newest-wins
-   *  as a whole. See AccountSettings. */
+  /** v5. The singleton settings record — one value, merged newest-wins as a
+   *  whole. See AccountSettings. */
   accountSettings?: AccountSettings;
   hookInstall?: HookInstallState;
 }
@@ -1407,13 +1405,13 @@ export interface HookEvent {
   event: string | null;          // hook_event_name
   sessionId: string | null;      // session_id
   transcriptPath: string | null; // transcript_path
-  /** M10. The LINEAGE_NODE_ID the hook process inherited from its terminal —
+  /** The LINEAGE_NODE_ID the hook process inherited from its terminal —
    *  i.e. which of OUR launches this event fired inside — or null for a
    *  session we did not launch (or a v2 hook that logged no env). When this
    *  differs from sessionId, the terminal we stamped is now running a NEW
    *  generation of the same conversation: the exact re-key signal. */
   nodeId: string | null;
-  /** M11. SessionStart's `source` field: 'startup' | 'resume' | 'clear' |
+  /** SessionStart's `source` field: 'startup' | 'resume' | 'clear' |
    *  'compact' | 'fork'. The one that matters is 'fork' — a node-id mismatch
    *  on a FORK is a new branch, not a re-key, and chaining it would collapse
    *  the parent into its own fork. */
@@ -1427,10 +1425,10 @@ export interface LaunchOptions {
   sessionId: string;   // pre-minted uuid (crypto.randomUUID())
   parentId?: string;   // when set: --fork-session --resume <parentId>
   /** Reopen an existing closed session: `--resume <resumeId>`. No
-   *  `--session-id` is passed and `sessionId` MUST equal `resumeId`. NOTE
-   *  (M10): despite `--fork-session` existing as a separate flag, a plain
-   *  `--resume` does NOT reliably keep the id — the CLI can mint a fresh
-   *  generation that copies the old transcript (verified on real data). The
+   *  `--session-id` is passed and `sessionId` MUST equal `resumeId`. NOTE:
+   *  despite `--fork-session` existing as a separate flag, a plain `--resume`
+   *  does NOT reliably keep the id — the CLI can mint a fresh generation that
+   *  copies the old transcript (verified on real data). The
    *  LINEAGE_NODE_ID stamp still names `resumeId`, which is exactly what lets
    *  the hook re-key (state.appendChainMember) and the transcript
    *  continuation signal fold the new id back onto this conversation.
@@ -1439,33 +1437,33 @@ export interface LaunchOptions {
   cwd?: string;
   prompt?: string;     // appended as the final positional argument
   title?: string;      // terminal name; default `claude · ${shortId}`
-  /** M13. Editor group to open the terminal tab in (1-based), used by the
-   *  workspace restore path so a session tab reopens where it was. Ignored
-   *  when the terminal location preference is `panel`. */
+  /** Editor group to open the terminal tab in (1-based), used by the workspace
+   *  restore path so a session tab reopens where it was. Ignored when the
+   *  terminal location preference is `panel`. */
   viewColumn?: number;
-  /** M13. Reveal the terminal without stealing keyboard focus. The workspace
+  /** Reveal the terminal without stealing keyboard focus. The workspace
    *  restore path sets this: a switch is a side effect of where the user is
    *  already typing, and a resumed background session must not take the
    *  keyboard mid-word. */
   preserveFocus?: boolean;
-  /** M16. Extra directories the CLI may read outside `cwd` (`--add-dir`). The
+  /** Extra directories the CLI may read outside `cwd` (`--add-dir`). The
    *  project chat passes the project's extra dirs so one conversation covers a
    *  multi-directory project. */
   addDirs?: string[];
-  /** M16. Text appended to the CLI's system prompt
-   *  (`--append-system-prompt`). Used to tell a project chat what project it
-   *  is about and that the window is a scratch one. */
+  /** Text appended to the CLI's system prompt (`--append-system-prompt`). Used
+   *  to tell a project chat what project it is about and that the window is a
+   *  scratch one. */
   appendSystemPrompt?: string;
-  /** M16. The CLI-side conversation name (`--name`), which is what shows up in
+  /** The CLI-side conversation name (`--name`), which is what shows up in
    *  `claude --resume`'s picker. Distinct from `title`, which only names the
    *  VS Code terminal tab. */
   sessionName?: string;
-  /** M16. This launch is a project chat. Only affects presentation — the tab
+  /** This launch is a project chat. Only affects presentation — the tab
    *  gets the chat icon and colour so it reads as different from the session
    *  tabs beside it. The membership consequences ride on the persisted
    *  EditorialRecord.chat, not on this. */
   chat?: boolean;
-  /** M22. Environment for this launch, resolved from the chosen account
+  /** Environment for this launch, resolved from the chosen account
    *  (accounts.envForProfile). `{}` — the default account — is the common case
    *  and must behave exactly as no env at all did.
    *
@@ -1481,7 +1479,7 @@ export interface LaunchOptions {
    *  SECRET-BEARING on API-key profiles: never log the values, never put them
    *  in a terminal title, an error message or a tooltip. */
   env?: Readonly<Record<string, string>>;
-  /** M22. The AccountProfile.id this launch resolved to, recorded on the
+  /** The AccountProfile.id this launch resolved to, recorded on the
    *  session's editorial record so the conversation stays pinned to it (see
    *  EditorialRecord.profileId). Carried alongside `env` rather than derived
    *  from it: an account whose env is `{}` is still a specific account, and
@@ -1518,7 +1516,7 @@ export interface DisposableLike {
 }
 
 // ---------------------------------------------------- dependency interfaces
-// Cross-owner calls go through these; extension.ts implements/wires them.
+// Cross-layer calls go through these; extension.ts implements/wires them.
 
 export interface TreeDeps {
   getForest(): SessionForest;
@@ -1528,7 +1526,7 @@ export interface TreeDeps {
   /** Persist a drag-reparent (parentSource 'reparent'); null = detach. */
   reparent(childId: string, newParentId: string | null): Promise<void>;
   groupByFolder(): boolean;
-  // ---- M7 -------------------------------------------------------------
+  // ---- projects, visibility and selection -----------------------------
   /** EVERY project, hidden ones included, name-sorted. `computeGrouping` does
    *  its own visible/hidden split and has to see the hidden ones: a hidden
    *  project still OWNS its directories, and filtering them out here would
@@ -1538,7 +1536,7 @@ export interface TreeDeps {
   hiddenFolders(): string[];
   /** Only show sessions that belong to a project (config). */
   onlyProjectSessions(): boolean;
-  /** M22. The view's session selection changed: these ids, in display order.
+  /** The view's session selection changed: these ids, in display order.
    *
    *  Reported UP rather than read down, because only the view knows it — the
    *  webview holds its own selection in the page, the native tree holds its own
@@ -1550,7 +1548,7 @@ export interface TreeDeps {
    *  Optional so an older wiring (and the unit doubles) keeps working; absent
    *  means the view simply never reports one, and every verb stays single-row. */
   noteSelection?(sessionIds: string[]): void;
-  /** M19. `lineage.onlyActiveSessions`. The views do not FILTER on this — that
+  /** `lineage.onlyActiveSessions`. The views do not FILTER on this — that
    *  happens once, in buildForest — they only need to know whether an empty
    *  tree means "nothing here" or "nothing here that is still running", which
    *  are different sentences. Optional so an older wiring (and the unit
@@ -1564,17 +1562,17 @@ export interface TreeDeps {
   mediaPath(relative: string): string | undefined;
   /** Move a session's cwd into a project by DnD onto a project row. */
   assignToProject(sessionId: string, projectId: string): Promise<void>;
-  // ---- M18 ------------------------------------------------------------
   /** `lineage.showTokens`: put a session's context size left of its age.
    *  Optional so an older wiring (and the unit doubles) keeps working — absent
    *  means off, which is also the setting's default. */
   showTokens?(): boolean;
-  // ---- M20 ------------------------------------------------------------
+  // ---- git worktrees and branch chips ---------------------------------
   /** The git worktrees visible from `dir`, from a cache that answers instantly
    *  and refreshes in the background (src/git.ts). Called on the render path,
    *  so it MUST NOT block; [] means "not a repository" and "not probed yet"
    *  alike, and both render as no chip row. Optional for the same reason as the
-   *  two above — a wiring without it produces exactly the pre-M20 tree. */
+   *  two above — a wiring without it produces the tree as it looked before
+   *  branch chips existed. */
   worktreesOf?(dir: string): readonly Worktree[];
   /** `lineage.branchColors` — a user palette for the branch chips. Entries are
    *  positional (index 0 is the first branch's colour); a short list fills from
@@ -1582,13 +1580,13 @@ export interface TreeDeps {
    *  page (see sanitizeBranchColor — the value lands in an inline style block).
    *  Absent or empty means the built-in muted palette. */
   branchColors?(): readonly string[];
-  // ---- M26 ------------------------------------------------------------
+  // ---- branch grouping and project nesting ----------------------------
   /** `lineage.groupSessionsByBranch`: nest a project's sessions under the
    *  branch row for the worktree they run in, instead of listing branches and
    *  sessions as two flat blocks. Optional for the same reason as the three
    *  above — absent means off, which is also the setting's default. */
   groupSessionsByBranch?(): boolean;
-  /** M26. Persist a project's new parent (null = move to top level). The drop
+  /** Persist a project's new parent (null = move to top level). The drop
    *  half of dragging one project row onto another; `reparent` above is the
    *  SESSION verb and the two must never be confused, because a project id and
    *  a session id are both bare uuids. Optional so an older wiring (and the
@@ -1599,7 +1597,7 @@ export interface TreeDeps {
 export interface DecorationDeps {
   getForest(): SessionForest;
   onDidChangeData(listener: () => void): DisposableLike;
-  /** M12. Project ids that currently contain an unseen-done session, for the
+  /** Project ids that currently contain an unseen-done session, for the
    *  attention dot on the project row. Optional so older wirings (and the unit
    *  doubles) keep working; absent means "no project dots". */
   projectsWithUnseen?(): ReadonlySet<string>;
@@ -1617,7 +1615,7 @@ export interface TerminalDeps {
   /** Detach tier: CLAUDE's real pid inside the named wrapped session (the
    *  pane's root process). A wrapped terminal's own pid is the tmux CLIENT's
    *  and matches nothing on the roster, so the registry swaps in this one —
-   *  it is what keeps the M11 re-key detector and app-restart re-association
+   *  it is what keeps the re-key detector and app-restart re-association
    *  working for wrapped sessions. Absent (the unit doubles) = wrapped
    *  bindings simply carry no pid, degrading those two mechanisms only. */
   tmuxPanePid?(name: string): Promise<number | undefined>;
@@ -1658,7 +1656,7 @@ export interface HookDeps {
 }
 
 /**
- * M22. How anything that wants rate-limit numbers asks for them.
+ * How anything that wants rate-limit numbers asks for them.
  *
  * A dependency interface rather than a direct import for the usual reason —
  * the accounts VIEW is vscode-facing and the limits module is not, and neither
@@ -1696,8 +1694,8 @@ export interface LimitsReader {
 }
 
 /**
- * M24. What a conversation's transcript says about itself, for the one list
- * that cannot ask the forest: the chat-history picker.
+ * What a conversation's transcript says about itself, for the one list that
+ * cannot ask the forest: the chat-history picker.
  *
  * A chat has no row, which is the whole point of it — so `getForest()` knows
  * nothing about one, and the editorial record's own timestamps only move when
@@ -1750,7 +1748,7 @@ export interface ResumeLeafReport {
 }
 
 /**
- * M25. A `/fork` that dispatched a BACKGROUND job rather than taking over a
+ * A `/fork` that dispatched a BACKGROUND job rather than taking over a
  * terminal: the process is live and holding the child session id, but no pty
  * belongs to any editor — which is why focusing one used to dead-end at
  * "Canopy cannot adopt a tab from" on a branch the user had just asked for.
@@ -1783,7 +1781,7 @@ export interface BackgroundJob {
    *  wrote it, so without this a finished job would keep looking adoptable and
    *  relaunching it would resurrect a conversation the user had ended. An
    *  unrecognised state reads as not-live, which costs the adopt path and
-   *  falls back to the pre-M25 behaviour — the safe direction to be wrong in. */
+   *  falls back to never adopting — the safe direction to be wrong in. */
   live: boolean;
 }
 
@@ -1792,10 +1790,10 @@ export interface CommandDeps {
   getForest(): SessionForest;
   refresh(): void;
   hasTranscript(sessionId: string): boolean;
-  /** M25. The background job holding this id, when one does. A native `/fork`
+  /** The background job holding this id, when one does. A native `/fork`
    *  dispatches such a job: live process, no pty any editor owns. Optional —
    *  a wiring without it (and every unit double) simply never offers to adopt
-   *  one, which is exactly the pre-M25 behaviour. */
+   *  one. */
   backgroundJob?(sessionId: string): BackgroundJob | undefined;
   /** Detach tier: is `name` a session the private tmux server still holds?
    *
@@ -1809,7 +1807,7 @@ export interface CommandDeps {
    *  Optional — a wiring without it (and every unit double) falls back to
    *  recorded names only, which is the pre-probe behaviour. */
   tmuxSessionLive?(name: string): Promise<boolean>;
-  /** M24. Bounded, cached facts read off one transcript — see TranscriptFacts.
+  /** Bounded, cached facts read off one transcript — see TranscriptFacts.
    *  Optional: a wiring without it (and every unit double) gets a chat history
    *  ordered and labelled from the editorial records alone, which is coarser
    *  but never wrong. */
@@ -1822,7 +1820,7 @@ export interface CommandDeps {
    *  exactly as it did before the module existed, which is a fork that can
    *  silently inherit the parent's last turn only up to its first tool call. */
   repairResumeLeaf?(sessionId: string): ResumeLeafReport;
-  /** M24. Is this id on the roster right now?
+  /** Is this id on the roster right now?
    *
    *  `getForest()` answers this for anything with a row, which is why nothing
    *  needed it before — and precisely why the chat history does: a chat is
@@ -1831,7 +1829,7 @@ export interface CommandDeps {
    *  marks nothing as open, which costs a dot and no correctness (the reopen
    *  path checks for a bound terminal either way). */
   isLive?(sessionId: string): boolean;
-  /** M10. The CURRENT generation of the conversation this id belongs to —
+  /** The CURRENT generation of the conversation this id belongs to —
    *  identity when the id is not part of a chain. Every verb that resumes or
    *  forks routes its target through this, so a click on a row that has been
    *  superseded mid-tick still acts on the newest state, never an older
@@ -1879,17 +1877,17 @@ export interface CommandDeps {
   /** Write `lineage.hooks.enabled`. Installing the plugin is only half the
    *  switch — this is the half that starts the events reader. */
   setHooksEnabled(enabled: boolean): Promise<void>;
-  // projects + visibility (M7)
+  // projects + visibility
   allProjects(): ProjectRecord[];
   getProject(id: string): ProjectRecord | undefined;
-  /** M20. The branches the tree is CURRENTLY showing for a project — the same
+  /** The branches the tree is CURRENTLY showing for a project — the same
    *  BranchInfo objects the chip row was built from, not a fresh git probe.
    *  That identity is the point: a chip click must be able to spawn only in a
    *  directory the user was actually looking at, so the verb resolves the
    *  clicked chip against this and refuses anything it does not find. Empty for
    *  a project that is not a repository, or whose probe has not landed. */
   getBranches(projectId: string): readonly BranchInfo[];
-  /** M20. Persist a branch-curation decision. `shown` true promotes a branch
+  /** Persist a branch-curation decision. `shown` true promotes a branch
    *  into the block, false folds it into "Others"; the store keeps BOTH lists,
    *  so this writes one and clears the other — see ProjectRecord for why two
    *  lists rather than one. */
@@ -1898,10 +1896,10 @@ export interface CommandDeps {
     branch: string,
     shown: boolean,
   ): Promise<void>;
-  /** M20. Fold or unfold a project's whole branch block. */
+  /** Fold or unfold a project's whole branch block. */
   setBranchesCollapsed(projectId: string, collapsed: boolean): Promise<void>;
   upsertProject(id: string, patch: Partial<ProjectRecord>): Promise<void>;
-  /** M26. Re-file a project under another one, or at the top level (null).
+  /** Re-file a project under another one, or at the top level (null).
    *  Refuses a cycle (a project cannot be filed under its own descendant) and
    *  reports whether the move happened, so the verb can say why it did not. */
   setProjectParent(
@@ -1914,17 +1912,17 @@ export interface CommandDeps {
   unhideFolder(dir: string): Promise<void>;
   /** `lineage.staleAfterHours` — only ever pre-ticks a checkbox. */
   staleAfterHours(): number;
-  // ---- M12 notifications --------------------------------------------------
+  // ---- notifications ------------------------------------------------------
   /** Stamp `seenAt` now — the user looked at this session. Idempotent. */
   markSeen(sessionId: string): Promise<void>;
   /** `lineage.notifications.enabled` (the global default). */
   notificationsEnabled(): boolean;
-  // ---- M19 active-only filter ---------------------------------------------
+  // ---- active-only filter -------------------------------------------------
   /** Write `lineage.onlyActiveSessions`. A setter and no getter on purpose: the
    *  two commands that call it each know the value they mean, and the state the
    *  user reads is the view-title icon, which the context key drives. */
   setOnlyActiveSessions(on: boolean): Promise<void>;
-  // ---- M22 multi-select ---------------------------------------------------
+  // ---- multi-select -------------------------------------------------------
   /** The session ids selected in whichever view is on screen, top to bottom, or
    *  [] when nothing is or no view has reported one.
    *
@@ -1934,17 +1932,17 @@ export interface CommandDeps {
    *  their selection as a second argument and do not need this; the webview has
    *  no such channel. */
   selectedSessions(): string[];
-  // ---- M13 workspaces -----------------------------------------------------
+  // ---- workspaces ---------------------------------------------------------
   /** Switch this window to a project's workspace (null = leave workspace
    *  mode: save the current layout and stop scoping). Implemented by the
-   *  WorkspaceManager wired in extension.ts. */
+   *  WorkspaceManager that extension.ts wires in. */
   switchWorkspace(projectId: string | null): Promise<void>;
   /** The project id this window's workspace is scoped to, or null. */
   activeWorkspace(): string | null;
-  // ---- M21 the Explorer follows the project -------------------------------
-  // All three are OPTIONAL: a host wiring that predates M21 (and every unit
-  // double) simply has no Explorer to move, and the two verbs below report
-  // that rather than failing.
+  // ---- the Explorer follows the project -----------------------------------
+  // All three are OPTIONAL: a host wiring without them (and every unit double)
+  // simply has no Explorer to move, and the two verbs below report that rather
+  // than failing.
   /** Is this window a Canopy workspace — folder[0] our anchor, so the
    *  Explorer's folder list can be repointed in place? */
   explorerAnchored?(): boolean;

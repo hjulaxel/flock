@@ -186,7 +186,7 @@ selected:
 | Where | Suggested name |
 | --- | --- |
 | New session (folder) | the directory's basename, e.g. `api` |
-| New session in a project | the project's name, e.g. `Magma Score` |
+| New session in a project | the project's name, e.g. `Storefront` |
 | Fork | the parent's, plus the next free number: `auth` → `auth 2` → `auth 3` |
 
 Neither `+` asks **where**. The one in the view title starts the session in the

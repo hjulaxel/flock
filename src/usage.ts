@@ -1,4 +1,4 @@
-// IMPLEMENTED BY: M18 — what the age column means, and the token column.
+// src/usage.ts — what the age column means, and the token column.
 //
 // Two facts that are only in the transcript's TAIL, and that nothing else in
 // the extension had a source for:
@@ -14,8 +14,9 @@
 //                 a cumulative total would grow without bound while the thing
 //                 you actually want to know is "is this session getting full".
 //
-// Imports allowed here: ./log, node:fs. NEVER import vscode — this is read by
-// the same rebuild path as archive.ts and must stay unit-testable.
+// This module imports ./log and node:fs only, and never vscode: it is called
+// from the same rebuild path as archive.ts and must stay unit-testable outside
+// a workbench.
 //
 // Reads are BOUNDED and cached on (mtimeMs, size), the same discipline
 // archive.ts uses: the tail is the last TAIL_MAX_BYTES of the file, so cost is
@@ -102,7 +103,7 @@ export function isUserPrompt(rec: Record<string, unknown>): boolean {
 }
 
 /**
- * M24. The FIRST thing the person typed, for the chat-history picker.
+ * The FIRST thing the person typed, for the chat-history picker.
  *
  * The mirror image of `readTailStats` and bounded the same way: a chat is
  * identified by how it opened ("why is the roster poll firing twice"), which is

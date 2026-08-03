@@ -1,0 +1,53 @@
+name: Bug report
+description: Something in Canopy behaves differently than it should.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: input
+    id: canopy
+    attributes:
+      label: Canopy version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: editor
+    attributes:
+      label: Editor and version
+      description: VS Code, Cursor, Windsurf or VSCodium, with its version.
+      placeholder: "VS Code 1.96.2"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: "macOS 15.2 / Ubuntu 24.04 / Windows 11"
+    validations:
+      required: true
+
+  - type: input
+    id: claude
+    attributes:
+      label: Claude Code version
+      description: The output of `claude --version`.
+      placeholder: "2.1.220"
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Output channel
+      description: >-
+        Anything relevant from `View → Output → Canopy`. Session ids and
+        directory paths appear there, so redact whatever you would rather not
+        post.
+      render: text

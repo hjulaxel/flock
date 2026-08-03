@@ -1,4 +1,5 @@
-// test/generations.test.ts — generation chains (M10).
+// test/generations.test.ts — generation chains: one conversation that the CLI
+// has re-minted under several session ids, collapsed back into one row.
 //
 // The scenarios mirror the on-disk shapes that motivated the module: one
 // conversation re-minted across several ids by plain `--resume` (the verified

@@ -1,4 +1,4 @@
-// src/projectview.ts — M21. The project header, inside the Explorer.
+// src/projectview.ts — the project header, inside the Explorer.
 //
 // A view contributed into the BUILT-IN explorer container (the same door the
 // npm extension uses for NPM SCRIPTS), so the Explorer reads top to bottom as:

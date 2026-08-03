@@ -1,4 +1,4 @@
-/* M9 — the inline-rename sidebar.
+/* The webview tree's stylesheet.
  *
  * Every colour is a VS Code theme variable, never a literal: the webview has to
  * be indistinguishable from a native view in any theme the user installs, and a
@@ -67,7 +67,7 @@
    *
    * Both fallbacks are mixed from the sidebar's own foreground rather than
    * named, so a host that is not VS Code still gets a visible line — see
-   * --root-band above for why a mix of a foreground cannot come out invisible. */
+   * --root-band below for why a mix of a foreground cannot come out invisible. */
   --rail-ink: var(
     --vscode-tree-indentGuidesStroke,
     color-mix(
@@ -140,7 +140,7 @@ body {
   align-items: center;
   height: var(--row-height);
   line-height: var(--row-height);
-  /* --row-indent is the M26 subproject nesting, set per row by the client
+  /* --row-indent is the subproject nesting, set per row by the client
    * (applyIndent) and 0 for every row in a tree where nobody has nested a
    * project. ADDED to the 4px rather than replacing it, so a nested row keeps
    * the same left margin its parent had and simply starts further in. */
@@ -193,7 +193,7 @@ body {
   box-shadow: none;
 }
 
-/* M26. A SUBPROJECT row — a project header standing inside another project's
+/* A SUBPROJECT row — a project header standing inside another project's
  * block. It keeps the band (it heads a section of its own) and loses the top
  * RULE, for the same reason a branch row has none: that line separates one
  * top-level block from the last, and drawing it inside a block would cut the
@@ -657,10 +657,10 @@ body {
  * slot open for a mark that never comes is what pushed every age away from the
  * edge.
  *
- * CLOSED joined them in M19. It used to draw a hollow ring, on the argument
- * that a dead row left bare could be mistaken for a live quiet one — but it
- * never could: a closed row is dimmed and its logo greyed, which says "over"
- * across the whole row instead of in one 8px circle. What the ring actually did
+ * CLOSED collapses too, though a hollow ring there is the tempting alternative:
+ * a dead row left bare could in principle be mistaken for a live quiet one. In
+ * practice it cannot — a closed row is dimmed and its logo greyed, which says
+ * "over" across the whole row instead of in one 8px circle. What the ring did
  * was put an empty dot beside every finished session in the tree, and a column
  * that is mostly empty circles is a column the eye learns to skip — including
  * past the two lit dots that are the only reason it exists. */
@@ -705,7 +705,7 @@ body {
 }
 
 /* ------------------------------------------------------------- branches */
-/* The branch block (M20): one row per git worktree, stacked, sharing the
+/* The branch block: one row per git worktree, stacked, sharing the
  * project header's band so header + branches read as ONE box.
  *
  * ORDER-DEPENDENT, like the root-row band above: these rules must stay BEFORE
@@ -739,7 +739,7 @@ body {
   cursor: pointer;
 }
 
-/* M26. The chevron on an openable branch row. Its own small column ahead of the
+/* The chevron on an openable branch row. Its own small column ahead of the
  * swatch, drawn as a CSS triangle rather than a glyph so it needs no font and
  * no svg round trip: at 22px rows a 4px triangle is what the workbench's own
  * twisty looks like anyway, and one that rotates has an animation the eye reads
@@ -774,13 +774,6 @@ body {
 
 .branch-twisty.expanded::before {
   transform: translateY(-50%) rotate(90deg);
-}
-
-/* An openable branch row is a container, so the whole row is a toggle and the
- * pointer should not promise the "starts a session here" click the flat layout
- * has. The `+` button inside it keeps its own pointer cursor from `.action`. */
-.row.branch.expandable {
-  cursor: pointer;
 }
 
 /* The colour, as a solid block, in the column where a session's provider logo
@@ -894,13 +887,13 @@ body {
  * Deliberately NOT struck through. A closed row is not a finished TODO: it is a
  * conversation you resume with one click, and a line through its name reads as
  * "cancelled / no longer valid" on the one row kind whose whole point is that it
- * is still good. The hollow ring at the right edge already says "over", and the
+ * is still good. The dimming and the greyed logo already say "over", and the
  * name has to stay readable — it is what you scan the tree for. */
 .row.closed .name {
   opacity: 0.75;
 }
 
-/* M20. A closed row drops its branch tint. (0,3,0) — above both
+/* A closed row drops its branch tint. (0,3,0) — above both
  * .name.branch-tinted and the inline custom property the client sets, which is
  * why this can be a plain declaration rather than a re-definition of
  * --name-color. See the note above .row.muted .name for why "over" outranks
@@ -919,9 +912,8 @@ body {
 }
 
 /* -------------------------------------------------------- inline rename */
-/* The whole point of the webview. Mirrors the Explorer's rename box: it
- * replaces the label in place, inherits the row's metrics, and validates
- * inline. */
+/* Mirrors the Explorer's rename box: it replaces the label in place, inherits
+ * the row's metrics, and validates inline. */
 
 /* Everything the row was showing gets out of the way for the duration of the
  * edit — the age, the status dot (lit or not, so the box is the same width on

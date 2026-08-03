@@ -1,4 +1,4 @@
-// src/explorer.ts — M21. The Explorer follows the project.
+// src/explorer.ts — the Explorer follows the project.
 //
 // THE FEATURE: switching projects in the Canopy sidebar swaps what the
 // built-in Explorer shows. Not a Canopy-flavoured file tree in our own
@@ -15,9 +15,9 @@
 // folder list, and there are exactly two ways to do that:
 //
 //   * `vscode.openFolder` — reloads the window. That restarts the extension
-//     host and kills every terminal, which is the one thing M13's whole design
-//     exists to avoid. Never used here (surfaces.ts owns that verb, for
-//     window-per-project).
+//     host and kills every terminal, which is the one thing the whole
+//     terminal-survival design exists to avoid. Never used here (surfaces.ts
+//     owns that verb, for window-per-project).
 //   * `workspace.updateWorkspaceFolders` — an in-place splice. The API doc
 //     names TWO cases that terminate and restart the extension host:
 //       1. the FIRST workspace folder is added, removed or changed (the

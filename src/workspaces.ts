@@ -1,6 +1,6 @@
-// src/workspaces.ts — project workspaces (M13).
+// src/workspaces.ts — project workspaces.
 //
-// THE FEATURE: while you work on a project, the window shows THAT project's
+// The feature: while you work on a project, the window shows THAT project's
 // tabs — its files, its sessions — and switching projects swaps the whole
 // layout. The layout you leave is saved under the project you leave and
 // restored when you come back, across window reloads and full app restarts
@@ -29,7 +29,7 @@
 //                 outright, the claude process ends, instantly and silently
 //                 (an API dispose never raises the workbench's "terminate?"
 //                 dialog). The CONVERSATION is the durable thing (its
-//                 transcript); `--resume` brings it back whole, and the M10
+//                 transcript); `--resume` brings it back whole, and the
 //                 re-key machinery absorbs the fresh generation id that
 //                 mints.
 //                 The terminal panel is NEVER involved in either tier: an
@@ -59,7 +59,7 @@
 //               by an older build of this extension (moved home, one-shot
 //               migration) or hosted by another window (left alone).
 //
-// A project CHAT (M16) is a session like any other for the purposes of a
+// A project CHAT is a session like any other for the purposes of a
 // switch — it is ours, it is project-scoped, so it is stowed away from other
 // projects and brought back to its own — but it is NOT part of any layout: it
 // is never snapshotted and never auto-resumed. A chat is asked for, not
@@ -76,7 +76,9 @@
 // the log, because "that tab is still there" is the complaint this file exists
 // to answer and an unexplained survivor reads as a bug either way.
 //
-// Imports allowed here: vscode, ./types, ./log, ./projects.
+// This module depends only on vscode, ./types, ./log and ./projects —
+// everything else a switch needs arrives through the deps interface below, so
+// the planning half can be exercised without a running window.
 
 import * as vscode from 'vscode';
 
@@ -106,7 +108,7 @@ export interface TabFacts {
   fsPath?: string;
   /** kind 'session' only. */
   sessionId?: string;
-  /** kind 'session' only: this session is a project CHAT (M16). A chat is ours
+  /** kind 'session' only: this session is a project CHAT. A chat is ours
    *  and is project-scoped, so a switch stows it away from a foreign project
    *  and brings it back to its own exactly like any other session. What it is
    *  NOT is part of a layout — see `layoutFacts` — so it is never snapshotted
@@ -246,7 +248,7 @@ export function planSwitch(
  *   * one merely PARKED here — stowed into the panel by an earlier switch,
  *     still waiting for its own project. Snapshotting it would make restoring
  *     this project unstow a foreign session into it.
- *   * a project CHAT (M16). A chat is a conversation ABOUT the project, not one
+ *   * a project CHAT. A chat is a conversation ABOUT the project, not one
  *     of the tabs the project is worked in: it is opened on demand by the chat
  *     verb and closed when the thought is finished. Keeping it out of the
  *     snapshot is what stops a switch from reviving — or `--resume`ing — a chat
@@ -514,15 +516,15 @@ export interface WorkspaceManagerDeps {
   /** Reveal and focus a session's terminal. False when not bound here. */
   focusSession(sessionId: string): boolean;
   launchSession(opts: LaunchOptions): Promise<TerminalBinding | null>;
-  /** M22. The account environment a parked conversation must come back on —
-   *  its PIN, resolved by the wiring (state.getSessionProfile ->
+  /** The account environment a parked conversation must come back on — its
+   *  PIN, resolved by the wiring (state.getSessionProfile ->
    *  routing.pinnedLaunchProfile -> accounts.envForProfile). A restore is a resume,
    *  and a resume that landed on a different account would point claude at a
    *  config directory that does not contain the conversation.
    *
-   *  Optional, and undefined for a session with no pin (everything launched
-   *  before M22) — which restores exactly as it always did. Asked for the TIP
-   *  id, the one the launch below uses.
+   *  Optional, and undefined for a session with no pin (anything launched
+   *  before accounts existed) — which restores exactly as it always did. Asked
+   *  for the TIP id, the one the launch below uses.
    *
    *  Matters most on the KILL tier: the reattach tier hands the terminal back
    *  to a process that never died and still carries its original environment.
@@ -538,7 +540,7 @@ export interface WorkspaceManagerDeps {
    *  mid-turn-leaf truncation a fork does (see resumeLeaf.ts). Optional; absent
    *  means the restore behaves as it always has. */
   repairResumeLeaf?(sessionId: string): unknown;
-  /** M10 chain routing — a parked id may have been superseded since. */
+  /** Chain routing — a parked id may have been superseded since. */
   tipOf(sessionId: string): string;
   // per-WINDOW persistence (workspaceState memento)
   getActive(): string | null;
@@ -549,7 +551,7 @@ export interface WorkspaceManagerDeps {
    *  the setting simply behaves as `'editor'`, which is the default. */
   terminalLocation?(): TerminalLocationPref;
   refresh(): void;
-  /** M21. Point the BUILT-IN Explorer's folder tree at this project's
+  /** Point the BUILT-IN Explorer's folder tree at this project's
    *  directories — main root on top, extra connected directories as their own
    *  collapsible roots below it. See src/explorer.ts for why this is a folder
    *  splice and not a file tree of our own.
@@ -612,9 +614,9 @@ export class WorkspaceManager {
   private readonly recentlyKilled = new Map<string, number>();
   /** Serialises legacy unstows. Restores run in PARALLEL now, but the unstow
    *  is an active-terminal-addressed move — two in flight would race each
-   *  other's reveal/confirm and both could fail. Post-rework switches never
-   *  take this path (parked sessions are dead), so the queue costs nothing
-   *  outside the one-shot migration of panel-parked legacy sessions. */
+   *  other's reveal/confirm and both could fail. Switches made by this build
+   *  never take this path (parked sessions are dead), so the queue costs
+   *  nothing outside the one-shot migration of panel-parked legacy sessions. */
   private unstowQueue: Promise<void> = Promise.resolve();
 
   constructor(deps: WorkspaceManagerDeps) {
@@ -780,7 +782,7 @@ export class WorkspaceManager {
     if (projectId === null || !target) {
       await this.deps.setActive(null);
       this.deps.refresh();
-      // The Explorer is deliberately LEFT ALONE here (M21). Leaving workspace
+      // The Explorer is deliberately LEFT ALONE here. Leaving workspace
       // mode is the "show everything" door and its promise is that it costs
       // nothing — clearing the folder tree back to the bare anchor would be
       // this verb taking something away, which is the one thing it says it
@@ -866,7 +868,7 @@ export class WorkspaceManager {
     // switch-back how to bring each one home.
     const park = this.parkSweep(parkIds, writes);
 
-    // 2b. The EXPLORER follows (M21). Before the restore rather than after:
+    // 2b. The EXPLORER follows. Before the restore rather than after:
     // the restore reopens this project's files, and opening them into a folder
     // tree that still shows the OLD project is what makes every restored tab
     // read as "outside the workspace" for the second it takes to catch up.
@@ -1024,7 +1026,7 @@ export class WorkspaceManager {
       facts.push({
         kind: 'session',
         sessionId: binding.sessionId,
-        // M16: a project CHAT is a session for every purpose a switch has — it
+        // A project CHAT is a session for every purpose a switch has — it
         // is ours, and `ProjectRecord.chatSessionId` makes it as project-scoped
         // as any session's cwd does — so it is planned, stowed and unstowed
         // like one. Only its LAYOUT status differs (`layoutFacts` drops it),
@@ -1188,7 +1190,7 @@ export class WorkspaceManager {
     writes: Array<Promise<void>>,
   ): { detached: number; killed: number; failed: string[] } {
     const out = { detached: 0, killed: 0, failed: [] as string[] };
-    // Two bindings can share one chain tip (an M10 re-key leaves the terminal
+    // Two bindings can share one chain tip (a re-key leaves the terminal
     // bound under its launch-time id while the row wears the new one), and the
     // tip is what gets the record and what the restore path acts on. Park a
     // tip once.
@@ -1325,8 +1327,8 @@ export class WorkspaceManager {
     // (restoreSession's `parked` gate), so a chat the USER closed stays closed
     // until it is asked for, exactly as before.
     //
-    // M24: read off the RECORDS rather than `project.chatSessionId`, which held
-    // one id back when a project had one chat. The set is "every parked chat
+    // Read off the RECORDS rather than `project.chatSessionId`, which held the
+    // one id a project used to be limited to. The set is "every parked chat
     // whose cwd is in this project", which is precisely the set `planSwitch`
     // parked on the way out — park and restore stay each other's inverse, which
     // is the property this has to have. A chat whose cwd is NOT in the project
@@ -1475,7 +1477,7 @@ export class WorkspaceManager {
 
   // ------------------------------------------------------------- utilities
 
-  /** M22. The pinned account's launch fields, or `{}`. Never throws and never
+  /** The pinned account's launch fields, or `{}`. Never throws and never
    *  guesses: a wiring without the dep, a session with no pin, and a pin whose
    *  account was deleted all resolve to no environment, which lands the resume
    *  on the machine's default login — the same place its transcript would be
@@ -1583,7 +1585,7 @@ export class WorkspaceManager {
     }
   }
 
-  /** M21. Move the Explorer, swallowing everything. The dep is absent in a
+  /** Move the Explorer, swallowing everything. The dep is absent in a
    *  window that never opted in and in every unit double, and a splice that
    *  throws is a file tree that did not move — neither is a reason for the
    *  switch that owns the user's tabs to stop half-done. */
@@ -1708,7 +1710,7 @@ export class WorkspaceManager {
     }
   }
 
-  /** M24. Every editorial record, or none. A switch that cannot read the store
+  /** Every editorial record, or none. A switch that cannot read the store
    *  restores the layout it does know about rather than throwing halfway
    *  through — the same rule every other `safe*` wrapper in here follows. */
   private safeRecords(): Record<string, EditorialRecord> {
@@ -1787,12 +1789,4 @@ function isTerminalInput(input: unknown): boolean {
   // Fallbacks for hosts and mocks that do not export the class.
   const name = (input as { constructor?: { name?: string } }).constructor?.name;
   return name === 'TabInputTerminal' || 'terminal' in (input as object);
-}
-
-export function describeWorkspace(project: ProjectRecord | undefined): string {
-  return project ? project.name : 'no workspace';
-}
-
-export function shortSession(id: string): string {
-  return shortId(id);
 }

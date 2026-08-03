@@ -1,11 +1,11 @@
-// test/accountsView.test.ts — the M22 CONTRACT under test: src/accountsView.ts.
+// test/accountsView.test.ts — the CONTRACT under test: src/accountsView.ts.
 //
 // Everything here goes through test/mocks/vscode.ts. registerAccountsView()
 // calls vscode.window.createTreeView, which the mock's (deliberately empty)
-// `window` does not implement — same house rule as registerTree()/
+// `window` does not implement — the same split as registerTree()/
 // registerDecorations() in test/tree.test.ts: that glue is never called here,
-// only the pure TreeDataProvider class (AccountsViewProvider), the usage
-// cache (AccountUsageCache) and the exported helpers they are built from.
+// only the pure TreeDataProvider class (AccountsViewProvider), the usage cache
+// (AccountUsageCache) and the exported helpers they are built from.
 //
 // What actually matters, in the order the file's own header states it:
 //
@@ -21,8 +21,9 @@
 //     USAGE_MIN_AGE_MS unless forced, and a reader's own `cached()` wins over
 //     what this process fetched itself.
 //
-// package.json sanity lives here too (not in scaffold.test.ts, which is
-// frozen and owns the COMMANDS<->package.json cross-check): every account
+// package.json sanity for the Accounts surface lives here rather than in
+// scaffold.test.ts, which owns the generic COMMANDS <-> package.json
+// cross-check: what is asserted below is specific to this view. Every account
 // verb has to be reachable from SOMEWHERE — a menu, a view title, or an
 // explicit (even `when: false`) palette entry — and the Accounts view has to
 // actually sit inside the `lineage` activity-bar container the rest of the
@@ -737,7 +738,7 @@ const ACCOUNT_COMMAND_IDS = [
   COMMANDS.setProjectAccount,
 ] as const;
 
-describe('the ten M22 account verbs', () => {
+describe('the ten account verbs', () => {
   it('is exactly ten ids, every one under the lineage. prefix, no duplicates', () => {
     expect(ACCOUNT_COMMAND_IDS).toHaveLength(10);
     expect(new Set(ACCOUNT_COMMAND_IDS).size).toBe(ACCOUNT_COMMAND_IDS.length);
@@ -765,7 +766,7 @@ function readPackageJson(): PackageJson {
   ) as PackageJson;
 }
 
-describe('package.json — the Accounts surface is wired, not just declared (M22)', () => {
+describe('package.json — the Accounts surface is wired, not just declared', () => {
   it('puts the Accounts view inside the lineage activity-bar container', () => {
     const pkg = readPackageJson();
     const lineageViews = pkg.contributes.views['lineage'] ?? [];

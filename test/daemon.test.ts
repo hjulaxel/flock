@@ -1,4 +1,4 @@
-// test/daemon.test.ts — the CLI daemon's dispatch roster (M11).
+// test/daemon.test.ts — the CLI daemon's dispatch roster.
 //
 // The fixture shapes are taken from the REAL ~/.claude/daemon/roster.json on
 // the machine this was built on (CLI 2.1.207–2.1.220): a /fork dispatch is a
@@ -195,10 +195,12 @@ describe('daemon: DaemonRosterReader', () => {
   });
 });
 
-// ---------------------------------------------------------------------- M25
+// ------------------------------------------------------- background-job forks
 //
 // The shapes below are taken from the REAL background-job `/fork` observed on
-// CLI 2.1.220, the one M11 documented as a known gap and refused to guess at:
+// CLI 2.1.220. This dispatch shape is the one the roster reader could not infer
+// an edge from, so rather than guess it was left uncovered until it could be
+// captured from a live run:
 //
 //   launch.sessionId = "<configDir>/jobs/<short>/tmp/parent-transcript.jsonl"
 //   dispatch.env.CLAUDE_CODE_RESUME_SOURCE_ALIVE = "<child>|<ISO>|<PARENT>"
@@ -237,7 +239,7 @@ describe('daemon: parentFromResumeSourceAlive', () => {
   });
 });
 
-describe('daemon: background-job forks (M25)', () => {
+describe('daemon: background-job forks', () => {
   /** A `<configDir>` laid out the way the CLI lays one out. */
   function configDir(): string {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lineage-cfg-'));
@@ -412,7 +414,7 @@ describe('daemon: background-job forks (M25)', () => {
     expect(job?.configDir).toBe(dir);
   });
 
-  it('merges every account roster — M22 gives each its own config dir', () => {
+  it('merges every account roster — each account has its own config dir', () => {
     const a = configDir();
     const b = configDir();
     writeRoster(

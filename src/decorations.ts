@@ -1,7 +1,6 @@
-// IMPLEMENTED BY: C
-// FileDecorationProvider on the `lineage-session:` scheme — SPEC.md §4-C1.
+// src/decorations.ts — the FileDecorationProvider on the `lineage-session:`
+// scheme.
 //
-// Imports allowed here: vscode, ./types, ./log.
 // The badge is the ONLY thing an extension can put at the right edge of a tree
 // row (the workbench pins `.monaco-icon-label::after` there; a
 // TreeItem.description always renders flush against the label), so this is
@@ -46,9 +45,9 @@ export function sessionUri(sessionId: string): vscode.Uri {
   return vscode.Uri.from({ scheme: SESSION_URI_SCHEME, path: '/' + sessionId });
 }
 
-/** M12. Scheme for PROJECT rows, so the unseen-done dot can bubble up to the
- *  project the same way cmux rolls a pane's unread badge up to its workspace
- *  row. Distinct from the session scheme on purpose — a project id is not a
+/** Scheme for project rows, so the unseen-done dot can bubble up to the
+ *  project the way an unread count rolls up from a row to the group it sits
+ *  in. Distinct from the session scheme on purpose — a project id is not a
  *  session id, and the provider must never confuse the two. */
 export const PROJECT_URI_SCHEME = 'lineage-project';
 
@@ -107,8 +106,8 @@ function makeDecoration(
 // ----------------------------------------------------------------- provider
 
 /**
- * Badge table (§4-C1, amended M9): ONE mark at the right edge, three lit tones
- * and one deliberate blank.
+ * Badge table: ONE mark at the right edge, three lit tones and one deliberate
+ * blank.
  *   hidden (muted)        → colour-only ThemeColor('disabledForeground'), FIRST
  *   done (waiting on you) → '●' + ThemeColor(lineage.done)    + `waiting: …`
  *   running (busy)        → '●' + ThemeColor(lineage.running) + 'running'
@@ -157,9 +156,8 @@ export class SessionDecorationProvider implements vscode.FileDecorationProvider 
     try {
       if (!uri) return undefined;
 
-      // M12: project rows carry the dot when a session under them is
-      // unseen-done. Colour + dot, exactly like the session row it bubbles
-      // up from.
+      // Project rows carry the dot when a session under them is unseen-done.
+      // Colour + dot, exactly like the session row it bubbles up from.
       if (uri.scheme === PROJECT_URI_SCHEME) {
         const path = uri.path ?? '';
         const projectId = path.startsWith('/') ? path.slice(1) : path;
@@ -199,8 +197,8 @@ export class SessionDecorationProvider implements vscode.FileDecorationProvider 
 
       const tone = statusTone(node);
       if (tone === 'done') {
-        // An unseen-done IDLE session (M12) finished a turn rather than
-        // blocking on a dialog; say which it is.
+        // An unseen-done idle session finished a turn rather than blocking on
+        // a dialog; say which it is.
         const tooltip =
           node.status === 'waiting'
             ? `waiting: ${node.roster?.waitingFor ?? 'input'}`
@@ -219,7 +217,7 @@ export class SessionDecorationProvider implements vscode.FileDecorationProvider 
         );
       }
       if (tone === 'closed') {
-        // COLOUR ONLY (M19), exactly like `hidden` above: the grey label is what
+        // COLOUR ONLY, exactly like `hidden` above: the grey label is what
         // says "this is over", and it says it across the whole row instead of in
         // one 8px circle. The hollow ring that used to sit here was a second
         // mark for the same fact, and a column of empty circles beside every

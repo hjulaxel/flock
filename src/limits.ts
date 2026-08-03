@@ -1,10 +1,10 @@
-// IMPLEMENTED BY: M22 — how much of each account is left.
+// src/limits.ts — how much of each account is left.
 //
-// Node-only. Imports ./types, ./log and node builtins; NEVER vscode. This is
-// the one seam in M22 that touches a credential store and the network, and it
-// exists as its own file precisely so that everything downstream of it —
-// routing.ts's auto-picker, the accounts view's meters — takes plain numbers
-// and stays testable without either.
+// Node-only: it imports ./types, ./log and node builtins, never vscode. This is
+// the one seam that touches a credential store and the network, and it exists
+// as its own file precisely so that everything downstream of it — routing.ts's
+// auto-picker, the accounts view's meters — takes plain numbers and stays
+// testable without either.
 //
 // WHAT IT READS, AND WHY IT IS A GUESS. Claude Code's own `/usage` screen is
 // served by `GET https://api.anthropic.com/api/oauth/usage`, authenticated with
@@ -29,7 +29,7 @@
 //      config dir under `Claude Code-credentials-<first 8 hex of
 //      sha256(configDir)>` — verified empirically on 2026-08-02 against Claude
 //      Code 2.1.220, where two profile dirs produced keychain items whose
-//      suffixes matched their paths' sha256 prefixes exactly (M22.1). This tier
+//      suffixes matched their paths' sha256 prefixes exactly. This tier
 //      exists because on macOS EVERY login normally goes to the keychain and
 //      there is no credentials file at all; before the naming scheme was known,
 //      custom dirs skipped the keychain entirely (the item was assumed shared,
@@ -97,7 +97,7 @@ export const KEYCHAIN_SERVICE = 'Claude Code-credentials';
 export const IDENTITY_FILE = '.claude.json';
 
 /**
- * The keychain service a config directory's login is stored under (M22.1).
+ * The keychain service a config directory's login is stored under.
  *
  * No directory — the default login — is the bare service name. A custom
  * directory appends the first 8 hex characters of the sha256 of the EXACT
@@ -599,8 +599,8 @@ function weeklyReset(snapshot: UsageSnapshot): number | undefined {
  *   "5h 62% · wk 41% → Tue"   numbers, weekly rollover day
  *   "5h 62% · wk 41% · stale" the same, served from a cache we no longer trust
  *   "a@b.c · usage unavailable"  signed in (identity file says so) but the
- *                             credential could not be read — the M22.1 state
- *                             that used to render, wrongly, as "not logged in"
+ *                             credential could not be read — the state that
+ *                             used to render, wrongly, as "not logged in"
  *   "not logged in"           never signed in on this account (no identity)
  *   "a@b.c · login expired" / "login expired"  the token needs renewing
  *   "usage unavailable"       the endpoint said something we could not use
@@ -716,13 +716,13 @@ function hasApiKeyEnv(profile: AccountProfile): boolean {
 /**
  * Whether this file has anything to say about a profile at all.
  *
- * v1 answers for OAuth Claude accounts only. Codex's usage lives behind a
- * different (and, at the time of writing, undocumented) surface, and inventing
- * one would produce numbers rather than an absence — so Codex, Gemini, generic
- * and API-key profiles get `null`, which routing.ts already treats as "unknown"
- * and the view renders as no meter at all. This is the documented stub: when the
- * Codex endpoint is known, it becomes another branch here and nothing else in
- * M22 changes.
+ * Today this answers for OAuth Claude accounts only. Codex's usage lives behind
+ * a different (and, at the time of writing, undocumented) surface, and
+ * inventing one would produce numbers rather than an absence — so Codex,
+ * Gemini, generic and API-key profiles get `null`, which routing.ts already
+ * treats as "unknown" and the view renders as no meter at all. This is a
+ * deliberate stub: when the Codex endpoint is known, it becomes another branch
+ * here and nothing downstream has to change.
  */
 export function supportsUsage(profile: AccountProfile): boolean {
   if (profile.provider !== 'claude') return false;
@@ -911,15 +911,6 @@ export class LimitsService implements LimitsReader, DisposableLike {
     return out;
   }
 
-  /** Refresh a whole roster. Used by the manual refresh verb and by the view
-   *  when it opens; failures are already snapshots, so this never rejects. */
-  async refreshAll(
-    profiles: readonly AccountProfile[],
-    options: ReadUsageOptions = {},
-  ): Promise<void> {
-    await Promise.all(profiles.map((p) => this.readUsage(p, options)));
-  }
-
   /** Drop a profile's cache — it was deleted, or its config directory moved. */
   forget(profileId: string): void {
     if (this.entries.delete(profileId)) this.emit();
@@ -1036,9 +1027,9 @@ export class LimitsService implements LimitsReader, DisposableLike {
   }
 
   /** File first, then — macOS only — the profile's own keychain item. Safe for
-   *  custom config dirs since M22.1: the service name is derived from the
-   *  config dir (`keychainServiceFor`), so the lookup can only ever land on
-   *  THIS profile's login, never the default account's. */
+   *  custom config dirs: the service name is derived from the config dir
+   *  (`keychainServiceFor`), so the lookup can only ever land on THIS profile's
+   *  login, never the default account's. */
   private async resolveCredential(profile: AccountProfile): Promise<CredentialResult> {
     const now = this.clock();
     const file = credentialsPathFor(profile, this.homeDir);

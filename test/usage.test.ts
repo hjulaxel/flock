@@ -1,5 +1,5 @@
-// test/usage.test.ts — M18. What the transcript TAIL says about a session:
-// when the user last prompted it, and how big the conversation has got.
+// test/usage.test.ts — what the transcript TAIL says about a session: when the
+// user last prompted it, and how big the conversation has got.
 //
 // Written against temp files, never the real ~/.claude/projects: these
 // assertions must not depend on which sessions happen to exist on the machine.
@@ -262,7 +262,7 @@ describe('formatTokens: how a row reads a count', () => {
   });
 });
 
-// ------------------------------------------- M24: the transcript's first line
+// ------------------------------------------------ the transcript's first line
 
 describe('readFirstPrompt: what a chat was about', () => {
   it('returns the first thing the PERSON said', () => {

@@ -1,6 +1,6 @@
-// test/notifications.test.ts — the M12 unseen model, across its three pure
-// homes: deriveUnseen (lineage.ts), the dot/count/bubble-up (viewmodel.ts),
-// and the bell's content (commands.ts notificationItems).
+// test/notifications.test.ts — the unseen model, across its three pure homes:
+// deriveUnseen (lineage.ts), the dot/count/bubble-up (viewmodel.ts), and the
+// bell's content (commands.ts notificationItems).
 
 import { describe, expect, it } from 'vitest';
 
@@ -72,7 +72,7 @@ function forestOf(nodes: SessionNode[]): SessionForest {
 
 // ------------------------------------------------------------- deriveUnseen
 
-describe('M12: deriveUnseen', () => {
+describe('deriveUnseen', () => {
   it('a finished turn nobody looked at is unseen (idle + doneAt, no seenAt)', () => {
     expect(deriveUnseen('idle', record(A, { doneAt: T1 }), true)).toBe(true);
   });
@@ -120,7 +120,7 @@ describe('M12: deriveUnseen', () => {
   });
 });
 
-describe('M12: buildForest carries unseen onto live nodes', () => {
+describe('buildForest carries unseen onto live nodes', () => {
   const entry = (id: string, status: string): RosterEntry => ({
     sessionId: id,
     status,
@@ -161,7 +161,7 @@ describe('M12: buildForest carries unseen onto live nodes', () => {
     ).toEqual([]);
   });
 
-  it('notificationsDefault: false restores the pre-M12 forest', () => {
+  it('notificationsDefault: false leaves a node with no unseen state at all', () => {
     const forest = buildForest({
       entries: [entry(A, 'waiting')],
       resolutions: new Map(),
@@ -174,7 +174,7 @@ describe('M12: buildForest carries unseen onto live nodes', () => {
 
 // ---------------------------------------------------------------- statusTone
 
-describe('M12: statusTone with the unseen axis', () => {
+describe('statusTone with the unseen axis', () => {
   it('waiting stays lit while unseen and goes quiet once seen', () => {
     expect(statusTone(node(A, { status: 'waiting', unseen: true }))).toBe('done');
     expect(statusTone(node(A, { status: 'waiting' }))).toBe('done'); // legacy
@@ -219,7 +219,7 @@ function vmInput(
   };
 }
 
-describe('M12: the dot bubbles up to the project row', () => {
+describe('the dot bubbles up to the project row', () => {
   const nodes = [
     node(A, { status: 'idle', unseen: true, cwd: '/code/api' }),
     node(B, { status: 'idle', cwd: '/code/api' }),
@@ -290,7 +290,7 @@ describe('M12: the dot bubbles up to the project row', () => {
 
 // ------------------------------------------------------------------ the bell
 
-describe('M12: notificationItems (the bell dropdown)', () => {
+describe('notificationItems (the bell dropdown)', () => {
   const project: ProjectRecord = {
     id: 'p1',
     name: 'API',
@@ -350,10 +350,10 @@ describe('M12: notificationItems (the bell dropdown)', () => {
   });
 });
 
-// M18 — the × on a bell row. Dismissal is per FINISH, which is the whole
-// distinction between it and Mute: one says "I have dealt with this one", the
-// other says "never tell me about this session".
-describe('M18: dismissing a bell row', () => {
+// The × on a bell row. Dismissal is per FINISH, which is the whole distinction
+// between it and Mute: one says "I have dealt with this one", the other says
+// "never tell me about this session".
+describe('dismissing a bell row', () => {
   it('takes a dismissed row off the list', () => {
     const forest = forestOf([node(A, { status: 'idle' })]);
     const records = {

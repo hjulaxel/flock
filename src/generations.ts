@@ -1,4 +1,4 @@
-// src/generations.ts — generation chains (M10).
+// src/generations.ts — generation chains.
 //
 // THE PROBLEM THIS FILE EXISTS TO FIX: plain `--resume` does NOT always keep
 // a session's id. Verified on real data: resuming can write a FRESH transcript
@@ -30,17 +30,16 @@
 // trailing lines after being continued), so any byte-comparison scheme would
 // mis-order chains.
 //
-// Imports allowed here: ./types, ./log. NEVER vscode, never node IO — every
-// input is handed in, so the whole module is pure and unit-testable.
+// Dependencies are deliberately minimal — ./types and ./log, never vscode and
+// never node IO: every input is handed in, so the whole module is pure and
+// unit-testable.
 
 import { log } from './log';
 import {
   isSessionId,
-  shortId,
   type ArchivedSession,
   type ChainRecord,
   type EditorialRecord,
-  type ParentSource,
   type RosterEntry,
 } from './types';
 
@@ -59,7 +58,7 @@ export interface GenerationFacts {
    *  indexed transcript — live ones included, since chainFacts() (unlike
    *  current()) covers them. buildChainIndex reduces these to Chain's
    *  rootStartedAt, the conversation's true start time independent of which
-   *  physical id currently wears it (P7). */
+   *  physical id currently wears it. */
   startedAt?: number;
 }
 
@@ -86,7 +85,7 @@ export interface Chain {
 
 export interface ChainIndexInput {
   facts: Iterable<GenerationFacts>;
-  /** Persisted ChainRecords from state.json (Stage 2 re-keys). */
+  /** Persisted ChainRecords from state.json — the recorded re-keys. */
   recorded?: Iterable<ChainRecord>;
   /** Ids with a live roster row. Liveness outranks mtime for tip selection,
    *  and a live member is never suppressed (see supersededIds). */
@@ -302,13 +301,13 @@ const INHERITED_RECORD_KEYS = [
   'parentId',
   'parentSource',
   'launchedByUs',
-  // M12: muting notifications names the CONVERSATION — a re-minted id must
-  // stay muted. doneAt/seenAt are deliberately NOT here: they describe one
+  // Muting notifications names the CONVERSATION — a re-minted id must stay
+  // muted. doneAt/seenAt are deliberately NOT here: they describe one
   // physical session's turn, and inheriting a stale doneAt would light the
   // green dot on a fresh generation nobody finished anything in.
   'notify',
-  // M16: same rationale as `notify`. Being a chat names the CONVERSATION, not
-  // one physical id, so a plain `--resume` that mints a fresh generation must
+  // Same rationale as `notify`. Being a chat names the CONVERSATION, not one
+  // physical id, so a plain `--resume` that mints a fresh generation must
   // stay a chat — otherwise the re-keyed chat surfaces as an ordinary row.
   'chat',
 ] as const;
@@ -440,31 +439,3 @@ export function collapseChains(input: CollapseInput): CollapseResult {
   }
   return { entries: entriesOut, archived: archivedOut, records };
 }
-
-// ------------------------------------------------------------------ helpers
-
-/** Parent-edge remap for resolveAll: an edge that lands on a superseded
- *  generation re-points to the chain tip, so children of ANY generation hang
- *  off the conversation's one visible row. A remap that lands the edge on the
- *  child itself is the continuation case — buildForest's self-edge cut turns
- *  that into "no parent", which is correct: the chain, not the tree, owns
- *  that relationship. */
-export function chainParentMapper(
-  chains: ChainIndex,
-): (parentId: string) => string {
-  return (parentId: string): string => chains.tipOf(parentId);
-}
-
-/** Log helper for the rebuild path. */
-export function describeChain(chain: Chain): string {
-  return `${chain.members.map((m) => shortId(m)).join(' → ')} (tip ${shortId(chain.tipId)})`;
-}
-
-/** Sources that survive the remap unchanged; exported for tests. */
-export const REMAPPABLE_SOURCES: readonly ParentSource[] = [
-  'minted',
-  'reparent',
-  'forkedFrom',
-  'argv',
-  'cli-fork',
-];

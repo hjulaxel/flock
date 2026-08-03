@@ -1,4 +1,5 @@
-// test/archive.test.ts — the M1.5 history index.
+// test/archive.test.ts — the history index: sessions the CLI's live roster has
+// forgotten, recovered from the transcripts left on disk.
 //
 // Written against a temp ~/.claude/projects tree, not the real one: these
 // assertions must not depend on which sessions happen to be running.
@@ -210,7 +211,7 @@ describe('archive: helpers', () => {
     expect(archivedLabel(mk(A, { label: 'named' }))).toBe('named');
   });
 
-  // M14. Tree membership is editorial: a session with a non-deleted record
+  // Tree membership is editorial: a session with a non-deleted record
   // keeps its row when its terminal closes — the row flips to inactive rather
   // than leaving the tree. keepIds carries that membership past the
   // `showArchived` gate.
@@ -235,8 +236,8 @@ describe('archive: helpers', () => {
         keepIds: new Set([B]),
       });
       // Without this a session's row would vanish on the roster tick after its
-      // tab closed — exactly the "closed tab = gone from the tree" behaviour
-      // M14 removes.
+      // tab closed — the "closed tab = gone from the tree" behaviour that keepIds
+      // exists to prevent.
       expect(out.map((s) => s.sessionId)).toEqual([B]);
     });
 
@@ -267,7 +268,7 @@ describe('archive: helpers', () => {
     });
   });
 
-  // M14. Which records earn membership, and how chain re-keys route.
+  // Which records earn membership, and how chain re-keys route.
   describe('memberKeepIds', () => {
     const rec = (id: string, over: Partial<EditorialRecord> = {}): EditorialRecord => ({
       id,
@@ -342,7 +343,7 @@ describe('archive: buildForest integration', () => {
     expect(f.visibleRoots).toContain(A); // survives ghost pruning
   });
 
-  // The hide verb is retired (M14), but buildForest still honours a node-level
+  // The hide verb is retired, but buildForest still honours a node-level
   // hidden flag — this pins the rendering old state written by other windows
   // can still reach: archived rather than live, on screen, greyed and last.
   it('keeps a hidden+archived session on screen, sorted after live rows', () => {
@@ -457,9 +458,9 @@ describe('archive: buildForest integration', () => {
   });
 });
 
-// --------------------------------------------------- generation chains (M10)
+// --------------------------------------------------------- generation chains
 
-describe('archive: continuation detection (M10)', () => {
+describe('archive: continuation detection', () => {
   it('flags a plain-resume continuation via its copied head', () => {
     // B's transcript starts with lines copied from A — sessionId A, no
     // forkedFrom — exactly what a plain `--resume` re-mint writes on disk.
@@ -525,9 +526,9 @@ describe('archive: continuation detection (M10)', () => {
   });
 });
 
-// ═════════════════════════ M22.3: multi-root indexing ═══════════════════════
+// ═══════════════════════════ multi-root indexing ════════════════════════════
 
-describe('archive: extraProjectsDirs (M22.3)', () => {
+describe('archive: extraProjectsDirs', () => {
   const C = '0f0000c9-0000-4000-8000-0000000000c9';
 
   /** A transcript in a PROFILE's own projects root, not the primary one. */

@@ -1,11 +1,15 @@
 // test/mocks/vscode.ts — minimal, class-shaped stand-ins for the `vscode`
-// module. Frozen: written by the scaffold agent from SPEC.md §8.5.
-// vitest.config.ts aliases `vscode` here, so the vscode-facing modules can be
-// unit-tested outside the extension host. No implementer may edit this file.
+// module. vitest.config.ts aliases `vscode` here, so the vscode-facing modules
+// can be unit-tested outside the extension host.
 //
-// Only the surface the provider tests need is modeled. Nothing here talks to
-// a real workbench; `window` and `commands` are intentionally empty — tests
-// instantiate provider classes directly and never call registerTree().
+// Only the surface the tests actually need is modelled, and that is deliberate:
+// every suite in test/ resolves `vscode` through this file, so widening it
+// changes what dozens of unrelated tests are running against. Adding to it is
+// fine; changing what is already here is not a local edit.
+//
+// Nothing here talks to a real workbench. `window` and `commands` are
+// intentionally empty — tests instantiate the provider classes directly and
+// never register anything with the host.
 
 // ------------------------------------------------------------------- events
 
@@ -235,7 +239,16 @@ export class Uri implements UriParts {
 }
 
 // ------------------------------------------------------------- host surface
-// Deliberately empty: no test may register anything with the workbench.
+// Deliberately empty, and useful precisely because it is. The modules that talk
+// to the workbench declare the members they need as OPTIONAL and check before
+// calling (see `showInformationMessage` in src/hooks.ts), so an empty namespace
+// turns every prompt and every registration into a silent no-op — no fake
+// workbench required, and no test can register anything real.
+//
+// A test that DOES need one of these hangs its own stub off the object here for
+// its duration and removes it afterwards (test/hooks.test.ts and
+// test/windows.test.ts both do), which keeps the stand-in next to the test that
+// explains it instead of in a shared mock nothing owns.
 
 export const window = {};
 export const commands = {};

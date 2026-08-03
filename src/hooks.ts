@@ -1,4 +1,4 @@
-// IMPLEMENTED BY: G  (M5 — the opt-in hooks accelerator)
+// src/hooks.ts — the opt-in hooks accelerator.
 //
 // Hooks buy instant updates and coverage of sessions we never launched. They
 // are NEVER required: `disableAllHooks`, `allowManagedHooksOnly`,
@@ -53,7 +53,7 @@ import { log, logError } from './log';
 export const PLUGIN_NAME = 'lineage-events';
 /** Bumped whenever the generated files change; drives silent self-heal.
  *  v2: HOOK_COMMAND became a single-write append (see below).
- *  v3 (M10): the append wraps the payload with the LINEAGE_NODE_ID the hook
+ *  v3: the append wraps the payload with the LINEAGE_NODE_ID the hook
  *  inherited, and UserPromptSubmit joined the event list — together these are
  *  the enrollment channel: a hook event carries the id of the conversation the
  *  terminal was launched for, so a session whose id has churned can be re-keyed
@@ -65,7 +65,7 @@ const PLUGIN_SEMVER = '0.1.0';
 const EVENTS_DIR_NAME = '.lineage';
 const EVENTS_BASENAME = 'events.ndjson';
 
-/** Truncate the append-only log once it grows past this (SPEC §4-G). */
+/** Truncate the append-only log once it grows past this. */
 const MAX_EVENTS_BYTES = 5 * 1024 * 1024;
 /** Never re-read more than this in one drain — skip to the tail instead. */
 const MAX_DRAIN_BYTES = 4 * 1024 * 1024;
@@ -114,8 +114,7 @@ export function eventsFile(home?: string): string {
  * parallel-session workload this extension exists for. Buffering the payload
  * and emitting it with a single `printf` makes the append atomic for any line
  * below PIPE_BUF.
- */
-/**
+ *
  * v3 shape: `{"lineage_node_id":"<env>","payload":<stdin JSON>}`. The
  * LINEAGE_NODE_ID environment variable is the stamp our terminals launch
  * claude with, inherited by the hook process — so every event says WHICH of
@@ -198,7 +197,7 @@ export function parseEventLine(line: string): HookEvent | null {
   const name = body['hook_event_name'];
   const sid = body['session_id'];
   const tp = body['transcript_path'];
-  // M11. SessionStart carries `source`: 'startup' | 'resume' | 'clear' |
+  // SessionStart carries `source`: 'startup' | 'resume' | 'clear' |
   // 'compact' | 'fork'. 'fork' is the one consumers must see — a node-id
   // mismatch on a fork is a new BRANCH, never a re-key.
   const src = body['source'];
@@ -319,9 +318,9 @@ export class HooksManager implements DisposableLike {
 
   // --------------------------------------------------------------- install
 
-  /** Idempotent. Consent-gated by ONE modal — SPEC §4-G asks for a plain
-   *  mkdir -p + idempotent write, and nothing else may sit between the user
-   *  clicking Install and the bytes landing. Never touches
+  /** Idempotent. Consent-gated by ONE modal: what follows it is a plain
+   *  mkdir -p plus an idempotent write, and nothing else may sit between the
+   *  user clicking Install and the bytes landing. Never touches
    *  ~/.claude/settings.json. */
   async install(): Promise<HookInstallState> {
     const stored = this.getState();
@@ -425,11 +424,6 @@ export class HooksManager implements DisposableLike {
     );
     log('hooks: removed', dir);
     return state;
-  }
-
-  /** Alias for `remove()` — the two names appear in different documents. */
-  uninstall(): Promise<HookInstallState> {
-    return this.remove();
   }
 
   /** ACTIVATE-time reconciliation; never called from deactivate().

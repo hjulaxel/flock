@@ -1,11 +1,11 @@
-// IMPLEMENTED BY: A
 // src/transcript.ts — locating and reading session transcripts under
-// ~/.claude/projects. Public surface frozen by SPEC §4-A2. Direct port of the
-// Python `transcript_file` / `has_transcript` / `fork_parent_from_transcript`
-// of the prototype this extension replaced.
+// ~/.claude/projects. Direct port of the Python `transcript_file` /
+// `has_transcript` / `fork_parent_from_transcript` of the prototype this
+// extension replaced.
 //
-// Imports allowed here: ./types, ./log, node:fs, node:path, node:os.
-// NEVER import vscode. Never cache, never watch files.
+// Dependencies are deliberately minimal — ./types, ./log and node builtins,
+// never vscode — so this module stays unit-testable outside the editor. It
+// never caches and never watches files.
 //
 // Reads are BOUNDED: a transcript is an append-only JSONL that can reach tens
 // of megabytes, and this runs on every poll tick. The head scan reads at most
@@ -28,9 +28,9 @@ import {
 export interface TranscriptLocateOptions {
   hint?: string;        // e.g. a hook payload's transcript_path
   projectsDir?: string; // default path.join(os.homedir(), '.claude', 'projects')
-  /** M22.3. Account-profile projects roots (`<configDir>/projects`), probed
-   *  after the primary — a session launched on a custom account writes its
-   *  transcript there, and "has no transcript" gates resume and fork. */
+  /** Account-profile projects roots (`<configDir>/projects`), probed after the
+   *  primary — a session launched on a custom account writes its transcript
+   *  there, and "has no transcript" gates resume and fork. */
   extraProjectsDirs?: readonly string[];
 }
 
@@ -159,7 +159,7 @@ function readHead(file: string, maxBytes: number): string {
  *
  * Synchronous port of Python `fork_parent_from_transcript`. A single pass over
  * the resolved transcript, in this priority order PER LINE — the ordering is
- * load-bearing (SPEC §5.4):
+ * load-bearing:
  *
  *  1. a compaction marker (`subtype: "compact_boundary"` or `isCompactSummary`)
  *     seen BEFORE any fork signal aborts the scan and yields null. A compaction
@@ -268,8 +268,8 @@ function firstNonEmptyString(...values: unknown[]): string | undefined {
  * Later records overwrite earlier ones. Always returns an object (possibly
  * empty). Never throws.
  *
- * Deliberately non-load-bearing (SPEC open question #2): these record shapes
- * were not re-verified for this build, so each is read tolerantly across a
+ * Deliberately non-load-bearing: these record shapes were never verified as
+ * carefully as the lineage signals were, so each is read tolerantly across a
  * couple of plausible key names and only ever feeds a LABEL FALLBACK — no
  * lineage decision depends on anything in here.
  */

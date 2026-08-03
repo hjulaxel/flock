@@ -1,4 +1,5 @@
-// src/daemon.ts — the CLI daemon's dispatch roster (M11: native /fork).
+// src/daemon.ts — the CLI daemon's dispatch roster, the one place a native
+// /fork records its parentage.
 //
 // THE PROBLEM THIS FILE EXISTS TO FIX: `/fork` typed inside a session leaves
 // NO marker in the child's transcript. Verified on this machine (CLI 2.1.207–
@@ -28,15 +29,15 @@
 // the persisted record is all that keeps the fork nested under its parent.
 //
 // `mode: "resume"` WITHOUT `fork` is the other useful fact: the daemon resumed
-// an old conversation under a new id — exactly the M10 generation-chain
-// signal, from a source that (unlike the transcript-head heuristic) also
-// covers successors that copy nothing.
+// an old conversation under a new id — exactly the generation-chain signal,
+// from a source that (unlike the transcript-head heuristic) also covers
+// successors that copy nothing.
 //
-// M25 — TWO REGRESSIONS THIS FILE ALSO FIXES, both verified on CLI 2.1.220:
+// TWO REGRESSIONS THIS FILE ALSO FIXES, both verified on CLI 2.1.220:
 //
-//  1. THE ROSTER IS PER-ACCOUNT, NOT PER-MACHINE. M22 gave every account its
-//     own `CLAUDE_CONFIG_DIR`, and the daemon writes its roster INSIDE that
-//     dir. A session running on a non-default account dispatches into
+//  1. THE ROSTER IS PER-ACCOUNT, NOT PER-MACHINE. Every account has its own
+//     `CLAUDE_CONFIG_DIR`, and the daemon writes its roster INSIDE that dir.
+//     A session running on a non-default account dispatches into
 //     `<configDir>/daemon/roster.json`, and this reader — which hardcoded
 //     `~/.claude/daemon/roster.json` — never saw it. Every /fork from a
 //     non-default account rendered as a flat root. The reader now takes a
@@ -46,8 +47,8 @@
 //  2. `/fork` NOW DISPATCHES A BACKGROUND JOB, whose `launch.sessionId` names
 //     a COPY of the parent transcript with the uuid scrubbed out of the path:
 //     `<configDir>/jobs/<short>/tmp/parent-transcript.jsonl`. `resumedIdOf`
-//     correctly refuses to guess from that, which is the "background JOB
-//     fork" gap M11 documented and left open. Two other records name the
+//     correctly refuses to guess from that, so the launch record alone leaves
+//     a background-job fork with no parent at all. Two other records name the
 //     parent EXACTLY, and this file now reads both:
 //       * `dispatch.env.CLAUDE_CODE_RESUME_SOURCE_ALIVE` —
 //         `"<child>|<ISO boundary>|<PARENT>"`, right there in the dispatch.
@@ -56,8 +57,8 @@
 //         terminal has ever attached to it (`firstTerminalAt`).
 //     Neither is an inference; both are the CLI's own dispatch bookkeeping.
 //
-// Imports allowed here: ./types, ./log, node:fs, node:path, node:os.
-// NEVER import vscode.
+// Dependencies are deliberately minimal — ./types, ./log and node builtins,
+// never vscode — so this module stays unit-testable outside the editor.
 
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -87,8 +88,6 @@ export interface DaemonDispatch {
   short?: string;
 }
 
-export type { BackgroundJob };
-
 export interface DaemonFacts {
   /** child id → parent id, for fork dispatches. */
   forkParents: ReadonlyMap<string, string>;
@@ -105,8 +104,8 @@ const EMPTY_FACTS: DaemonFacts = {
   jobs: new Map(),
 };
 
-/** The roster inside one account's config dir. M22 gives every account its
- *  own `CLAUDE_CONFIG_DIR`, and the daemon writes its roster under it. */
+/** The roster inside one account's config dir. Every account has its own
+ *  `CLAUDE_CONFIG_DIR`, and the daemon writes its roster under it. */
 export function daemonRosterPathFor(configDir: string): string {
   return path.join(configDir, 'daemon', 'roster.json');
 }
@@ -346,8 +345,8 @@ interface RootState {
 
 /**
  * Reads every daemon roster that matters — `~/.claude/daemon/roster.json` plus
- * one per account config dir (M22/M25) — cached by (mtimeMs, size) per file so
- * the steady state is one stat each per tick. Never throws: a missing daemon,
+ * one per account config dir — cached by (mtimeMs, size) per file so the
+ * steady state is one stat each per tick. Never throws: a missing daemon,
  * an unreadable file or a torn write all keep that root's LAST GOOD facts,
  * because a broken read must not un-parent rows that were correct a tick ago.
  *

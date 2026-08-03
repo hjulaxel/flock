@@ -1,5 +1,6 @@
-// Owner A. The parent-resolution cascade (SPEC §5.1), the argv primitives,
-// and the forest builder (§5.6).
+// test/lineage.test.ts — how a session's parent is worked out: the resolution
+// cascade, the argv primitives it reads, and the forest builder that turns the
+// resolved edges into the tree the sidebar draws.
 
 import { describe, expect, it } from 'vitest';
 import * as process from 'node:process';
@@ -600,7 +601,7 @@ describe('buildForest', () => {
     expect(f.nodes.get(PARENT)?.visibleChildren).toEqual([CHILD]);
   });
 
-  // M19 — `lineage.onlyActiveSessions`, the view-title filter.
+  // `lineage.onlyActiveSessions`, the view-title filter.
   describe('onlyActive', () => {
     const archivedOf = (id: string): ArchivedSession => ({
       sessionId: id,
@@ -694,7 +695,7 @@ describe('buildForest', () => {
     expect(f.nodes.get(GONE)?.deleted).toBe(true);
   });
 
-  // M8: hide and delete are different verbs. Hiding MUTES — the row survives.
+  // Hide and delete are different verbs. Hiding MUTES — the row survives.
   it('keeps a hidden node’s row and its subtree nested under it', () => {
     const HID = OTHER;
     const GRAND = '0f0000c3-0000-4000-8000-0000000000c3';
@@ -922,7 +923,7 @@ describe('buildForest', () => {
     expect(f.nodes.get(CHILD)?.lastActiveAt).toBeUndefined();
   });
 
-  // M18: the transcript-tail facts, carried alongside the mtime sweep. The two
+  // The transcript-tail facts, carried alongside the mtime sweep. The two
   // are separate inputs because they answer different questions — "was
   // anything written" vs "did the USER say anything" — and a node may have
   // either without the other.
@@ -971,9 +972,9 @@ describe('buildForest', () => {
   });
 });
 
-// --------------------------------------------- resolveAll: chain remap (M10)
+// --------------------------------------------------- resolveAll: chain remap
 
-describe('resolveAll: chain-tip parent remap (M10)', () => {
+describe('resolveAll: chain-tip parent remap', () => {
   it('re-points an inferred edge at the tip and never ghosts the superseded id', async () => {
     const spy = spyIO({ head: PARENT });
     const resolver = new LineageResolver(spy.io);

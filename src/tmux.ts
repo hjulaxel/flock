@@ -1,10 +1,10 @@
-// src/tmux.ts — the detach tier (M13 rework two).
+// src/tmux.ts — the detach tier.
 //
 // THE PROBLEM THIS FILE EXISTS TO FIX: a workspace switch must hide a foreign
 // session's tab instantly and invisibly, but VS Code's API cannot separate a
 // terminal's UI from its process — closing the tab kills the pty, and there is
-// no detach/reattach. So kill+resume parking (rework one) had to spare BUSY
-// sessions and lost live process state for idle ones. The one design that
+// no detach/reattach. The earlier kill+resume parking therefore had to spare
+// BUSY sessions, and lost live process state for idle ones. The one design that
 // hides the view while the process keeps running is to have something OUTSIDE
 // the window own the pty: tmux.
 //
@@ -47,9 +47,9 @@
 // and any machine without tmux — keeps the kill+resume tier, which every
 // caller of these helpers must treat as the always-available fallback.
 //
-// Imports allowed here: ./types, ./log, node:fs, node:path,
-// node:child_process. NEVER import vscode — everything here must be
-// unit-testable pure or against the fs.
+// This module NEVER imports vscode: everything in it is either pure or talks
+// straight to the filesystem and to child processes, so it stays unit-testable
+// outside a running workbench.
 
 import { execFile } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -246,7 +246,7 @@ export function parsePanePid(stdout: string): number | undefined {
  *
  * WHY THIS EXISTS: a wrapped terminal's own process is the tmux CLIENT, so
  * `Terminal.processId` identifies nothing on the roster — and every pid-keyed
- * mechanism goes blind: the M11 re-key detector never sees "same pid, new
+ * mechanism goes blind: the re-key detector never sees "same pid, new
  * session id" (a wrapped `--resume` that mints a fresh generation leaves the
  * terminal bound to the OLD id — the session's own tab on screen while its
  * row says "running outside this editor"), and app-restart re-association

@@ -1,8 +1,10 @@
 .vscode/**
 .vscode-test/**
 .claude/**
+.github/**
 .gitignore
 .vscodeignore
+CONTRIBUTING.md
 esbuild.mjs
 scripts/**
 # Source for media/icon.png. The tile is what ships; the SVG is not referenced

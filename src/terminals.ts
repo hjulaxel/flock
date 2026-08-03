@@ -1,11 +1,10 @@
-// IMPLEMENTED BY: D (M2) — terminal launch, binding, re-association, rename.
-// Contract: SPEC.md §4-D; plan of record §4 ("Terminals and session lifecycle").
+// src/terminals.ts — terminal launch, binding, re-association, rename.
 //
-// Imports allowed here: vscode, ./types, ./log, ./tmux, ./accounts (pure — M22
-// borrows its env-var-name guard rather than keeping a second copy of it),
-// node:crypto.
+// Imports vscode, ./types, ./log, ./tmux, node:crypto, and ./accounts — the
+// last only for its env-var-name guard, borrowed rather than copied so the two
+// modules cannot disagree about what a legal variable name is.
 //
-// M22 — ACCOUNT ENVIRONMENT. `LaunchOptions.env` is the chosen account's
+// ACCOUNT ENVIRONMENT. `LaunchOptions.env` is the chosen account's
 // environment (CLAUDE_CONFIG_DIR / CODEX_HOME / an API key), and it has to
 // reach the claude process by BOTH routes this module can launch by:
 // `creationOptions.env` for a bare launch, and the tmux wrap's `-e` for a
@@ -16,7 +15,7 @@
 // is written LAST in both places so a profile can never overwrite the node id
 // the whole binding table is keyed on.
 //
-// Design invariants (empirically established in the plan — do not "improve"):
+// Design invariants, each established empirically. Do not "improve" them away:
 //
 //   * claude IS the terminal process: `shellPath: <claude binary>` plus
 //     `shellArgs: ['--session-id', <uuid>, …]`. No shell, no init race, no
@@ -202,8 +201,8 @@ function delay(ms: number): Promise<void> {
 }
 
 /** Run `fn` on the next microtask, swallowing anything it throws. Used so that
- *  bind events raised by `reassociate()` still reach listeners the integrator
- *  subscribes immediately AFTER calling it (SPEC §4-I step 4 order). */
+ *  bind events raised by `reassociate()` still reach listeners that activation
+ *  subscribes immediately AFTER the call. */
 function soon(fn: () => void): void {
   void Promise.resolve().then(() => {
     try {
@@ -245,7 +244,7 @@ export function mintSessionId(): string {
  *    replace the id. The caller sets `sessionId === resumeId` so the
  *    LINEAGE_NODE_ID stamp and the binding name the session being reopened —
  *    and when the CLI re-mints the id anyway (it can: a plain resume may
- *    write a fresh transcript under a fresh id, M10), that stamp is
+ *    write a fresh transcript under a fresh id), that stamp is
  *    precisely what lets the hook re-key the new generation onto this
  *    conversation instead of it surfacing as a duplicate row.
  *  - fork    `['--fork-session', '--resume', parentId, '--session-id', child]`
@@ -303,7 +302,7 @@ export function buildShellArgs(opts: LaunchOptions): string[] {
 }
 
 /**
- * M22. The account environment for a launch, cleaned.
+ * The account environment for a launch, cleaned.
  *
  * A launch env arrives from the routing resolver, which builds it from a state
  * file the user can hand-edit, so it is validated here as well: a key that is
@@ -626,7 +625,7 @@ export class TerminalRegistry implements DisposableLike {
 
     const pref = this.locationPref();
 
-    // M13: the workspace restore path knows which editor group a session tab
+    // The workspace restore path knows which editor group a session tab
     // lived in. A TerminalEditorLocationOptions only makes sense for editor
     // tabs; the panel preference keeps winning.
     const location: vscode.TerminalOptions['location'] =
@@ -640,9 +639,9 @@ export class TerminalRegistry implements DisposableLike {
           } as unknown as vscode.TerminalOptions['location'])
         : (locationValueOf(pref) as vscode.TerminalOptions['location']);
 
-    // M22: the chosen account's environment, cleaned once and used by BOTH
-    // tiers below. `{}` — the default account, and every launch that predates
-    // accounts — must behave exactly as passing no environment at all did.
+    // The chosen account's environment, cleaned once and used by BOTH tiers
+    // below. `{}` — the default account, and every launch made before accounts
+    // existed — must behave exactly as passing no environment at all did.
     const profileEnv = launchEnv(opts.env);
 
     // DETACH TIER: wrap the launch in the private tmux server when the wiring
@@ -670,9 +669,9 @@ export class TerminalRegistry implements DisposableLike {
         // and the server keeps the FIRST client's env for every later
         // session — `-e` (session environment) is what makes each wrap carry
         // its own id. The terminal's env stamp below still exists, but it
-        // only reaches the tmux client. M22: the account environment rides the
-        // same flags, for exactly the same reason, and is written FIRST so the
-        // stamp always wins a collision.
+        // only reaches the tmux client. The account environment rides the same
+        // flags, for exactly the same reason, and is written FIRST so the stamp
+        // always wins a collision.
         env: { ...profileEnv, [ENV_NODE_ID]: sessionId },
         command: [binary, ...shellArgs],
       });
@@ -687,10 +686,10 @@ export class TerminalRegistry implements DisposableLike {
         shellPath,
         shellArgs,
         cwd: opts.cwd,
-        // The stamp that survives a window reload inside creationOptions —
-        // and, since M22, the account environment beside it. Both are
-        // reconstructed for a revived terminal, so a reloaded window's
-        // re-launch (if any) lands on the same account.
+        // The stamp that survives a window reload inside creationOptions, and
+        // the account environment beside it. Both are reconstructed for a
+        // revived terminal, so a reloaded window's re-launch (if any) lands on
+        // the same account.
         env: { ...profileEnv, [ENV_NODE_ID]: sessionId },
         // NEVER strictEnv — claude needs the inherited environment.
         location,
@@ -883,7 +882,7 @@ export class TerminalRegistry implements DisposableLike {
   }
 
   /**
-   * M11. The claude process in a bound terminal re-keyed itself: the roster
+   * The claude process in a bound terminal re-keyed itself: the roster
    * now reports the SAME pid under a NEW session id (a `/fork` that switched
    * the terminal over, a plain resume that re-minted, `/clear`). Move the
    * binding so every verb keeps finding the terminal under the id the tree
@@ -1102,7 +1101,7 @@ export class TerminalRegistry implements DisposableLike {
    * Detach tier. A wrapped terminal's own process is the tmux CLIENT, whose
    * pid matches nothing on the roster — so a wrapped binding must carry the
    * PANE's root pid (claude itself; the wrap execs it directly) or the two
-   * pid-keyed mechanisms go blind: the M11 re-key detector never notices the
+   * pid-keyed mechanisms go blind: the re-key detector never notices the
    * fresh generation id a wrapped `--resume` mints (leaving the session's own
    * tab on screen while its row claims "running outside this editor"), and
    * app-restart re-association never matches. Background with retries: the
@@ -1208,10 +1207,9 @@ export class TerminalRegistry implements DisposableLike {
    * Both the reveal and the command are fire-and-forget IPC to the renderer,
    * so without the confirmation the command can execute while the workbench
    * still considers the PREVIOUS terminal active — see moveToTerminalPanel.
-   * Never
-   * runs the command unconfirmed: on a terminal the workbench refuses to
-   * activate, a skipped move is recoverable; a move applied to the wrong tab
-   * is not.
+   * Never runs the command unconfirmed: on a terminal the workbench refuses to
+   * activate, a skipped move is recoverable; a move applied to the wrong tab is
+   * not.
    *
    * Three attempts, cheapest first. The first reveals WITHOUT taking focus:
    * the workbench sets the active instance on any reveal, independently of the

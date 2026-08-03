@@ -1,4 +1,4 @@
-// test/limits.test.ts — the M22 CONTRACT under test: src/limits.ts.
+// test/limits.test.ts — the CONTRACT under test: src/limits.ts.
 //
 // Node-only, no vscode, no real network, no real keychain, no real ~/.claude.
 // Every seam (`fetch`, `exec`, `readFile`, `now`, `homeDir`) is injected via
@@ -11,7 +11,7 @@
 //
 //   1. CREDENTIAL RESOLUTION ORDER — file beats keychain; on macOS EVERY
 //      claude profile may probe the keychain, each under its OWN service name
-//      (`keychainServiceFor`, M22.1: the default item bare, a custom configDir
+//      (`keychainServiceFor`: the default item bare, a custom configDir
 //      suffixed with sha256(path)[:8] — so a lookup can never cross accounts),
 //      because that item is not per-config-dir and a fallback would render
 //      the DEFAULT account's usage under another account's name.
@@ -365,7 +365,7 @@ describe('LimitsService — credential resolution order', () => {
     expect(exec).not.toHaveBeenCalled();
   });
 
-  it('a custom configDir with no credentials file probes the keychain under its OWN hashed service (M22.1)', async () => {
+  it('a custom configDir with no credentials file probes the keychain under its OWN hashed service', async () => {
     let clock = BASE;
     const readFile = vi.fn(async (): Promise<string | null> => null); // nothing at that path
     const exec = vi.fn(async (): Promise<string | null> => credBlob('TOKEN-KEYCHAIN'));
@@ -485,7 +485,7 @@ describe('LimitsService — credential resolution order', () => {
   });
 });
 
-describe('keychainServiceFor — the per-config-dir service name (M22.1)', () => {
+describe('keychainServiceFor — the per-config-dir service name', () => {
   it('no dir / blank dir -> the bare default service', () => {
     expect(keychainServiceFor(undefined)).toBe(KEYCHAIN_SERVICE);
     expect(keychainServiceFor('')).toBe(KEYCHAIN_SERVICE);
@@ -509,7 +509,7 @@ describe('keychainServiceFor — the per-config-dir service name (M22.1)', () =>
   });
 });
 
-describe('LimitsService — signedInAs identity (M22.1)', () => {
+describe('LimitsService — signedInAs identity', () => {
   it('a signed-in profile whose credential cannot be read reports WHO it is, not "not logged in"', async () => {
     let clock = BASE;
     const dir = '/acct/personal';

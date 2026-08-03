@@ -1,4 +1,4 @@
-// M20 — git worktree discovery.
+// test/git.test.ts — git worktree discovery.
 //
 // Two things are worth testing here and the rest is subprocess plumbing:
 //

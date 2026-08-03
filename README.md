@@ -134,9 +134,10 @@ npm run compile     # esbuild bundle -> dist/extension.js
 npm run watch       # rebuild on change
 ```
 
-`SPEC.md` is the authoritative implementation contract through M5; `STATUS.md`
-records what is actually built. `src/log.ts` and `test/mocks/vscode.ts` are
-frozen.
+Press **F5** to open an Extension Development Host with Canopy loaded. There are
+no runtime dependencies — the extension is Node builtins plus the `vscode` API,
+bundled into a single file by esbuild. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the rest.
 
 ## Credits
 

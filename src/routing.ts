@@ -1,10 +1,10 @@
-// IMPLEMENTED BY: M22 — which account a new session lands on.
+// src/routing.ts — which account a new session lands on.
 //
-// Pure. Imports ./types and its own lane's ./accounts (also pure) — never
-// vscode, never node, never the network. That is the whole point of the split:
-// the limits module does the fetching and hands this file plain numbers, so
-// every rule below can be tested with a Map literal and a fixed `now`, and the
-// answers do not change with the weather.
+// Pure: it imports ./types and ./accounts (also pure) — never vscode, never
+// node, never the network. That is the whole point of the split: the limits
+// module does the fetching and hands this file plain numbers, so every rule
+// below can be tested with a Map literal and a fixed `now`, and the answers do
+// not change with the weather.
 //
 // Three tiers, resolved in one pass:
 //
@@ -19,18 +19,18 @@
 // The auto-pick, in priority order, and every clause of it is a claim about
 // how these subscriptions actually behave:
 //
-//   1. PREFER AN ALREADY-OPEN FIVE-HOUR WINDOW. The five-hour limit starts
+//   1. Prefer an already-open five-hour window. The five-hour limit starts
 //      when you send the first message and expires whether or not you use it,
 //      so an open window is a sunk cost: spending it is free, and starting a
 //      SECOND window on another account converts one paid-for window into two
 //      half-used ones. This is the rule that matters; the rest are tiebreaks.
-//   2. THEN SOONEST WEEKLY RESET. Use it or lose it — the account whose weekly
+//   2. Then soonest weekly reset. Use it or lose it — the account whose weekly
 //      allowance is about to roll over is the one with the least to lose.
-//   3. A FULL FIVE-HOUR WINDOW RANKS LAST, and an account we know nothing
+//   3. A full five-hour window ranks last, and an account we know nothing
 //      about ranks between the two: no data is not evidence of exhaustion, and
 //      picking an unknown over a known-full account is right, while picking it
 //      over a known-open one is not.
-//   4. THEN THE USER'S OWN ORDER. Dragging your preferred account to the top
+//   4. Then the user's own order. Dragging your preferred account to the top
 //      has to mean something, and this is where it means it.
 //
 // A window whose `resetsAt` has already passed is treated as CLOSED rather
@@ -39,7 +39,7 @@
 // session on the wrong account until the next fetch landed. This is the one
 // thing `now` is for.
 //
-// EVERY TIER PICKS FROM THE SAME CANDIDATE SET: the live accounts a session can
+// Every tier picks from the same candidate set: the live accounts a session can
 // actually be launched on (`accounts.canHostSession`). The launcher execs one
 // binary, the Claude CLI, so routing a launch to a Codex account would run
 // `claude` under `CODEX_HOME`, land on the machine's DEFAULT Claude login, and
@@ -61,7 +61,8 @@ import { canHostSession, sortProfiles } from './accounts';
 /** What the resolver hands back: the account to launch on, and a short line
  *  saying why — shown next to the picker, so the user can see the rule work
  *  rather than having to trust it. `null` means there is no account at all to
- *  pick, and the caller launches with no profile env (the pre-M22 behaviour). */
+ *  pick, and the caller launches with no profile env — exactly what every
+ *  launch did before accounts existed. */
 export interface RoutingResolution {
   profile: AccountProfile | null;
   reason: string;

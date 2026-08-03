@@ -1,6 +1,5 @@
-// IMPLEMENTED BY: F (M4)
-// Visual surfaces: browser tabs, markdown preview, project open, and our own
-// HTML in a webview. SPEC.md §4-F2 / plan §6.
+// src/surfaces.ts — visual surfaces: browser tabs, markdown preview, project
+// open, and our own HTML in a webview.
 //
 // Browser rules (measured, not guessed):
 //   * `simpleBrowser.show` exists in BOTH VS Code and Cursor, and on VS Code
@@ -147,8 +146,8 @@ async function openExternally(uri: vscode.Uri): Promise<boolean> {
 // --------------------------------------------------------------- markdown
 
 /**
- * Built-in markdown preview — cmux-markdown parity for free, including
- * live reload on file change. Falls back to a plain text editor.
+ * The editor's own markdown preview: rendered markdown in a tab, reloading
+ * live as the file changes, for free. Falls back to a plain text editor.
  */
 export async function openMarkdownPreview(fsPath: string): Promise<void> {
   const p = typeof fsPath === 'string' ? fsPath.trim() : '';

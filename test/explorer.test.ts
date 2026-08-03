@@ -1,4 +1,4 @@
-// test/explorer.test.ts — the Explorer follows the project (M21).
+// test/explorer.test.ts — the Explorer follows the project.
 //
 // What matters here is the SPLICE ARITHMETIC and the anchor invariant. The
 // workbench half (updateWorkspaceFolders, the folder-change event) can only be

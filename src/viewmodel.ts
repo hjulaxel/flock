@@ -1,9 +1,9 @@
-// IMPLEMENTED BY: M9 — the inline-rename sidebar.
+// src/viewmodel.ts — the tree's rendering decision, as data.
 //
-// PURE. Imports ./types and ./projects and NOTHING else — no vscode, no node.
 // This is the whole rendering decision for the tree, expressed as a flat list of
 // serializable rows, so it can be unit-tested without a workbench AND posted
-// straight into a webview.
+// straight into a webview. It imports ./types and ./projects and nothing else —
+// no vscode, no node — which is what keeps that true.
 //
 // Why a flat list: the webview renders rows, not a nested DOM. Flattening here
 // (honouring the collapsed set) means the client is a dumb painter with no model
@@ -105,13 +105,13 @@ export function statusDescriptor(node: SessionNode): string {
   }
 }
 
-/** How the status dot is lit: 'running' amber, 'done' red. 'idle' and (since
- *  M19) 'closed' are tones with NO glyph — the row is known-quiet or known-over,
- *  which is worth a word in the hover and worth drawing nothing for, because a
- *  tree where every quiet row still carries a mark teaches the eye to ignore
- *  marks. They stay distinct tones rather than collapsing into one because the
- *  renderers key other things on them (a closed row is dimmed; an idle one is
- *  not) and the hover names them differently.
+/** How the status dot is lit: 'running' amber, 'done' red. 'idle' and 'closed'
+ *  are tones with NO glyph — the row is known-quiet or known-over, which is
+ *  worth a word in the hover and worth drawing nothing for, because a tree where
+ *  every quiet row still carries a mark teaches the eye to ignore marks. They
+ *  stay distinct tones rather than collapsing into one because the renderers key
+ *  other things on them (a closed row is dimmed; an idle one is not) and the
+ *  hover names them differently.
  *  undefined = no tone at all: a row put away, or one whose state we genuinely
  *  do not know. */
 export type StatusTone = 'idle' | 'running' | 'done' | 'closed';
@@ -126,11 +126,11 @@ export type StatusTone = 'idle' | 'running' | 'done' | 'closed';
  * putting a session away is how you tell it to stop asking for you, so it must
  * not keep a lit dot.
  *
- * M12 makes 'done' mean UNSEEN done, the cmux unread model: once you have
- * looked at a finished session its dot goes back to quiet, and a session that
- * finished a turn while you were elsewhere lights up even if it is merely
- * idle. `unseen === undefined` (tracking off for this session, or an input
- * that predates M12) keeps the pre-M12 reading: waiting = done.
+ * 'done' means UNSEEN done — the unread-message model: once you have looked at
+ * a finished session its dot goes back to quiet, and a session that finished a
+ * turn while you were elsewhere lights up even if it is merely idle.
+ * `unseen === undefined` (tracking off for this session, or an input from
+ * before unseen tracking existed) keeps the older reading: waiting = done.
  *
  * A finished-for-good row is 'closed' rather than no tone at all, even though
  * neither draws a mark: `closed` is what the renderers dim the row and grey its
@@ -158,7 +158,7 @@ export function statusTone(node: SessionNode): StatusTone | undefined {
  *  straight into a FileDecoration badge, while the webview asks only whether
  *  there is anything to draw and then draws its own circle in CSS.
  *
- *  M19: only the two LIT tones draw. 'closed' used to get a hollow ring, on the
+ *  Only the two LIT tones draw. 'closed' used to get a hollow ring, on the
  *  argument that a dead row left bare is indistinguishable from a live quiet
  *  one — but it never was: a closed row is dimmed, its logo greyed, and in the
  *  native tree its label greyed by the decoration's own colour. The ring was a
@@ -182,8 +182,8 @@ export function sessionContextValue(
   // Muted rows offer Unhide where the others offer Hide. Exactly one of the two
   // is always present, so neither menu entry needs a negated `when` clause.
   tokens.push(node.hidden ? 'hidden' : 'shown');
-  // The same shape for the notification mute (M19): the row says which half of
-  // the pair applies, so the menu shows "Hide Notifications" or "Show
+  // The same shape for the notification mute: the row says which half of the
+  // pair applies, so the menu shows "Hide Notifications" or "Show
   // Notifications" and never a toggle whose direction you have to guess.
   tokens.push(node.notifyMuted === true ? 'silenced' : 'notified');
 
@@ -211,10 +211,10 @@ export function sessionContextValue(
 export function projectContextValue(el: ProjectGroupNode): string {
   const tokens: ContextToken[] = ['project'];
   if (el.rootIds.length === 0) tokens.push('empty');
-  // M26. Two independent facts about where the row sits, each a positive token
-  // so a `when` clause never has to negate a viewItem regex: a middle project
-  // carries both, a leaf under a root only the first, a root with children only
-  // the second, and a lone top-level project neither — which is every project
+  // Two independent facts about where the row sits, each a positive token so a
+  // `when` clause never has to negate a viewItem regex: a middle project carries
+  // both, a leaf under a root only the first, a root with children only the
+  // second, and a lone top-level project neither — which is every project
   // anybody had before nesting existed.
   if (typeof el.parentProjectId === 'string' && el.parentProjectId !== '') {
     tokens.push('subproject');
@@ -229,12 +229,12 @@ export type RowKind =
   | 'project'
   | 'folder'
   | 'session'
-  /** M20. ONE branch, on its own row, inside the project's band. */
+  /** ONE branch, on its own row, inside the project's band. */
   | 'branch'
-  /** M20. The tail row of a branch block: "Others (12)", which opens a picker
-   *  of the branches this project is not currently showing. Its own kind rather
-   *  than a branch with a flag, because nothing that applies to a branch —
-   *  hiding it, copying its name, starting a session on it — applies to this. */
+  /** The tail row of a branch block: "Others (12)", which opens a picker of the
+   *  branches this project is not currently showing. Its own kind rather than a
+   *  branch with a flag, because nothing that applies to a branch — hiding it,
+   *  copying its name, starting a session on it — applies to this. */
   | 'branchOthers';
 
 /**
@@ -294,8 +294,8 @@ export interface BranchChip {
   /** Live sessions filed under this branch. Drawn only when non-zero. */
   count: number;
   /** A session on this branch is finished-and-unlooked-at. The same roll-up the
-   *  project row does (M12), one level finer: the project's own dot says only
-   *  THAT something is waiting, and the branch row says WHICH branch. */
+   *  project row does, one level finer: the project's own dot says only THAT
+   *  something is waiting, and the branch row says WHICH branch. */
   attention: boolean;
   /** The repository's main worktree. Drawn no differently, but the hide verb
    *  refuses it — see hideBranch. */
@@ -384,8 +384,8 @@ export interface ViewRow {
    */
   rails: boolean[];
   /**
-   * M26. How many SECTION levels of plain padding stand to the left of this
-   * row, before anything it draws itself.
+   * How many SECTION levels of plain padding stand to the left of this row,
+   * before anything it draws itself.
    *
    * Deliberately not `depth`, and deliberately not derivable from it. `depth` is
    * the outline level — what aria-level reports and what ArrowLeft walks — and a
@@ -396,7 +396,7 @@ export interface ViewRow {
    * branch row, a root session or a fork of a fork.
    *
    * Absent means 0, which is every row in a tree where nobody has nested a
-   * project — i.e. the pre-M26 layout, unchanged to the pixel.
+   * project — i.e. the older, unnested layout, unchanged to the pixel.
    */
   indent?: number;
   /** This row's own rail carries on downwards, into the children drawn beneath
@@ -413,23 +413,23 @@ export interface ViewRow {
   sessionId?: string;
   projectId?: string;
   cwd?: string;
-  /** M20, `kind === 'branch'` only: the branch this row IS. Named `chip` rather
-   *  than `branch` because `branch` is already taken, on SESSION rows, by the
-   *  name of the branch a session is running on — two different things that
-   *  would otherwise share a field name on the same type. */
+  /** `kind === 'branch'` only: the branch this row IS. Named `chip` rather than
+   *  `branch` because `branch` is already taken, on SESSION rows, by the name of
+   *  the branch a session is running on — two different things that would
+   *  otherwise share a field name on the same type. */
   chip?: BranchChip;
-  /** M20, `kind === 'branchOthers'` only: how many branches are folded away
-   *  behind this row. Always ≥ 1 — the row is not emitted at zero. */
+  /** `kind === 'branchOthers'` only: how many branches are folded away behind
+   *  this row. Always ≥ 1 — the row is not emitted at zero. */
   othersCount?: number;
-  /** M20, session rows only: which branch colour the NAME takes. Set only under
-   *  a project with BRANCH_CHIPS_MIN branches or more — see that constant.
-   *  Absent means "paint the name the way you always did", which is what every
-   *  row in a single-branch or non-git project gets. */
+  /** Session rows only: which branch colour the NAME takes. Set only under a
+   *  project with BRANCH_CHIPS_MIN branches or more — see that constant. Absent
+   *  means "paint the name the way you always did", which is what every row in a
+   *  single-branch or non-git project gets. */
   branchColor?: number;
-  /** M20, session rows only: the branch this session's cwd is in. Always set
-   *  when it is known, even where `branchColor` is not, because the hover can
-   *  afford a fact the row has no width for — a single-branch project still
-   *  answers "which branch is this running on" without spending a pixel. */
+  /** Session rows only: the branch this session's cwd is in. Always set when it
+   *  is known, even where `branchColor` is not, because the hover can afford a
+   *  fact the row has no width for — a single-branch project still answers
+   *  "which branch is this running on" without spending a pixel. */
   branch?: string;
 }
 
@@ -444,13 +444,13 @@ export interface ViewModelInput {
    *  scope to this view (`webviewId == '<id>'`). */
   viewId: string;
   now: number;
-  /** M18. `lineage.showTokens`. Read here rather than inside the row builder so
-   *  the setting is one input to a pure function and the tests can drive both
-   *  states without touching a workspace configuration. */
+  /** `lineage.showTokens`. Read here rather than inside the row builder so the
+   *  setting is one input to a pure function and the tests can drive both states
+   *  without touching a workspace configuration. */
   showTokens?: boolean;
-  /** M26. `lineage.groupSessionsByBranch`: hang a project's sessions off the
-   *  branch row for the worktree they run in. Absent = off, which is the
-   *  setting's default and the layout every existing test describes. */
+  /** `lineage.groupSessionsByBranch`: hang a project's sessions off the branch
+   *  row for the worktree they run in. Absent = off, which is the setting's
+   *  default and the layout every existing test describes. */
   groupByBranch?: boolean;
 }
 
@@ -488,13 +488,13 @@ export const othersRowKey = (projectId: string): string =>
  * into pieces. It carries no rails and no status dot, and sits inside the
  * project's own band.
  *
- * M26 makes that a CHOICE. Under `lineage.groupSessionsByBranch` the row
- * becomes the container the flat layout refuses to make it: expandable, with
- * the sessions running in that worktree as its children. Off by default,
- * because it is the right answer only for the way of working it is named after
- * — one agent per worktree, several worktrees at once — and the wrong one for
- * a single checkout with a handful of forks in it, where it would put every row
- * in the project one level deeper for no information at all.
+ * `lineage.groupSessionsByBranch` makes that a CHOICE. Under it the row becomes
+ * the container the flat layout refuses to make it: expandable, with the
+ * sessions running in that worktree as its children. Off by default, because it
+ * is the right answer only for the way of working it is named after — one agent
+ * per worktree, several worktrees at once — and the wrong one for a single
+ * checkout with a handful of forks in it, where it would put every row in the
+ * project one level deeper for no information at all.
  */
 function branchRow(
   el: ProjectGroupNode,
@@ -669,8 +669,8 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
   let branchScope: { branches: readonly BranchInfo[]; colored: boolean } | null =
     null;
 
-  // M26. The preorder list, indexed, so a project row can find the children it
-  // has to draw underneath itself. Built once per model rather than per row.
+  // The preorder list, indexed, so a project row can find the children it has
+  // to draw underneath itself. Built once per model rather than per row.
   const projectById = new Map(
     input.grouping.projects.map((p) => [p.projectId, p] as const),
   );
@@ -698,8 +698,8 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
     // trusted:
     //
     //   lastPromptAt  the last request the user sent, out of the transcript
-    //                 tail (M18). This is what the column means. The two below
-    //                 it are fallbacks for when it cannot be read, not
+    //                 tail. This is what the column means. The two below it
+    //                 are fallbacks for when it cannot be read, not
     //                 alternatives to it.
     //   lastActiveAt  the transcript's mtime. Moves for every token Claude
     //                 writes, so an unattended agentic run reads as "now" — a
@@ -825,9 +825,9 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
     const key = projectRowKey(el.projectId);
     const branches = el.branches ?? [];
     const active = branches.length >= BRANCH_CHIPS_MIN;
-    // M26. Where this project sits in the PROJECT tree, and therefore how far
-    // in everything it draws is pushed. `depth` doubles as the outline level:
-    // a subproject's row is a child of its parent's row, and its own contents
+    // Where this project sits in the PROJECT tree, and therefore how far in
+    // everything it draws is pushed. `depth` doubles as the outline level: a
+    // subproject's row is a child of its parent's row, and its own contents
     // start one level below that.
     const level = Math.max(0, el.depth ?? 0);
     const grouped = active && input.groupByBranch === true;
@@ -854,14 +854,15 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
     // only affordance it has, and an expandable row with nothing under it reads
     // correctly as "nothing running here yet".
     const expanded = !collapsed.has(key);
-    // M12: the attention dot BUBBLES UP — a project containing an unseen-done
+    // The attention dot BUBBLES UP — a project containing an unseen-done
     // session carries the dot itself, so a collapsed (or merely long) project
-    // still shows there is something to come back to. cmux does the same
-    // pane → workspace → group roll-up.
-    // M26: including everything filed UNDER it. A collapsed parent is the only
-    // thing on screen standing for its subprojects, so a finished session three
-    // levels down has to light it — otherwise collapsing a project is a way to
-    // lose the notification the dot exists to carry.
+    // still shows there is something to come back to. The same way an unread
+    // count rolls up from a row to the group it sits in.
+    //
+    // And it rolls up everything filed UNDER the project, too. A collapsed
+    // parent is the only thing on screen standing for its subprojects, so a
+    // finished session three levels down has to light it — otherwise collapsing
+    // a project is a way to lose the notification the dot exists to carry.
     const hasUnseen = subtreeHasUnseen(forest, descendantRootIds(projectById, el));
     const row: ViewRow = {
       key,
@@ -891,10 +892,10 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
       // and an empty one is waiting rather than finished.
       closed: false,
       canRename: true,
-      // M26. A project row DRAGS now: onto another project row it becomes that
-      // project's subproject, onto the background it goes back to the top
-      // level. The same gesture the Explorer moves a folder with, and the
-      // reason nesting does not need a dialog to be usable.
+      // A project row DRAGS: onto another project row it becomes that project's
+      // subproject, onto the background it goes back to the top level. The same
+      // gesture the Explorer moves a folder with, and the reason nesting does
+      // not need a dialog to be usable.
       canDrag: true,
       // A project is a section header, not the top of a lineage: it carries the
       // same toggle the sessions do, but no rail runs from it down to the roots
@@ -914,7 +915,7 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
       },
       tooltip: [el.label, ...el.dirs].join('\n'),
       projectId: el.projectId,
-      // M16: the chat lives on the PROJECT row and nowhere else — it is a
+      // The chat lives on the PROJECT row and nowhere else — it is a
       // conversation about the project as a whole, so a session row offering
       // one would be offering something that does not exist.
       //
@@ -923,7 +924,7 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
       // of work. Starting one is the single most common thing anybody does on
       // a project row and it was previously two clicks through a context menu.
       //
-      // M20 WITHDRAWS the `+` once the chip row is present. A `+` on the
+      // The `+` is WITHDRAWN once the chip row is present. A `+` on the
       // project has to pick a directory for you, and it picks rootDir — which,
       // for somebody running one agent per worktree, is the one checkout they
       // are least likely to have meant. With chips on screen every branch is a
@@ -947,10 +948,10 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
               },
             ]
           : []),
-        // M24: "New chat", because that is what the button now does every
-        // time. A label that just said "Chat" described a place you went back
-        // to, which is exactly the behaviour that changed — and the old chats
-        // are one right-click away under View Chat History.
+        // "New chat", because that is what the button does every time. A label
+        // that just said "Chat" described a place you went back to, which is
+        // exactly the behaviour that changed — and the old chats are one
+        // right-click away under View Chat History.
         { id: 'chat', icon: 'chat', title: `New chat in ${el.label}` },
         ...(active
           ? []
@@ -1090,8 +1091,8 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
     for (const id of el.rootIds) pushSession(id, 1, [], 0);
   };
 
-  // M26. Only the ROOTS are walked from here; each one emits its own subtree
-  // (see the tail of pushProject). `grouping.projects` is a preorder list, so
+  // Only the ROOTS are walked from here; each one emits its own subtree (see
+  // the tail of pushProject). `grouping.projects` is a preorder list, so
   // filtering it to depth 0 keeps the top-level order exactly as it was.
   for (const project of input.grouping.projects) {
     if ((project.depth ?? 0) === 0) pushProject(project);
@@ -1186,7 +1187,7 @@ function sessionTooltip(
   return lines.join('\n');
 }
 
-/** True when a session in (or under) `rootIds` is unseen-done (M12). Walks
+/** True when a session in (or under) `rootIds` is unseen-done. Walks
  *  visibleChildren, so a row removed from view can never light a dot no click
  *  can clear. */
 export function subtreeHasUnseen(
@@ -1207,15 +1208,15 @@ export function subtreeHasUnseen(
   }
 }
 
-/** Sessions DEMANDING the user that are actually ON SCREEN, for the view
- *  badge. Since M12 this is "rows whose dot is lit for attention": unseen-done
- *  sessions where tracking is on, waiting sessions where it is off — one
- *  definition, shared with statusTone, so the number on the view container
- *  always equals the dots in the tree. Counted over the rendered rows rather
- *  than the raw forest, so a session removed by a hidden folder / hidden
- *  project / onlyProjectSessions never leaves a permanent count with no row
- *  anywhere to open or dismiss. Collapsed rows still count — they are one
- *  click from view, and their ancestor is on screen. */
+/** Sessions DEMANDING the user that are actually ON SCREEN, for the view badge.
+ *  This is "rows whose dot is lit for attention": unseen-done sessions where
+ *  tracking is on, waiting sessions where it is off — one definition, shared
+ *  with statusTone, so the number on the view container always equals the dots
+ *  in the tree. Counted over the rendered rows rather than the raw forest, so a
+ *  session removed by a hidden folder / hidden project / onlyProjectSessions
+ *  never leaves a permanent count with no row anywhere to open or dismiss.
+ *  Collapsed rows still count — they are one click from view, and their ancestor
+ *  is on screen. */
 export function attentionCountOf(
   forest: SessionForest,
   grouping: GroupingResult,

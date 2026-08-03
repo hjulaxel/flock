@@ -1,9 +1,9 @@
-// test/windows.test.ts — owner F (SPEC.md §9).
-// Pure-function coverage, plus (P9 #2/#3) the publish() RPC's timeout and
-// retry-floor behaviour. registerFocusIntegration talks to the real
-// workbench for registerUriHandler / openExternal — those stay untested — but
-// asExternalUri is the one call publish() itself bounds, so it is worth
-// reaching.
+// test/windows.test.ts — cross-window focus: the pure functions, plus the
+// publish() RPC's timeout and retry-floor behaviour.
+//
+// registerFocusIntegration talks to the real workbench for registerUriHandler /
+// openExternal — those stay untested — but asExternalUri is the one call
+// publish() itself bounds, so it is worth reaching.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as vscodeMock from 'vscode';
@@ -68,11 +68,11 @@ describe('withSessionQuery', () => {
     );
   });
 
-  // REGRESSION (review finding #3). asExternalUri is only interesting under
-  // Remote / Codespaces / tunnels, where it hands back a forwarded URL whose
-  // query carries percent-escaped tokens — and `openExternal` may route that
-  // one to a BROWSER, which will not undo any encoding we add. The handle is
-  // opaque (SPEC §4-F1): every byte of it must survive verbatim.
+  // REGRESSION. asExternalUri is only interesting under Remote / Codespaces /
+  // tunnels, where it hands back a forwarded URL whose query carries
+  // percent-escaped tokens — and `openExternal` may route that one to a
+  // BROWSER, which will not undo any encoding we add. The handle is opaque to
+  // us: every byte of it must survive verbatim.
   const TUNNEL =
     'https://abc123-8080.euw.devtunnels.ms/focus' +
     '?tkn=A%2FB%2Bc%3D&windowId=1';
@@ -125,16 +125,15 @@ describe('withSessionQuery', () => {
 
 // --------------------------------------- publish()'s bounded asExternalUri
 //
-// The frozen mock (test/mocks/vscode.ts, SPEC §8.5) exports neither `env` nor
-// `workspace` at all — "window and commands are intentionally empty" is true
-// one level further up too. Both tests below only ever exercise publish()'s
-// FAILURE paths (a handle that never arrives, or never resolves at all), and
-// on both of those paths `vscode.workspace.workspaceFolders` is never
-// reached — publish() returns before constructing the WindowRecord that
-// reads it — so only `env` needs a stand-in. It is added the same way
-// test/hooks.test.ts hangs a stub off `vscode.window`: extending the mock's
-// already-exported (empty) namespace object at runtime, never editing the
-// frozen file.
+// The vscode mock (test/mocks/vscode.ts) exports neither `env` nor `workspace`
+// at all — "window and commands are intentionally empty" is true one level
+// further up too. Both tests below only ever exercise publish()'s FAILURE paths
+// (a handle that never arrives, or never resolves at all), and on both of those
+// paths `vscode.workspace.workspaceFolders` is never reached — publish() returns
+// before constructing the WindowRecord that reads it — so only `env` needs a
+// stand-in. It is added the same way test/hooks.test.ts hangs a stub off
+// `vscode.window`: extending the mock's already-exported (empty) namespace
+// object at runtime, rather than widening the shared mock.
 
 interface EnvStub {
   uriScheme: string;
@@ -165,7 +164,7 @@ afterEach(() => {
 });
 
 describe('registerFocusIntegration: publish() bounds the asExternalUri RPC', () => {
-  // REGRESSION (P9 #2). activate() awaits registerFocusIntegration(), so an
+  // REGRESSION. activate() awaits registerFocusIntegration(), so an
   // asExternalUri that never answers — a dead tunnel, an unsupported remote
   // target — used to mean NOTHING after it ever ran: no tree, no webview, no
   // commands. This is the fix, isolated from the rest of activate().
@@ -183,7 +182,7 @@ describe('registerFocusIntegration: publish() bounds the asExternalUri RPC', () 
     expect(deps.calls).toHaveLength(0);
   });
 
-  // REGRESSION (P9 #3). lastPublishedAt was only ever set on SUCCESS, so a
+  // REGRESSION. lastPublishedAt was only ever set on SUCCESS, so a
   // host that can never produce a handle re-ran the RPC on every
   // refreshPublication() call — on the roster poll's ~3s cadence, forever.
   it('a handle-less host calls asExternalUri at most once per FAILED_PUBLISH_RETRY_MS across many refreshPublication() calls', async () => {

@@ -1,9 +1,9 @@
-// IMPLEMENTED BY: INTEGRATOR
-// src/extension.ts — activate/deactivate and every cross-module wire.
+// src/extension.ts — the extension entry point: activation order, provider
+// wiring and disposal.
 //
-// This file is the ONLY place the seven module groups meet: each of them talks
+// This file is the ONLY place the module groups meet: each of them talks
 // exclusively through the dependency interfaces in types.ts, and this file is
-// what implements them. The activation sequence is SPEC.md §4-I:
+// what implements them. The activation sequence is:
 //
 //   1. OutputChannel('Canopy') + setLogSink
 //   2. StateStore(globalStorageUri.fsPath).load() + RelativePattern watcher
@@ -128,7 +128,7 @@ import {
 } from './explorer';
 import { registerProjectView } from './projectview';
 import type { ProjectViewController } from './projectview';
-// M22 accounts. The pure halves (accounts.ts / routing.ts) are imported here
+// Accounts. The pure halves (accounts.ts / routing.ts) are imported here
 // because this file is where the account roster, the pins and the launch env
 // are joined up — the views and the verbs only ever see the interfaces.
 import {
@@ -162,10 +162,10 @@ import { HooksManager } from './hooks';
 
 const DEFAULT_POLL_INTERVAL_MS = 3000;
 const STATE_FILE_NAME = 'state.json';
-/** workspaceState key holding this window's active project workspace (M13). */
+/** workspaceState key holding this window's active project workspace. */
 const ACTIVE_WORKSPACE_KEY = 'lineage.activeWorkspace';
 /** workspaceState key counting extension-host activations in this window — the
- *  M21 restart probe. See the log line in `activate`. */
+ *  restart probe. See the log line in `activate`. */
 const ACTIVATION_COUNT_KEY = 'lineage.activationCount';
 /** One turn end can be reported twice (Stop hook + the poll transition); a
  *  second doneAt stamp inside this window is the same turn, not a new one. */
@@ -186,10 +186,10 @@ export async function activate(
   context.subscriptions.push(channel);
   setLogSink((line) => channel.appendLine(line));
   context.subscriptions.push({ dispose: () => setLogSink(null) });
-  // The activation COUNT, not just the fact of one. M21 splices workspace
-  // folders in place on the strength of the API's promise that only index 0
-  // restarts the extension host, and a restart is otherwise almost invisible —
-  // terminals survive it (the pty host outlives us, which is what
+  // The activation COUNT, not just the fact of one. The Explorer sync splices
+  // workspace folders in place on the strength of the API's promise that only
+  // index 0 restarts the extension host, and a restart is otherwise almost
+  // invisible — terminals survive it (the pty host outlives us, which is what
   // `registry.reassociate()` exists to pick up), so the only symptom is Canopy
   // quietly rebuilding. If this number climbs when you switch projects, a
   // splice restarted the host and the anchor invariant has a hole in it.
@@ -279,7 +279,7 @@ export async function activate(
   const onForestChanged = new vscode.EventEmitter<void>();
   context.subscriptions.push(onForestChanged);
 
-  // VIEW SUSPENSION (M13). A workspace switch closes a batch of tabs,
+  // VIEW SUSPENSION. A workspace switch closes a batch of tabs,
   // disposes a terminal per parked session and writes a record for each one —
   // and every one of those fires a state change that would rebuild the forest
   // and repaint the sidebar. Repainting a dozen intermediate trees is the flicker
@@ -319,7 +319,7 @@ export async function activate(
     records: {},
   });
 
-  // M10. The generation-chain index for the CURRENT forest: which session ids
+  // The generation-chain index for the CURRENT forest: which session ids
   // are worn by one logical conversation, and which member is its tip. Rebuilt
   // every tick alongside the forest; seeded empty for the same reason.
   let chainIndex: ChainIndex = emptyChainIndex();
@@ -345,7 +345,7 @@ export async function activate(
 
   // ------------------------------------------------------ pending launches
   //
-  // M18. A session we just started exists in three places over the next few
+  // A session we just started exists in three places over the next few
   // seconds, and for a moment it is in none of them: the roster
   // (`claude agents --json`, polled every 3 s), the archive index (its
   // transcript, which claude writes lazily and only once there is something to
@@ -424,7 +424,7 @@ export async function activate(
     return meta;
   };
 
-  // M1.5 archive. `claude agents --json` is live-only, so without this a closed
+  // The archive. `claude agents --json` is live-only, so without this a closed
   // session leaves the tree entirely. Re-scanned at most every
   // ARCHIVE_RESCAN_MIN_MS on the rebuild path (the archive changes slowly and a
   // cold scan of 217 transcripts measured 0.20 s); an explicit refresh or a
@@ -436,9 +436,9 @@ export async function activate(
   let prevLiveIds: ReadonlySet<string> = new Set<string>();
 
   /**
-   * M22.3: the config dirs and projects roots of every account profile that
-   * has its own directory. Computed fresh at each use — the account roster
-   * changes at runtime and a stale list is exactly a disappearing session.
+   * The config dirs and projects roots of every account profile that has its
+   * own directory. Computed fresh at each use — the account roster changes at
+   * runtime and a stale list is exactly a disappearing session.
    * Only claude-provider profiles: they are the only ones whose sessions and
    * transcripts this extension launches and indexes.
    */
@@ -462,7 +462,7 @@ export async function activate(
 
   /**
    * Throttled scan of ~/.claude/projects. Runs on schedule even when every
-   * archived ROW is currently gated off: chain detection (M10) reads the
+   * archived ROW is currently gated off: chain detection reads the
    * index — a live session that continues an older transcript is only
    * recognisable because the older head was scanned. Cached by (mtime, size);
    * the steady-state cost is one readdir per project dir plus one stat per
@@ -486,7 +486,7 @@ export async function activate(
   };
 
   /**
-   * Tree membership is editorial (M14): any session with a non-deleted record
+   * Tree membership is editorial: any session with a non-deleted record
    * keeps its row when its terminal closes — it flips to an INACTIVE
    * (archived, resumable) row instead of leaving the tree, and only an
    * explicit Delete removes it. `showArchived` widens the gate to sessions
@@ -511,7 +511,7 @@ export async function activate(
     });
   };
 
-  // M18. What the transcript TAIL says about a session: when the user last
+  // What the transcript TAIL says about a session: when the user last
   // prompted it (the age column's real meaning) and how many tokens the last
   // turn ran with. Cached on the (mtime, size) the archive indexer already
   // stat'ed, so a transcript nobody has written to is never re-read.
@@ -527,7 +527,7 @@ export async function activate(
    * and reading a 96 kB tail off each of them on the first rebuild would block
    * the extension host for about a second to answer a question nobody asked
    * about somebody else's session. A row left out simply falls back to the
-   * transcript mtime, which is exactly what every row showed before M18.
+   * transcript mtime, which is exactly what every row showed in older builds.
    *
    * Paths and stat values come from the archive index rather than a fresh
    * `statSync` per session: that sweep has already run, and a second
@@ -556,7 +556,7 @@ export async function activate(
   };
 
   /**
-   * M24. CommandDeps.transcriptFacts — what the chat-history picker labels and
+   * CommandDeps.transcriptFacts — what the chat-history picker labels and
    * orders its rows with.
    *
    * Both halves come off work already done. `lastActiveAt` is the archive
@@ -606,12 +606,12 @@ export async function activate(
     return facts;
   };
 
-  // M11. The CLI daemon's dispatch roster: fork edges for native /fork
-  // children (whose transcripts carry no marker at all), resume continuations
-  // for daemon-dispatched re-keys. Cached by stat inside the reader.
+  // The CLI daemon's dispatch roster: fork edges for native /fork children
+  // (whose transcripts carry no marker at all), resume continuations for
+  // daemon-dispatched re-keys. Cached by stat inside the reader.
   //
-  // M25: there is not ONE roster. The daemon writes its roster inside
-  // `CLAUDE_CONFIG_DIR`, and M22 gave every account its own — so a /fork on a
+  // There is not ONE roster. The daemon writes its roster inside
+  // `CLAUDE_CONFIG_DIR`, and every account has its own — so a /fork on a
   // non-default account dispatched into a file this reader never opened, and
   // rendered as a flat root. The machine default plus every account config dir
   // are all read and merged. Re-evaluated per tick: accounts come and go.
@@ -627,7 +627,7 @@ export async function activate(
   const daemonReader = new DaemonRosterReader(daemonRosterPaths);
 
   /**
-   * Persist newly observed daemon fork edges (M11). The roster is ephemeral —
+   * Persist newly observed daemon fork edges. The roster is ephemeral —
    * the daemon rewrites it — so each edge is written into the editorial store
    * as `parentSource: 'daemon'` the first time it is seen. A record that
    * already carries an exact edge (`minted`, a user `reparent`, an earlier
@@ -649,7 +649,7 @@ export async function activate(
   };
 
   /**
-   * M25. Assigned once `commandDeps` exists (it is built far below, and the
+   * Assigned once `commandDeps` exists (it is built far below, and the
    * adopt flow needs all of it). Until then every tick simply skips the pass —
    * a fork job that arrives during activation is picked up on the next tick,
    * or by the click path, and neither loses anything.
@@ -662,7 +662,7 @@ export async function activate(
     // ONE records snapshot, handed to both calls — resolveAll must be awaited
     // before buildForest and both must observe the same object.
     const records = store.all();
-    // M18. Sessions this window launched that the roster has not caught up
+    // Sessions this window launched that the roster has not caught up
     // with, folded in as ordinary entries so everything downstream — chain
     // collapse, resolution, grouping, the views — treats them as the live
     // sessions they are. Merged HERE rather than in the poller so the raw
@@ -687,7 +687,7 @@ export async function activate(
     prevLiveIds = liveIds;
     ensureArchiveScan(liveIds);
 
-    // M11 daemon facts: fork edges are persisted (they land via the records
+    // Daemon facts: fork edges are persisted (they land via the records
     // snapshot on the NEXT rebuild, which the upsert itself triggers), resume
     // continuations feed the chain index below alongside the transcript
     // signal.
@@ -699,7 +699,7 @@ export async function activate(
       daemonChainFacts.push({ sessionId: childId, continuesId: parentId });
     }
 
-    // M10 generation chains. Facts come from the archive index (which covers
+    // Generation chains. Facts come from the archive index (which covers
     // EVERY transcript, live included — chainFacts, not current()), re-keys
     // from the persisted chains. The collapse then drops superseded
     // generations from every input and surfaces each chain's editorial
@@ -720,7 +720,7 @@ export async function activate(
     });
     const archived = collapsed.archived;
 
-    // M16: a project chat has no row anywhere in the tree. The filter sits
+    // A project chat has no row anywhere in the tree. The filter sits
     // HERE, after the collapse, so it reads the chain-collapsed records — a
     // chat that was `--resume`d onto a fresh generation inherits `chat` on its
     // tip (generations.INHERITED_RECORD_KEYS) and is still filtered out.
@@ -778,7 +778,7 @@ export async function activate(
     // already run (it has, above) or a superseded generation's stale key
     // would never match a live entry's collapsed id.
     const activityMtimes = archiveIndexer.transcriptMtimes();
-    // M18. Same keying and the same "must run after collapseChains" rule as
+    // Same keying and the same "must run after collapseChains" rule as
     // activityMtimes above, and for the same reason: a superseded generation's
     // id would never match a live entry's collapsed one.
     const tailStats = tailStatsFor(liveIds, collapsed.records);
@@ -818,7 +818,7 @@ export async function activate(
   let poller: RosterPoller | null = null;
   let treeController: TreeController | null = null;
   let webtreeController: WebtreeController | null = null;
-  /** M21. The project header inside the Explorer container. */
+  /** The project header inside the Explorer container. */
   let projectViewController: ProjectViewController | null = null;
   /** Repaints that header and re-evaluates its `when` key. Replaced once the
    *  view is registered; a no-op until then, because the active-workspace path
@@ -839,7 +839,7 @@ export async function activate(
     webtreeController?.refresh();
   };
 
-  // M20. Git worktree discovery, shared by both views and by the chip verb.
+  // Git worktree discovery, shared by both views and by the chip verb.
   //
   // Created here rather than inside a view because BOTH views group with it and
   // they must agree: two caches would probe on different schedules and could
@@ -976,7 +976,7 @@ export async function activate(
 
   // TAB-NAME RECONCILIATION. Every bind funnels through onDidBind: the launch
   // (already named from the same source, so this is a no-op), the window-reload
-  // reassociate below, the roster- and tmux-pid adoptions, and the M11 re-key
+  // reassociate below, the roster- and tmux-pid adoptions, and the re-key
   // rebind. Only a tab that DRIFTED does any work — one whose name still
   // matches its row is left alone, so a reload with ten live sessions renames
   // nothing and moves no focus.
@@ -1048,7 +1048,7 @@ export async function activate(
     }),
   );
 
-  // -------------------------------------------------- M12: notifications
+  // --------------------------------------------------------- notifications
   // The unseen model: a session that FINISHES a turn gets `doneAt` stamped;
   // looking at it stamps `seenAt`; `doneAt > seenAt` is the green dot. The
   // roster transition (busy → waiting/idle) is the poll-side detector, the
@@ -1094,8 +1094,9 @@ export async function activate(
     if (nowMs - (recentlyDoneAt.get(sessionId) ?? 0) < DONE_DEDUPE_MS) return;
     recentlyDoneAt.set(sessionId, nowMs);
     const stamp = new Date(nowMs).toISOString();
-    // Watching the session as it finishes IS seeing the finish — cmux
-    // auto-withdraws the banner for the focused surface for the same reason.
+    // Watching the session as it finishes IS seeing the finish — the same
+    // reason a chat app withdraws its notification for the conversation you
+    // already have open.
     const watched = isWatchedHere(sessionId);
     void store.upsert(sessionId, {
       doneAt: stamp,
@@ -1182,7 +1183,7 @@ export async function activate(
     }
   }
 
-  /** M19. The active-only filter is a two-position switch in the view title, and
+  /** The active-only filter is a two-position switch in the view title, and
    *  a contributed button has no state of its own: this mirrors the setting into
    *  the context key the two halves' `when` clauses read, so exactly one of them
    *  is ever on screen. Called at activation, after our own write, and on any
@@ -1201,7 +1202,7 @@ export async function activate(
   }
 
   /**
-   * M22. THE session selection, whichever view reported it.
+   * THE session selection, whichever view reported it.
    *
    * One store for both views, because a command cannot tell which one it was
    * invoked from and must not have to: only one of the two is ever on screen
@@ -1256,7 +1257,7 @@ export async function activate(
 
   // Looking at a session clears its dot: the terminal becoming ACTIVE in this
   // window is the strongest "the user is looking" signal the API offers.
-  // Except mid-switch — stowing focuses each terminal it moves (M13), and a
+  // Except mid-switch — stowing focuses each terminal it moves, and a
   // green dot must survive its session being tucked into the panel.
   context.subscriptions.push(
     registry.onDidChangeActive((sessionId) => {
@@ -1311,11 +1312,11 @@ export async function activate(
     // that writes the CSS (sanitizeBranchColor).
     branchColors: () =>
       cfg().get<unknown[]>(CONFIG_KEYS.branchColors, [])?.map(String) ?? [],
-    // M26. Read per render like every other setting here, so the layout flips
+    // Read per render like every other setting here, so the layout flips
     // on the next tick rather than on a window reload.
     groupSessionsByBranch: () =>
       boolCfg(CONFIG_KEYS.groupSessionsByBranch, false),
-    // M26. Dropping a project row onto another project row files it there;
+    // Dropping a project row onto another project row files it there;
     // onto the background (or a folder row) it goes back to the top level. The
     // store owns the cycle refusal — see StateStore.setProjectParent — and a
     // refused move is silent here on purpose: the gesture is cheap, repeatable
@@ -1438,7 +1439,7 @@ export async function activate(
         // rename API, so this is show(true) + renameWithArg and can fail.
         //
         // Over the CHAIN, like every other terminal verb here (see
-        // chainAliases): after an M11 re-key the terminal is still bound under
+        // chainAliases): after a re-key the terminal is still bound under
         // the generation id it was LAUNCHED with, not the id this row now
         // carries — so renaming only `sessionId` silently hit nothing and left
         // the tab on its old name (a `claude · 1a2b3c4d` default, usually)
@@ -1517,7 +1518,7 @@ export async function activate(
 
   const hookEventSink = (e: HookEvent): void => {
     if (e.sessionId) resolver.invalidate(e.sessionId);
-    // M10 re-key. The hook inherited LINEAGE_NODE_ID from a terminal WE
+    // Re-key. The hook inherited LINEAGE_NODE_ID from a terminal WE
     // stamped, and the CLI in that terminal is now running a different
     // session id: the conversation moved (plain --resume, /clear, compaction
     // — whichever, the CLI minted a new generation). Exact by construction —
@@ -1525,7 +1526,7 @@ export async function activate(
     // payload: appendChainMember fires the store's change event, which
     // rebuilds, which collapses the old id's row into the new tip.
     //
-    // M11 exception: `source: 'fork'` is a NEW BRANCH, not a re-key. Chaining
+    // Exception: `source: 'fork'` is a NEW BRANCH, not a re-key. Chaining
     // it would collapse the parent into its own fork — the parent edge comes
     // from the daemon roster (or the transcript marker) instead.
     if (
@@ -1536,7 +1537,7 @@ export async function activate(
     ) {
       void store.appendChainMember(e.nodeId, e.sessionId);
     }
-    // M12: Stop is the turn ending, right now — the poll transition would say
+    // Stop is the turn ending, right now — the poll transition would say
     // the same thing up to pollIntervalMs later. (`Notification` is claude
     // asking for the user, same urgency.)
     if (e.sessionId && (e.event === 'Stop' || e.event === 'Notification')) {
@@ -1616,9 +1617,9 @@ export async function activate(
     });
   };
 
-  // ------------------------------------------------- M13: project workspaces
+  // ----------------------------------------------------- project workspaces
 
-  // -------------------------------------- M21: the Explorer follows the project
+  // --------------------------------------- the Explorer follows the project
   //
   // The built-in Explorer's folder tree IS `workspace.workspaceFolders` — there
   // is no API to reroot it — so making it follow the active project means
@@ -1709,7 +1710,7 @@ export async function activate(
     explorerAnchorPath,
   );
 
-  // ------------------------------------------------------- 6b. accounts (M22)
+  // ---------------------------------------------------------- 6b. accounts
   //
   // The one place the accounts feature is assembled: the store (the roster and
   // the pins), the limits reader (the usage numbers, and the only part of this
@@ -1744,8 +1745,8 @@ export async function activate(
   const usageCache = new AccountUsageCache(limits);
   context.subscriptions.push(usageCache);
 
-  /** M22.2: where the SHARED configuration lives — the default config dir for
-   *  the symlinked items, the home-root `.claude.json` for trust seeding. */
+  /** Where the SHARED configuration lives — the default config dir for the
+   *  symlinked items, the home-root `.claude.json` for trust seeding. */
   const profileConfigSources = (): ProfileConfigSources => {
     const home = profileHome();
     return {
@@ -1754,10 +1755,10 @@ export async function activate(
     };
   };
 
-  /** M22.2 retrofit: profiles created before the shared-config wiring existed
-   *  (or on another machine) get their symlinks and trust seeding here.
-   *  Idempotent and additive — a profile that already has everything is a
-   *  no-op, one that diverged on purpose is left diverged. */
+  /** Retrofit: profiles created before the shared-config wiring existed (or on
+   *  another machine) get their symlinks and trust seeding here. Idempotent
+   *  and additive — a profile that already has everything is a no-op, one that
+   *  diverged on purpose is left diverged. */
   const wireProfileConfigs = async (): Promise<void> => {
     try {
       const sources = profileConfigSources();
@@ -1791,7 +1792,7 @@ export async function activate(
           hasCodexAuth = false;
         }
       }
-      // Tombstones (M22.1): a deleted seed stays deleted. `accountIds()` is
+      // Tombstones: a deleted seed stays deleted. `accountIds()` is
       // every id including tombstoned ones; live ids are subtracted so only
       // the graves remain.
       const live = store.getAccounts();
@@ -1865,7 +1866,7 @@ export async function activate(
         const dir = profileConfigDirFor(id, profileHome());
         if (dir === '') return undefined;
         await vscode.workspace.fs.createDirectory(vscode.Uri.file(dir));
-        // M22.2: a new profile isolates the LOGIN, not the person. Wire the
+        // A new profile isolates the LOGIN, not the person. Wire the
         // shared settings/skills/trust in before the first session ever runs,
         // so account number two does not greet the user like a fresh install.
         await ensureProfileConfig(dir, profileConfigSources());
@@ -1902,7 +1903,7 @@ export async function activate(
 
   const workspaceManager = new WorkspaceManager({
     getProject: (id) => store.getProject(id),
-    // M22. A restore is a resume: it re-injects the account the conversation
+    // A restore is a resume: it re-injects the account the conversation
     // was pinned to, never a freshly routed one.
     accountLaunchFor,
     getWorkspace: (id) => store.getWorkspace(id),
@@ -1996,7 +1997,7 @@ export async function activate(
     // With sessions in the panel there are no session tabs to park or restore,
     // so a switch leaves terminals alone entirely and snapshots files only.
     terminalLocation,
-    // M21. Swap the Explorer's folder tree to the target project as part of
+    // Swap the Explorer's folder tree to the target project as part of
     // the switch. Gated on the setting, and a no-op in any window that was
     // never converted into a Canopy workspace — the switch itself does not
     // care either way (see WorkspaceManagerDeps.syncExplorer).
@@ -2168,7 +2169,7 @@ export async function activate(
   }
 
   const commandDeps: AccountCommandDeps = {
-    // M22. The whole accounts surface, as ONE optional member: the verbs guard
+    // The whole accounts surface, as ONE optional member: the verbs guard
     // on its presence, so a build without it behaves exactly as this extension
     // did before accounts existed.
     accounts: accountDeps,
@@ -2180,13 +2181,13 @@ export async function activate(
     repairResumeLeaf: (sessionId) =>
       repairResumeLeaf(sessionId, { extraProjectsDirs: profileProjectsDirs() }),
     transcriptFacts,
-    // M24. The roster's own answer, one tick old at worst. `prevLiveIds` is
+    // The roster's own answer, one tick old at worst. `prevLiveIds` is
     // assigned the CURRENT set at the end of every rebuild — the name is about
     // where it is read from inside the rebuild, not about how stale it is —
     // and it is the only live-id set that outlives one.
     isLive: (sessionId) => prevLiveIds.has(sessionId),
     tipOf: (sessionId) => chainIndex.tipOf(sessionId),
-    // M25. The background job holding this id, if one does — the shape a
+    // The background job holding this id, if one does — the shape a
     // native `/fork` dispatches. Stat-cached inside the reader, so asking on
     // every focus costs nothing.
     backgroundJob: (sessionId) => daemonReader.read().jobs.get(sessionId),
@@ -2292,7 +2293,7 @@ export async function activate(
       // so every other launch is untouched.
       let launchOpts = opts;
       let parkedAlias: string | undefined;
-      // M22 SAFETY NET. Every verb resolves the account itself — it has to,
+      // SAFETY NET. Every verb resolves the account itself — it has to,
       // since only the verb knows whether this is a new conversation (route)
       // or an existing one (pin). This backfills the ONE case a verb can get
       // wrong: a launch for a session that is already pinned, arriving with no
@@ -2418,7 +2419,7 @@ export async function activate(
 
     allProjects: () => store.getProjects(),
     getProject: (id) => store.getProject(id),
-    // M20. Answered by the view that DREW the chips, not by a fresh grouping:
+    // Answered by the view that DREW the chips, not by a fresh grouping:
     // the verb's whole safety argument is that it can only start a session in a
     // directory the user was looking at, and recomputing here would open a
     // window where the answer differs from the row that was clicked. [] when
@@ -2451,7 +2452,7 @@ export async function activate(
       await store.upsertProject(projectId, { branchesCollapsed: collapsed });
     },
     upsertProject: (id, patch) => store.upsertProject(id, patch),
-    // M26. Its own store method rather than an upsert with a `parentId` in it:
+    // Its own store method rather than an upsert with a `parentId` in it:
     // the cycle check has to run against the whole project set at write time.
     setProjectParent: (id, parentId) => store.setProjectParent(id, parentId),
     deleteProject: (id) => store.deleteProject(id),
@@ -2461,16 +2462,16 @@ export async function activate(
     staleAfterHours: () =>
       numCfg(CONFIG_KEYS.staleAfterHours, DEFAULT_STALE_AFTER_HOURS),
 
-    // M12 notifications
+    // Notifications
     markSeen: (sessionId) => markSeen(sessionId),
     notificationsEnabled: () => notificationsOn(),
 
-    // M22. The live selection, for the verbs a row's context menu cannot hand
+    // The live selection, for the verbs a row's context menu cannot hand
     // it (see CommandDeps.selectedSessions). Read through a closure rather than
     // captured, so it is whatever the view last reported and never a snapshot.
     selectedSessions: () => [...selectedSessionIds],
 
-    // M19 active-only filter. The write is enough to repaint: the config
+    // Active-only filter. The write is enough to repaint: the config
     // listener at the bottom of activate() rebuilds the forest on any
     // `lineage.*` change, and buildForest reads the flag per build.
     setOnlyActiveSessions: async (on) => {
@@ -2492,11 +2493,11 @@ export async function activate(
       await syncOnlyActiveContext();
     },
 
-    // M13 workspaces
+    // Project workspaces
     switchWorkspace: (projectId) => workspaceManager.switchTo(projectId),
     activeWorkspace: () => workspaceManager.activeProjectId(),
 
-    // M21 the Explorer follows the project. Both verbs reload the window —
+    // The Explorer follows the project. Both verbs reload the window —
     // converting a plain folder window into a multi-root workspace cannot be
     // done in place — and both are confirmed modally by commands.ts first.
     explorerAnchored: () => explorerSync.anchored(),
@@ -2553,7 +2554,7 @@ export async function activate(
 
   context.subscriptions.push(registerCommands(commandDeps));
 
-  // M25. `/fork` ≡ Fork Session. A native `/fork` dispatches a background job
+  // `/fork` ≡ Fork Session. A native `/fork` dispatches a background job
   // instead of opening a tab, so the branch the user just asked for arrives
   // unowned and unopenable. The moment the roster shows one, the window that
   // owns its PARENT adopts it: the job is stopped and the same session id
@@ -2605,13 +2606,13 @@ export async function activate(
   const ROSTER_REASSOCIATE_MAX_ATTEMPTS = 10;
 
   /**
-   * M11. The claude process inside one of OUR terminals is now reporting a
+   * The claude process inside one of OUR terminals is now reporting a
    * DIFFERENT session id at the same pid: a /fork that switched the terminal
    * over, or a plain resume // clear // compaction that re-minted. Re-bind the
    * terminal so every verb keeps finding it, and classify the move — a FORK
    * (daemon dispatch record, or a transcript marker) is a new branch and must
-   * NOT be chained; anything else is the M10 re-key, now detected without
-   * hooks.
+   * NOT be chained; anything else is a re-key, which this path detects without
+   * needing the hooks installed.
    */
   const detectPidRekeys = (entries: readonly RosterEntry[]): void => {
     try {
@@ -2738,7 +2739,7 @@ export async function activate(
       numCfg(CONFIG_KEYS.busyStaleMinutes, DEFAULT_BUSY_STALE_MINUTES) * 60_000,
   });
   const fetchFiltered = async (): Promise<RosterResult> => {
-    // M22.3: the agents registry is per config dir, so the roster asks every
+    // The agents registry is per config dir, so the roster asks every
     // account profile's dir and merges — otherwise a session on a custom
     // account is invisible to the poll and vanishes from the tree.
     const result = await fetchRosterMulti({
@@ -2790,7 +2791,7 @@ export async function activate(
       ) {
         pokeNow();
       }
-      // The status bar's visibility is config-gated (M13).
+      // The status bar's visibility is config-gated.
       if (
         e.affectsConfiguration(
           `${CONFIG_SECTION}.${CONFIG_KEYS.workspacesEnabled}`,
@@ -2798,7 +2799,7 @@ export async function activate(
       ) {
         updateWorkspaceStatusBar();
       }
-      // M22. The accounts view is contributed under a `config.` when-clause, so
+      // The accounts view is contributed under a `config.` when-clause, so
       // turning the setting on reveals a view whose provider does not exist yet
       // — the workbench then renders "no data provider registered" until a
       // reload. Registering it here on the way up closes that gap. There is no

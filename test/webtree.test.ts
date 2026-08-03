@@ -1,11 +1,10 @@
-// test/webtree.test.ts — first coverage of src/webtree.ts (P9's general-pass
-// report: 614 lines, zero tests, and three of the batch's bugs (beginRename's
-// lie, the leaked view subscriptions, the project/folder collapsed-key leak)
-// live entirely in here).
+// test/webtree.test.ts — src/webtree.ts, the extension half of the webview
+// sidebar: the message protocol the client speaks to it, the row-key parsing
+// that turns a click into a session id, and the subscription bookkeeping.
 //
 // `LineageWebtreeProvider` is constructed directly — never through
 // registerWebtree() or resolveWebviewView(), and html() is never called: the
-// frozen mock's Uri has no joinPath (test/mocks/vscode.ts), so any path that
+// mock's Uri has no joinPath (test/mocks/vscode.ts), so any path that
 // reaches vscode.Uri.joinPath throws. resolveWebviewView() calls html()
 // unconditionally, so tests instead reach into the provider's private state
 // with a cast — the same technique test/terminals.test.ts uses to seed a
@@ -224,7 +223,7 @@ function internals(p: LineageWebtreeProvider): Internals {
 
 describe('buildCsp', () => {
   it('nonces both style-src and script-src', () => {
-    // REGRESSION (P9 #1). style-src carried no nonce, so Chromium silently
+    // REGRESSION. style-src carried no nonce, so Chromium silently
     // dropped the <style nonce> block defining every --lineage-* colour.
     const csp = buildCsp('ABC123', 'vscode-webview://x');
     expect(csp).toContain("style-src 'nonce-ABC123' vscode-webview://x");
@@ -257,7 +256,7 @@ describe('sessionIdFromKey', () => {
 });
 
 // ------------------------------------------------------------ sessionIdsFromKeys
-// M22 — what the page reports as selected, turned into ids a verb can act on.
+// What the page reports as selected, turned into ids a verb can act on.
 
 describe('sessionIdsFromKeys', () => {
   it('keeps the session keys, in the order the page sent them', () => {
@@ -471,7 +470,7 @@ describe('LineageWebtreeProvider row actions (via the "action" message)', () => 
     ]);
   });
 
-  // M18 — the `+` on a project row. Same door as the chat, same arg shape, so
+  // The `+` on a project row. Same door as the chat, same arg shape, so
   // the handler cannot tell a row button from a context-menu click.
   it('routes the new-session action to newSessionInProject', async () => {
     const { calls, priv } = setup();
@@ -544,7 +543,7 @@ describe('LineageWebtreeProvider.beginRename', () => {
     expect(await provider.beginRename(GHOST)).toBe(false);
   });
 
-  // REGRESSION (P9 #4). beginRename used to return the postMessage delivery
+  // REGRESSION. beginRename used to return the postMessage delivery
   // boolean, so commands.ts's quick-input fallback ran only when the message
   // failed to REACH the client — never when the client itself refused the
   // row. The row check above is what makes this test meaningful: without it,
@@ -585,7 +584,7 @@ describe('LineageWebtreeProvider.focusView', () => {
     return { provider, priv: internals(provider) };
   }
 
-  // REGRESSION (M1/M2). Nothing revealed the view before asking it for an
+  // REGRESSION. Nothing revealed the view before asking it for an
   // editable row, so "Canopy: New Session" from the palette with the sidebar
   // collapsed always failed `beginRename`'s visibility check and landed in the
   // quick-input popup — the one thing the inline editor exists to replace.
@@ -657,7 +656,7 @@ describe('LineageWebtreeProvider.focusView', () => {
 // ------------------------------------------------------------------ pruneCollapsed
 
 describe('LineageWebtreeProvider.refresh() / pruneCollapsed', () => {
-  // REGRESSION (P9 #9). Only `session:` keys were ever pruned, so a deleted
+  // REGRESSION. Only `session:` keys were ever pruned, so a deleted
   // project's or folder's collapsed key survived forever — until the
   // CACHE_SOFT_LIMIT in the `toggle` handler tripped and wiped the whole set,
   // which read as every row on screen abruptly re-expanding at once.
@@ -758,7 +757,7 @@ describe('LineageWebtreeProvider onDrop (via the "drop" message)', () => {
     expect(calls.assignToProject).toEqual([[ROOT, 'p1']]);
   });
 
-  // ------------------------------------------------------------ M26
+  // ------------------------------------------ filing a project under another
 
   it('files a dragged project under the project it was dropped on', async () => {
     const { deps, calls } = makeDeps(forestWithChild(), {
@@ -827,7 +826,7 @@ describe('LineageWebtreeProvider onDrop (via the "drop" message)', () => {
   });
 });
 
-// ------------------------------------------ M26: the branch row's own `+`
+// ----------------------------------------------- the branch row's own `+`
 
 describe('LineageWebtreeProvider: grouped branch rows', () => {
   const WORKTREES: Worktree[] = [
@@ -878,7 +877,7 @@ describe('LineageWebtreeProvider: grouped branch rows', () => {
   });
 });
 
-// ------------------------------------------------------- M20 branch chips
+// ------------------------------------------------------------ branch chips
 
 import {
   branchPalette,

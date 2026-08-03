@@ -1,4 +1,4 @@
-// src/state.ts — the editorial state layer (owner B, M1).
+// src/state.ts — the editorial state layer.
 //
 // This is OUR JSON in <globalStorageUri>/state.json: everything the roster
 // cannot know (per-session title/summary/closed/hidden/wrap state, the exact
@@ -13,19 +13,19 @@
 // with a RelativePattern base is the documented way to watch outside the
 // workspace) and can be merged record-by-record instead of clobbered.
 //
-// Imports allowed here: ./types, ./log, ./projects, ./accounts (both pure),
-// node:fs/promises, node:path, node:process. NEVER vscode — the watcher lives
-// in extension.ts and calls reloadFromDisk(); this module stays unit-testable
-// with no mock.
+// This module deliberately depends on nothing from vscode — only ./types,
+// ./log, ./projects, ./accounts (both pure) and node:fs/promises, node:path,
+// node:process. The watcher lives in extension.ts and calls reloadFromDisk(),
+// which is what keeps this module unit-testable with no mock.
 //
-// M22 adds two more top-level shapes and one new KIND of value. `accounts` is
-// an ordinary record map and merges like every other one. `accountSettings` is
-// the file's first SINGLETON — one object with one clock, merged newest-wins as
-// a whole rather than key by key, because its single field is a single choice
-// and two windows disagreeing about it should resolve to the later opinion
-// rather than to a blend. Nothing in either shape is a credential: an account
-// is a path plus a label, and the one secret-bearing field (`extraEnv`) is
-// validated by NAME and never by value, never echoed, never logged.
+// Two of the top-level shapes are about ACCOUNTS. `accounts` is an ordinary
+// record map and merges like every other one. `accountSettings` is the file's
+// one SINGLETON — one object with one clock, merged newest-wins as a whole
+// rather than key by key, because its single field is a single choice and two
+// windows disagreeing about it should resolve to the later opinion rather than
+// to a blend. Nothing in either shape is a credential: an account is a path
+// plus a label, and the one secret-bearing field (`extraEnv`) is validated by
+// NAME and never by value, never echoed, never logged.
 
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
@@ -71,7 +71,7 @@ const TMP_SUFFIX = '.tmp';
 const CORRUPT_PREFIX = `${STATE_FILE}.corrupt-`;
 /** Advisory cross-window mutex, held only for one read→merge→write pass.
  *  O_EXCL creation is the one atomic primitive every filesystem agrees on;
- *  this is the fs-level stand-in for the Python's `flock`. */
+ *  this is the fs-level stand-in for the Python prototype's `flock`. */
 const LOCK_FILE = `${STATE_FILE}.lock`;
 /** A lock older than this belonged to a window that died mid-write. */
 const LOCK_STALE_MS = 5_000;
@@ -99,13 +99,12 @@ const MAX_CORRUPT_BACKUPS = 5;
  *  still hand us something exotic). */
 const CANONICAL_MAX_DEPTH = 24;
 
-/** INFERRED lineage sources are NEVER persisted (SPEC §5.5) — what survives a
- *  round trip is exact knowledge only: edges we minted ourselves, edges the
- *  user drew by hand, and (M11) edges the CLI daemon's own dispatch log
- *  recorded for a native `/fork`. 'daemon' qualifies because the roster entry
- *  is a dispatch record, not an inference — and it MUST be persisted, because
- *  the daemon roster is ephemeral and the fork child's transcript carries no
- *  marker at all. */
+/** INFERRED lineage sources are NEVER persisted — what survives a round trip
+ *  is exact knowledge only: edges we minted ourselves, edges the user drew by
+ *  hand, and edges the CLI daemon's own dispatch log recorded for a native
+ *  `/fork`. 'daemon' qualifies because the roster entry is a dispatch record,
+ *  not an inference — and it MUST be persisted, because the daemon roster is
+ *  ephemeral and the fork child's transcript carries no marker at all. */
 const PERSISTED_PARENT_SOURCES: ReadonlySet<string> = new Set([
   'minted',
   'reparent',
@@ -246,11 +245,11 @@ function sanitizeRecord(key: string, value: unknown): EditorialRecord | null {
   ] as const) {
     if (rec[k] !== undefined && typeof rec[k] !== 'boolean') delete rec[k];
   }
-  // M14: the hide verb is retired — tree membership is editorial and DELETE is
-  // the one put-away verb (still restorable). A record hidden by an older
-  // version reads as deleted, which is the same "off the tree, on purpose"
-  // state it was in. Idempotent, so a stale window still writing `hidden`
-  // converges on the next read here.
+  // The hide verb is retired — tree membership is editorial and DELETE is the
+  // one put-away verb (still restorable). A record hidden by an older version
+  // reads as deleted, which is the same "off the tree, on purpose" state it was
+  // in. Idempotent, so a stale window still writing `hidden` converges on the
+  // next read here.
   if (rec.hidden === true) rec.deleted = true;
   delete rec.hidden;
   for (const k of [
@@ -272,9 +271,9 @@ function sanitizeRecord(key: string, value: unknown): EditorialRecord | null {
   if (rec.provider !== undefined && !isProviderId(rec.provider)) {
     delete rec.provider;
   }
-  // M22. The account pin. Validated against the strict slug shape rather than
-  // "is a string", because this id is interpolated into a filesystem path by
-  // the profile-directory helper and state.json is hand-editable.
+  // The account pin. Validated against the strict slug shape rather than "is a
+  // string", because this id is interpolated into a filesystem path by the
+  // profile-directory helper and state.json is hand-editable.
   if (rec.profileId !== undefined && !isAccountId(rec.profileId)) {
     delete rec.profileId;
   }
@@ -282,7 +281,7 @@ function sanitizeRecord(key: string, value: unknown): EditorialRecord | null {
 }
 
 /**
- * One account, sanitized (M22).
+ * One account, sanitized.
  *
  * Strict about the KEY for a reason the other sanitizers do not have: an
  * account id names a directory under `~/.lineage/profiles/`, so a hand-edited
@@ -353,9 +352,9 @@ function sanitizeAccount(key: string, value: unknown): AccountProfile | null {
   return acc as unknown as AccountProfile;
 }
 
-/** The singleton account settings (M22). Unknown keys survive, the one field
- *  we understand is validated, and a blob that is not an object at all becomes
- *  the empty record rather than being carried as junk. */
+/** The singleton account settings. Unknown keys survive, the one field we
+ *  understand is validated, and a blob that is not an object at all becomes the
+ *  empty record rather than being carried as junk. */
 function sanitizeAccountSettings(value: unknown): AccountSettings {
   if (!isPlainObject(value)) return {};
   const out: Record<string, unknown> = { ...value };
@@ -432,7 +431,7 @@ function sanitizeProject(key: string, value: unknown): ProjectRecord | null {
   if (proj.hidden !== undefined && typeof proj.hidden !== 'boolean') {
     delete proj.hidden;
   }
-  // M26. The subproject pointer. Absent is the normal state and the only thing
+  // The subproject pointer. Absent is the normal state, and the only thing
   // stored here is a non-empty id that is not this project's own — everything
   // else about it (does it exist, does it close a loop, is the chain too deep)
   // is decided at RENDER time by projects.buildProjectTree, which has the whole
@@ -444,9 +443,8 @@ function sanitizeProject(key: string, value: unknown): ProjectRecord | null {
     if (id === '' || id === key) delete proj.parentId;
     else proj.parentId = id;
   }
-  // M22. A routing override that does not parse is no override at all — the
-  // project falls back to the global default, which is what it did before it
-  // had one.
+  // A routing override that does not parse is no override at all — the project
+  // falls back to the global default, which is what it did before it had one.
   if (proj.routing !== undefined && !isRoutingChoice(proj.routing)) {
     delete proj.routing;
   }
@@ -486,10 +484,10 @@ function sanitizeWindow(key: string, value: unknown): WindowRecord | null {
   return win as unknown as WindowRecord;
 }
 
-/** A generation chain (M10). The key is the chain root id; members are
- *  deduped session ids with the root guaranteed present and first-or-earlier.
- *  A chain that sanitizes down to fewer than two members is dropped — it
- *  says nothing a plain session row does not. */
+/** A generation chain. The key is the chain root id; members are deduped
+ *  session ids with the root guaranteed present and first-or-earlier. A chain
+ *  that sanitizes down to fewer than two members is dropped — it says nothing
+ *  a plain session row does not. */
 function sanitizeChain(key: string, value: unknown): ChainRecord | null {
   if (!isSessionId(key)) return null;
   if (!isPlainObject(value)) return null;
@@ -514,8 +512,8 @@ function sanitizeChain(key: string, value: unknown): ChainRecord | null {
   };
 }
 
-/** A workspace snapshot (M13). The map key is the project id; a snapshot with
- *  no usable tab list still round-trips (an empty layout is a valid layout —
+/** A workspace snapshot. The map key is the project id; a snapshot with no
+ *  usable tab list still round-trips (an empty layout is a valid layout —
  *  "close everything" is rememberable). */
 function sanitizeWorkspace(key: string, value: unknown): WorkspaceSnapshot | null {
   if (!isNonEmptyString(key)) return null;
@@ -584,10 +582,10 @@ function sanitizeHookState(value: unknown): HookInstallState | undefined {
  *
  * Only editorial fields are carried across. Legacy `parent` edges are
  * deliberately NOT imported: in the older format they could have come from
- * lineage inference, and SPEC §5.5 forbids persisting an inferred edge —
- * freezing one into `parentSource: 'minted'` would make a guess permanent. The
- * legacy `nodes` key itself is left in place (unknown top-level keys are
- * preserved), so nothing is destroyed by the fold.
+ * lineage inference, and an inferred edge is never persisted (see
+ * PERSISTED_PARENT_SOURCES) — freezing one into `parentSource: 'minted'` would
+ * make a guess permanent. The legacy `nodes` key itself is left in place
+ * (unknown top-level keys are preserved), so nothing is destroyed by the fold.
  */
 function migrateV0ToV1(src: Record<string, unknown>): Record<string, unknown> {
   if (isPlainObject(src.records)) return src; // already our shape
@@ -616,7 +614,7 @@ function migrateV0ToV1(src: Record<string, unknown>): Record<string, unknown> {
 }
 
 /**
- * Sanitize + version-stamp an arbitrary parsed blob (SPEC §4-B).
+ * Sanitize + version-stamp an arbitrary parsed blob.
  *
  * Forward compatibility is the point of the odd-looking rules: unknown
  * TOP-LEVEL keys and unknown per-record/per-window fields are preserved
@@ -706,8 +704,8 @@ export function migrateState(raw: unknown): LineageState {
   }
   out.hiddenFolders = hiddenFolders;
 
-  // v3 (M10). Purely additive, exactly like v1 -> v2: an older file simply
-  // yields the empty map.
+  // v3 added the generation chains. Purely additive, exactly like v1 -> v2: an
+  // older file simply yields the empty map.
   const chains: Record<string, ChainRecord> = {};
   if (isPlainObject(working.chains)) {
     for (const [key, value] of Object.entries(working.chains)) {
@@ -718,7 +716,7 @@ export function migrateState(raw: unknown): LineageState {
   }
   out.chains = chains;
 
-  // v4 (M13). Purely additive again.
+  // v4 added the workspace snapshots. Purely additive again.
   const workspaces: Record<string, WorkspaceSnapshot> = {};
   if (isPlainObject(working.workspaces)) {
     for (const [key, value] of Object.entries(working.workspaces)) {
@@ -729,9 +727,10 @@ export function migrateState(raw: unknown): LineageState {
   }
   out.workspaces = workspaces;
 
-  // v5 (M22). Additive again: a v4 file yields an empty account roster and an
-  // empty settings record, which is exactly the state of a machine that has
-  // never opened the accounts view — one implicit default login, no rows.
+  // v5 added the account roster and its settings record. Additive again: a v4
+  // file yields an empty roster and empty settings, which is exactly the state
+  // of a machine that has never opened the accounts view — one implicit default
+  // login, no rows.
   const accounts: Record<string, AccountProfile> = {};
   const accountCutoff = Date.now() - ACCOUNT_TOMBSTONE_TTL_MS;
   if (isPlainObject(working.accounts)) {
@@ -869,13 +868,13 @@ export function mergeStates(
     (f) => f.hiddenAt ?? '',
   );
 
-  // Chains (M10) are append-mostly member SETS, so newest-wins would drop a
-  // member the other window observed: the merge is a member UNION, ordered by
-  // the newer record first (its view of the order is the fresher one), with
-  // the older record's stragglers appended.
+  // Chains are append-mostly member SETS, so newest-wins would drop a member
+  // the other window observed: the merge is a member UNION, ordered by the
+  // newer record first (its view of the order is the fresher one), with the
+  // older record's stragglers appended.
   out.chains = mergeChainMaps(disk.chains, mem.chains);
 
-  // A workspace snapshot (M13) is one VALUE — the layout as last saved — so
+  // A workspace snapshot is one VALUE — the layout as last saved — so
   // newest-wins is the whole story.
   out.workspaces = newerWins(
     disk.workspaces,
@@ -883,7 +882,7 @@ export function mergeStates(
     (w) => w.updatedAt ?? '',
   );
 
-  // Accounts (M22) are ordinary records: one row per account, each with its own
+  // Accounts are ordinary records: one row per account, each with its own
   // clock, so the same newest-wins rule projects use is the whole story. It is
   // also what makes reordering safe across windows — a move writes several
   // records, and each lands or loses on its own merit rather than the whole
@@ -1028,7 +1027,7 @@ export class StateStore implements DisposableLike {
   }
 
   /**
-   * Re-read from disk. Wired by the INTEGRATOR to the FileSystemWatcher's
+   * Re-read from disk. extension.ts wires this to the FileSystemWatcher's
    * onDidChange/onDidCreate/onDidDelete. Calls inside the debounce window
    * collapse into one read (a single rename produces a burst of events, and
    * every window sees its own writes too). Fires onDidChange only when the
@@ -1138,10 +1137,11 @@ export class StateStore implements DisposableLike {
   // ----------------------------------------------------------------- mutators
 
   /**
-   * Merge a patch into one record (mirrors Python `upsert_node`): `undefined`
-   * values never clobber an existing field, an explicit `null` DOES write —
-   * that is how `closed`, `parentId` and `boundWindowId` get cleared.
-   * `id`/`createdAt`/`updatedAt` in the patch are ignored; the store owns them.
+   * Merge a patch into one record (mirrors the Python prototype's
+   * `upsert_node`): `undefined` values never clobber an existing field, an
+   * explicit `null` DOES write — that is how `closed`, `parentId` and
+   * `boundWindowId` get cleared. `id`/`createdAt`/`updatedAt` in the patch are
+   * ignored; the store owns them.
    */
   upsert(id: string, patch: Partial<EditorialRecord>): Promise<void> {
     if (!isSessionId(id)) {
@@ -1155,7 +1155,7 @@ export class StateStore implements DisposableLike {
       (typeof copy.parentSource !== 'string' ||
         !PERSISTED_PARENT_SOURCES.has(copy.parentSource))
     ) {
-      // SPEC §5.5: inferred sources are recomputed every tick, never stored.
+      // Inferred sources are recomputed every tick, never stored.
       log('state: dropping non-persistable parentSource', copy.parentSource);
       delete copy.parentSource;
     }
@@ -1193,7 +1193,7 @@ export class StateStore implements DisposableLike {
 
   // ---------------------------------------------------------------- chains
 
-  /** Every persisted generation chain (M10). Copies, name irrelevant order. */
+  /** Every persisted generation chain. Copies, in no meaningful order. */
   getChains(): ChainRecord[] {
     return Object.values(this.memory.chains ?? {}).map((c) => ({
       ...c,
@@ -1203,12 +1203,12 @@ export class StateStore implements DisposableLike {
 
   /**
    * Record that `newId` is a NEW GENERATION of the conversation `anchorId`
-   * belongs to (M10) — the re-key. `anchorId` may be any member of an
-   * existing chain (typically the LINEAGE_NODE_ID a hook event inherited);
-   * when it belongs to none, a fresh chain rooted at it is created. If the
-   * two ids turn out to already sit in different chains, the chains are
-   * merged into the anchor's — both were observations of the same
-   * conversation, and losing either's members would orphan rows.
+   * belongs to — the re-key. `anchorId` may be any member of an existing chain
+   * (typically the LINEAGE_NODE_ID a hook event inherited); when it belongs to
+   * none, a fresh chain rooted at it is created. If the two ids turn out to
+   * already sit in different chains, the chains are merged into the anchor's —
+   * both were observations of the same conversation, and losing either's
+   * members would orphan rows.
    */
   appendChainMember(anchorId: string, newId: string): Promise<void> {
     if (!isSessionId(anchorId) || !isSessionId(newId) || anchorId === newId) {
@@ -1348,7 +1348,7 @@ export class StateStore implements DisposableLike {
   }
 
   /**
-   * M26. File a project under another one, or at the top level (`null`).
+   * File a project under another one, or at the top level (`null`).
    *
    * Its own method rather than `upsertProject({ parentId })` for the reason
    * `setProjectRouting` is not one either: the write has a RULE attached that
@@ -1459,7 +1459,7 @@ export class StateStore implements DisposableLike {
 
   // ------------------------------------------------------------- workspaces
 
-  /** The saved layout for one project (M13), or undefined. */
+  /** The saved layout for one project, or undefined. */
   getWorkspace(projectId: string): WorkspaceSnapshot | undefined {
     const ws = this.memory.workspaces?.[projectId];
     return ws ? { ...ws, tabs: ws.tabs.map((t) => ({ ...t })) } : undefined;
@@ -1490,8 +1490,8 @@ export class StateStore implements DisposableLike {
   }
 
   // ---------------------------------------------------------------- accounts
-  // M22. The account roster, its one settings record, and the two writes that
-  // attach a routing choice to a project and a PIN to a session.
+  // The account roster, its one settings record, and the two writes that attach
+  // a routing choice to a project and a PIN to a session.
 
   /** Every live account, in the user's own arrangement (accounts.sortProfiles
    *  — the same order the view draws and the auto-picker breaks ties on).
@@ -1525,10 +1525,6 @@ export class StateStore implements DisposableLike {
     return Object.keys(this.memory.accounts ?? {});
   }
 
-  getAccountSettings(): AccountSettings {
-    return { ...(this.memory.accountSettings ?? {}) };
-  }
-
   /** The machine-wide default routing, or undefined for "never set" — which
    *  every consumer must read as `{ kind: 'auto' }` rather than as an error. */
   getDefaultRouting(): RoutingChoice | undefined {
@@ -1542,10 +1538,10 @@ export class StateStore implements DisposableLike {
    * The session's own record first, then — if it carries no pin — the earliest
    * pin held by any member of its generation chain. That second step is the
    * whole reason this lives in the store rather than at the call site: a plain
-   * `--resume` can mint a fresh session id (M10), and the new generation's
-   * record is brand new and empty. Reading only its own field would launch
-   * generation two of a conversation on a different account from generation
-   * one, which is precisely the failure `profileId` exists to prevent.
+   * `--resume` can mint a fresh session id, and the new generation's record is
+   * brand new and empty. Reading only its own field would launch generation two
+   * of a conversation on a different account from generation one, which is
+   * precisely the failure `profileId` exists to prevent.
    *
    * Members are ordered oldest → newest, so the answer is the account the
    * conversation STARTED on. Forks are not covered here (a fork is a different
@@ -1938,11 +1934,11 @@ export class StateStore implements DisposableLike {
     try {
       parsed = JSON.parse(raw) as unknown;
     } catch {
-      // The ERROR OBJECT is deliberately not logged. Since M22 this file can
-      // hold API keys (AccountProfile.extraEnv), and V8's SyntaxError message
-      // quotes the source either side of the fault — corruption landing near a
-      // key would put that key in the output channel. The backup path already
-      // never logs the text; this is the same rule for the message about it.
+      // The ERROR OBJECT is deliberately not logged. This file can hold API
+      // keys (AccountProfile.extraEnv), and V8's SyntaxError message quotes the
+      // source either side of the fault — corruption landing near a key would
+      // put that key in the output channel. The backup path already never logs
+      // the text; this is the same rule for the message about it.
       logError(
         'state: state.json is not valid JSON',
         new Error(this.filePath),

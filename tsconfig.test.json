@@ -1,11 +1,11 @@
 // tsconfig.test.json — the SAME strict settings as tsconfig.json, applied to
 // src/ AND test/.
 //
-// tsconfig.json is frozen (SPEC §8.1) and its `include` is `["src"]`, so the
-// blocker gate `npx tsc --noEmit` never looks at the ~2600 lines under test/.
-// A real strict-mode compile error lived there undetected. This config closes
-// that hole without touching the frozen file; `npm run typecheck` runs both.
-// It emits nothing — vitest transpiles the tests itself.
+// tsconfig.json's `include` is `["src"]`, because that is what the bundle is
+// built from — so `tsc --noEmit -p .` alone never looks at test/, and a real
+// strict-mode error can live there undetected. This config closes that hole;
+// `npm run typecheck` runs both. It emits nothing — vitest transpiles the tests
+// itself.
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {

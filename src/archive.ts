@@ -1,4 +1,4 @@
-// src/archive.ts — the history index (M1.5).
+// src/archive.ts — the history index.
 //
 // `claude agents --json` is a LIVE registry: it lists running sessions only.
 // Every session you close leaves the roster and, before this module existed,
@@ -8,8 +8,9 @@
 // session becomes an ARCHIVED row: still in the tree, still in its lineage,
 // and safe to `--resume` (nothing else holds the transcript open).
 //
-// Imports allowed here: ./types, ./log, node:fs, node:path, node:os.
-// NEVER import vscode.
+// It imports ./types, ./log and node builtins only, and never vscode: the
+// index is plain filesystem work, and staying free of the editor API is what
+// keeps it runnable under unit tests outside the extension host.
 //
 // Reads are BOUNDED and cached by (mtimeMs, size): a full cold scan of 217
 // transcripts measured 0.20 s (0.9 ms each), and a warm re-scan only re-reads
@@ -20,7 +21,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { log, logError } from './log';
+import { log } from './log';
 import {
   ARCHIVE_HEAD_LINES,
   ARCHIVE_HEAD_MAX_BYTES,
@@ -37,7 +38,7 @@ export interface ArchiveScanOptions {
   projectsDir?: string;
   /** Ids known to be live; they are indexed but flagged so callers can skip. */
   liveIds?: ReadonlySet<string>;
-  /** M22.3. Additional projects roots to index — one per account profile with
+  /** Additional projects roots to index — one per account profile with
    *  its own config dir (`<configDir>/projects`), where that account's
    *  transcripts actually land. Scanned AFTER the primary root, so on the
    *  (theoretically impossible) duplicate id the default dir wins — the same
@@ -93,7 +94,7 @@ interface HeadFacts {
   firstTimestamp?: number;
   /** The FIRST line's `sessionId` value. In a fork or a plain file this is the
    *  file's own id; in a plain-`--resume` continuation it is the PREDECESSOR's
-   *  id, because the CLI copies the predecessor's lines verbatim (M10). */
+   *  id, because the CLI copies the predecessor's lines verbatim. */
   firstSessionId?: string;
   /** A forkedFrom marker was seen in the head window. Forks rewrite their
    *  copied head to their own id AND write this marker, so its absence is what
@@ -158,7 +159,7 @@ export function readHeadFacts(file: string, ownId?: string): HeadFacts {
     if (out.forkMarker !== true && isPlainObject(rec['forkedFrom'])) {
       out.forkMarker = true;
     }
-    // The early break needs one extra condition (M10): when the first line
+    // The early break needs one extra condition: when the first line
     // names a DIFFERENT session id, the fork-vs-continuation verdict hangs on
     // whether a forkedFrom marker appears anywhere in the window, so the scan
     // must run to the limit unless the marker has already been seen.
@@ -180,7 +181,7 @@ export function readHeadFacts(file: string, ownId?: string): HeadFacts {
   return out;
 }
 
-/** The M10 continuation verdict for one head. Exported for tests. */
+/** The continuation verdict for one head. Exported for tests. */
 export function continuationOf(
   ownId: string,
   facts: HeadFacts,
@@ -218,7 +219,7 @@ export class ArchiveIndexer implements DisposableLike {
   private cache = new Map<string, CacheEntry>();
   private last: ArchivedSession[] = [];
   private lastOk = false;
-  /** M10. sessionId → continuation verdict (predecessor id, or null for
+  /** sessionId → continuation verdict (predecessor id, or null for
    *  "verified: not a continuation"). A transcript's HEAD is immutable — the
    *  file is append-only — so this is computed at most once per id per window,
    *  which is what makes reading it affordable for LIVE transcripts too (whose
@@ -274,9 +275,9 @@ export class ArchiveIndexer implements DisposableLike {
       };
     }
 
-    // M22.3: (root, subdir) pairs across every readable root. The primary
-    // root's failure semantics above are untouched — it aborts the scan the
-    // way it always has — while an extra root only ever ADDS pairs.
+    // (root, subdir) pairs across every readable root. The primary root's
+    // failure semantics above are untouched — it aborts the scan the way it
+    // always has — while an extra root only ever ADDS pairs.
     const pairs: Array<{ root: string; sub: string }> = subdirs.map((sub) => ({
       root: dir,
       sub,
@@ -347,7 +348,7 @@ export class ArchiveIndexer implements DisposableLike {
         const facts = live ? {} : readHeadFacts(full, sessionId);
         if (!live) reread++;
 
-        // M10 continuation verdict. For a non-live file it falls out of the
+        // The continuation verdict. For a non-live file it falls out of the
         // read above; for a live file — whose facts read is skipped every
         // scan — it is worth ONE dedicated bounded head read, once per id,
         // because the head never changes after being written.
@@ -397,11 +398,11 @@ export class ArchiveIndexer implements DisposableLike {
   }
 
   /**
-   * M10. Chain-building facts for EVERY indexed transcript — live ones
-   * included, unlike current(), whose live rows are display-fact-less. This
-   * is the archive's contribution to buildChainIndex; mtime/bytes are the
-   * tip-selection keys, startedAt is P7's chain-root age source. All three
-   * come from the SAME sweep (scan(), above) that computes startedAt
+   * Chain-building facts for EVERY indexed transcript — live ones included,
+   * unlike current(), whose live rows are display-fact-less. This is the
+   * archive's contribution to buildChainIndex; mtime/bytes are the
+   * tip-selection keys, and startedAt is where a chain's root age comes from.
+   * All three come from the SAME sweep (scan(), above) that computes startedAt
    * unconditionally for every transcript, so coverage does not depend on
    * `lineage.showArchived` — buildChainIndex only ever sees the facts it is
    * handed, and a future caller that filters this list before passing it in
@@ -452,19 +453,19 @@ export function archivedOnly(
 }
 
 /**
- * Tree membership is editorial (M14): every session with a non-deleted
- * editorial record keeps its row when its terminal closes — the row goes
- * INACTIVE (archived, resumable), it does not leave the tree. Only an explicit
- * Delete forgets it. A record is exactly the evidence that the session was
- * ever the user's: launched here, titled, stamped by a finished turn, parked
- * by a workspace switch — foreign history on disk has no record and stays
- * behind the `showArchived` gate.
+ * Tree membership is editorial: every session with a non-deleted editorial
+ * record keeps its row when its terminal closes — the row goes INACTIVE
+ * (archived, resumable), it does not leave the tree. Only an explicit Delete
+ * forgets it. A record is exactly the evidence that the session was ever the
+ * user's: launched here, titled, stamped by a finished turn, parked by a
+ * workspace switch — foreign history on disk has no record and stays behind
+ * the `showArchived` gate.
  *
  * Ids are routed through `tipOf` so a record written against a superseded
- * generation id (M10) keeps the CONVERSATION's row — its chain tip — rather
+ * generation id keeps the CONVERSATION's row — its chain tip — rather
  * than a row the collapse is about to drop.
  *
- * A CHAT record (M16) is the one kind of record that is explicitly NOT tree
+ * A CHAT record is the one kind of record that is explicitly NOT tree
  * membership. It is a scratch conversation about a project, filtered out of
  * the live forest by design; without this skip it would come straight back as
  * an inactive "closed" row the moment its tab shut, which is precisely the
@@ -527,8 +528,4 @@ export function archivedAsEntries(
 /** Best-effort human label for an archived session. */
 export function archivedLabel(s: ArchivedSession): string {
   return s.label ?? shortId(s.sessionId);
-}
-
-export function logArchiveError(where: string, err: unknown): void {
-  logError(`archive.${where}`, err);
 }

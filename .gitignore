@@ -1,7 +1,11 @@
 node_modules/
 out/
 dist/
+.vscode-test/
 *.vsix
+
+# macOS
+.DS_Store
 
 # Local Claude Code settings — machine-specific, contains absolute paths.
 .claude/settings.local.json

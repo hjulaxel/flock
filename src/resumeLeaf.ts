@@ -32,8 +32,9 @@
 // reduces `leafUuids` to the LAST leaf seen (unless `keepAllLeaves`), the
 // appended record simply wins.
 //
-// Imports allowed here: ./types, ./log, ./transcript, node:fs.
-// NEVER import vscode.
+// Dependencies are deliberately minimal — ./types, ./log, ./transcript and
+// node:fs, never vscode — so this module stays unit-testable outside the
+// editor.
 //
 // This is the one module that WRITES into a transcript, so every gate below is
 // load-bearing. It runs once per fork/resume click — never on a poll tick —

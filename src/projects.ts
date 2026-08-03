@@ -1,7 +1,7 @@
-// IMPLEMENTED BY: M7 — the project-first rework.
+// src/projects.ts — projects, path matching and the grouping rules.
 //
-// Pure. Imports ./types and NOTHING else — no vscode, no node:path, no fs — so
-// every rule in here is unit-testable without a workbench and can be called
+// Pure: it imports ./types and nothing else — no vscode, no node:path, no fs —
+// so every rule in here is unit-testable without a workbench and can be called
 // from both the tree and the command layer.
 //
 // The model: a PROJECT owns a name and a set of directories. A SESSION owns a
@@ -191,7 +191,7 @@ export function providerOfProject(p: ProjectRecord | undefined): ProviderId {
 }
 
 // ------------------------------------------------------------ project tree
-// M26. A project may be filed under another project, to any depth and any
+// A project may be filed under another project, to any depth and any
 // breadth. The records store only a pointer UP (ProjectRecord.parentId); this
 // is the one place those pointers become a tree, and the one place that has to
 // survive them being wrong.
@@ -446,7 +446,7 @@ export interface ProjectMatch {
   dir: string;
   /** Length of the matched directory key — the tie-break for nesting. */
   depth: number;
-  /** M26. The matched directory is one the project LISTS, rather than one it
+  /** The matched directory is one the project LISTS, rather than one it
    *  merely reaches as a worktree of a repository it sits in. Part of the
    *  tie-break: an explicit statement outranks a derived one. */
   own?: boolean;
@@ -462,7 +462,7 @@ export function matchProject(
   projects: readonly ProjectRecord[],
   cwd: string | undefined,
   /**
-   * M20. Directories a project owns WITHOUT having them listed — the worktrees
+   * Directories a project owns WITHOUT having them listed — the worktrees
    * of the repositories its own directories sit in. A session running in
    * `~/code/app-feat-x`, a linked worktree of the repo at `~/code/app`, belongs
    * to the project rooted at `~/code/app` even though nobody added that path to
@@ -511,10 +511,10 @@ export function matchProject(
  * Which of two projects claiming the SAME directory wins.
  *
  * Reached only when two projects match a cwd at identical directory depth,
- * which is either a user mistake (the same path listed twice) or the M26 case:
- * a project and a subproject inside it, both of which see the same git
- * worktrees. Three rules, each with its own reason, then the old stable
- * name/id fallback so the answer never depends on iteration order:
+ * which is either a user mistake (the same path listed twice) or the nesting
+ * case: a project and a subproject inside it, both of which see the same git
+ * worktrees. Three rules, each with its own reason, then the stable name/id
+ * fallback so the answer never depends on iteration order:
  *
  *  1. An OWN directory beats a DERIVED one. "I put this path in this project"
  *     is a statement; "this path is a worktree of a repository this project
@@ -545,7 +545,7 @@ function beatsAtEqualDepth(
 // ------------------------------------------------------------------- chats
 
 /**
- * M24. Every CHAT this project has ever had, newest first.
+ * Every CHAT this project has ever had, newest first.
  *
  * Membership is derived exactly as it is for a session — the project whose
  * directory is the longest match for the conversation's cwd — and for the same
@@ -760,7 +760,7 @@ export interface GroupingInput {
    *  when no project exists, or the tree would just be empty. */
   onlyProjectSessions: boolean;
   /**
-   * M20. The git worktrees visible from `dir`, or [] for a directory that is
+   * The git worktrees visible from `dir`, or [] for a directory that is
    * not a repository (and for one whose probe has not landed yet — the caller
    * cannot tell those apart, and must not need to).
    *
@@ -774,7 +774,7 @@ export interface GroupingInput {
 }
 
 /**
- * M26. Sessions of a project that the branch block does NOT account for.
+ * Sessions of a project that the branch block does NOT account for.
  *
  * Under `lineage.groupSessionsByBranch` the shown branches take their own
  * sessions as children, and whatever is left has to stay visible directly under
@@ -797,10 +797,10 @@ export function unbranchedRoots(
 
 export interface GroupingResult {
   /** Every VISIBLE project, depth-first: a parent immediately followed by its
-   *  own subtree (M26). A caller that renders them flat gets the pre-M26 tree
-   *  whenever nobody has nested anything, and a sensible reading list
-   *  otherwise; a caller that renders the nesting walks `childProjectIds` from
-   *  the entries whose `depth` is 0. */
+   *  own subtree. A caller that renders them flat gets the same order the
+   *  older, non-nesting tree had whenever nobody has nested anything, and a
+   *  sensible reading list otherwise; a caller that renders the nesting walks
+   *  `childProjectIds` from the entries whose `depth` is 0. */
   projects: ProjectGroupNode[];
   /** Folder rows for the leftovers. Empty when grouping does not apply. */
   folders: GroupNode[];
@@ -864,7 +864,7 @@ export function computeGrouping(
   prev?: GroupingResult | null,
 ): GroupingResult {
   const all = (input?.projects ?? []).filter((p): p is ProjectRecord => !!p);
-  // M26. The tree over ALL of them, closed ones included: a closed project
+  // The tree over ALL of them, closed ones included: a closed project
   // still owns its directories (see the session loop below), and its children
   // have to be reachable from it in order to be closed along with it.
   const tree = buildProjectTree(all);
@@ -904,17 +904,17 @@ export function computeGrouping(
 
   for (const rootId of input?.visibleRootIds ?? []) {
     const cwd = input.cwdOf(rootId);
-    // Matched against ALL projects, CLOSED ones included (M24 renamed the verb
-    // that writes `hidden`; the rule is unchanged). A closed project still OWNS
-    // its directories: if the winning match is closed, the session goes with
-    // it. Otherwise closing a project would just demote its sessions to folder
-    // rows, i.e. close nothing — and a closed project nested inside an open one
-    // (close `api`, keep `code`) would leak straight back.
+    // Matched against ALL projects, CLOSED ones included (the user-facing verb
+    // is "close"; the field it writes is still called `hidden`). A closed
+    // project still OWNS its directories: if the winning match is closed, the
+    // session goes with it. Otherwise closing a project would just demote its
+    // sessions to folder rows, i.e. close nothing — and a closed project nested
+    // inside an open one (close `api`, keep `code`) would leak straight back.
     const match = matchProject(all, cwd, extraDirs);
     if (match) {
-      // `closed`, not `match.project.hidden`: M26 makes a subproject of a
-      // closed project closed too, and its sessions have to go away with it
-      // rather than reappear under a folder row.
+      // `closed`, not `match.project.hidden`: a subproject of a closed project
+      // is closed too, and its sessions have to go away with it rather than
+      // reappear under a folder row.
       if (closed.has(match.project.id)) hiddenCount++;
       else claimed.get(match.project.id)?.push(rootId);
       continue;
@@ -930,10 +930,11 @@ export function computeGrouping(
     leftover.push(rootId);
   }
 
-  // Depth-first over the VISIBLE half of the tree (M26). `tree.order` is
-  // already a preorder walk of every project, so filtering it keeps parents
-  // ahead of their children and siblings in name order, which is exactly the
-  // pre-M26 ordering whenever nothing is nested.
+  // Depth-first over the VISIBLE half of the tree. `tree.order` is already a
+  // preorder walk of every project, so filtering it keeps parents ahead of
+  // their children and siblings in name order — which, whenever nothing is
+  // nested, is exactly the flat name-ordered list the tree had before nesting
+  // existed.
   const visible = new Set(projects.map((p) => p.id));
   const projectNodes: ProjectGroupNode[] = tree.order
     .filter((id) => visible.has(id))
@@ -1033,7 +1034,7 @@ function reuseUnchanged(
       sameIds(old.rootIds, p.rootIds) &&
       old.branchesCollapsed === p.branchesCollapsed &&
       sameBranches(old.branches, p.branches) &&
-      // M26. Everything the row's PLACE in the tree draws. Without these a
+      // Everything the row's PLACE in the tree draws. Without these a
       // project that was moved, or that gained a subproject, would hand the
       // workbench the previous object and keep its old indent until something
       // else about it happened to change.

@@ -1,4 +1,4 @@
-// test/projectview.test.ts — the project header inside the Explorer (M21).
+// test/projectview.test.ts — the project header inside the Explorer.
 //
 // The view has no state and no lazy loading: its whole behaviour is WHICH ROWS
 // appear for a given window, in which order, and what each row does when

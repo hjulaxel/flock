@@ -1,5 +1,4 @@
-// IMPLEMENTED BY: F (M4)
-// Cross-window focus. SPEC.md §4-F1 / plan §6.
+// src/windows.ts — cross-window focus.
 //
 // There is EXACTLY ONE supported mechanism for raising another window:
 // every window computes `env.asExternalUri(<uriScheme>://<EXTENSION_ID>/focus)`
@@ -65,8 +64,8 @@ const PUBLISH_TIMEOUT_MS = 5_000;
  * whose `publishWindow` write itself errored — waits before trying again.
  * Deliberately far longer than REPUBLISH_INTERVAL_MS: a host that cannot
  * produce a focus handle is not going to start being able to a few seconds
- * later, and `refreshPublication()` sits on the roster poll path (SPEC's
- * ~3s tick). Without this floor, a permanently handle-less host (an
+ * later, and `refreshPublication()` sits on the roster poll path, which ticks
+ * every ~3s. Without this floor, a permanently handle-less host (an
  * unsupported remote target, say) would re-run the RPC on every single tick,
  * forever — an RPC storm against a host that was never going to answer.
  */
@@ -103,13 +102,12 @@ function withTimeout<T>(
  * caller still attempts the raise.
  *
  * Deliberately a TEXTUAL splice, not the `Uri.parse(...).with(...).toString()`
- * round trip §4-F1's pseudocode sketches. The handle is OPAQUE (§4-F1 also
- * forbids parsing meaning out of it) and its encoding is not ours to
- * normalize: `Uri.parse` percent-DECODES the query and `Uri.toString()`
- * re-encodes it through a table that escapes the sub-delimiters — `&` → `%26`,
- * `=` → `%3D` (verified against the encode table shipped in VS Code's own
- * extension-host bundle). A tunnel handle
- * (`https://<id>.devtunnels.ms/…?tkn=…`) that `openExternal` hands to a
+ * round trip that looks equivalent. The handle is OPAQUE — nothing may parse
+ * meaning out of it — and its encoding is not ours to normalize: `Uri.parse`
+ * percent-DECODES the query and `Uri.toString()` re-encodes it through a table
+ * that escapes the sub-delimiters — `&` → `%26`, `=` → `%3D` (verified against
+ * the encode table shipped in VS Code's own extension-host bundle). A tunnel
+ * handle (`https://<id>.devtunnels.ms/…?tkn=…`) that `openExternal` hands to a
  * BROWSER would then arrive with its separators escaped and its token
  * unreadable, and decoding first also makes a `%26` inside a value look like a
  * pair separator to the split below. Splicing preserves every original byte

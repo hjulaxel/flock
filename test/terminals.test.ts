@@ -1,9 +1,10 @@
-// test/terminals.test.ts — owner D. SPEC.md §9: "pure parts only".
+// test/terminals.test.ts — the pure parts of src/terminals.ts: the argv a
+// launch produces, the environment it carries, and the registry's bookkeeping.
 //
 // The vscode mock exposes an empty `window`/`commands`, which doubles as the
 // worst-case host: every registry method must degrade to a logged no-op rather
-// than throw. That is asserted here too, since "degrade, never break" is a
-// hard requirement of §4-D.
+// than throw, because a terminal that cannot be created must not take the whole
+// sidebar down with it. That is asserted here too.
 
 import { afterEach, describe, expect, it } from 'vitest';
 import * as vscodeMock from 'vscode';
@@ -81,12 +82,12 @@ describe('buildShellArgs', () => {
     ]);
   });
 
-  // ------------------------------------------------------- resume (M1.5)
+  // ------------------------------------------------------------- resume
 
   it('resumes with --resume ONLY — never also --session-id', () => {
     // Passing --session-id too would ask claude to both keep and replace the
-    // id. (The CLI may re-mint the id anyway — M10's chains absorb that; the
-    // argv shape here stays the same either way.)
+    // id. (The CLI may re-mint the id anyway — generation chains absorb that;
+    // the argv shape here stays the same either way.)
     expect(buildShellArgs({ sessionId: PARENT, resumeId: PARENT })).toEqual([
       '--resume',
       PARENT,
@@ -112,7 +113,7 @@ describe('buildShellArgs', () => {
     ]);
   });
 
-  // ------------------------------------------------------- chat (M16)
+  // --------------------------------------------------------------- chat
 
   it('emits --add-dir BEFORE the mode flags, because it is variadic', () => {
     // --add-dir consumes every following bare word. Emitted last it would eat
@@ -238,9 +239,9 @@ describe('defaultTerminalName', () => {
   });
 });
 
-// -------------------------------------------- M22: the account environment
+// ------------------------------------------- the account environment: rules
 
-describe('launchEnv (M22 — cleans a chosen account\'s environment)', () => {
+describe('launchEnv (cleans a chosen account\'s environment)', () => {
   it('passes through legal string entries untouched', () => {
     expect(
       launchEnv({ CLAUDE_CONFIG_DIR: '/work/.claude', FOO_BAR: 'baz' }),
@@ -300,7 +301,7 @@ describe('TerminalRegistry degrades on a host without a terminal API', () => {
   });
 });
 
-describe('TerminalRegistry.rebind (M11 — /fork and re-key follow the terminal)', () => {
+describe('TerminalRegistry.rebind (/fork and re-key follow the terminal)', () => {
   const OTHER = '0f0000d1-0000-4000-8000-0000000000d1';
 
   /** Seed a binding directly: there is no public bind path without a live
@@ -473,7 +474,7 @@ describe('launch wraps in the private tmux server when the wiring says so', () =
   it("carries CLAUDE's pid (the pane's) — never the tmux client's", async () => {
     // The fake host resolves processId 42: the CLIENT pid. It must never land
     // on a wrapped binding — it matches nothing on the roster, and a binding
-    // wearing it would blind the M11 re-key detector (the "session's own tab
+    // wearing it would blind the re-key detector (the "session's own tab
     // on screen while its row says running-outside-this-editor" bug). The
     // pane lookup owns the field.
     const captured: Array<Record<string, unknown>> = [];
@@ -542,9 +543,9 @@ describe('launch wraps in the private tmux server when the wiring says so', () =
   });
 });
 
-// -------------------------------------------- M22: the account environment
+// ----------------------------------- the account environment: reaching launch
 
-describe('launch carries LaunchOptions.env into BOTH tiers (M22)', () => {
+describe('launch carries LaunchOptions.env into BOTH tiers', () => {
   afterEach(() => {
     delete (vscodeMock.window as { createTerminal?: unknown }).createTerminal;
   });
@@ -606,7 +607,7 @@ describe('launch carries LaunchOptions.env into BOTH tiers (M22)', () => {
     registry.dispose();
   });
 
-  it('with no env at all, creationOptions.env is exactly the pre-M22 stamp', async () => {
+  it('with no env at all, creationOptions.env is exactly the node-id stamp', async () => {
     const captured: Array<Record<string, unknown>> = [];
     fakeHost(captured);
     const registry = new TerminalRegistry({ claudeBinary: () => '/bin/claude' });

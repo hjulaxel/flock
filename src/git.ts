@@ -1,10 +1,9 @@
-// IMPLEMENTED BY: M20 — worktree awareness.
+// src/git.ts — worktree awareness.
 //
-// Imports allowed here: ./types, ./log, node:child_process. NEVER import
-// vscode, and never import ./projects — the PURE modules (projects.ts,
-// viewmodel.ts) are downstream of this one and are handed its output as plain
-// data. That direction is what keeps grouping unit-testable without a git
-// binary anywhere near the test runner.
+// This module NEVER imports vscode, and never imports ./projects: the pure
+// modules (projects.ts, viewmodel.ts) sit downstream of this one and are handed
+// its output as plain data. That direction is what keeps grouping unit-testable
+// without a git binary anywhere near the test runner.
 //
 // Why this module exists at all: a session's cwd is not its address. Somebody
 // running 3–8 agents in parallel gives each one its own git WORKTREE — a second

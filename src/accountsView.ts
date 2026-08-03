@@ -1,4 +1,4 @@
-// src/accountsView.ts — M22. The Accounts view, under Sessions.
+// src/accountsView.ts — the Accounts view, under Sessions.
 //
 // One row per AI ACCOUNT you can launch on. The list is short by construction
 // — a person has a work plan, a personal plan, maybe an API key — so the whole
@@ -13,10 +13,10 @@
 // rolls over — and the accounts rows would either be dragged through every
 // tree repaint or freeze the tree behind a network read.
 //
-// WHAT THIS FILE MUST NEVER DO: render, log, or otherwise emit an environment
-// VALUE. `AccountProfile.extraEnv` is the API-key case and on those profiles
-// the value IS the credential. The tooltip names the variables and stops
-// there; every string that leaves this file is a name, a path, or a number.
+// This file must never render, log, or otherwise emit an environment VALUE.
+// `AccountProfile.extraEnv` is the API-key case and on those profiles the value
+// IS the credential. The tooltip names the variables and stops there; every
+// string that leaves this file is a name, a path, or a number.
 //
 // The usage numbers arrive through `LimitsReader` (types.ts) wired in
 // extension.ts, never by importing the limits module: this view is
@@ -52,10 +52,10 @@ import { log, logError } from './log';
 export const ACCOUNTS_VIEW_ID = 'lineageAccounts';
 
 // The ten account verbs live in `COMMANDS` (types.ts) with every other id, and
-// the setting behind this view is `CONFIG_KEYS.accountsEnabled`. Both were
-// local stand-ins here while the milestone was in flight; a private table would
-// have been a set of ids nothing checks, since the scaffold test cross-checks
-// `COMMANDS` against the manifest in both directions.
+// the setting behind this view is `CONFIG_KEYS.accountsEnabled`. Both were once
+// local stand-ins here; a private table would have been a set of ids nothing
+// checks, since a test cross-checks `COMMANDS` against the manifest in both
+// directions.
 
 // -------------------------------------------------------------------- deps
 
@@ -110,7 +110,7 @@ export interface AccountDeps {
   mediaPath(relative: string): string | undefined;
   /** Repaint the accounts view. */
   refreshAccounts(): void;
-  /** Optional: the limits lane's own summary wording, so the meter reads the
+  /** Optional: the limits module's own summary wording, so the meter reads the
    *  same here as it does anywhere else that module renders. Falls back to
    *  `formatUsageSummary` below, which is the wording this view shipped with. */
   formatUsage?(snapshot: UsageSnapshot | null): string;
@@ -340,16 +340,17 @@ export function untilLabel(resetsAt: number | undefined, now: number): string {
  * whether to start another session here is the five-hour one, and it has to be
  * readable at the width a sidebar description gets before it is elided.
  *
- * The limits lane may supply its own wording through `AccountDeps.formatUsage`
- * — this is the fallback, and the shape both must keep.
+ * The limits module may supply its own wording through
+ * `AccountDeps.formatUsage` — this is the fallback, and the shape both must
+ * keep.
  */
 export function formatUsageSummary(
   snapshot: UsageSnapshot | null | undefined,
   now: number,
 ): string {
   if (!snapshot) return '';
-  // M22.1: with an identity on record "not signed in" would be false — the
-  // sign-in exists, the credential read failed. Same rule as limits.ts.
+  // With an identity on record, "not signed in" would be false — the sign-in
+  // exists, the credential read failed. Same rule as limits.ts.
   const who =
     typeof snapshot.signedInAs === 'string' ? snapshot.signedInAs.trim() : '';
   if (snapshot.error === 'no-credentials') {
@@ -519,9 +520,9 @@ export class AccountsViewProvider implements vscode.TreeDataProvider<AccountRow>
         );
       }
 
-      // Identity outranks inference (M22.1): when the profile's own config dir
-      // NAMES its login, say that — it is the one line that settles "did my
-      // sign-in take?" without a terminal.
+      // Identity outranks inference: when the profile's own config dir NAMES
+      // its login, say that — it is the one line that settles "did my sign-in
+      // take?" without a terminal.
       const who =
         typeof snapshot?.signedInAs === 'string' ? snapshot.signedInAs.trim() : '';
       if (who !== '') md.appendMarkdown(`Signed in as **${mdEscape(who)}**\n\n`);
