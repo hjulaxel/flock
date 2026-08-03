@@ -1355,6 +1355,36 @@ async function newSessionInProjectFlow(
 }
 
 /**
+ * Repair the transcript's resume leaf, and say so in the log.
+ *
+ * Deliberately silent in the UI. The repair restores the history the user
+ * already believes they are branching from, so a toast would announce a bug
+ * rather than a fix — and on the ~92% of transcripts whose leaf is already
+ * correct there would be nothing to announce at all. The log line is what makes
+ * it debuggable when a fork still looks short.
+ *
+ * Optional dependency, and never fatal: a wiring without it launches exactly as
+ * this extension always has.
+ */
+function reportResumeLeaf(
+  deps: AccountCommandDeps,
+  sessionId: string,
+  verb: 'fork' | 'resume',
+): void {
+  const report = deps.repairResumeLeaf?.(sessionId);
+  if (report === undefined) return;
+  if (report.repaired) {
+    log(
+      `${verb}: repaired resume leaf of`,
+      shortId(sessionId),
+      `— ${report.gained ?? 0} more record(s) inherited`,
+    );
+  } else if (report.skipped !== undefined && report.skipped !== 'already-tip') {
+    log(`${verb}: resume leaf left alone for`, shortId(sessionId), `(${report.skipped})`);
+  }
+}
+
+/**
  * Fork = mint a child uuid, record the parent edge BEFORE launching, then
  * launch `--fork-session --resume <parent> --session-id <child>`. The edge is
  * exact by construction; nothing about it is ever inferred.
@@ -1388,6 +1418,15 @@ async function forkFlow(
     );
     return undefined;
   }
+  // Before anything else reads that transcript: make its recorded resume leaf
+  // name its actual tip. `--fork-session --resume` inherits the chain claude
+  // walks back from that leaf, and the leaf is written mid-turn — so without
+  // this a fork of a parent whose last turn made a tool call inherits the turn
+  // only as far as the first tool result, and the parent's final answer is
+  // simply absent from the child. Reported as "I only get the first part of the
+  // last message"; see resumeLeaf.ts for the claude-side selection.
+  reportResumeLeaf(deps, parentId, 'fork');
+
   const forest = deps.getForest();
   const node = forest.nodes.get(parentId);
   const cwd = node?.cwd ?? deps.getRecord(parentId)?.cwd;
@@ -1612,6 +1651,11 @@ export async function resumeFlow(
     );
     return false;
   }
+
+  // Same repair as the fork path, and for the same reason: a plain `--resume`
+  // walks back from the same recorded leaf, so reopening a session could drop
+  // the tail of the very turn you were reading when you closed it.
+  reportResumeLeaf(deps, sessionId, 'resume');
 
   const cwd = node?.cwd ?? deps.getRecord(sessionId)?.cwd;
   log(

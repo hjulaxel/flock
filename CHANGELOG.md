@@ -4,6 +4,26 @@ All notable changes to Canopy are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A fork no longer inherits its parent's last turn only up to the first tool
+  call.** claude picks the message a `--resume` / `--fork-session` walks back
+  from out of the transcript's `last-prompt` records; those are written mid-turn,
+  next to `ai-title` / `mode` / `permission-mode`, and are not corrected when the
+  turn ends. A parent whose final turn made a tool call therefore recorded a leaf
+  pointing at the first tool result, and everything the assistant said after it
+  was unreachable — the sibling-recovery pass pulled back the other blocks of
+  that same message, so the loss read as "I only get the first part of the last
+  message" rather than as a missing turn. Fork, resume and workspace restore now
+  append a corrective `last-prompt` record naming the transcript's actual tip
+  first. Append-only, skipped whenever it would not strictly increase what the
+  launch sees, and never applied to a `/clear`-ed or actively-written transcript.
+  Measured on the machine this was found on: 23 of 282 transcripts carried a
+  stale leaf. Verified against claude 2.1.220 by forking an affected session and
+  diffing the child transcript against its parent, before and after.
+
 ## [0.1.0] — 2026-08-03
 
 First public release.

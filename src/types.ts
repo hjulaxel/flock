@@ -1712,6 +1712,39 @@ export interface TranscriptFacts {
 }
 
 /**
+ * What repairResumeLeaf did, or why it did nothing. See resumeLeaf.ts — the
+ * short version is that claude picks the message a resume walks back from out
+ * of the transcript's `last-prompt` records, those records are written mid-turn
+ * and never corrected, and so a fork can inherit its parent's final turn only
+ * as far as its first tool call.
+ *
+ * Every field is diagnostic: the launch path logs the report and proceeds
+ * either way, because a skip leaves the transcript exactly as claude wrote it.
+ */
+export interface ResumeLeafReport {
+  /** A corrective `last-prompt` record was appended. */
+  repaired: boolean;
+  /** The uuid the CLI would have resumed from, when the transcript named one. */
+  staleLeaf?: string;
+  /** The uuid now named as the leaf. */
+  tip?: string;
+  /** How many more records the walk reaches from `tip` than from `staleLeaf`. */
+  gained?: number;
+  /** Why nothing was written. Absent when `repaired`. */
+  skipped?:
+    | 'no-transcript'
+    | 'unreadable'
+    | 'too-large'
+    | 'writing'
+    | 'cleared'
+    | 'no-leaf-record'
+    | 'already-tip'
+    | 'no-tip'
+    | 'no-gain'
+    | 'write-failed';
+}
+
+/**
  * M25. A `/fork` that dispatched a BACKGROUND job rather than taking over a
  * terminal: the process is live and holding the child session id, but no pty
  * belongs to any editor — which is why focusing one used to dead-end at
@@ -1764,6 +1797,14 @@ export interface CommandDeps {
    *  ordered and labelled from the editorial records alone, which is coarser
    *  but never wrong. */
   transcriptFacts?(sessionId: string): TranscriptFacts;
+  /** Point the transcript's recorded resume leaf at its actual tip, so a
+   *  `--resume` / `--fork-session` sees the whole conversation — see
+   *  resumeLeaf.ts for the claude-side selection this compensates for.
+   *
+   *  Optional, and every unit double omits it: absent means the launch behaves
+   *  exactly as it did before the module existed, which is a fork that can
+   *  silently inherit the parent's last turn only up to its first tool call. */
+  repairResumeLeaf?(sessionId: string): ResumeLeafReport;
   /** M24. Is this id on the roster right now?
    *
    *  `getForest()` answers this for anything with a row, which is why nothing

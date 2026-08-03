@@ -533,6 +533,11 @@ export interface WorkspaceManagerDeps {
     profileId?: string;
   } | undefined;
   hasTranscript(sessionId: string): boolean;
+  /** Point the transcript's recorded resume leaf at its actual tip before the
+   *  `--resume` below reads it — a restore is a resume, and inherits the same
+   *  mid-turn-leaf truncation a fork does (see resumeLeaf.ts). Optional; absent
+   *  means the restore behaves as it always has. */
+  repairResumeLeaf?(sessionId: string): unknown;
   /** M10 chain routing — a parked id may have been superseded since. */
   tipOf(sessionId: string): string;
   // per-WINDOW persistence (workspaceState memento)
@@ -1442,6 +1447,7 @@ export class WorkspaceManager {
         if (!this.deps.resumeSessions() || !canLaunch) return false;
       }
       if (!this.deps.hasTranscript(tip)) return false;
+      this.deps.repairResumeLeaf?.(tip);
       const account = this.accountLaunch(tip);
       const binding = await this.deps.launchSession({
         sessionId: tip,

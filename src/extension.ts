@@ -91,6 +91,7 @@ import {
   readTranscriptHeader,
   transcriptMtimeMs,
 } from './transcript';
+import { repairResumeLeaf } from './resumeLeaf';
 import { LineageResolver, buildForest, resolveAll } from './lineage';
 import type { ResolveOptions } from './lineage';
 import {
@@ -1979,6 +1980,8 @@ export async function activate(
     launchSession: (opts) => registry.launch(opts),
     hasTranscript: (id) =>
       hasTranscript(id, { extraProjectsDirs: profileProjectsDirs() }),
+    repairResumeLeaf: (id) =>
+      repairResumeLeaf(id, { extraProjectsDirs: profileProjectsDirs() }),
     tipOf: (id) => chainIndex.tipOf(id),
     getActive: () => {
       const v = context.workspaceState.get<string>(ACTIVE_WORKSPACE_KEY);
@@ -2174,6 +2177,8 @@ export async function activate(
     refresh: refreshNow,
     hasTranscript: (sessionId) =>
       hasTranscript(sessionId, { extraProjectsDirs: profileProjectsDirs() }),
+    repairResumeLeaf: (sessionId) =>
+      repairResumeLeaf(sessionId, { extraProjectsDirs: profileProjectsDirs() }),
     transcriptFacts,
     // M24. The roster's own answer, one tick old at worst. `prevLiveIds` is
     // assigned the CURRENT set at the end of every rebuild — the name is about
