@@ -4,7 +4,15 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.1] — unreleased
+
+No user-visible change yet. The three fixes previously listed here shipped in
+0.1.0 and have been moved under it — they were written before that release and
+the heading was never updated.
+
+## [0.1.0] — 2026-08-03
+
+First public release.
 
 ### Fixed
 
@@ -52,9 +60,6 @@ All notable changes to Flock are recorded here. The format follows
   stale leaf. Verified against claude 2.1.220 by forking an affected session and
   diffing the child transcript against its parent, before and after.
 
-## [0.1.0] — 2026-08-03
-
-First public release.
 
 ### Added
 
