@@ -9,3 +9,7 @@ dist/
 
 # Local Claude Code settings — machine-specific, contains absolute paths.
 .claude/settings.local.json
+
+# Internal planning docs — private, kept locally only.
+SPEC.md
+STATUS.md
