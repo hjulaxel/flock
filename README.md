@@ -56,7 +56,9 @@ written to your repository.
   the only fact that mattered: that five checkouts are one repository. Canopy
   reads `git worktree list`, files every checkout of a project's repo under that
   project wherever it sits on disk, and gives each branch a colour-coded row.
-  Click a branch to start a session in that worktree.
+  Click a branch to start a session in that worktree. Turn on
+  `lineage.groupSessionsByBranch` and each branch becomes a container instead:
+  its sessions hang under it and the whole branch folds shut.
 
 - **Several accounts, one window.** A row per subscription you can launch on —
   work plan, personal plan, an API key — each showing how much of its five-hour
@@ -71,8 +73,31 @@ written to your repository.
 
 - **Orchestration verbs.** New, fork, **fork and compact** (branch a long
   conversation and let the *branch* squash its history — the parent keeps
-  everything), ask-in-a-fork, rename in place, close with an optional summary,
-  and drag to re-parent.
+  everything), rename in place, close with an optional summary, and drag to
+  re-parent.
+
+- **Chats, as many as you have questions.** The chat button on a project row
+  opens a scratch conversation about that project — every directory it owns on
+  `--add-dir`, no row in the tree, nothing to name. Every click opens a **new**
+  one, so a question that occurs to you mid-answer never interrupts the answer.
+  Right-click the project → **View Chat History…** for the list of every chat
+  it has had, newest first, labelled with what you opened it with. Pick one to
+  come back to it.
+
+- **Projects inside projects.** A monorepo is not one project and neither is it
+  six: file `api`, `web` and `infra` under `app` and the sidebar reads like an
+  Explorer, to whatever depth you want. Each subproject keeps its own
+  directories, provider and account. Drag a project row onto another to file it
+  there, or onto empty space to bring it back out. Membership never moves with
+  it — a session belongs to whichever project's directory is the longest match
+  for where it is running, exactly as before.
+
+- **Open and close projects.** A project you are not working on this month
+  doesn't have to be deleted to get out of the way: **Close Project** takes its
+  row and its sessions' rows out of the tree and changes nothing else — no
+  process is signalled, nothing is deleted, whatever was running is still
+  running. The `$(folder-opened)` button at the top of the view lists every
+  closed project, with how many sessions each still has, and puts one back.
 
 - **Nothing is lost.** Closing a tab does not remove its row — it dims and stays
   one click from resuming. Only **Delete** removes a row, and that is undoable.
@@ -88,7 +113,7 @@ written to your repository.
 
 ## Documentation
 
-- **[Settings](docs/settings.md)** — all 23, with defaults.
+- **[Settings](docs/settings.md)** — all 24, with defaults.
 - **[Reference](docs/reference.md)** — how it works, projects, notifications,
   workspaces, close vs delete, naming, and the sidebar rendering modes.
 

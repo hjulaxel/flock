@@ -330,13 +330,19 @@ describe('computeGrouping', () => {
     expect(result.loose).toEqual([]);
   });
 
-  it('files a session with no cwd under (unknown)', () => {
+  it('files a session with no cwd under (no directory)', () => {
     const result = grouping({
       visibleRootIds: ['B', 'D'],
       cwdOf: cwds,
       projects: [],
     });
-    expect(result.folders.map((f) => f.label)).toEqual(['(unknown)', 'web']);
+    expect(result.folders.map((f) => f.label)).toEqual([
+      '(no directory)',
+      'web',
+    ]);
+    // The label is cosmetic; the key is identity, and collapse state keys off
+    // it — so it stays '(unknown)' across the rename.
+    expect(result.folders[0]).toMatchObject({ key: '(unknown)', cwd: '' });
   });
 
   it('leaves everything ungrouped when groupByFolder is off', () => {

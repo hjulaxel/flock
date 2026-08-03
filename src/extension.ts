@@ -46,6 +46,7 @@ import {
 } from './types';
 import type {
   ArchivedSession,
+  BackgroundJob,
   DecorationDeps,
   EditorialRecord,
   HookEvent,
@@ -104,7 +105,12 @@ import {
   emptyChainIndex,
 } from './generations';
 import type { ChainIndex } from './generations';
-import { DaemonRosterReader, describeForkEdge } from './daemon';
+import {
+  DaemonRosterReader,
+  daemonRosterPathFor,
+  defaultDaemonRosterPath,
+  describeForkEdge,
+} from './daemon';
 import { WorktreeCache } from './git';
 import type { GenerationFacts } from './generations';
 import { TranscriptStatsCache, readFirstPrompt } from './usage';
@@ -142,7 +148,12 @@ import type { TreeController } from './tree';
 import { registerWebtree } from './webtree';
 import type { WebtreeController } from './webtree';
 import { TerminalRegistry } from './terminals';
-import { notificationItems, registerCommands, tabTitleFrom } from './commands';
+import {
+  adoptBackgroundJob,
+  notificationItems,
+  registerCommands,
+  tabTitleFrom,
+} from './commands';
 import type { AccountCommandDeps } from './commands';
 import { registerFocusIntegration } from './windows';
 import { openProject } from './surfaces';
@@ -597,7 +608,22 @@ export async function activate(
   // M11. The CLI daemon's dispatch roster: fork edges for native /fork
   // children (whose transcripts carry no marker at all), resume continuations
   // for daemon-dispatched re-keys. Cached by stat inside the reader.
-  const daemonReader = new DaemonRosterReader();
+  //
+  // M25: there is not ONE roster. The daemon writes its roster inside
+  // `CLAUDE_CONFIG_DIR`, and M22 gave every account its own — so a /fork on a
+  // non-default account dispatched into a file this reader never opened, and
+  // rendered as a flat root. The machine default plus every account config dir
+  // are all read and merged. Re-evaluated per tick: accounts come and go.
+  const daemonRosterPaths = (): string[] => {
+    const paths = [defaultDaemonRosterPath()];
+    for (const profile of store.getAccounts()) {
+      const dir =
+        typeof profile.configDir === 'string' ? profile.configDir.trim() : '';
+      if (dir !== '') paths.push(daemonRosterPathFor(dir));
+    }
+    return paths;
+  };
+  const daemonReader = new DaemonRosterReader(daemonRosterPaths);
 
   /**
    * Persist newly observed daemon fork edges (M11). The roster is ephemeral —
@@ -620,6 +646,16 @@ export async function activate(
       resolver.invalidate(childId);
     }
   };
+
+  /**
+   * M25. Assigned once `commandDeps` exists (it is built far below, and the
+   * adopt flow needs all of it). Until then every tick simply skips the pass —
+   * a fork job that arrives during activation is picked up on the next tick,
+   * or by the click path, and neither loses anything.
+   */
+  let adoptForkJobs:
+    | ((jobs: ReadonlyMap<string, BackgroundJob>) => void)
+    | undefined;
 
   const rebuild = async (rosterEntries: RosterEntry[]): Promise<void> => {
     // ONE records snapshot, handed to both calls — resolveAll must be awaited
@@ -656,6 +692,7 @@ export async function activate(
     // signal.
     const daemonFacts = daemonReader.read();
     persistDaemonForkEdges(daemonFacts.forkParents, records);
+    adoptForkJobs?.(daemonFacts.jobs);
     const daemonChainFacts: GenerationFacts[] = [];
     for (const [childId, parentId] of daemonFacts.resumeContinuations) {
       daemonChainFacts.push({ sessionId: childId, continuesId: parentId });
@@ -1273,6 +1310,29 @@ export async function activate(
     // that writes the CSS (sanitizeBranchColor).
     branchColors: () =>
       cfg().get<unknown[]>(CONFIG_KEYS.branchColors, [])?.map(String) ?? [],
+    // M26. Read per render like every other setting here, so the layout flips
+    // on the next tick rather than on a window reload.
+    groupSessionsByBranch: () =>
+      boolCfg(CONFIG_KEYS.groupSessionsByBranch, false),
+    // M26. Dropping a project row onto another project row files it there;
+    // onto the background (or a folder row) it goes back to the top level. The
+    // store owns the cycle refusal — see StateStore.setProjectParent — and a
+    // refused move is silent here on purpose: the gesture is cheap, repeatable
+    // and its own feedback (the row does not move), where a modal for a drag
+    // that landed somewhere illegal is a dialog nobody asked for.
+    reparentProject: async (projectId, newParentId) => {
+      const moved = await store.setProjectParent(projectId, newParentId);
+      if (!moved) return;
+      log(
+        'project:',
+        store.getProject(projectId)?.name ?? projectId,
+        'filed under',
+        newParentId === null
+          ? '(top level)'
+          : (store.getProject(newParentId)?.name ?? newParentId),
+      );
+      refreshNow();
+    },
     providerFor,
     mediaPath,
     // Dropping a session onto a project row teaches the project the directory
@@ -2121,6 +2181,10 @@ export async function activate(
     // and it is the only live-id set that outlives one.
     isLive: (sessionId) => prevLiveIds.has(sessionId),
     tipOf: (sessionId) => chainIndex.tipOf(sessionId),
+    // M25. The background job holding this id, if one does — the shape a
+    // native `/fork` dispatches. Stat-cached inside the reader, so asking on
+    // every focus costs nothing.
+    backgroundJob: (sessionId) => daemonReader.read().jobs.get(sessionId),
     revealSession,
 
     /** No wait-for-it loop, unlike revealSession: a project exists in the model
@@ -2373,6 +2437,9 @@ export async function activate(
       await store.upsertProject(projectId, { branchesCollapsed: collapsed });
     },
     upsertProject: (id, patch) => store.upsertProject(id, patch),
+    // M26. Its own store method rather than an upsert with a `parentId` in it:
+    // the cycle check has to run against the whole project set at write time.
+    setProjectParent: (id, parentId) => store.setProjectParent(id, parentId),
     deleteProject: (id) => store.deleteProject(id),
     hiddenFolders: () => store.getHiddenFolders(),
     hideFolder: (dir) => store.hideFolder(dir),
@@ -2471,6 +2538,47 @@ export async function activate(
   };
 
   context.subscriptions.push(registerCommands(commandDeps));
+
+  // M25. `/fork` ≡ Fork Session. A native `/fork` dispatches a background job
+  // instead of opening a tab, so the branch the user just asked for arrives
+  // unowned and unopenable. The moment the roster shows one, the window that
+  // owns its PARENT adopts it: the job is stopped and the same session id
+  // relaunches here as an ordinary fork tab.
+  //
+  // Ownership is what keeps this single-shot across windows. Every window
+  // polls the same rosters, so without a guard they would all race to adopt
+  // the same job; `isBoundHere(parent)` is true in exactly one of them — the
+  // window the user typed `/fork` in, which is the window the branch belongs
+  // in. A fork whose parent is bound nowhere here is left for the click path.
+  // Ids this window has taken on, held for the LIFETIME of the window and
+  // never cleared on success. The daemon does not reap a killed worker's
+  // roster row promptly (verified: the row outlives the process), so the same
+  // job keeps arriving tick after tick — and once its tab has been opened and
+  // then closed by the user, a second adopt would silently resurrect a session
+  // they had just dismissed. Cleared only when an attempt FAILED, so a
+  // transient error can be retried.
+  const adopting = new Set<string>();
+  adoptForkJobs = (jobs) => {
+    for (const [childId, job] of jobs) {
+      if (job.attached || !job.live || job.parentId === undefined) continue;
+      if (adopting.has(childId)) continue;      // taken, or in flight
+      if (registry.isBoundHere(childId)) continue; // already ours
+      if (!registry.isBoundHere(job.parentId)) continue;
+      adopting.add(childId);
+      void (async () => {
+        let ok = false;
+        try {
+          ok = await adoptBackgroundJob(commandDeps, childId, job);
+          if (ok) {
+            log('adopt: /fork adopted', shortId(childId), '— tab opened here');
+          }
+        } catch (err) {
+          logError('extension.adoptForkJobs', err);
+        }
+        if (!ok) adopting.delete(childId);
+      })();
+    }
+  };
 
   // ------------------------------------------------------------ 9. poller
 

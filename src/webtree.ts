@@ -44,6 +44,7 @@ import { BRANCH_COLOR_COUNT, computeGrouping } from './projects';
 import type { GroupingResult } from './projects';
 import {
   attentionCountOf,
+  branchRowKey,
   buildViewModel,
   folderRowKey,
   projectRowKey,
@@ -57,6 +58,11 @@ export const INLINE_VIEW_ID = 'lineageSessionsInline';
 
 /** Cap on the collapsed-key set, mirroring the native tree's shadow state. */
 const CACHE_SOFT_LIMIT = 2000;
+
+/** M26. The target key the client reports for a drop on empty space below the
+ *  last row — the gesture that takes a project back to the top level. Not a row
+ *  key and deliberately unparseable as one. */
+export const BACKGROUND_DROP_KEY = 'background';
 
 /** How long `focusView()` waits for a view it just revealed to be on screen
  *  with its page listening, and how often it looks. A first reveal has to
@@ -293,6 +299,9 @@ interface ClientMessage {
   keys?: unknown;
   name?: unknown;
   sessionId?: unknown;
+  /** M26. The row a drag STARTED on, which for a project drag is the only thing
+   *  identifying it — `sessionId` is a session's id and a project's is not one. */
+  sourceKey?: unknown;
   targetKey?: unknown;
   command?: unknown;
   action?: unknown;
@@ -469,6 +478,11 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
       // Read per post, like every other setting here, so flipping it takes
       // effect on the next tick rather than on a window reload.
       showTokens: this.safe('showTokens', () => this.deps.showTokens?.(), false),
+      groupByBranch: this.safe(
+        'groupSessionsByBranch',
+        () => this.deps.groupSessionsByBranch?.(),
+        false,
+      ),
     });
   }
 
@@ -710,7 +724,15 @@ ${branchPaletteCss()}  }
     // actually be collapsed right now.
     const live = new Set<string>();
     for (const id of forest.nodes.keys()) live.add(sessionRowKey(id));
-    for (const p of grouping.projects) live.add(projectRowKey(p.projectId));
+    for (const p of grouping.projects) {
+      live.add(projectRowKey(p.projectId));
+      // M26. Branch rows collapse too once `groupSessionsByBranch` is on, and
+      // a branch that is deleted (or a project that stops being a repository)
+      // would otherwise leave its key here until the whole set was wiped.
+      for (const b of p.branches ?? []) {
+        live.add(branchRowKey(p.projectId, b.name));
+      }
+    }
     for (const g of grouping.folders) live.add(folderRowKey(g.key));
     for (const key of Array.from(this.collapsed)) {
       if (!live.has(key)) this.collapsed.delete(key);
@@ -734,12 +756,33 @@ ${branchPaletteCss()}  }
     for (const id of chain) {
       if (this.collapsed.delete(sessionRowKey(id))) changed = true;
     }
-    // The top-level group holding it, too.
+    // The group holding it, too — and since M26 that can be a project nested
+    // inside another project, so every ancestor of it has to open as well. A
+    // reveal that expands the row's own project and leaves its grandparent
+    // folded selects a key the client never rendered, which is a no-op it does
+    // not retry.
     const grouping = this.grouping(forest);
+    const byId = new Map(
+      grouping.projects.map((p) => [p.projectId, p] as const),
+    );
     const top = chain.length > 0 ? chain[chain.length - 1] : sessionId;
     for (const p of grouping.projects) {
-      if (p.rootIds.includes(top) && this.collapsed.delete(projectRowKey(p.projectId))) {
-        changed = true;
+      if (!p.rootIds.includes(top)) continue;
+      // The project, its ancestors, and — under branch grouping — the branch
+      // row the session actually hangs off.
+      for (const branch of p.branches ?? []) {
+        if (!branch.rootIds.includes(top)) continue;
+        if (this.collapsed.delete(branchRowKey(p.projectId, branch.name))) {
+          changed = true;
+        }
+      }
+      let cursor: string | undefined = p.projectId;
+      const seen = new Set<string>();
+      while (cursor !== undefined && !seen.has(cursor)) {
+        seen.add(cursor);
+        if (this.collapsed.delete(projectRowKey(cursor))) changed = true;
+        const parent: string | null | undefined = byId.get(cursor)?.parentProjectId;
+        cursor = typeof parent === 'string' && parent !== '' ? parent : undefined;
       }
     }
     for (const g of grouping.folders) {
@@ -755,6 +798,27 @@ ${branchPaletteCss()}  }
    *  ancestors to expand first and this is the select half of `reveal` alone. */
   async revealProject(projectId: string): Promise<void> {
     if (projectId === '') return;
+    // M26. A project row is no longer always at depth 0: a subproject only
+    // exists in the flattened model while every project above it is expanded,
+    // so the walk up has to happen here too.
+    try {
+      const grouping = this.grouping(this.forest());
+      const byId = new Map(
+        grouping.projects.map((p) => [p.projectId, p] as const),
+      );
+      let cursor: string | undefined = byId.get(projectId)?.parentProjectId ?? undefined;
+      const seen = new Set<string>([projectId]);
+      let changed = false;
+      while (typeof cursor === 'string' && cursor !== '' && !seen.has(cursor)) {
+        seen.add(cursor);
+        if (this.collapsed.delete(projectRowKey(cursor))) changed = true;
+        const parent: string | null | undefined = byId.get(cursor)?.parentProjectId;
+        cursor = typeof parent === 'string' ? parent : undefined;
+      }
+      if (changed) this.groupCacheForest = null;
+    } catch (err) {
+      logError('webtree.revealProject', err);
+    }
     await this.selectRow(projectRowKey(projectId));
   }
 
@@ -981,6 +1045,22 @@ ${branchPaletteCss()}  }
           // client sends 'chat' and this side decides which verb that is, so a
           // compromised or buggy page cannot invoke a command the extension
           // never offered on a row.
+          //
+          // M26. A BRANCH row carries one too, once grouping is on and a click
+          // on the row toggles it instead of starting a session. It resolves
+          // through the rendered model exactly as the branch click does — the
+          // page names a row, never a directory.
+          if (String(msg.action) === 'newSessionInBranch') {
+            const row = this.branchRowFor(msg.key);
+            if (!row?.chip || row.chip.dir === '') return;
+            await this.deps.runCommand('newSessionInBranch', {
+              type: 'branch',
+              projectId: row.projectId,
+              dir: row.chip.dir,
+              branch: row.chip.full,
+            });
+            return;
+          }
           const command = PROJECT_ROW_ACTIONS[String(msg.action)];
           if (command === undefined) return;
           const projectId = projectIdFromKey(msg.key);
@@ -1039,9 +1119,29 @@ ${branchPaletteCss()}  }
    *   onto a FOLDER   -> detach to a root
    */
   private async onDrop(msg: ClientMessage): Promise<void> {
-    const dragged = typeof msg.sessionId === 'string' ? msg.sessionId : '';
     const targetKey = typeof msg.targetKey === 'string' ? msg.targetKey : '';
-    if (!isSessionId(dragged) || targetKey === '') return;
+    if (targetKey === '') return;
+
+    // M26. A PROJECT was dragged: onto another project it becomes its
+    // subproject, onto the background (or a folder row, which belongs to no
+    // project) it goes back to the top level. Handled before the session path
+    // and never mixed with it — a project id and a session id are both bare
+    // uuids, so the only thing telling the two gestures apart is which key the
+    // page reported as the source.
+    const draggedProject = projectIdFromKey(msg.sourceKey);
+    if (draggedProject !== undefined) {
+      const onto =
+        targetKey === BACKGROUND_DROP_KEY || targetKey.startsWith('folder:')
+          ? null
+          : projectIdFromKey(targetKey);
+      if (onto === undefined) return; // a session row: not a place for a project
+      if (onto === draggedProject) return;
+      await this.deps.reparentProject?.(draggedProject, onto);
+      return;
+    }
+
+    const dragged = typeof msg.sessionId === 'string' ? msg.sessionId : '';
+    if (!isSessionId(dragged)) return;
 
     if (targetKey.startsWith('project:')) {
       const projectId = targetKey.slice('project:'.length);

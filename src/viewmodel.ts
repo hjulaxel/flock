@@ -25,7 +25,7 @@ import type {
   SessionForest,
   SessionNode,
 } from './types';
-import { branchIndexForCwd } from './projects';
+import { branchIndexForCwd, unbranchedRoots } from './projects';
 import type { GroupingResult } from './projects';
 
 // ------------------------------------------------------------ pure helpers
@@ -211,6 +211,15 @@ export function sessionContextValue(
 export function projectContextValue(el: ProjectGroupNode): string {
   const tokens: ContextToken[] = ['project'];
   if (el.rootIds.length === 0) tokens.push('empty');
+  // M26. Two independent facts about where the row sits, each a positive token
+  // so a `when` clause never has to negate a viewItem regex: a middle project
+  // carries both, a leaf under a root only the first, a root with children only
+  // the second, and a lone top-level project neither — which is every project
+  // anybody had before nesting existed.
+  if (typeof el.parentProjectId === 'string' && el.parentProjectId !== '') {
+    tokens.push('subproject');
+  }
+  if ((el.childProjectIds?.length ?? 0) > 0) tokens.push('parentProject');
   return contextValueOf(tokens);
 }
 
@@ -374,6 +383,22 @@ export interface ViewRow {
    * is false exactly when this row is its parent's last visible child.
    */
   rails: boolean[];
+  /**
+   * M26. How many SECTION levels of plain padding stand to the left of this
+   * row, before anything it draws itself.
+   *
+   * Deliberately not `depth`, and deliberately not derivable from it. `depth` is
+   * the outline level — what aria-level reports and what ArrowLeft walks — and a
+   * forked session three deep in a lineage has depth 3 while sitting at exactly
+   * the same x as its root, because the gutter draws that nesting instead. This
+   * is the other kind of nesting: the project a row is filed under. A row under
+   * a subproject two levels down gets 2 here whether it is a project row, a
+   * branch row, a root session or a fork of a fork.
+   *
+   * Absent means 0, which is every row in a tree where nobody has nested a
+   * project — i.e. the pre-M26 layout, unchanged to the pixel.
+   */
+  indent?: number;
   /** This row's own rail carries on downwards, into the children drawn beneath
    *  it. True only for an expanded session with children — a project header is
    *  expandable but spawns no rail, see `rails`. */
@@ -423,6 +448,10 @@ export interface ViewModelInput {
    *  the setting is one input to a pure function and the tests can drive both
    *  states without touching a workspace configuration. */
   showTokens?: boolean;
+  /** M26. `lineage.groupSessionsByBranch`: hang a project's sessions off the
+   *  branch row for the worktree they run in. Absent = off, which is the
+   *  setting's default and the layout every existing test describes. */
+  groupByBranch?: boolean;
 }
 
 export const sessionRowKey = (id: string): string => `session:${id}`;
@@ -453,31 +482,49 @@ export const othersRowKey = (projectId: string): string =>
  * (defaultBranchVisibility) are for — the block is meant to be curated down to
  * the few branches you are actually working on, not to list the repository.
  *
- * Still NOT a level of the tree. A branch row is a sibling of the sessions, not
- * their parent: the tree's subject is fork lineage, and nesting sessions under
- * branches would cut every lineage that crosses a worktree into pieces. It
- * carries no rails and no status dot, and sits inside the project's own band.
+ * By DEFAULT it is still NOT a level of the tree. A branch row is a sibling of
+ * the sessions, not their parent: the tree's subject is fork lineage, and
+ * nesting sessions under branches cuts every lineage that crosses a worktree
+ * into pieces. It carries no rails and no status dot, and sits inside the
+ * project's own band.
+ *
+ * M26 makes that a CHOICE. Under `lineage.groupSessionsByBranch` the row
+ * becomes the container the flat layout refuses to make it: expandable, with
+ * the sessions running in that worktree as its children. Off by default,
+ * because it is the right answer only for the way of working it is named after
+ * — one agent per worktree, several worktrees at once — and the wrong one for
+ * a single checkout with a handful of forks in it, where it would put every row
+ * in the project one level deeper for no information at all.
  */
 function branchRow(
   el: ProjectGroupNode,
   chip: BranchChip,
   viewId: string,
+  place: { depth: number; indent: number; expandable: boolean; expanded: boolean },
 ): ViewRow {
   const what = chip.count
     ? `${chip.count} session${chip.count === 1 ? '' : 's'}`
     : 'no sessions yet';
-  return {
+  const row: ViewRow = {
     key: branchRowKey(el.projectId, chip.full),
     kind: 'branch',
     // Level with the sessions it sits above rather than with the header above
     // it, so the block reads as part of the project rather than as a heading.
-    depth: 1,
+    // Under branch grouping the sessions move one level DOWN instead, and this
+    // row keeps the level they used to have.
+    depth: place.depth,
+    indent: place.indent,
     // The SHORT label — the client draws `label` and nothing else, and the full
     // name travels on the chip for the hover and the verbs.
     label: chip.name,
-    description: '',
-    expandable: false,
-    expanded: false,
+    // Grouped, the count is the only thing a COLLAPSED branch says about what
+    // is inside it, which is the whole point of being able to collapse it.
+    // Flat, it is noise: the sessions are already on screen underneath, in this
+    // branch's colour, so the number restates them in the column the eye scans
+    // for what they cannot say (see the note in media/webtree.js).
+    description: place.expandable && chip.count > 0 ? String(chip.count) : '',
+    expandable: place.expandable,
+    expanded: place.expandable && place.expanded,
     icon: { type: 'codicon', id: 'none' },
     muted: false,
     closed: false,
@@ -503,12 +550,24 @@ function branchRow(
       chip.full,
       `${what}${chip.attention ? ', finished work waiting' : ''}`,
       chip.dir,
-      'Click to start a session here',
+      place.expandable
+        ? 'Click to show its sessions · + starts a new one here'
+        : 'Click to start a session here',
     ].join('\n'),
     projectId: el.projectId,
     cwd: chip.dir,
     chip,
   };
+  // Grouped, a click TOGGLES the row, so the verb it used to run needs a button
+  // of its own — the same trade the project header made when the chips took its
+  // `+` away, in the other direction. Ungrouped there is no button: the whole
+  // row already is one.
+  if (place.expandable) {
+    row.actions = [
+      { id: 'newSessionInBranch', icon: 'add', title: `New session on ${chip.full}` },
+    ];
+  }
+  return row;
 }
 
 /**
@@ -528,11 +587,13 @@ function othersRow(
   el: ProjectGroupNode,
   count: number,
   viewId: string,
+  place: { depth: number; indent: number },
 ): ViewRow {
   return {
     key: othersRowKey(el.projectId),
     kind: 'branchOthers',
-    depth: 1,
+    depth: place.depth,
+    indent: place.indent,
     label: 'Others',
     // The count is the whole content of this row: it is the difference between
     // "there is more" and "there are twelve more", and the second is what
@@ -608,7 +669,23 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
   let branchScope: { branches: readonly BranchInfo[]; colored: boolean } | null =
     null;
 
-  const pushSession = (id: string, depth: number, rails: boolean[]): void => {
+  // M26. The preorder list, indexed, so a project row can find the children it
+  // has to draw underneath itself. Built once per model rather than per row.
+  const projectById = new Map(
+    input.grouping.projects.map((p) => [p.projectId, p] as const),
+  );
+  /** Projects already emitted this pass. `computeGrouping` cannot produce a
+   *  cycle (buildProjectTree breaks them), but this function is also handed
+   *  hand-built groupings by callers and by tests, and a renderer that can be
+   *  made to recurse forever is a renderer that can hang the extension host. */
+  const drawnProjects = new Set<string>();
+
+  const pushSession = (
+    id: string,
+    depth: number,
+    rails: boolean[],
+    indent: number,
+  ): void => {
     const node = forest.nodes.get(id);
     if (!node) return;
     const key = sessionRowKey(id);
@@ -671,6 +748,7 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
       key,
       kind: 'session',
       depth,
+      indent,
       label: node.label,
       description,
       expandable,
@@ -734,15 +812,25 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
       for (let i = 0; i < kids.length; i++) {
         // The appended entry is this row's rail seen from the child: it carries
         // on below the child unless the child is the last one hanging off it.
-        pushSession(kids[i], depth + 1, [...rails, i < kids.length - 1]);
+        // `indent` is passed straight down: a fork is nested by the SPINE, not
+        // by padding, and the project it is filed under has not changed.
+        pushSession(kids[i], depth + 1, [...rails, i < kids.length - 1], indent);
       }
     }
   };
 
   const pushProject = (el: ProjectGroupNode): void => {
+    if (drawnProjects.has(el.projectId)) return;
+    drawnProjects.add(el.projectId);
     const key = projectRowKey(el.projectId);
     const branches = el.branches ?? [];
     const active = branches.length >= BRANCH_CHIPS_MIN;
+    // M26. Where this project sits in the PROJECT tree, and therefore how far
+    // in everything it draws is pushed. `depth` doubles as the outline level:
+    // a subproject's row is a child of its parent's row, and its own contents
+    // start one level below that.
+    const level = Math.max(0, el.depth ?? 0);
+    const grouped = active && input.groupByBranch === true;
     const toChip = (b: BranchInfo): BranchChip => ({
       name: b.name,
       full: b.name,
@@ -770,11 +858,16 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
     // session carries the dot itself, so a collapsed (or merely long) project
     // still shows there is something to come back to. cmux does the same
     // pane → workspace → group roll-up.
-    const hasUnseen = subtreeHasUnseen(forest, el.rootIds);
+    // M26: including everything filed UNDER it. A collapsed parent is the only
+    // thing on screen standing for its subprojects, so a finished session three
+    // levels down has to light it — otherwise collapsing a project is a way to
+    // lose the notification the dot exists to carry.
+    const hasUnseen = subtreeHasUnseen(forest, descendantRootIds(projectById, el));
     const row: ViewRow = {
       key,
       kind: 'project',
-      depth: 0,
+      depth: level,
+      indent: level,
       label: el.label,
       // NOTHING. Not a session count — the rows underneath are the count — and
       // no longer the extra-directory count either. `+1 dir` was true and
@@ -798,7 +891,11 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
       // and an empty one is waiting rather than finished.
       closed: false,
       canRename: true,
-      canDrag: false,
+      // M26. A project row DRAGS now: onto another project row it becomes that
+      // project's subproject, onto the background it goes back to the top
+      // level. The same gesture the Explorer moves a folder with, and the
+      // reason nesting does not need a dialog to be usable.
+      canDrag: true,
       // A project is a section header, not the top of a lineage: it carries the
       // same toggle the sessions do, but no rail runs from it down to the roots
       // underneath. Those roots are separate lineages that happen to be filed
@@ -877,6 +974,18 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
     rows.push(row);
     if (!expanded) return;
 
+    // Sessions of this project that the branch block will NOT account for:
+    // everything, in the flat layout; only what is not under a shown branch,
+    // in the grouped one.
+    //
+    // `!folded` matters and is not belt-and-braces: folding the block hides the
+    // branch ROWS, so under grouping it would also take their children with it
+    // — a fold that quietly removed four running sessions from the tree. Folded,
+    // every session comes back to sitting directly under the project, which is
+    // exactly what folding the block asks for.
+    const loose =
+      grouped && !folded ? unbranchedRoots(el.rootIds, branches) : el.rootIds;
+
     // Between the header and the sessions, stacked one per row and wearing the
     // project's own band so the whole thing reads as one box: you read which
     // branches this project has, then the sessions filed under them.
@@ -884,24 +993,65 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
     // Inside the project's collapse (a collapsed project shows nothing about
     // its contents, and its branches are part of its contents) AND inside its
     // own fold, which is the finer control — see the chevron above.
-    if (!folded) {
-      for (const chip of chips) rows.push(branchRow(el, chip, input.viewId));
-      // Last, after every branch that IS shown, because it is the tail of the
-      // list rather than a peer of it: everything above is on screen, and this
-      // is the door to what is not.
-      if (hiddenCount > 0) {
-        rows.push(othersRow(el, hiddenCount, input.viewId));
-      }
-    }
-
+    //
     // The scope covers every branch, SHOWN OR NOT. A session on a hidden branch
     // still gets that branch's colour: hiding is a statement about how many
     // rows the block is worth, never about the sessions underneath, and a
     // session that lost its colour because you tidied the list above it would
     // read as having moved.
     branchScope = { branches, colored: active };
-    for (const id of el.rootIds) pushSession(id, 1, []);
+    if (!folded) {
+      for (const chip of chips) {
+        // Grouped, a branch with nothing in it stays a plain click-to-start
+        // row: an expandable row that opens onto nothing is a control that
+        // does not work, and starting a session there is exactly what you
+        // reach an empty worktree for.
+        const expandableChip = grouped && chip.count > 0;
+        const chipKey = branchRowKey(el.projectId, chip.full);
+        rows.push(
+          branchRow(el, chip, input.viewId, {
+            depth: level + 1,
+            indent: level,
+            expandable: expandableChip,
+            expanded: !collapsed.has(chipKey),
+          }),
+        );
+        if (!expandableChip || collapsed.has(chipKey)) continue;
+        const branch = branches.find((b) => b.name === chip.full);
+        for (const id of branch?.rootIds ?? []) {
+          pushSession(id, level + 2, [], level + 1);
+        }
+      }
+      // Last, after every branch that IS shown, because it is the tail of the
+      // list rather than a peer of it: everything above is on screen, and this
+      // is the door to what is not.
+      if (hiddenCount > 0) {
+        rows.push(
+          othersRow(el, hiddenCount, input.viewId, {
+            depth: level + 1,
+            indent: level,
+          }),
+        );
+      }
+    }
+
+    // What is left over: every session in the flat layout, and in the grouped
+    // one the ones no shown branch claimed — a session on a folded-away branch,
+    // or in a directory of the project that is not in the repository at all.
+    // They keep their place directly under the project rather than being
+    // dropped, because a view OPTION that silently hides rows is a filter
+    // wearing a layout's name.
+    for (const id of loose) pushSession(id, level + 1, [], level);
     branchScope = null;
+
+    // Then everything filed under this project, each with its own band, its own
+    // branches and its own sessions. Depth-first, so a subproject's rows sit
+    // between it and the next sibling — which is what makes the indent readable
+    // as containment rather than as decoration.
+    for (const childId of el.childProjectIds ?? []) {
+      const child = projectById.get(childId);
+      if (child) pushProject(child);
+    }
   };
 
   const pushFolder = (el: GroupNode): void => {
@@ -926,7 +1076,7 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
       context: {
         webviewSection: 'folder',
         webviewId: input.viewId,
-        // What groupCwdFromArg() reads — including cwd '' for "(unknown)".
+        // What groupCwdFromArg() reads — including cwd '' for "(no directory)".
         type: 'group',
         cwd: el.cwd,
         key: el.key,
@@ -937,14 +1087,40 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
       cwd: el.cwd,
     });
     if (!expanded) return;
-    for (const id of el.rootIds) pushSession(id, 1, []);
+    for (const id of el.rootIds) pushSession(id, 1, [], 0);
   };
 
-  for (const project of input.grouping.projects) pushProject(project);
+  // M26. Only the ROOTS are walked from here; each one emits its own subtree
+  // (see the tail of pushProject). `grouping.projects` is a preorder list, so
+  // filtering it to depth 0 keeps the top-level order exactly as it was.
+  for (const project of input.grouping.projects) {
+    if ((project.depth ?? 0) === 0) pushProject(project);
+  }
   for (const folder of input.grouping.folders) pushFolder(folder);
-  for (const id of input.grouping.loose) pushSession(id, 0, []);
+  for (const id of input.grouping.loose) pushSession(id, 0, [], 0);
 
   return rows;
+}
+
+/** Every session filed under a project OR under anything nested inside it —
+ *  the roll-up the attention dot on a collapsed parent is computed over. */
+function descendantRootIds(
+  byId: ReadonlyMap<string, ProjectGroupNode>,
+  el: ProjectGroupNode,
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const walk = (node: ProjectGroupNode): void => {
+    if (seen.has(node.projectId)) return;
+    seen.add(node.projectId);
+    out.push(...node.rootIds);
+    for (const childId of node.childProjectIds ?? []) {
+      const child = byId.get(childId);
+      if (child) walk(child);
+    }
+  };
+  walk(el);
+  return out;
 }
 
 /** Tone → the word for it. The mark at the right edge is the only place state

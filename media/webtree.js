@@ -50,6 +50,16 @@
   let anchorKey = null;
   /** Row key being renamed, or null. */
   let editingKey = null;
+  /**
+   * M26. The row key a drag started on, or null.
+   *
+   * `text/plain` carries the dragged SESSION's id, which is what every existing
+   * drop path reads — but a project has no session id, and its uuid would be
+   * indistinguishable from one if it did. The key names the row and its kind in
+   * one string, and the drag never leaves this page, so module state is a
+   * truthful place to keep it for the length of the gesture.
+   */
+  let dragKey = null;
   /** The in-flight rename, `{ key, input, cancel }`, or null while nothing is
    *  being renamed. Set for as long as an input is on screen, so a re-render
    *  does not destroy it. `cancel` is the same teardown the Escape key runs,
@@ -412,6 +422,15 @@
     return box;
   }
 
+  /** M26. The project nesting a row is filed under, as plain left padding.
+   *  Read by webtree.css, which adds it to whatever padding that row kind
+   *  already has — so a branch row keeps its own extra offset and a session row
+   *  keeps its gutter, both simply shifted right by the same amount. */
+  function applyIndent(el, row) {
+    const steps = Number(row && row.indent) || 0;
+    if (steps > 0) el.style.setProperty('--row-indent', steps * INDENT + 'px');
+  }
+
   /**
    * ONE branch, on its own row inside the project's band.
    *
@@ -430,13 +449,16 @@
     const chip = row.chip || {};
     const el = document.createElement('div');
     el.className = 'row branch' + (chip.count ? '' : ' empty');
+    if (row.expandable) el.classList.add('expandable');
     if (chip.attention) el.classList.add('attention');
     if (row.key === focusKey) el.classList.add('selected', 'focused');
     el.setAttribute('data-key', row.key);
     el.setAttribute('role', 'treeitem');
     el.setAttribute('aria-level', String(row.depth + 1));
     el.setAttribute('title', row.tooltip || '');
+    if (row.expandable) el.setAttribute('aria-expanded', String(!!row.expanded));
     el.setAttribute('data-vscode-context', JSON.stringify(row.context));
+    applyIndent(el, row);
     // One custom property, read by the swatch, the label and the count at three
     // different opacities — and one place for a colour index with no variable
     // behind it to fall back, instead of three.
@@ -444,6 +466,25 @@
       '--chip-color',
       'var(--lineage-branch-' + (Number(chip.colorIndex) || 0) + ', var(--vscode-foreground))',
     );
+
+    // M26. Under branch grouping the row OPENS, so it needs the one thing every
+    // other openable row in this tree has: a twisty. Drawn as a small chevron in
+    // its own column ahead of the swatch — not as the session spine's ⊕ ring,
+    // which means "a lineage continues here" and would claim the sessions below
+    // are forks of the branch.
+    if (row.expandable) {
+      const twisty = document.createElement('span');
+      twisty.className = 'branch-twisty' + (row.expanded ? ' expanded' : '');
+      twisty.setAttribute('aria-hidden', 'true');
+      twisty.addEventListener('mousedown', (e) => {
+        // mousedown, and stopped, exactly as the session twisty does: the row's
+        // own click would otherwise toggle it a second time, straight back.
+        e.preventDefault();
+        e.stopPropagation();
+        post('toggle', { key: row.key });
+      });
+      el.appendChild(twisty);
+    }
 
     // A small filled square in the icon column, where a session's provider logo
     // sits. THIS is what ties the row to the coloured session names below it:
@@ -468,6 +509,20 @@
     // one thing they cannot say. The width goes back to the branch NAME, which
     // is what a long ref actually needed.
     //
+    // Grouped, the branch says how many sessions it holds — the number is the
+    // only content a collapsed row has. Flat, `description` is empty and this
+    // draws nothing (see branchRow in src/viewmodel.ts).
+    if (row.description) {
+      const count = document.createElement('span');
+      count.className = 'branch-count';
+      count.textContent = row.description;
+      el.appendChild(count);
+    }
+
+    // The `+` that starts a session on this branch, once a click on the row
+    // itself means "open me" instead.
+    if (row.actions && row.actions.length) el.appendChild(renderActions(row));
+
     // The same unread mark the sessions and the project header carry, at branch
     // granularity: with the sessions collapsed this is the only thing that says
     // WHICH branch has finished work waiting on you.
@@ -485,6 +540,7 @@
   function renderOthersRow(row) {
     const el = document.createElement('div');
     el.className = 'row branch others';
+    applyIndent(el, row);
     if (row.key === focusKey) el.classList.add('selected', 'focused');
     el.setAttribute('data-key', row.key);
     el.setAttribute('role', 'treeitem');
@@ -533,6 +589,14 @@
     el.addEventListener('click', (e) => {
       if (editing) return;
       e.preventDefault();
+      // M26. An openable branch row is a container: clicking it opens and shuts
+      // it, the way clicking a project header does, and the `+` on the row is
+      // what starts a session there. Ungrouped it has no children to show and
+      // the click keeps its original meaning.
+      if (row.expandable) {
+        post('toggle', { key: row.key });
+        return;
+      }
       post(row.kind === 'branchOthers' ? 'branchOthers' : 'branch', {
         key: row.key,
       });
@@ -557,6 +621,13 @@
     const el = document.createElement('div');
     el.className =
       'row ' + row.kind + (row.muted ? ' muted' : '') + (row.closed ? ' closed' : '');
+    // M26. A project row standing inside another project's block. The class
+    // carries the whole visual difference (no top rule, a lighter label weight)
+    // — see webtree.css — because the row is otherwise exactly a project row and
+    // should stay one.
+    if (row.kind === 'project' && (Number(row.indent) || 0) > 0) {
+      el.classList.add('nested');
+    }
     // Two classes, two meanings: `selected` is every row in the selection (the
     // band), `focused` is the one holding the cursor (the ring). On a
     // single-row selection they land together, which is what they always did.
@@ -572,6 +643,9 @@
     el.setAttribute('data-vscode-context', JSON.stringify(row.context));
 
     if (row.canDrag) el.draggable = true;
+    // M26. The project a row is filed under, as padding. Everything else about
+    // the row's geometry is unchanged — see applyIndent.
+    applyIndent(el, row);
 
     // EVERY row starts at the same 4px (webtree.css's `.row`), and all the
     // indentation that is left lives inside the gutter, which only a session
@@ -943,11 +1017,19 @@
 
     if (row.canDrag) {
       el.addEventListener('dragstart', (e) => {
+        // The session id stays the payload for a session drag — every existing
+        // drop path reads it. A project drag has no session id to carry, so the
+        // ROW KEY is what identifies the source (see `dragKey`), and it is set
+        // for both kinds so the extension never has to guess.
         e.dataTransfer.setData('text/plain', row.sessionId || '');
         e.dataTransfer.effectAllowed = 'move';
+        dragKey = row.key;
         el.classList.add('dragging');
       });
-      el.addEventListener('dragend', () => el.classList.remove('dragging'));
+      el.addEventListener('dragend', () => {
+        dragKey = null;
+        el.classList.remove('dragging');
+      });
     }
 
     // Every row is a drop target: onto a session re-parents, onto a project
@@ -960,10 +1042,22 @@
     el.addEventListener('dragleave', () => el.classList.remove('drop-target'));
     el.addEventListener('drop', (e) => {
       e.preventDefault();
+      // Stopped so the background handler below cannot ALSO see this drop and
+      // read it as "onto empty space", which would un-nest a project the user
+      // was filing under another one.
+      e.stopPropagation();
       el.classList.remove('drop-target');
       const dragged = e.dataTransfer.getData('text/plain');
+      const source = dragKey;
+      dragKey = null;
+      // A project drag carries no session id, so the key is the whole of it.
+      if (source && source.indexOf('project:') === 0) {
+        if (source === row.key) return;
+        post('drop', { sourceKey: source, targetKey: row.key });
+        return;
+      }
       if (!dragged || dragged === row.sessionId) return;
-      post('drop', { sessionId: dragged, targetKey: row.key });
+      post('drop', { sessionId: dragged, sourceKey: source, targetKey: row.key });
     });
   }
 
@@ -1204,6 +1298,25 @@
     reportSelection();
   }
 
+  // M26. Empty space below the last row is where a project goes to stop being
+  // a subproject. Guarded on `e.target === root` rather than by not registering
+  // it: the listener is on the scroll container, so every row's drop bubbles
+  // through here, and the row handlers stop propagation for exactly that
+  // reason. This is the belt to their braces.
+  root.addEventListener('dragover', (e) => {
+    if (!dragKey || dragKey.indexOf('project:') !== 0) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+  });
+  root.addEventListener('drop', (e) => {
+    if (e.target !== root) return;
+    const source = dragKey;
+    dragKey = null;
+    if (!source || source.indexOf('project:') !== 0) return;
+    e.preventDefault();
+    post('drop', { sourceKey: source, targetKey: 'background' });
+  });
+
   root.addEventListener('keydown', (e) => {
     if (editing) return; // the input owns the keyboard
 
@@ -1288,7 +1401,10 @@
       // starting a session on the branch under the cursor, or opening the
       // picker behind "Others". Falling through to 'toggle' would send a
       // collapse message for a row that does not expand.
-      else if (row.kind === 'branch') post('branch', { key: row.key });
+      else if (row.kind === 'branch') {
+        // Same split as the click: an openable branch row is a container.
+        post(row.expandable ? 'toggle' : 'branch', { key: row.key });
+      }
       else if (row.kind === 'branchOthers') post('branchOthers', { key: row.key });
       else post('toggle', { key: row.key });
     } else if (e.key === 'F2') {

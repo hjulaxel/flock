@@ -47,6 +47,7 @@ import {
 } from './types';
 import type {
   AccountProfile,
+  BackgroundJob,
   CommandDeps,
   DisposableLike,
   EditorialRecord,
@@ -57,12 +58,15 @@ import type {
   SessionNode,
 } from './types';
 import {
+  buildProjectTree,
+  canReparentProject,
   chatsForProject,
   isWithin,
   matchProject,
   normalizeDir,
   pathKey,
   projectDirs,
+  projectSubtree,
   providerOfProject,
   validateProjectName,
 } from './projects';
@@ -396,9 +400,9 @@ function groupCwdFromArg(arg: unknown): string | undefined {
 }
 
 /** True when the command came from a folder row at all — including the
- *  "(unknown)" row, whose cwd is ''. The distinction matters: every folder row
- *  carries the same contextValue, so the row-scoped verbs are offered on
- *  "(unknown)" too, and falling through to a picker there would silently
+ *  "(no directory)" row, whose cwd is ''. The distinction matters: every folder
+ *  row carries the same contextValue, so the row-scoped verbs are offered on
+ *  "(no directory)" too, and falling through to a picker there would silently
  *  retarget the action at a DIFFERENT folder the user never clicked. */
 function isGroupArg(arg: unknown): boolean {
   if (arg === null || typeof arg !== 'object') return false;
@@ -1025,13 +1029,28 @@ interface ActionPick extends vscode.QuickPickItem {
 async function pickDirectory(
   openLabel: string,
   title?: string,
+  /** M26. Where the dialog opens. A path, not a Uri, so this module keeps its
+   *  one vscode dependency (the dialog itself) and the callers keep handing
+   *  round plain strings. Ignored when the host's Uri.file is unavailable —
+   *  the unit-test double — or when the path is empty. */
+  defaultDir?: string,
 ): Promise<string | undefined> {
+  let defaultUri: vscode.Uri | undefined;
+  const opensAt = normalizeDir(defaultDir);
+  if (opensAt !== '') {
+    try {
+      defaultUri = vscode.Uri.file(opensAt);
+    } catch (err) {
+      logError('commands.pickDirectory.defaultUri', err);
+    }
+  }
   const picked = await vscode.window.showOpenDialog({
     canSelectFiles: false,
     canSelectFolders: true,
     canSelectMany: false,
     openLabel,
     title,
+    ...(defaultUri ? { defaultUri } : {}),
   });
   const uri = picked?.[0];
   if (!uri) return undefined;
@@ -1053,14 +1072,23 @@ async function pickProject(
     );
     return undefined;
   }
-  const items: ProjectPick[] = projects.map((p) => {
+  // M26. Listed in TREE order and indented, not alphabetically flat: with
+  // nesting, two projects can legitimately be called "api" and the only thing
+  // telling them apart in a picker is what they are filed under.
+  const tree = buildProjectTree(projects);
+  const shown = new Set(projects.map((p) => p.id));
+  const ordered = tree.order.filter((id) => shown.has(id));
+  const items: ProjectPick[] = ordered.map((id) => {
+    const node = tree.byId.get(id);
+    const p = node?.project ?? projects.find((x) => x.id === id)!;
     const dirs = projectDirs(p);
+    const depth = node?.depth ?? 0;
     return {
-      label: p.name,
+      label: `${'    '.repeat(depth)}${depth > 0 ? '$(chevron-right) ' : ''}${p.name}`,
       description: [
         PROVIDERS[providerOfProject(p)].label,
         dirs.length > 1 ? `${dirs.length} directories` : '',
-        p.hidden === true ? 'hidden' : '',
+        p.hidden === true ? 'closed' : '',
       ]
         .filter((s) => s !== '')
         .join(' · '),
@@ -1115,11 +1143,24 @@ async function pickProjectDirectory(
  */
 async function newProjectFlow(
   deps: CommandDeps,
-  seed?: { rootDir?: string; name?: string },
+  seed?: { rootDir?: string; name?: string; parentId?: string },
 ): Promise<string | undefined> {
+  // M26. A subproject starts its directory pick INSIDE its parent, because
+  // that is where it is going to be nine times out of ten — `~/code/app` then
+  // `api`, not `~/code/app` then a walk back up from wherever the last dialog
+  // happened to be. The dialog is still a full picker; only its opening
+  // directory changes, so filing a subproject somewhere else entirely (a
+  // sibling checkout, a notes folder) is exactly as available as it was.
+  const parent = seed?.parentId ? deps.getProject(seed.parentId) : undefined;
   const rootDir =
     normalizeDir(seed?.rootDir) ||
-    (await pickDirectory('Use as Main Directory', 'Main directory for the project'));
+    (await pickDirectory(
+      'Use as Main Directory',
+      parent
+        ? `Main directory for a project inside ${parent.name}`
+        : 'Main directory for the project',
+      parent ? projectDirs(parent)[0] : undefined,
+    ));
   if (!rootDir) return undefined;
 
   const existing = deps.allProjects();
@@ -1155,7 +1196,7 @@ async function newProjectFlow(
       });
     }
     const chosen = await vscode.window.showQuickPick(items, {
-      title: `New Project — ${name}`,
+      title: parent ? `New Project in ${parent.name} — ${name}` : `New Project — ${name}`,
       placeHolder: `Main: ${rootDir}`,
       ignoreFocusOut: true,
     });
@@ -1180,8 +1221,23 @@ async function newProjectFlow(
   }
 
   const id = randomUUID();
-  await deps.upsertProject(id, { name, rootDir, dirs: extraDirs });
-  log('project: created', id, name, rootDir, `+${extraDirs.length} dir(s)`);
+  await deps.upsertProject(id, {
+    name,
+    rootDir,
+    dirs: extraDirs,
+    // Written with the create rather than through setProjectParent: there is
+    // no cycle to check against a project that does not exist yet, and one
+    // write means a half-made project cannot exist even for a tick.
+    ...(parent ? { parentId: parent.id } : {}),
+  });
+  log(
+    'project: created',
+    id,
+    name,
+    rootDir,
+    `+${extraDirs.length} dir(s)`,
+    parent ? `under ${parent.name}` : '(top level)',
+  );
   deps.refresh();
   // Select the new project's row and open an editor on its label: the tree is
   // where the name lives from now on, and the generated one is only a default.
@@ -1381,6 +1437,114 @@ async function forkFlow(
   // editor on its row.
   if (!titleGiven) await nameJustCreatedSession(deps, childId);
   return childId;
+}
+
+/**
+ * M25. Adopt a native `/fork` — finish turning it into the session that
+ * clicking **Fork Session** would have produced.
+ *
+ * `/fork` does not open a tab anywhere. It dispatches a BACKGROUND JOB: a live
+ * process holding the child's session id, parked on "send a prompt to start",
+ * whose pty lives on a daemon socket no editor can attach to. M11 taught the
+ * tree to NEST such a child; this is what makes it OPEN. The user typed the
+ * fork verb, so they get the fork verb's result.
+ *
+ * Adoption is a HAND-OFF, not a copy. The job is stopped and the SAME session
+ * id is relaunched here under our own terminal, so the row that was clicked is
+ * the row that opens — same id, same parent edge, same place in the tree — and
+ * the branch arrives with the name, the account pin and the tab that `forkFlow`
+ * gives every other fork.
+ *
+ * Four refusals, each of which leaves the caller's existing fallback intact:
+ *
+ *  * `job.attached` — a terminal has driven this job before, so it has an
+ *    owner. Relaunching would put a second writer on one transcript, the one
+ *    corruption this extension is careful never to cause.
+ *  * `!job.live` — the job has finished (`done`/`failed`/`stopped`). The
+ *    daemon does not reap a finished worker's roster row promptly, so this is
+ *    the difference between adopting a branch and resurrecting a conversation
+ *    the user ended.
+ *  * no `parentId` — a background job that is not a fork. Nothing to relaunch
+ *    it from.
+ *  * no parent transcript — `--fork-session --resume` has nothing to read.
+ *
+ * The relaunch forks the parent's CURRENT transcript rather than the copy the
+ * job snapshotted at its fork boundary, so an adopted branch can carry a few
+ * more turns of the parent than the raw `/fork` would have. That is the same
+ * history clicking Fork Session right now would give, which is the behaviour
+ * this whole path is converging on.
+ */
+export async function adoptBackgroundJob(
+  deps: AccountCommandDeps,
+  sessionId: string,
+  job: BackgroundJob,
+): Promise<boolean> {
+  if (job.attached || !job.live) return false;
+  const parentId = job.parentId;
+  if (parentId === undefined || parentId === sessionId) return false;
+  if (!deps.hasTranscript(parentId)) return false;
+
+  const node = deps.getForest().nodes.get(sessionId);
+  const cwd = job.cwd ?? node?.cwd ?? deps.getRecord(parentId)?.cwd;
+
+  // Name it the way a fork is named here, unless the user has already renamed
+  // the row. The CLI seeds a job's own name by COPYING the parent's, which is
+  // the duplicate-looking row this replaces.
+  const record = deps.getRecord(sessionId);
+  let title = record?.title;
+  if (title === undefined || title.trim() === '') {
+    const parentNode = deps.getForest().nodes.get(parentId);
+    const parentLabel = parentNode?.label ?? labelFor(deps, parentId);
+    const siblings = (parentNode?.children ?? [])
+      .filter((id) => id !== sessionId)
+      .map((id) => deps.getForest().nodes.get(id)?.label)
+      .filter((l): l is string => typeof l === 'string');
+    title = defaultForkTitle(parentLabel, siblings);
+  }
+
+  // Stop the job BEFORE relaunching: two processes must never hold one session
+  // id. Verified on CLI 2.1.220 that SIGTERM to the roster pid takes the whole
+  // worker down and the daemon does NOT respawn it. A pid that is already gone
+  // (ESRCH) is the success case, not a failure — but any other error means we
+  // do not know that the id is free, so we refuse rather than double-write.
+  const pid = node?.roster?.pid;
+  if (typeof pid === 'number' && Number.isInteger(pid) && pid > 0) {
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== 'ESRCH') {
+        logError('adopt: could not stop background job', err);
+        return false;
+      }
+    }
+  }
+
+  // Same edge bookkeeping as forkFlow, and for the same reason: recorded
+  // before the process exists, so a crash between here and launch still leaves
+  // the lineage correct.
+  await deps.recordLaunch(sessionId, parentId, cwd);
+  await deps.upsertRecord(sessionId, { title });
+
+  // M22: a fork inherits its parent's account, never a routed one — the launch
+  // reads the parent's transcript, which lives in that account's config dir.
+  const routed = pinnedLaunch(deps, parentId);
+
+  log('adopt:', shortId(sessionId), 'from background job of', shortId(parentId));
+  const binding = await deps.launchSession({
+    sessionId,
+    parentId,
+    cwd,
+    title,
+    ...launchAccountOptions(routed),
+  });
+  if (!binding) {
+    log('adopt: launch failed for', shortId(sessionId));
+    return false;
+  }
+  await pinLaunch(deps, sessionId, routed);
+  deps.refresh();
+  void deps.revealSession(sessionId);
+  return true;
 }
 
 /**
@@ -1719,9 +1883,18 @@ export async function closeProjectFlow(
   project: ProjectRecord,
 ): Promise<boolean> {
   const running = runningInProject(deps, project);
+  // M26. Closing a parent closes everything under it (computeGrouping), so the
+  // dialog has to say so — a project putting four other projects away with it
+  // is exactly the surprise a confirmation exists to prevent.
+  const nested = subprojectCount(deps, project.id);
   const detail = [
     'The project leaves the tree, with its sessions. Nothing is deleted: no ' +
       'transcript, no directory, no record — and nothing stops.',
+    nested > 0
+      ? `Its ${nested} subproject${nested === 1 ? '' : 's'} ${
+          nested === 1 ? 'goes' : 'go'
+        } with it, and ${nested === 1 ? 'comes' : 'come'} back when it does.`
+      : '',
     running > 0
       ? `${running} session${running === 1 ? '' : 's'} ${
           running === 1 ? 'is' : 'are'
@@ -1748,6 +1921,85 @@ export async function closeProjectFlow(
     `Canopy: closed ${project.name} — reopen it with "Canopy: Open Project…"`,
     4000,
   );
+  return true;
+}
+
+/**
+ * M26. Re-file a project: pick where it goes, or Top Level.
+ *
+ * The picker lists every project the move is LEGAL for and nothing else — the
+ * subtree being moved is absent (you cannot file something under itself), and
+ * so is anything that would take the chain past the depth cap. Offering a
+ * choice and then refusing it is how a picker teaches people not to trust it;
+ * `canReparentProject` is the same function the store enforces with, so the two
+ * cannot drift.
+ *
+ * No confirmation. Moving a project changes where a row is drawn and nothing
+ * else — no session moves, no directory changes, no membership is recomputed —
+ * and it is undone by moving it back.
+ */
+export async function moveProjectFlow(
+  deps: CommandDeps,
+  projectId: string,
+): Promise<boolean> {
+  const project = deps.getProject(projectId);
+  if (!project) return false;
+  const all = deps.allProjects();
+  const tree = buildProjectTree(all);
+  const shown = new Set(all.map((p) => p.id));
+
+  const items: ActionPick[] = [];
+  if (typeof project.parentId === 'string' && project.parentId !== '') {
+    items.push({
+      label: '$(home) Top Level',
+      description: 'Not filed under anything',
+      action: 'top',
+    });
+  }
+  for (const id of tree.order) {
+    if (!shown.has(id) || id === projectId) continue;
+    const node = tree.byId.get(id);
+    const candidate = node?.project;
+    if (!candidate) continue;
+    if (candidate.id === project.parentId) continue; // already there
+    if (!canReparentProject(all, projectId, candidate.id).ok) continue;
+    const depth = node?.depth ?? 0;
+    items.push({
+      label: `${'    '.repeat(depth)}$(folder) ${candidate.name}`,
+      description: candidate.hidden === true ? 'closed' : '',
+      detail: projectDirs(candidate)[0] ?? '',
+      action: 'project',
+      payload: candidate.id,
+    });
+  }
+
+  if (items.length === 0) {
+    void vscode.window.showInformationMessage(
+      `Canopy: there is nowhere to move "${project.name}" — every other project is inside it.`,
+    );
+    return false;
+  }
+
+  const chosen = await vscode.window.showQuickPick(items, {
+    title: `Move ${project.name}`,
+    placeHolder: 'File this project under…',
+    matchOnDescription: true,
+    matchOnDetail: true,
+    ignoreFocusOut: true,
+  });
+  if (!chosen) return false;
+
+  const target = chosen.action === 'top' ? null : (chosen.payload ?? null);
+  const ok = await deps.setProjectParent(projectId, target);
+  if (!ok) {
+    void vscode.window.showWarningMessage(
+      `Canopy: could not move "${project.name}" there.`,
+    );
+    return false;
+  }
+  log('project: moved', project.name, '->', target ?? '(top level)');
+  deps.refresh();
+  void deps.revealProject(projectId);
   return true;
 }
 
@@ -1784,6 +2036,14 @@ function runningInProject(deps: CommandDeps, project: ProjectRecord): number {
   return count;
 }
 
+/** M26. How many projects are filed under this one, at any depth. */
+function subprojectCount(deps: CommandDeps, projectId: string): number {
+  const tree = buildProjectTree(deps.allProjects());
+  // The subtree includes the project itself, which is not a subproject of
+  // itself — hence the -1, and hence 0 for a project that has none.
+  return Math.max(0, projectSubtree(tree, projectId).length - 1);
+}
+
 /**
  * What a closed project's row says about itself in the history picker.
  *
@@ -1815,14 +2075,28 @@ async function confirmDeleteProject(
   deps: CommandDeps,
   project: ProjectRecord,
 ): Promise<boolean> {
+  // M26. Deleting a parent does NOT delete its children — they are re-rooted
+  // at the top level by the tree builder, which treats a parent pointer at
+  // nothing as no pointer at all. Said out loud here because the close verb
+  // right above does take the subtree with it, and two neighbouring verbs that
+  // differ on that must not leave the user to find out which is which.
+  const nested = subprojectCount(deps, project.id);
   const choice = await vscode.window.showWarningMessage(
     `Delete the project "${project.name}"?`,
     {
       modal: true,
-      detail:
+      detail: [
         'Only the project grouping is removed. No directory, session or ' +
-        'transcript is touched, and its sessions reappear under their ' +
-        'folders.',
+          'transcript is touched, and its sessions reappear under their ' +
+          'folders.',
+        nested > 0
+          ? `Its ${nested} subproject${nested === 1 ? '' : 's'} ${
+              nested === 1 ? 'is' : 'are'
+            } kept and ${nested === 1 ? 'moves' : 'move'} to the top level.`
+          : '',
+      ]
+        .filter((t) => t !== '')
+        .join('\n\n'),
     },
     'Delete Project',
   );
@@ -2001,7 +2275,10 @@ export async function chatHistoryFlow(
       const stamped = Date.parse(record.updatedAt ?? record.createdAt ?? '');
       const when =
         facts.lastActiveAt ?? (Number.isFinite(stamped) ? stamped : 0);
-      return { record, facts, when, live: deps.isLive?.(deps.tipOf(record.id)) === true };
+      // Liveness is asked of the TIP: a chat resumed once already runs under a
+      // newer generation id, and the roster only knows that one.
+      const live = deps.isLive?.(deps.tipOf(record.id)) === true;
+      return { record, facts, when, live };
     })
     // Transcript activity beats record order: the record only moves when WE
     // write it, so ordering on it alone sorts by "when was this last parked",
@@ -2850,11 +3127,20 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       return;
     }
 
+    // M25. A native `/fork` parked in a background job: live, unowned, and no
+    // pty any editor can attach to — the shape that used to fall all the way
+    // through to the "another app or terminal" dead end on a branch the user
+    // had just asked for. Adopt it in place: same id, same row, our terminal.
+    // Unconditional, no prompt — clicking a fork you just made IS the intent,
+    // and the refusals inside adoptBackgroundJob keep it to jobs nobody owns.
+    const job = deps.backgroundJob?.(id);
+    if (job && (await adoptBackgroundJob(deps, id, job))) return;
+
     // The last resort, and it must stay rare: every session of OURS is
-    // reachable above (bound tab, detached-in-tmux, or another Canopy
-    // window). What remains is a process some other host owns — a plain
-    // terminal, another tool — whose live state no editor can adopt.
-    // Forking a copy is the one genuine "open" such a session has.
+    // reachable above (bound tab, detached-in-tmux, another Canopy window, or
+    // an unowned background job). What remains is a process some other host
+    // owns — a plain terminal, another tool — whose live state no editor can
+    // adopt. Forking a copy is the one genuine "open" such a session has.
     const FORK = 'Fork Here';
     const choice = await vscode.window.showInformationMessage(
       `"${label}" is running in another app or terminal` +
@@ -3309,6 +3595,27 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
 
   register(COMMANDS.newProject, 'new project', async () => {
     await newProjectFlow(deps);
+  });
+
+  // M26 — the two nesting verbs. Both take a project row's argument shape and
+  // both fall back to a picker, so each is equally usable from the palette
+  // (where a subproject of nothing is the one thing they must not create —
+  // hence the pick, not a silent top-level project).
+  register(COMMANDS.newSubproject, 'new subproject', async (arg?: unknown) => {
+    const parentId =
+      projectIdFromArg(arg) ??
+      (await pickProject(deps, 'Create a subproject inside which project?'));
+    if (!parentId) return;
+    if (!deps.getProject(parentId)) return;
+    await newProjectFlow(deps, { parentId });
+  });
+
+  register(COMMANDS.moveProject, 'move project', async (arg?: unknown) => {
+    const id =
+      projectIdFromArg(arg) ??
+      (await pickProject(deps, 'Move which project?', { includeHidden: true }));
+    if (!id) return;
+    await moveProjectFlow(deps, id);
   });
 
   // M24 — the open/close pair. Two verbs and not one toggle, for the reason

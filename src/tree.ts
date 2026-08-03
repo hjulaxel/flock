@@ -20,6 +20,8 @@ import {
   shortId,
 } from './types';
 import type {
+  BranchInfo,
+  BranchTreeNode,
   DisposableLike,
   GroupNode,
   ProjectGroupNode,
@@ -33,7 +35,7 @@ import type {
 } from './types';
 import { log, logError } from './log';
 import { projectUri, sessionUri } from './decorations';
-import { computeGrouping } from './projects';
+import { computeGrouping, unbranchedRoots } from './projects';
 import type { GroupingResult } from './projects';
 
 /** TreeView.reveal expands at most 3 levels — the API's hard cap. */
@@ -64,6 +66,7 @@ const EMPTY_FOREST: SessionForest = {
 // identically, and two copies of "how a row reads" would diverge on the first
 // change. Re-exported so importers and tests keep their existing entry point.
 import {
+  BRANCH_CHIPS_MIN,
   formatAge,
   formatTokens,
   projectContextValue,
@@ -116,6 +119,9 @@ function notify(message: string): void {
 function nodeKey(el: TreeNode): string {
   if (el.type === 'group') return `group:${el.key}`;
   if (el.type === 'project') return `project:${el.projectId}`;
+  // Project id FIRST and split nowhere, for the reason branchRowKey gives: a
+  // branch name may contain anything a ref can, a colon included.
+  if (el.type === 'branch') return `branch:${el.projectId}:${el.branch}`;
   return el.id;
 }
 
@@ -131,9 +137,16 @@ function groupingSignature(
   const p = projects
     .map(
       (x) =>
+        // `parentId` is in here (M26) for the same reason every other field is:
+        // this string is what decides whether the cached grouping can be
+        // reused, and a project that was re-filed changes nothing else about
+        // itself — so without it, moving a project would leave the tree drawing
+        // the old nesting until something unrelated happened to change.
         `${x.id}\u0000${x.name}\u0000${x.rootDir}\u0000${(x.dirs ?? []).join(
           '\u0001',
-        )}\u0000${x.provider ?? ''}\u0000${x.hidden === true ? '1' : '0'}`,
+        )}\u0000${x.provider ?? ''}\u0000${x.hidden === true ? '1' : '0'}\u0000${
+          typeof x.parentId === 'string' ? x.parentId : ''
+        }`,
     )
     .join('\u0002');
   return `${groupByFolder ? '1' : '0'}${onlyProjectSessions ? '1' : '0'}|${p}|${hiddenFolders.join('\u0002')}`;
@@ -160,6 +173,10 @@ export class LineageTreeProvider
    *  identity, so handing back the same object for the same id keeps reveal()
    *  and selection cheap and stable. */
   private readonly refs = new Map<string, SessionRef>();
+
+  /** M26. The same interning for branch container rows, keyed
+   *  `<projectId>\u0000<branch>`. See branchRef(). */
+  private readonly branchRefs = new Map<string, BranchTreeNode>();
 
   /** There is no API to READ expansion state and no collapse API, so shadow
    *  it from the TreeView's expand/collapse events. Only explicit user
@@ -382,15 +399,28 @@ export class LineageTreeProvider
         // Projects first, then folder rows for whatever no project claims,
         // then bare sessions. An empty root list (NOT a placeholder node) is
         // what makes the contributes.viewsWelcome empty state render.
+        //
+        // M26: only the TOP-LEVEL projects. `grouping.projects` is a preorder
+        // list of the whole forest, and a subproject is returned by its
+        // parent's getChildren instead — returning them all here would draw
+        // every project at the root AND again under its parent.
         const grouping = this.groupingFor(forest);
         return [
-          ...grouping.projects,
+          ...grouping.projects.filter((p) => (p.depth ?? 0) === 0),
           ...grouping.folders,
           ...grouping.loose.map((id) => this.sessionRef(id)),
         ];
       }
 
-      if (el.type === 'group' || el.type === 'project') {
+      if (el.type === 'project') {
+        return this.projectChildren(forest, el);
+      }
+
+      if (el.type === 'branch') {
+        return el.rootIds.map((id) => this.sessionRef(id));
+      }
+
+      if (el.type === 'group') {
         return el.rootIds.map((id) => this.sessionRef(id));
       }
 
@@ -403,15 +433,99 @@ export class LineageTreeProvider
     }
   }
 
+  /**
+   * What hangs under a project row: its subprojects, then its branches (only
+   * under `lineage.groupSessionsByBranch`), then its sessions.
+   *
+   * SUBPROJECTS FIRST, unlike the Explorer's folders-before-files by accident:
+   * a project's sessions are a list that grows all day and its subprojects are
+   * a structure that does not, so putting the stable thing at the top is what
+   * keeps the structure findable once there are fifteen sessions under it.
+   */
+  private projectChildren(
+    forest: SessionForest,
+    el: ProjectGroupNode,
+  ): TreeNode[] {
+    const grouping = this.groupingFor(forest);
+    const byId = new Map(grouping.projects.map((p) => [p.projectId, p] as const));
+    const out: TreeNode[] = [];
+    for (const childId of el.childProjectIds ?? []) {
+      const child = byId.get(childId);
+      if (child) out.push(child);
+    }
+
+    const branches = el.branches ?? [];
+    const grouped =
+      branches.length >= BRANCH_CHIPS_MIN &&
+      // Folded (the project's own `branchesCollapsed`) means the block is not
+      // on screen, and under grouping the sessions hang off that block — so a
+      // fold has to put them back under the project rather than take them with
+      // it. Same rule as the inline sidebar's; the two views must not disagree
+      // about which rows a project contains.
+      el.branchesCollapsed !== true &&
+      this.safe('groupSessionsByBranch', () => this.deps.groupSessionsByBranch?.(), false) === true;
+    if (!grouped) {
+      out.push(...el.rootIds.map((id) => this.sessionRef(id)));
+      return out;
+    }
+
+    // Only the branches the user has on screen; the folded-away ones keep their
+    // sessions directly under the project (unbranchedRoots), which is what stops
+    // a curation decision about ROWS from hiding SESSIONS.
+    for (const branch of branches) {
+      if (branch.shown === false) continue;
+      out.push(this.branchRef(el.projectId, branch));
+    }
+    out.push(
+      ...unbranchedRoots(el.rootIds, branches).map((id) => this.sessionRef(id)),
+    );
+    return out;
+  }
+
+  /** Interned branch node, for the same reason sessionRef interns: the
+   *  workbench keys expansion state on element identity, so a fresh object per
+   *  refresh would collapse every open branch on every roster tick. */
+  private branchRef(projectId: string, branch: BranchInfo): BranchTreeNode {
+    const key = `${projectId}\u0000${branch.name}`;
+    const existing = this.branchRefs.get(key);
+    const next: BranchTreeNode = {
+      type: 'branch',
+      projectId,
+      branch: branch.name,
+      dir: branch.dir,
+      colorIndex: branch.colorIndex,
+      primary: branch.primary,
+      rootIds: branch.rootIds.slice(),
+    };
+    if (
+      existing &&
+      existing.dir === next.dir &&
+      existing.primary === next.primary &&
+      existing.colorIndex === next.colorIndex &&
+      existing.rootIds.length === next.rootIds.length &&
+      existing.rootIds.every((id, i) => id === next.rootIds[i])
+    ) {
+      return existing;
+    }
+    if (this.branchRefs.size > CACHE_SOFT_LIMIT) this.branchRefs.clear();
+    this.branchRefs.set(key, next);
+    return next;
+  }
+
   getTreeItem(el: TreeNode): vscode.TreeItem {
     try {
       if (el.type === 'group') return this.groupItem(el);
       if (el.type === 'project') return this.projectItem(el);
+      if (el.type === 'branch') return this.branchItem(el);
       return this.sessionItem(el, this.forest());
     } catch (err) {
       logError('tree.getTreeItem', err);
       const fallback = new vscode.TreeItem(
-        el.type === 'session' ? shortId(el.id) : el.label,
+        el.type === 'session'
+          ? shortId(el.id)
+          : el.type === 'branch'
+            ? el.branch
+            : el.label,
         vscode.TreeItemCollapsibleState.None,
       );
       fallback.id = nodeKey(el);
@@ -446,12 +560,58 @@ export class LineageTreeProvider
     // (a fake `lineage-project:` scheme with no extension) through whatever
     // file-icon theme is active, which is unpredictable rather than absent.
     // `providerIcon()` stays reserved for sessionItem(), below.
-    item.iconPath = new vscode.ThemeIcon('root-folder');
+    // M26. A SUBPROJECT gets the plain folder glyph and a top-level project
+    // keeps the root marker. The native tree indents by 8px per level and
+    // draws no band, so the icon is the only thing left to say which rows are
+    // the roots of the view — with one glyph for both, a four-project tree
+    // reads as four peers whatever the indentation does.
+    item.iconPath = new vscode.ThemeIcon(
+      (el.depth ?? 0) > 0 ? 'folder-library' : 'root-folder',
+    );
     item.contextValue = projectContextValue(el);
     // A project row IS decorated since M12 — but only under its own scheme,
     // which lights the attention dot when a session beneath it is unseen-done
     // and renders nothing otherwise.
     item.resourceUri = projectUri(el.projectId);
+    return item;
+  }
+
+  /**
+   * A branch CONTAINER row (M26, `lineage.groupSessionsByBranch` only).
+   *
+   * Deliberately plain next to the inline sidebar's version: a TreeItem has one
+   * label, one icon and one description, and no way to draw a coloured swatch —
+   * so the colour, which is the whole of the inline row's language, has nothing
+   * to live in here. What survives is what the row is FOR: the branch's name,
+   * how many sessions are on it, and the fact that it opens.
+   */
+  private branchItem(el: BranchTreeNode): vscode.TreeItem {
+    const item = new vscode.TreeItem(
+      el.branch,
+      el.rootIds.length === 0
+        ? vscode.TreeItemCollapsibleState.None
+        : this.isCollapsed(el)
+          ? vscode.TreeItemCollapsibleState.Collapsed
+          : vscode.TreeItemCollapsibleState.Expanded,
+    );
+    item.id = nodeKey(el);
+    item.description =
+      el.rootIds.length > 0 ? String(el.rootIds.length) : undefined;
+    item.iconPath = new vscode.ThemeIcon('git-branch');
+    item.contextValue = contextValueOf(
+      el.primary ? ['branch', 'primary'] : ['branch'],
+    );
+    // Clicking an EMPTY branch starts a session in it — there is nothing to
+    // open, and that is what the row is for. A branch with sessions under it
+    // opens instead (the workbench toggles it), and the `+` for a new one is on
+    // its context menu.
+    if (el.rootIds.length === 0) {
+      item.command = {
+        command: COMMANDS.newSessionInBranch,
+        title: 'New Session Here',
+        arguments: [el],
+      };
+    }
     return item;
   }
 
@@ -654,15 +814,52 @@ export class LineageTreeProvider
    *  materialise the path to an element it has not rendered yet. */
   getParent(el: TreeNode): TreeNode | undefined {
     try {
-      if (el.type !== 'session') return undefined;
       const forest = this.forest();
+      // M26. A subproject's parent is the project it is filed under, and
+      // reveal() walks upward through this — without it, revealing a session in
+      // a nested project could not materialise the path to it.
+      if (el.type === 'project') {
+        const parentId = el.parentProjectId;
+        if (typeof parentId !== 'string' || parentId === '') return undefined;
+        return this.groupingFor(forest).projects.find(
+          (p) => p.projectId === parentId,
+        );
+      }
+      if (el.type === 'branch') {
+        return this.groupingFor(forest).projects.find(
+          (p) => p.projectId === el.projectId,
+        );
+      }
+      if (el.type !== 'session') return undefined;
       const parentId = this.visibleParents(forest).get(el.id);
       if (parentId) return this.sessionRef(parentId);
       const grouping = this.groupingFor(forest);
-      return (
-        grouping.projects.find((p) => p.rootIds.indexOf(el.id) >= 0) ??
-        grouping.folders.find((g) => g.rootIds.indexOf(el.id) >= 0)
+      const project = grouping.projects.find(
+        (p) => p.rootIds.indexOf(el.id) >= 0,
       );
+      if (project) {
+        // Under branch grouping the session hangs off a BRANCH row rather than
+        // off the project directly, and reveal() has to name the row that
+        // actually contains it or the walk stops one level short.
+        const branches = project.branches ?? [];
+        const grouped =
+          branches.length >= BRANCH_CHIPS_MIN &&
+          project.branchesCollapsed !== true &&
+          this.safe(
+            'groupSessionsByBranch',
+            () => this.deps.groupSessionsByBranch?.(),
+            false,
+          ) === true;
+        const branch = grouped
+          ? branches.find(
+              (b) => b.shown !== false && b.rootIds.indexOf(el.id) >= 0,
+            )
+          : undefined;
+        return branch
+          ? this.branchRef(project.projectId, branch)
+          : project;
+      }
+      return grouping.folders.find((g) => g.rootIds.indexOf(el.id) >= 0);
     } catch (err) {
       logError('tree.getParent', err);
       return undefined;
@@ -677,6 +874,7 @@ export class LineageTreeProvider
       md.isTrusted = true;
       if (el.type === 'group') this.appendGroupTooltip(md, el);
       else if (el.type === 'project') this.appendProjectTooltip(md, el);
+      else if (el.type === 'branch') this.appendBranchTooltip(md, el);
       else this.appendSessionTooltip(md, el);
       item.tooltip = md;
     } catch (err) {
@@ -706,6 +904,20 @@ export class LineageTreeProvider
     const count = el.rootIds.length;
     md.appendMarkdown(
       `\n${count} root session${count === 1 ? '' : 's'} here\n`,
+    );
+  }
+
+  private appendBranchTooltip(
+    md: vscode.MarkdownString,
+    el: BranchTreeNode,
+  ): void {
+    md.appendMarkdown(`**${mdEscape(el.branch)}**${el.primary ? ' — main worktree' : ''}\n\n`);
+    md.appendMarkdown(`${mdCode(el.dir)}\n\n`);
+    const count = el.rootIds.length;
+    md.appendMarkdown(
+      count === 0
+        ? 'no sessions yet — click to start one here'
+        : `${count} session${count === 1 ? '' : 's'} here`,
     );
   }
 
@@ -811,8 +1023,15 @@ export class LineageTreeProvider
       const ids: string[] = [];
       for (const el of source) {
         if (el.type === 'session') ids.push(el.id);
+        // M26. A project row drags too, to be filed under another one. It rides
+        // the SAME payload under a `project:` prefix rather than a second mime
+        // type: the array has always been read through a uuid-shaped filter
+        // (parseDraggedIds), so a prefixed entry is invisible to every existing
+        // reader — including an older window's, if two versions ever share a
+        // drag.
+        else if (el.type === 'project') ids.push(`project:${el.projectId}`);
       }
-      if (ids.length === 0) return; // groups are not draggable
+      if (ids.length === 0) return; // folder groups and branches are not draggable
       dt.set(TREE_DND_MIME, new vscode.DataTransferItem(JSON.stringify(ids)));
       dt.set('text/plain', new vscode.DataTransferItem(ids[0]));
     } catch (err) {
@@ -829,6 +1048,27 @@ export class LineageTreeProvider
       if (!transferred) return;
 
       const raw = await transferred.asString();
+
+      // M26. A PROJECT drag first, and never mixed with the session path: onto
+      // a project row it becomes that project's subproject, onto a folder row
+      // or empty space it goes back to the top level, onto a session row
+      // nothing happens (a project cannot be filed under a conversation).
+      const draggedProjects = parseDraggedProjectIds(raw);
+      if (draggedProjects.length > 0) {
+        const onto =
+          target === undefined || target.type === 'group'
+            ? null
+            : target.type === 'project'
+              ? target.projectId
+              : undefined;
+        if (onto === undefined) return;
+        for (const id of draggedProjects) {
+          if (id === onto) continue;
+          await this.deps.reparentProject?.(id, onto);
+        }
+        return;
+      }
+
       const ids = parseDraggedIds(raw);
       if (ids.length === 0) return;
 
@@ -894,7 +1134,13 @@ export class LineageTreeProvider
   private pruneShadowState(forest: SessionForest): void {
     if (this.collapsedKeys.size === 0) return;
     for (const key of Array.from(this.collapsedKeys)) {
-      if (key.startsWith('group:') || key.startsWith('project:')) continue;
+      if (
+        key.startsWith('group:') ||
+        key.startsWith('project:') ||
+        key.startsWith('branch:')
+      ) {
+        continue;
+      }
       if (!forest.nodes.has(key)) this.collapsedKeys.delete(key);
     }
   }
@@ -915,6 +1161,25 @@ function parseDraggedIds(raw: string): string[] {
     return parsed.filter((v): v is string => isSessionId(v));
   } catch {
     // A foreign payload under our own mime type: ignore, never throw.
+    return [];
+  }
+}
+
+/** The `project:<id>` entries of a drag payload. Its own reader rather than a
+ *  widened parseDraggedIds, so a session verb can never be handed a project id
+ *  by a payload that happened to contain one. */
+function parseDraggedProjectIds(raw: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const out: string[] = [];
+    for (const value of parsed) {
+      if (typeof value !== 'string' || !value.startsWith('project:')) continue;
+      const id = value.slice('project:'.length);
+      if (id !== '') out.push(id);
+    }
+    return out;
+  } catch {
     return [];
   }
 }

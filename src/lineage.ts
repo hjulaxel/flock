@@ -786,7 +786,7 @@ export function buildForest(input: BuildForestInput): SessionForest {
   // possible cwd is the one its children are running in — and it NEEDS one: a
   // ghost is the visible root of its subtree, and grouping keys entirely off
   // the root's cwd. Without this a fork of a just-closed parent falls out of
-  // its project row into "(unknown)", or disappears altogether under
+  // its project row into "(no directory)", or disappears altogether under
   // `lineage.onlyProjectSessions`. Forks inherit the parent's directory, so
   // the child's cwd is the right answer rather than a guess.
   const inheritedCwd = new Map<string, string>();

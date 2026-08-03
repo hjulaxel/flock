@@ -1061,3 +1061,187 @@ describe('SessionDecorationProvider.provideFileDecoration', () => {
     expect((d?.color as unknown as { id: string }).id).toBe('disabledForeground');
   });
 });
+
+// ---------------------------------------------------------- M26: nesting
+//
+// The native tree's half of subprojects and branch grouping. It renders the
+// same grouping the inline sidebar does (that is the point — the two views
+// must never disagree about what a project contains), but through TreeNodes
+// rather than a flat row list, so the walk is what has to be tested here.
+
+describe('LineageTreeProvider: subprojects (M26)', () => {
+  const APP = project('app', 'app', '/code/app');
+  const API = project('api', 'api', '/code/app/api', { parentId: 'app' });
+
+  function nested(): { provider: LineageTreeProvider; harness: Harness } {
+    const h = harness(
+      forestOf([node(A, { cwd: '/code/app' }), node(B, { cwd: '/code/app/api' })]),
+    );
+    h.setProjects([APP, API]);
+    return { provider: new LineageTreeProvider(h.deps), harness: h };
+  }
+
+  it('shows only top-level projects at the root', () => {
+    const { provider } = nested();
+    const roots = provider.getChildren();
+    expect(roots).toHaveLength(1);
+    expect((roots[0] as ProjectGroupNode).projectId).toBe('app');
+  });
+
+  it('returns the subproject from its parent, ahead of the sessions', () => {
+    const { provider } = nested();
+    const app = provider.getChildren()[0] as ProjectGroupNode;
+    const kids = provider.getChildren(app);
+    expect(kids.map((k) => (k.type === 'project' ? k.projectId : k.type === 'session' ? k.id : k.type))).toEqual([
+      'api',
+      A,
+    ]);
+    const api = kids[0] as ProjectGroupNode;
+    expect(provider.getChildren(api).map((k) => (k as SessionRef).id)).toEqual([B]);
+  });
+
+  it('walks back up: getParent of a subproject is its parent project', () => {
+    const { provider } = nested();
+    const app = provider.getChildren()[0] as ProjectGroupNode;
+    const api = provider.getChildren(app)[0] as ProjectGroupNode;
+    expect((provider.getParent(api) as ProjectGroupNode)?.projectId).toBe('app');
+    expect((provider.getParent(ref(B)) as ProjectGroupNode)?.projectId).toBe('api');
+  });
+
+  it('gives a subproject row its own glyph and the subproject token', () => {
+    const { provider } = nested();
+    const app = provider.getChildren()[0] as ProjectGroupNode;
+    const api = provider.getChildren(app)[0] as ProjectGroupNode;
+    const item = provider.getTreeItem(api);
+    expect((item.iconPath as unknown as { id: string }).id).toBe('folder-library');
+    expect(item.contextValue).toContain(';subproject;');
+    expect(provider.getTreeItem(app).contextValue).toContain(';parentProject;');
+  });
+
+  it('drags a project row and files it under the drop target', async () => {
+    const moves: Array<[string, string | null]> = [];
+    const h = harness(forestOf([node(A, { cwd: '/code/app' })]));
+    h.setProjects([APP, project('other', 'other', '/code/other')]);
+    const deps: TreeDeps = {
+      ...h.deps,
+      reparentProject: async (projectId, newParentId) => {
+        moves.push([projectId, newParentId]);
+      },
+    };
+    const provider = new LineageTreeProvider(deps);
+    const roots = provider.getChildren() as ProjectGroupNode[];
+    const app = roots.find((p) => p.projectId === 'app') as ProjectGroupNode;
+    const other = roots.find((p) => p.projectId === 'other') as ProjectGroupNode;
+
+    const dt = new DataTransfer();
+    provider.handleDrag([other], dt as never);
+    await provider.handleDrop(app, dt as never);
+    expect(moves).toEqual([['other', 'app']]);
+
+    // Onto a folder row: back to the top level.
+    moves.length = 0;
+    const dt2 = new DataTransfer();
+    provider.handleDrag([other], dt2 as never);
+    const group: GroupNode = {
+      type: 'group',
+      key: '/tmp',
+      cwd: '/tmp',
+      label: 'tmp',
+      rootIds: [],
+    };
+    await provider.handleDrop(group, dt2 as never);
+    expect(moves).toEqual([['other', null]]);
+  });
+
+  it('never lets a project drag reach the session reparent path', async () => {
+    const h = harness(forestOf([node(A, { cwd: '/code/app' })]));
+    h.setProjects([APP]);
+    const provider = new LineageTreeProvider(h.deps);
+    const app = provider.getChildren()[0] as ProjectGroupNode;
+    const dt = new DataTransfer();
+    provider.handleDrag([app], dt as never);
+    await provider.handleDrop(ref(A), dt as never);
+    expect(h.reparented).toEqual([]);
+    expect(h.assigned).toEqual([]);
+  });
+});
+
+describe('LineageTreeProvider: branch grouping (M26)', () => {
+  const APP = project('app', 'app', '/code/app');
+  const WORKTREES = [
+    { dir: '/code/app', branch: 'main', head: 'aaa', detached: false },
+    { dir: '/code/app-feat', branch: 'feat/x', head: 'bbb', detached: false },
+  ];
+
+  function build(on: boolean): { provider: LineageTreeProvider } {
+    const h = harness(
+      forestOf([
+        node(A, { cwd: '/code/app' }),
+        node(B, { cwd: '/code/app-feat' }),
+      ]),
+    );
+    h.setProjects([APP]);
+    const deps: TreeDeps = {
+      ...h.deps,
+      worktreesOf: () => WORKTREES,
+      groupSessionsByBranch: () => on,
+    };
+    return { provider: new LineageTreeProvider(deps) };
+  }
+
+  it('is off by default: a project lists its sessions directly', () => {
+    const { provider } = build(false);
+    const app = provider.getChildren()[0] as ProjectGroupNode;
+    expect(provider.getChildren(app).map((k) => (k as SessionRef).id)).toEqual([
+      A,
+      B,
+    ]);
+  });
+
+  it('puts a branch row between the project and its sessions when on', () => {
+    const { provider } = build(true);
+    const app = provider.getChildren()[0] as ProjectGroupNode;
+    const kids = provider.getChildren(app);
+    expect(kids.map((k) => k.type)).toEqual(['branch', 'branch']);
+    const main = kids[0];
+    expect(main.type === 'branch' && main.branch).toBe('main');
+    expect(provider.getChildren(main).map((k) => (k as SessionRef).id)).toEqual([
+      A,
+    ]);
+  });
+
+  it('reveals a session through the branch that contains it', () => {
+    const { provider } = build(true);
+    const parent = provider.getParent(ref(B));
+    expect(parent?.type).toBe('branch');
+    expect(parent?.type === 'branch' && parent.branch).toBe('feat/x');
+    // ...and the branch's own parent is the project, so reveal() can walk up.
+    const grand = parent ? provider.getParent(parent) : undefined;
+    expect(grand?.type === 'project' && grand.projectId).toBe('app');
+  });
+
+  it('hands back the same branch object while nothing about it changed', () => {
+    const { provider } = build(true);
+    const app = provider.getChildren()[0] as ProjectGroupNode;
+    const first = provider.getChildren(app)[0];
+    const second = provider.getChildren(app)[0];
+    expect(second).toBe(first);
+  });
+
+  it('renders the count and keeps an empty branch clickable', () => {
+    const h = harness(forestOf([node(A, { cwd: '/code/app' })]));
+    h.setProjects([APP]);
+    const provider = new LineageTreeProvider({
+      ...h.deps,
+      worktreesOf: () => WORKTREES,
+      groupSessionsByBranch: () => true,
+    });
+    const app = provider.getChildren()[0] as ProjectGroupNode;
+    const [main, feat] = provider.getChildren(app);
+    expect(provider.getTreeItem(main).description).toBe('1');
+    const featItem = provider.getTreeItem(feat);
+    expect(featItem.description).toBeUndefined();
+    expect(featItem.collapsibleState).toBe(TreeItemCollapsibleState.None);
+    expect(featItem.command?.command).toBe(COMMANDS.newSessionInBranch);
+  });
+});

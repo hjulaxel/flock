@@ -140,7 +140,11 @@ body {
   align-items: center;
   height: var(--row-height);
   line-height: var(--row-height);
-  padding-left: 4px;
+  /* --row-indent is the M26 subproject nesting, set per row by the client
+   * (applyIndent) and 0 for every row in a tree where nobody has nested a
+   * project. ADDED to the 4px rather than replacing it, so a nested row keeps
+   * the same left margin its parent had and simply starts further in. */
+  padding-left: calc(4px + var(--row-indent, 0px));
   padding-right: 6px;
   white-space: nowrap;
   position: relative;
@@ -187,6 +191,28 @@ body {
 #tree > .row.project:first-child,
 #tree > .row.folder:first-child {
   box-shadow: none;
+}
+
+/* M26. A SUBPROJECT row — a project header standing inside another project's
+ * block. It keeps the band (it heads a section of its own) and loses the top
+ * RULE, for the same reason a branch row has none: that line separates one
+ * top-level block from the last, and drawing it inside a block would cut the
+ * parent away from the children it contains. The indent is what says "this is
+ * inside"; the rule would say "this is next".
+ *
+ * Specificity (0,2,0) and declared after .row.project (0,2,0), so it wins on
+ * source order — the same ordering contract the hover and selection rules
+ * below depend on. */
+.row.project.nested {
+  box-shadow: none;
+}
+
+/* The label steps down a weight per level rather than staying uniformly bold:
+ * a column of six equally bold headings has no hierarchy in it, which is the
+ * one thing nesting is for. Two steps only — past that the indent carries it,
+ * and a third weight would just be smaller text. */
+.row.project.nested .name {
+  font-weight: 500;
 }
 
 /* No text-transform and no colour override here: a project's label is an
@@ -693,12 +719,15 @@ body {
 .row.branch {
   background-color: var(--vscode-sideBarSectionHeader-background, transparent);
   background-image: linear-gradient(var(--root-band), var(--root-band));
+  /* The branch block's own offset, plus whatever subproject nesting the row is
+   * under. Restated here rather than inherited because this rule overrides
+   * `.row`'s padding-left outright and the two offsets have to add up. */
   /* Aligned with the session NAMES below, not with the project title above: the
    * branches label the rows they sit over. The sum tracks the geometry it
    * mirrors — 4px (.row's own padding) + the gutter + the icon box and its
    * margin — rather than being a number somebody re-measures when the gutter
    * moves. */
-  padding-left: calc(4px + var(--rail-col));
+  padding-left: calc(4px + var(--rail-col) + var(--row-indent, 0px));
   /* THE GUARD. This row has a fixed height and #tree is a plain block flow with
    * no per-row stacking context, so anything that escapes paints over its
    * neighbours, unstyled and unclickable. A long branch name did exactly that
@@ -707,6 +736,50 @@ body {
    * large: the inline rename's .validation box deliberately hangs outside its
    * row, and a branch row never renames. */
   overflow: hidden;
+  cursor: pointer;
+}
+
+/* M26. The chevron on an openable branch row. Its own small column ahead of the
+ * swatch, drawn as a CSS triangle rather than a glyph so it needs no font and
+ * no svg round trip: at 22px rows a 4px triangle is what the workbench's own
+ * twisty looks like anyway, and one that rotates has an animation the eye reads
+ * as "this opened" for free.
+ *
+ * Deliberately NOT the session spine's ⊕ ring. That mark means "a lineage
+ * continues here", and a branch is not anybody's parent — the sessions under it
+ * are filed there, not forked from it. */
+.branch-twisty {
+  flex: 0 0 10px;
+  width: 10px;
+  height: 10px;
+  margin-right: 2px;
+  position: relative;
+  opacity: 0.8;
+}
+
+.branch-twisty::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 2px;
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid var(--chip-color, var(--vscode-foreground));
+  transform: translateY(-50%);
+  transform-origin: 2px 50%;
+  transition: transform 80ms ease-out;
+}
+
+.branch-twisty.expanded::before {
+  transform: translateY(-50%) rotate(90deg);
+}
+
+/* An openable branch row is a container, so the whole row is a toggle and the
+ * pointer should not promise the "starts a session here" click the flat layout
+ * has. The `+` button inside it keeps its own pointer cursor from `.action`. */
+.row.branch.expandable {
   cursor: pointer;
 }
 

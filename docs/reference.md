@@ -56,6 +56,44 @@ Dragging a session onto a project row adds that session's directory to the
 project. Dragging a session onto *another session* re-parents it. Those are two
 different gestures on purpose: one is about addresses, one about ancestry.
 
+### Subprojects
+
+A project can be filed **under** another project, to any depth and any breadth
+— a monorepo with `api`, `web` and `infra` under it, each with its own
+directories, provider and account. Nesting changes where a row is drawn and
+nothing else: membership is still the longest-matching-directory rule, so a
+session in `~/code/app/api` lands in the `api` subproject and one in
+`~/code/app/docs` stays with the parent.
+
+- **New Subproject…** on a project row creates one, with the directory picker
+  already opened inside the parent.
+- **Move Project…**, or dragging a project row onto another project row, files
+  an existing project somewhere else. Dropping it on empty space below the tree
+  takes it back to the top level.
+- Closing a project closes everything under it, and opening it brings the whole
+  thing back. **Deleting** one does not delete its subprojects — they move to
+  the top level, because a delete that took four other projects with it would
+  be a very different verb.
+
+Two ways a project tree can be wrong are handled rather than prevented: a
+subproject whose parent has been deleted is drawn at the top level, and a move
+that would close a loop is refused with a reason. Projects nest at most eight
+deep.
+
+### Branch grouping
+
+`lineage.groupSessionsByBranch` (off by default) changes what a project's branch
+rows *are*. Normally they are a list above the sessions: which worktrees exist,
+what colour each one is, click to start a session there. With the setting on,
+each branch row becomes a container — its sessions hang underneath it, it folds
+shut, and the `+` on the row is what starts a session in that worktree.
+
+It applies to a project with two or more worktrees, which is the same threshold
+the branch rows themselves appear at. Anything the branch rows do not account
+for — a session on a branch you folded away into **Others**, or in a project
+directory outside the repository — keeps its place directly under the project.
+It is a layout, never a filter: no setting in Canopy hides a session's row.
+
 ## Notifications
 
 The red dot is an **unread marker**. It appears when a session completes a turn

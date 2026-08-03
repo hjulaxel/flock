@@ -33,6 +33,7 @@ import type {
   ProviderId,
   SessionForest,
   SessionNode,
+  Worktree,
 } from '../src/types';
 import { Uri, commands } from './mocks/vscode';
 // src/webtree.ts's own `import * as vscode from 'vscode'` resolves (for tsc,
@@ -113,6 +114,7 @@ function project(
 
 interface DepsCalls {
   reparent: Array<[string, string | null]>;
+  reparentProject: Array<[string, string | null]>;
   assignToProject: Array<[string, string]>;
   renameSession: Array<[string, string]>;
   renameProject: Array<[string, string]>;
@@ -130,10 +132,13 @@ function makeDeps(
     onlyProjectSessions: () => boolean;
     isBoundHere: (id: string) => boolean;
     providerFor: (id: string) => ProviderId;
+    worktreesOf: (dir: string) => readonly Worktree[];
+    groupSessionsByBranch: () => boolean;
   }> = {},
 ): { deps: WebtreeDeps; calls: DepsCalls } {
   const calls: DepsCalls = {
     reparent: [],
+    reparentProject: [],
     assignToProject: [],
     renameSession: [],
     renameProject: [],
@@ -148,6 +153,11 @@ function makeDeps(
     reparent: async (childId, newParentId) => {
       calls.reparent.push([childId, newParentId]);
     },
+    reparentProject: async (projectId, newParentId) => {
+      calls.reparentProject.push([projectId, newParentId]);
+    },
+    worktreesOf: over.worktreesOf ?? (() => []),
+    groupSessionsByBranch: over.groupSessionsByBranch ?? (() => false),
     groupByFolder: over.groupByFolder ?? (() => false),
     projects: over.projects ?? (() => []),
     hiddenFolders: over.hiddenFolders ?? (() => []),
@@ -746,6 +756,125 @@ describe('LineageWebtreeProvider onDrop (via the "drop" message)', () => {
       targetKey: 'project:p1',
     });
     expect(calls.assignToProject).toEqual([[ROOT, 'p1']]);
+  });
+
+  // ------------------------------------------------------------ M26
+
+  it('files a dragged project under the project it was dropped on', async () => {
+    const { deps, calls } = makeDeps(forestWithChild(), {
+      projects: () => [
+        project('p1', 'P1', '/proj'),
+        project('p2', 'P2', '/other'),
+      ],
+    });
+    const provider = new LineageWebtreeProvider(deps, EXT_URI);
+    internals(provider).view = fakeView();
+
+    await internals(provider).onMessage({
+      type: 'drop',
+      sourceKey: projectRowKey('p2'),
+      targetKey: projectRowKey('p1'),
+    });
+    expect(calls.reparentProject).toEqual([['p2', 'p1']]);
+    // Never the session path: a project id is a bare uuid too.
+    expect(calls.reparent).toEqual([]);
+    expect(calls.assignToProject).toEqual([]);
+  });
+
+  it('takes a project back to the top level when dropped on the background', async () => {
+    const { deps, calls } = makeDeps(forestWithChild(), {
+      projects: () => [project('p1', 'P1', '/proj')],
+    });
+    const provider = new LineageWebtreeProvider(deps, EXT_URI);
+    internals(provider).view = fakeView();
+
+    await internals(provider).onMessage({
+      type: 'drop',
+      sourceKey: projectRowKey('p1'),
+      targetKey: 'background',
+    });
+    expect(calls.reparentProject).toEqual([['p1', null]]);
+  });
+
+  it('ignores a project dropped onto a session row', async () => {
+    const { deps, calls } = makeDeps(forestWithChild(), {
+      projects: () => [project('p1', 'P1', '/proj')],
+    });
+    const provider = new LineageWebtreeProvider(deps, EXT_URI);
+    internals(provider).view = fakeView();
+
+    await internals(provider).onMessage({
+      type: 'drop',
+      sourceKey: projectRowKey('p1'),
+      targetKey: `session:${ROOT}`,
+    });
+    expect(calls.reparentProject).toEqual([]);
+  });
+
+  it('ignores a project dropped on itself', async () => {
+    const { deps, calls } = makeDeps(forestWithChild(), {
+      projects: () => [project('p1', 'P1', '/proj')],
+    });
+    const provider = new LineageWebtreeProvider(deps, EXT_URI);
+    internals(provider).view = fakeView();
+
+    await internals(provider).onMessage({
+      type: 'drop',
+      sourceKey: projectRowKey('p1'),
+      targetKey: projectRowKey('p1'),
+    });
+    expect(calls.reparentProject).toEqual([]);
+  });
+});
+
+// ------------------------------------------ M26: the branch row's own `+`
+
+describe('LineageWebtreeProvider: grouped branch rows', () => {
+  const WORKTREES: Worktree[] = [
+    { dir: '/proj', branch: 'main', head: 'aaa', detached: false },
+    { dir: '/proj-feat', branch: 'feat/x', head: 'bbb', detached: false },
+  ];
+
+  function setup() {
+    const forest = forestOf([node(ROOT, { cwd: '/proj' })]);
+    const { deps, calls } = makeDeps(forest, {
+      projects: () => [project('p1', 'P1', '/proj')],
+      worktreesOf: () => WORKTREES,
+      groupSessionsByBranch: () => true,
+    });
+    const provider = new LineageWebtreeProvider(deps, EXT_URI);
+    internals(provider).view = fakeView();
+    return { provider, calls };
+  }
+
+  it('resolves the + on a branch row through the model it rendered', async () => {
+    const { provider, calls } = setup();
+    await internals(provider).onMessage({
+      type: 'action',
+      action: 'newSessionInBranch',
+      key: branchRowKey('p1', 'feat/x'),
+    });
+    expect(calls.runCommand).toEqual([
+      [
+        'newSessionInBranch',
+        {
+          type: 'branch',
+          projectId: 'p1',
+          dir: '/proj-feat',
+          branch: 'feat/x',
+        },
+      ],
+    ]);
+  });
+
+  it('refuses a branch the current model does not show', async () => {
+    const { provider, calls } = setup();
+    await internals(provider).onMessage({
+      type: 'action',
+      action: 'newSessionInBranch',
+      key: branchRowKey('p1', 'no-such-branch'),
+    });
+    expect(calls.runCommand).toEqual([]);
   });
 });
 

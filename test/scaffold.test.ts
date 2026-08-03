@@ -79,7 +79,8 @@ describe('scaffold: frozen types contract', () => {
     // + 10 account verbs (M22)
     // − askSession (M24: the third fork verb, retired)
     // + chatHistory, closeProject, reopenProject (M24)
-    expect(ids).toHaveLength(62);
+    // + newSubproject, moveProject (M26 subprojects)
+    expect(ids).toHaveLength(64);
     expect(new Set(ids).size).toBe(ids.length);
     for (const id of ids) expect(id.startsWith('lineage.')).toBe(true);
   });

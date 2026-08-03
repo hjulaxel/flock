@@ -262,6 +262,31 @@ export interface ProjectRecord {
   name: string;            // user-chosen; the tree row's label
   rootDir: string;         // the main directory
   dirs: string[];          // EXTRA directories; never contains rootDir
+  /**
+   * M26 SUBPROJECTS. The project this one is filed under, or absent for a
+   * top-level project. Arbitrary depth and breadth: a subproject is an ordinary
+   * ProjectRecord in every other respect — its own name, its own directories,
+   * its own provider and routing — and the only thing this field changes is
+   * where its row is drawn.
+   *
+   * A POINTER UP, never a list of children down, for the same reason
+   * EditorialRecord.chat is a flag on the chat rather than an array on the
+   * project: `projects` is merged newest-WINS per record, so a children array
+   * written by two windows a second apart would lose one of the entries for
+   * good. A parent pointer has a single writer — the child — and the tree is
+   * rebuilt from those pointers on every render.
+   *
+   * Nothing here is trusted at render time. An id naming a project that does
+   * not exist (deleted, or not yet merged in from another window) renders as
+   * TOP-LEVEL rather than vanishing, a cycle is broken at the first repeated
+   * id, and a chain longer than MAX_PROJECT_DEPTH is cut — see
+   * projects.buildProjectTree. A tree that cannot be drawn must degrade to a
+   * flat list, never to an empty view or a hung render.
+   *
+   * `null` clears it (the store's upsert writes explicit nulls and drops the
+   * field), which is what "move to top level" persists.
+   */
+  parentId?: string | null;
   provider?: ProviderId;   // default DEFAULT_PROVIDER
   /** CLOSED. The project is put away: no row, and its sessions have no rows
    *  either (computeGrouping counts them as hidden rather than demoting them
@@ -341,6 +366,22 @@ export interface HiddenFolder {
 }
 
 export const MAX_PROJECT_NAME_LEN = 60;
+
+/**
+ * M26. How deep the subproject tree may go before the renderer stops
+ * descending.
+ *
+ * A cap rather than "as deep as you like", because the depth is read out of
+ * user-editable state that several windows write: the cycle guard already stops
+ * a loop, but a hand-edited chain of two hundred parents would be two hundred
+ * indents of a sidebar that is 300px wide. Eight is far past any real structure
+ * (repo → area → service is three) and small enough that the deepest row still
+ * has room for a name.
+ *
+ * A project past the cap is not hidden — it is re-rooted at the cap's level, so
+ * every project always has a row somewhere.
+ */
+export const MAX_PROJECT_DEPTH = 8;
 
 // ----------------------------------------------------------------- accounts
 // M22. An ACCOUNT is an AI subscription you can launch sessions on. Somebody
@@ -599,6 +640,16 @@ export const COMMANDS = {
    *  that has existed since M7 (open a project's DIRECTORY in a new VS Code
    *  window) and which a closed project cannot be reached from either. */
   reopenProject: 'lineage.reopenProject',
+  /** M26. A project filed UNDER this one. The same create flow as
+   *  `newProject`, with the parent pre-answered — which is the whole difference
+   *  between "make a project and then go and find where it belongs" and the
+   *  gesture people actually make, which is "this repo has an api and a web
+   *  and I want them under it". */
+  newSubproject: 'lineage.newSubproject',
+  /** M26. Re-file a project: pick a new parent, or Top Level. The keyboard (and
+   *  palette) half of dragging a project row onto another one — and the only
+   *  half a closed project or a collapsed parent can be reached through. */
+  moveProject: 'lineage.moveProject',
   newSessionInProject: 'lineage.newSessionInProject',
   /** M20 — a session in one specific git WORKTREE of a project. What the branch
    *  chips run. Not offered in the palette: its argument is a directory that
@@ -735,6 +786,12 @@ export const CONFIG_KEYS = {
   showTokens: 'showTokens',
   /** M20. Override the branch-chip palette. Empty = the built-in muted one. */
   branchColors: 'branchColors',
+  /** M26. Nest a project's sessions UNDER the branch they are running on,
+   *  instead of listing the branches and then the sessions as two flat blocks.
+   *  OFF by default: it re-homes every row in a project the moment it goes on,
+   *  and the flat list is right for the common case of one checkout with a
+   *  handful of forks in it. See viewmodel.buildViewModel. */
+  groupSessionsByBranch: 'groupSessionsByBranch',
   staleAfterHours: 'staleAfterHours',
   busyStaleMinutes: 'busyStaleMinutes',
   // M12 — notifications
@@ -939,9 +996,9 @@ export interface SessionForest {
 
 export interface GroupNode {
   type: 'group';
-  key: string;   // the cwd string, or '(unknown)'
+  key: string;   // the cwd string, or '(unknown)' — identity, not display
   cwd: string;   // '' when unknown
-  label: string; // basename(cwd) or '(unknown)'
+  label: string; // basename(cwd) or '(no directory)'
   rootIds: string[];
 }
 /**
@@ -1012,12 +1069,57 @@ export interface ProjectGroupNode {
   branches?: BranchInfo[];
   /** M20. The user has folded this project's branch block shut. */
   branchesCollapsed?: boolean;
+  /**
+   * M26 SUBPROJECTS. Where this row sits in the project tree.
+   *
+   * All three are OPTIONAL, like every other post-freeze addition to this file:
+   * a node built by a caller that predates nesting is a valid node, and every
+   * reader treats absent as "top level, no children" — which is exactly the
+   * pre-M26 tree.
+   *
+   * `depth` is the RESOLVED depth (cycles broken, unknown parents re-rooted, cap
+   * applied), not a count of `parentId` hops through the raw records: the
+   * renderers indent by it and must never be handed a number a broken record
+   * could make up.
+   */
+  parentProjectId?: string | null;
+  depth?: number;
+  /** Child project ids, in display order (name-sorted). */
+  childProjectIds?: string[];
 }
 export interface SessionRef {
   type: 'session';
   id: string;
 }
-export type TreeNode = GroupNode | ProjectGroupNode | SessionRef;
+/**
+ * M26. One branch, as a CONTAINER row in the native tree.
+ *
+ * Exists only under `lineage.groupSessionsByBranch`. The inline sidebar draws
+ * its branch rows from the view model (which has a row kind for them and a
+ * layout to go with it); the native tree has neither, so it needs a real tree
+ * element to hand the workbench — one whose children are the sessions in that
+ * worktree.
+ *
+ * Carries `rootIds` rather than looking them up, because the answer is a
+ * PROJECT's (see the note on ViewRow.branch): the same directory can be a
+ * worktree of one project and an ordinary subdirectory of another.
+ */
+export interface BranchTreeNode {
+  type: 'branch';
+  projectId: string;
+  /** Short branch name, or the detached marker — the row's label. */
+  branch: string;
+  /** The worktree directory a session started here would run in. */
+  dir: string;
+  colorIndex: number;
+  primary: boolean;
+  rootIds: string[];
+}
+export type TreeNode =
+  | GroupNode
+  | ProjectGroupNode
+  | BranchTreeNode
+  | SessionRef;
 
 /** contextValue = ';' + tokens.join(';') + ';' so `when` clauses can match
  *  with viewItem =~ /;token;/ and never false-positive on substrings. */
@@ -1053,6 +1155,16 @@ export type ContextToken =
   /** M20. The "Others (N)" tail row. Distinct from 'branch' because none of the
    *  branch verbs apply — there is no single worktree behind it. */
   | 'branchOthers'
+  /** M26. A project row that is filed under another project. A SECOND token on
+   *  the row, never alone, so `viewItem =~ /;project;/` keeps matching every
+   *  project row while a verb that only makes sense on a nested one (Move to
+   *  Top Level) can single it out positively — the manifest never negates a
+   *  viewItem regex; see the M8 note above. */
+  | 'subproject'
+  /** M26. A project row with children under it. Its own token because the two
+   *  facts are independent: a middle project is both, a leaf under a root is
+   *  only `subproject`, and a root with children is only this. */
+  | 'parentProject'
   /** M22. A row in the Accounts view, and — as a SECOND token on the same row —
    *  the one of them the default routing names. Two tokens rather than two
    *  values of one, so that `viewItem =~ /;account;/` keeps matching every row
@@ -1465,6 +1577,18 @@ export interface TreeDeps {
    *  page (see sanitizeBranchColor — the value lands in an inline style block).
    *  Absent or empty means the built-in muted palette. */
   branchColors?(): readonly string[];
+  // ---- M26 ------------------------------------------------------------
+  /** `lineage.groupSessionsByBranch`: nest a project's sessions under the
+   *  branch row for the worktree they run in, instead of listing branches and
+   *  sessions as two flat blocks. Optional for the same reason as the three
+   *  above — absent means off, which is also the setting's default. */
+  groupSessionsByBranch?(): boolean;
+  /** M26. Persist a project's new parent (null = move to top level). The drop
+   *  half of dragging one project row onto another; `reparent` above is the
+   *  SESSION verb and the two must never be confused, because a project id and
+   *  a session id are both bare uuids. Optional so an older wiring (and the
+   *  unit doubles) simply refuses the gesture rather than throwing. */
+  reparentProject?(projectId: string, newParentId: string | null): Promise<void>;
 }
 
 export interface DecorationDeps {
@@ -1587,11 +1711,54 @@ export interface TranscriptFacts {
   firstPrompt?: string;
 }
 
+/**
+ * M25. A `/fork` that dispatched a BACKGROUND job rather than taking over a
+ * terminal: the process is live and holding the child session id, but no pty
+ * belongs to any editor — which is why focusing one used to dead-end at
+ * "Canopy cannot adopt a tab from" on a branch the user had just asked for.
+ * Read by daemon.ts out of `<configDir>/jobs/<short>/state.json`, the CLI's
+ * own bookkeeping.
+ */
+export interface BackgroundJob {
+  /** The job's session id — the fork CHILD. */
+  sessionId: string;
+  /** `forkParentSessionId`. Absent on a background job that is not a fork. */
+  parentId?: string;
+  /** The CLI's own name for the job, seeded from the parent's title. */
+  name?: string;
+  cwd?: string;
+  /** `<configDir>` the job lives under — the account it runs on. */
+  configDir: string;
+  /** The job directory's name; also the roster's `dispatch.short`. */
+  short: string;
+  /** `firstTerminalAt !== null` — a terminal has attached at least once, so
+   *  the job is somebody's and adopting it would be a second writer. Verified
+   *  across all 29 job states on the build machine: every job that reached
+   *  `done`/`failed`/`stopped` carries one, and the jobs that never got a
+   *  terminal — including a live `/fork` still parked on "send a prompt to
+   *  start" — carry `null`. */
+  attached: boolean;
+  /** The job's `state` is one the CLI runs in (`working`, `blocked`) rather
+   *  than one it has finished in (`done`, `failed`, `stopped`).
+   *
+   *  An ALLOW-list, deliberately: a stale roster row outlives the process that
+   *  wrote it, so without this a finished job would keep looking adoptable and
+   *  relaunching it would resurrect a conversation the user had ended. An
+   *  unrecognised state reads as not-live, which costs the adopt path and
+   *  falls back to the pre-M25 behaviour — the safe direction to be wrong in. */
+  live: boolean;
+}
+
 export interface CommandDeps {
   // model
   getForest(): SessionForest;
   refresh(): void;
   hasTranscript(sessionId: string): boolean;
+  /** M25. The background job holding this id, when one does. A native `/fork`
+   *  dispatches such a job: live process, no pty any editor owns. Optional —
+   *  a wiring without it (and every unit double) simply never offers to adopt
+   *  one, which is exactly the pre-M25 behaviour. */
+  backgroundJob?(sessionId: string): BackgroundJob | undefined;
   /** M24. Bounded, cached facts read off one transcript — see TranscriptFacts.
    *  Optional: a wiring without it (and every unit double) gets a chat history
    *  ordered and labelled from the editorial records alone, which is coarser
@@ -1676,6 +1843,13 @@ export interface CommandDeps {
   /** M20. Fold or unfold a project's whole branch block. */
   setBranchesCollapsed(projectId: string, collapsed: boolean): Promise<void>;
   upsertProject(id: string, patch: Partial<ProjectRecord>): Promise<void>;
+  /** M26. Re-file a project under another one, or at the top level (null).
+   *  Refuses a cycle (a project cannot be filed under its own descendant) and
+   *  reports whether the move happened, so the verb can say why it did not. */
+  setProjectParent(
+    projectId: string,
+    newParentId: string | null,
+  ): Promise<boolean>;
   deleteProject(id: string): Promise<void>;
   hiddenFolders(): HiddenFolder[];
   hideFolder(dir: string): Promise<void>;

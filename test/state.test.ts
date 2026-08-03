@@ -1150,6 +1150,106 @@ describe('StateStore: projects', () => {
   });
 });
 
+// ------------------------------------------------------- subprojects (M26)
+
+describe('StateStore: subprojects', () => {
+  it('stores a parent pointer and clears it with null', async () => {
+    const dir = tempDir();
+    const store = makeStore(dir);
+    await store.load();
+    await store.upsertProject('app', { name: 'app', rootDir: '/code/app' });
+    await store.upsertProject('api', {
+      name: 'api',
+      rootDir: '/code/app/api',
+      parentId: 'app',
+    });
+    expect(store.getProject('api')?.parentId).toBe('app');
+
+    expect(await store.setProjectParent('api', null)).toBe(true);
+    expect(store.getProject('api')?.parentId).toBeUndefined();
+
+    // ...and it survives the round trip through disk.
+    expect(await store.setProjectParent('api', 'app')).toBe(true);
+    const reader = makeStore(dir);
+    await reader.load();
+    expect(reader.getProject('api')?.parentId).toBe('app');
+  });
+
+  it('refuses a cycle rather than writing one', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.upsertProject('app', { name: 'app', rootDir: '/code/app' });
+    await store.upsertProject('api', {
+      name: 'api',
+      rootDir: '/code/app/api',
+      parentId: 'app',
+    });
+
+    expect(await store.setProjectParent('app', 'api')).toBe(false);
+    expect(store.getProject('app')?.parentId).toBeUndefined();
+    expect(store.getProject('api')?.parentId).toBe('app');
+  });
+
+  it('refuses a project filed under itself, at both doors', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.upsertProject('app', { name: 'app', rootDir: '/code/app' });
+
+    expect(await store.setProjectParent('app', 'app')).toBe(false);
+    // The sanitizer is the second door: a hand-edited file, or a patch that
+    // went through the generic upsert.
+    await store.upsertProject('app', { parentId: 'app' });
+    expect(store.getProject('app')?.parentId).toBeUndefined();
+  });
+
+  it('refuses to re-file a project that does not exist', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    expect(await store.setProjectParent('nope', null)).toBe(false);
+    expect(store.getProjects()).toEqual([]);
+  });
+
+  it('drops a blank pointer at load rather than keeping an empty string', async () => {
+    const dir = tempDir();
+    seedStateFile(dir, {
+      version: 5,
+      records: {},
+      windows: {},
+      projects: {
+        api: {
+          id: 'api',
+          name: 'api',
+          rootDir: '/code/api',
+          dirs: [],
+          parentId: '   ',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      },
+      hiddenFolders: {},
+      chains: {},
+      workspaces: {},
+    });
+    const store = makeStore(dir);
+    await store.load();
+    expect(store.getProject('api')?.parentId).toBeUndefined();
+  });
+
+  it('keeps a pointer at a project that is not there — the tree re-roots it', async () => {
+    // Deliberate: `projects` is merged newest-wins per record, so a child can
+    // legitimately arrive before its parent. Dropping the pointer here would
+    // silently un-nest it the moment two windows synced out of order.
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.upsertProject('api', {
+      name: 'api',
+      rootDir: '/code/api',
+      parentId: 'not-here-yet',
+    });
+    expect(store.getProject('api')?.parentId).toBe('not-here-yet');
+  });
+});
+
 describe('StateStore: hidden folders', () => {
   it('hides and un-hides a folder by its normalized path', async () => {
     const dir = tempDir();

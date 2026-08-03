@@ -56,7 +56,7 @@ import {
   type WorkspaceSnapshot,
   type WorkspaceTabRecord,
 } from './types';
-import { normalizeDir, pathKey } from './projects';
+import { canReparentProject, normalizeDir, pathKey } from './projects';
 import { isAccountId, isEnvVarName, nextOrder, sortProfiles } from './accounts';
 
 // ------------------------------------------------------------------ constants
@@ -431,6 +431,18 @@ function sanitizeProject(key: string, value: unknown): ProjectRecord | null {
   }
   if (proj.hidden !== undefined && typeof proj.hidden !== 'boolean') {
     delete proj.hidden;
+  }
+  // M26. The subproject pointer. Absent is the normal state and the only thing
+  // stored here is a non-empty id that is not this project's own — everything
+  // else about it (does it exist, does it close a loop, is the chain too deep)
+  // is decided at RENDER time by projects.buildProjectTree, which has the whole
+  // set in front of it and this function does not. `null` is how the move-to-
+  // top-level verb clears it, and it is stored as absence.
+  {
+    const raw = proj.parentId;
+    const id = typeof raw === 'string' ? raw.trim() : '';
+    if (id === '' || id === key) delete proj.parentId;
+    else proj.parentId = id;
   }
   // M22. A routing override that does not parse is no override at all — the
   // project falls back to the global default, which is what it did before it
@@ -1332,6 +1344,58 @@ export class StateStore implements DisposableLike {
       clean.updatedAt = stamp;
       state.projects[id] = clean;
     });
+  }
+
+  /**
+   * M26. File a project under another one, or at the top level (`null`).
+   *
+   * Its own method rather than `upsertProject({ parentId })` for the reason
+   * `setProjectRouting` is not one either: the write has a RULE attached that
+   * the generic patch path knows nothing about. A move that closes a loop
+   * (filing a project under its own subproject) would cut both subtrees out of
+   * every render — the tree builder breaks the cycle, so nothing crashes and
+   * nothing says why two projects jumped to the top level — and the check has
+   * to happen against the whole set, at write time, in the one place that holds
+   * it.
+   *
+   * Answers whether the move happened, so the verb can say what it refused
+   * rather than silently doing nothing. Refuses to create a project as a side
+   * effect: nesting is a property OF a project, and a rootDir-less record
+   * minted here would be dropped by the sanitizer anyway.
+   */
+  setProjectParent(projectId: string, newParentId: string | null): Promise<boolean> {
+    if (!isNonEmptyString(projectId)) return Promise.resolve(false);
+    let ok = false;
+    return this.enqueue((state, stamp) => {
+      if (!isPlainObject(state.projects)) state.projects = {};
+      const prev = state.projects[projectId];
+      if (!prev || prev.deleted === true) {
+        log('state: no such project to re-file', projectId);
+        return;
+      }
+      const parentId =
+        typeof newParentId === 'string' && newParentId.trim() !== ''
+          ? newParentId.trim()
+          : null;
+      if (parentId !== null) {
+        const live = Object.values(state.projects).filter(
+          (p): p is ProjectRecord => !!p && p.deleted !== true,
+        );
+        const verdict = canReparentProject(live, projectId, parentId);
+        if (!verdict.ok) {
+          log('state: refused project re-file —', verdict.reason);
+          return;
+        }
+      }
+      const next: Record<string, unknown> = { ...prev };
+      if (parentId === null) delete next.parentId;
+      else next.parentId = parentId;
+      const clean = sanitizeProject(projectId, next);
+      if (!clean) return;
+      clean.updatedAt = stamp;
+      state.projects[projectId] = clean;
+      ok = true;
+    }).then(() => ok);
   }
 
   /**

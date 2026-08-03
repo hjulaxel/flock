@@ -1,6 +1,6 @@
 # Settings
 
-All 23 settings, as contributed. The keys keep the `lineage.` prefix — Canopy
+All 24 settings, as contributed. The keys keep the `lineage.` prefix — Canopy
 was named Lineage before 0.1.0, and renaming settings keys would silently
 discard everyone's existing configuration.
 
@@ -20,6 +20,7 @@ discard everyone's existing configuration.
 | `lineage.busyStaleMinutes` | `5` | How long a session may hold the CLI's `busy` status with an untouched transcript before Canopy stops drawing the amber dot and shows it as idle. `claude agents --json` sometimes freezes a status at `busy` after the turn actually ended; a genuinely working session writes its transcript within seconds. Raise it if a long single tool call briefly flips to idle. |
 | `lineage.staleAfterHours` | `48` | Age at which **Delete Stale Sessions…** pre-ticks a session. Never removes anything on its own — it only decides which checkboxes start ticked. |
 | `lineage.showTokens` | `false` | Put a session's token count left of its age — the context its last turn ran with (prompt + cache + output), the same number `/context` reports. Off by default: it is a second number on every row. |
+| `lineage.groupSessionsByBranch` | `false` | Nest a project's sessions under the git branch they are running on. Each branch row becomes a container you can fold shut, with a `+` that starts a session in that worktree; a session no shown branch accounts for stays directly under the project. Only applies to a project with two or more worktrees. Off by default — it is the right shape for one-agent-per-worktree and the wrong one for a single checkout with a few forks in it. |
 | `lineage.branchColors` | `[]` | Colours for the branch chips, in order; index 0 is the first branch under a project (usually `main`). Each entry is a hex colour (`#7aa2f7`) or a theme colour id (`charts.blue`). A short list fills the rest from the built-in muted palette. |
 | `lineage.notifications.enabled` | `true` | Track finished sessions: red dot until looked at, project-row roll-up, and the bell. Off restores the plain waiting-only dot. Overridable per session from each row's context menu. |
 | `lineage.notifications.popup` | `false` | Also show a toast with a **Focus** button when a session finishes while you are elsewhere. Off by default — with many parallel sessions the bell and dots carry the same information without the interruption. |

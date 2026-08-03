@@ -13,6 +13,7 @@
 
 import {
   DEFAULT_PROVIDER,
+  MAX_PROJECT_DEPTH,
   MAX_PROJECT_NAME_LEN,
   isProviderId,
 } from './types';
@@ -26,7 +27,15 @@ import type {
   Worktree,
 } from './types';
 
+/** Identity of the catch-all folder row for roots with no cwd. Kept as
+ *  `(unknown)` even though the row now reads "(no directory)": the key is what
+ *  collapse state and `groupCwdFromArg()` round-trip through, so renaming it
+ *  would silently reset a user's collapsed rows for a cosmetic change. */
 const UNKNOWN_GROUP_KEY = '(unknown)';
+
+/** What that row is called in the tree. Parenthesised for the same reason as
+ *  {@link DETACHED_BRANCH_LABEL} — no real directory can be mistaken for it. */
+const UNKNOWN_GROUP_LABEL = '(no directory)';
 
 /** How many distinct branch colours the palette holds. Both renderers define
  *  exactly this many `--lineage-branch-N` variables; a project with more
@@ -181,6 +190,237 @@ export function providerOfProject(p: ProjectRecord | undefined): ProviderId {
   return isProviderId(p?.provider) ? p.provider : DEFAULT_PROVIDER;
 }
 
+// ------------------------------------------------------------ project tree
+// M26. A project may be filed under another project, to any depth and any
+// breadth. The records store only a pointer UP (ProjectRecord.parentId); this
+// is the one place those pointers become a tree, and the one place that has to
+// survive them being wrong.
+
+/** One project's resolved place in the tree. */
+export interface ProjectTreeNode {
+  project: ProjectRecord;
+  /** The parent AS RESOLVED — null for a top-level project, and for one whose
+   *  record names a parent this tree refused (missing, self, cyclic, too
+   *  deep). */
+  parentId: string | null;
+  /** 0 for a top-level project. Never ≥ MAX_PROJECT_DEPTH. */
+  depth: number;
+  /** Child ids in display order. */
+  childIds: string[];
+}
+
+export interface ProjectTree {
+  byId: Map<string, ProjectTreeNode>;
+  /** Top-level project ids, in display order. */
+  roots: string[];
+  /** Every id, depth-first preorder — a parent immediately followed by its own
+   *  subtree. This IS the row order the views render in. */
+  order: string[];
+}
+
+/** The order projects are drawn in among their siblings: name, then id so two
+ *  projects sharing a name still land in a stable order across ticks. */
+function byName(a: ProjectRecord, b: ProjectRecord): number {
+  return cmp(a.name.toLowerCase(), b.name.toLowerCase()) || cmp(a.id, b.id);
+}
+
+/**
+ * Turn a flat list of records into a tree, refusing every edge that cannot be
+ * drawn.
+ *
+ * NOTHING about a parent pointer is trusted. These records are merged across
+ * windows, hand-editable on disk, and outlive the projects they name, so all
+ * four failure modes are ordinary rather than theoretical:
+ *
+ *   - a parent id naming nothing (deleted here, or not merged in yet) — the
+ *     child becomes a ROOT. Never hidden: a project the user cannot see is a
+ *     project they cannot fix, and "my subproject vanished when I deleted its
+ *     parent" is the one outcome that would make nesting untrustworthy.
+ *   - a project naming itself;
+ *   - a cycle (a → b → a), broken at the first id the walk meets twice;
+ *   - a chain deeper than MAX_PROJECT_DEPTH, cut at the cap.
+ *
+ * Deterministic under all of them: ids are resolved in display order, so two
+ * windows looking at the same broken state draw the same tree.
+ */
+export function buildProjectTree(
+  projects: readonly ProjectRecord[],
+): ProjectTree {
+  const records = (projects ?? []).filter((p): p is ProjectRecord => !!p?.id);
+  const byId = new Map<string, ProjectTreeNode>();
+  const source = new Map<string, ProjectRecord>();
+  for (const p of records) if (!source.has(p.id)) source.set(p.id, p);
+
+  const ordered = Array.from(source.values()).sort(byName);
+
+  /** The raw pointer, or '' — before any of the tree's own rules apply. */
+  const rawParent = (p: ProjectRecord): string => {
+    const raw = p.parentId;
+    if (typeof raw !== 'string') return '';
+    const id = raw.trim();
+    if (id === '' || id === p.id || !source.has(id)) return '';
+    return id;
+  };
+
+  // Depth resolution with an in-progress marker: meeting a node that is still
+  // being resolved IS the cycle, and the node that met it is where the cycle is
+  // broken. Iterating in display order makes which node that is deterministic.
+  const depths = new Map<string, number>();
+  const resolving = new Set<string>();
+  const resolvedParent = new Map<string, string | null>();
+
+  /** Depth of `p`, memoised, breaking any loop at the node that closes it.
+   *
+   *  `resolving` holds the chain currently being walked, so a parent already in
+   *  it is by definition an ancestor of the node asking for it — which is the
+   *  exact definition of the cycle. The node that MEETS the loop is the one
+   *  cut loose, and because the walk starts from ids in display order, which
+   *  node that is never varies between windows. */
+  const resolve = (id: string): number => {
+    const known = depths.get(id);
+    if (known !== undefined) return known;
+    const p = source.get(id);
+    if (!p) return 0;
+    const parentId = rawParent(p);
+    if (parentId === '' || resolving.has(parentId)) {
+      depths.set(id, 0);
+      resolvedParent.set(id, null);
+      return 0;
+    }
+    resolving.add(id);
+    const depth = resolve(parentId) + 1;
+    resolving.delete(id);
+    if (depth >= MAX_PROJECT_DEPTH) {
+      depths.set(id, 0);
+      resolvedParent.set(id, null);
+      return 0;
+    }
+    depths.set(id, depth);
+    resolvedParent.set(id, parentId);
+    return depth;
+  };
+
+  for (const p of ordered) resolve(p.id);
+
+  for (const p of ordered) {
+    byId.set(p.id, {
+      project: p,
+      parentId: resolvedParent.get(p.id) ?? null,
+      depth: depths.get(p.id) ?? 0,
+      childIds: [],
+    });
+  }
+  const roots: string[] = [];
+  for (const p of ordered) {
+    const node = byId.get(p.id);
+    if (!node) continue;
+    if (node.parentId === null) roots.push(p.id);
+    else byId.get(node.parentId)?.childIds.push(p.id);
+  }
+
+  // Preorder: a parent, then everything filed under it, then the next sibling.
+  const order: string[] = [];
+  const walk = (id: string): void => {
+    const node = byId.get(id);
+    if (!node) return;
+    order.push(id);
+    for (const child of node.childIds) walk(child);
+  };
+  for (const id of roots) walk(id);
+
+  return { byId, roots, order };
+}
+
+/** Ids of `projectId` and everything filed under it, preorder. Used by every
+ *  verb that acts on a subtree (close, delete, the move picker's refusal). */
+export function projectSubtree(
+  tree: ProjectTree,
+  projectId: string,
+): string[] {
+  const out: string[] = [];
+  const walk = (id: string): void => {
+    const node = tree.byId.get(id);
+    if (!node) return;
+    out.push(id);
+    for (const child of node.childIds) walk(child);
+  };
+  walk(projectId);
+  return out;
+}
+
+/**
+ * Would filing `projectId` under `newParentId` produce something drawable?
+ *
+ * Refuses the three moves that are not moves: onto itself, onto a project it
+ * already contains (which would cut both loose from the tree), and past the
+ * depth cap (which would silently re-root the whole subtree at the next
+ * render — a move that appears to work and then does something else).
+ *
+ * `null` — move to the top level — is always allowed.
+ */
+export function canReparentProject(
+  projects: readonly ProjectRecord[],
+  projectId: string,
+  newParentId: string | null,
+): { ok: boolean; reason: string } {
+  if (newParentId === null) return { ok: true, reason: '' };
+  if (newParentId === projectId) {
+    return { ok: false, reason: 'A project cannot be filed under itself.' };
+  }
+  const tree = buildProjectTree(projects);
+  if (!tree.byId.has(projectId) || !tree.byId.has(newParentId)) {
+    return { ok: false, reason: 'That project no longer exists.' };
+  }
+  if (projectSubtree(tree, projectId).includes(newParentId)) {
+    return {
+      ok: false,
+      reason: 'A project cannot be filed under one of its own subprojects.',
+    };
+  }
+  // The moved subtree keeps its shape, so what matters is its own height added
+  // to the new parent's depth.
+  const parentDepth = tree.byId.get(newParentId)?.depth ?? 0;
+  const own = tree.byId.get(projectId)?.depth ?? 0;
+  let height = 0;
+  for (const id of projectSubtree(tree, projectId)) {
+    height = Math.max(height, (tree.byId.get(id)?.depth ?? 0) - own);
+  }
+  if (parentDepth + 1 + height >= MAX_PROJECT_DEPTH) {
+    return {
+      ok: false,
+      reason: `Projects nest at most ${MAX_PROJECT_DEPTH} deep.`,
+    };
+  }
+  return { ok: true, reason: '' };
+}
+
+/**
+ * How many projects sit above this one, walking the RAW pointers.
+ *
+ * Used only as a tiebreak inside matchProject, which is handed a bare array
+ * with no tree built over it — and is called once per session, so the walk is
+ * deliberately lazy: it runs only when two projects claim the same directory,
+ * which is the mistake case rather than the common one.
+ */
+function nestingDepth(
+  projects: readonly ProjectRecord[],
+  project: ProjectRecord,
+): number {
+  let depth = 0;
+  let cursor: ProjectRecord | undefined = project;
+  const seen = new Set<string>([project.id]);
+  while (cursor && depth < MAX_PROJECT_DEPTH) {
+    const raw: unknown = cursor.parentId;
+    const parentId: string = typeof raw === 'string' ? raw.trim() : '';
+    if (parentId === '' || seen.has(parentId)) break;
+    seen.add(parentId);
+    cursor = projects.find((p) => p?.id === parentId);
+    if (!cursor) break;
+    depth++;
+  }
+  return depth;
+}
+
 /** '' when the name is usable, else the reason it is not. */
 export function validateProjectName(
   raw: string,
@@ -206,6 +446,10 @@ export interface ProjectMatch {
   dir: string;
   /** Length of the matched directory key — the tie-break for nesting. */
   depth: number;
+  /** M26. The matched directory is one the project LISTS, rather than one it
+   *  merely reaches as a worktree of a repository it sits in. Part of the
+   *  tie-break: an explicit statement outranks a derived one. */
+  own?: boolean;
 }
 
 /**
@@ -234,27 +478,68 @@ export function matchProject(
   const target = normalizeDir(cwd);
   if (target === '') return null;
 
+  const all = projects ?? [];
   let best: ProjectMatch | null = null;
-  for (const project of projects ?? []) {
+  for (const project of all) {
     if (!project) continue;
+    const listed: (readonly [string, boolean])[] = projectDirs(project).map(
+      (d) => [d, true] as const,
+    );
     const dirs = extraDirs
-      ? [...projectDirs(project), ...extraDirs(project)]
-      : projectDirs(project);
-    for (const dir of dirs) {
-      if (!isWithin(dir, target)) continue;
+      ? [
+          ...listed,
+          ...extraDirs(project).map((d) => [normalizeDir(d), false] as const),
+        ]
+      : listed;
+    for (const [dir, own] of dirs) {
+      if (dir === '' || !isWithin(dir, target)) continue;
       const depth = pathKey(dir).length;
+      const candidate: ProjectMatch = { project, dir, depth, own };
       if (best === null || depth > best.depth) {
-        best = { project, dir, depth };
+        best = candidate;
         continue;
       }
-      if (depth === best.depth) {
-        const a = `${project.name}\u0000${project.id}`;
-        const b = `${best.project.name}\u0000${best.project.id}`;
-        if (a < b) best = { project, dir, depth };
+      if (depth === best.depth && beatsAtEqualDepth(all, candidate, best)) {
+        best = candidate;
       }
     }
   }
   return best;
+}
+
+/**
+ * Which of two projects claiming the SAME directory wins.
+ *
+ * Reached only when two projects match a cwd at identical directory depth,
+ * which is either a user mistake (the same path listed twice) or the M26 case:
+ * a project and a subproject inside it, both of which see the same git
+ * worktrees. Three rules, each with its own reason, then the old stable
+ * name/id fallback so the answer never depends on iteration order:
+ *
+ *  1. An OWN directory beats a DERIVED one. "I put this path in this project"
+ *     is a statement; "this path is a worktree of a repository this project
+ *     sits in" is an inference, and an inference must not overrule a
+ *     statement.
+ *  2. Both own -> the DEEPER project wins. The same directory listed on a
+ *     subproject as well as on its parent is the more specific of two
+ *     deliberate statements.
+ *  3. Both derived -> the SHALLOWER project wins. A worktree belongs to
+ *     whichever project owns the repository, not to every subproject that
+ *     happens to sit inside a checkout of it — otherwise adding one subproject
+ *     would quietly move every other worktree's sessions onto it.
+ */
+function beatsAtEqualDepth(
+  projects: readonly ProjectRecord[],
+  candidate: ProjectMatch,
+  best: ProjectMatch,
+): boolean {
+  if (candidate.own !== best.own) return candidate.own === true;
+  const a = nestingDepth(projects, candidate.project);
+  const b = nestingDepth(projects, best.project);
+  if (a !== b) return candidate.own === true ? a > b : a < b;
+  const x = `${candidate.project.name}\u0000${candidate.project.id}`;
+  const y = `${best.project.name}\u0000${best.project.id}`;
+  return x < y;
 }
 
 // ------------------------------------------------------------------- chats
@@ -488,7 +773,34 @@ export interface GroupingInput {
   worktreesOf?: (dir: string) => readonly Worktree[];
 }
 
+/**
+ * M26. Sessions of a project that the branch block does NOT account for.
+ *
+ * Under `lineage.groupSessionsByBranch` the shown branches take their own
+ * sessions as children, and whatever is left has to stay visible directly under
+ * the project: a session in a folded-away branch, one in a checkout git no
+ * longer reports, one whose cwd is a project directory outside the repository
+ * altogether. Dropping those would make a setting that "regroups rows" silently
+ * a filter, which is the one thing a view option must never be.
+ */
+export function unbranchedRoots(
+  rootIds: readonly string[],
+  branches: readonly BranchInfo[],
+): string[] {
+  const claimed = new Set<string>();
+  for (const branch of branches) {
+    if (branch.shown === false) continue;
+    for (const id of branch.rootIds) claimed.add(id);
+  }
+  return rootIds.filter((id) => !claimed.has(id));
+}
+
 export interface GroupingResult {
+  /** Every VISIBLE project, depth-first: a parent immediately followed by its
+   *  own subtree (M26). A caller that renders them flat gets the pre-M26 tree
+   *  whenever nobody has nested anything, and a sensible reading list
+   *  otherwise; a caller that renders the nesting walks `childProjectIds` from
+   *  the entries whose `depth` is 0. */
   projects: ProjectGroupNode[];
   /** Folder rows for the leftovers. Empty when grouping does not apply. */
   folders: GroupNode[];
@@ -552,7 +864,25 @@ export function computeGrouping(
   prev?: GroupingResult | null,
 ): GroupingResult {
   const all = (input?.projects ?? []).filter((p): p is ProjectRecord => !!p);
-  const projects = all.filter((p) => p.hidden !== true);
+  // M26. The tree over ALL of them, closed ones included: a closed project
+  // still owns its directories (see the session loop below), and its children
+  // have to be reachable from it in order to be closed along with it.
+  const tree = buildProjectTree(all);
+  // CLOSING A PARENT CLOSES ITS SUBTREE. Anything else would be a lie about
+  // what the gesture did: the subprojects would stay on screen as top-level
+  // rows — promoted by the very act of putting their parent away — and closing
+  // "app" would scatter its four services across the tree instead of taking
+  // them with it. Reopening the parent brings the whole thing back, because
+  // nothing was written on the children.
+  const closed = new Set<string>();
+  for (const id of tree.order) {
+    const node = tree.byId.get(id);
+    if (!node) continue;
+    const inheritedlyClosed =
+      node.parentId !== null && closed.has(node.parentId);
+    if (node.project.hidden === true || inheritedlyClosed) closed.add(id);
+  }
+  const projects = all.filter((p) => !closed.has(p.id));
   const hiddenFolders = input?.hiddenFolders ?? [];
   const hasProjects = projects.length > 0;
 
@@ -582,7 +912,10 @@ export function computeGrouping(
     // (close `api`, keep `code`) would leak straight back.
     const match = matchProject(all, cwd, extraDirs);
     if (match) {
-      if (match.project.hidden === true) hiddenCount++;
+      // `closed`, not `match.project.hidden`: M26 makes a subproject of a
+      // closed project closed too, and its sessions have to go away with it
+      // rather than reappear under a folder row.
+      if (closed.has(match.project.id)) hiddenCount++;
       else claimed.get(match.project.id)?.push(rootId);
       continue;
     }
@@ -597,10 +930,19 @@ export function computeGrouping(
     leftover.push(rootId);
   }
 
-  const projectNodes: ProjectGroupNode[] = projects
-    .slice()
-    .sort((a, b) => cmp(a.name.toLowerCase(), b.name.toLowerCase()) || cmp(a.id, b.id))
-    .map((p) => {
+  // Depth-first over the VISIBLE half of the tree (M26). `tree.order` is
+  // already a preorder walk of every project, so filtering it keeps parents
+  // ahead of their children and siblings in name order, which is exactly the
+  // pre-M26 ordering whenever nothing is nested.
+  const visible = new Set(projects.map((p) => p.id));
+  const projectNodes: ProjectGroupNode[] = tree.order
+    .filter((id) => visible.has(id))
+    .map((id): ProjectGroupNode | null => {
+      const node = tree.byId.get(id);
+      // `visible` is built from the same tree, so this cannot miss — the guard
+      // is here because a null node would otherwise take the whole view down.
+      const p = node?.project ?? projects.find((x) => x.id === id);
+      if (!p) return null;
       const dirs = projectDirs(p);
       const rootIds = claimed.get(p.id) ?? [];
       return {
@@ -618,8 +960,14 @@ export function computeGrouping(
           p,
         ),
         branchesCollapsed: p.branchesCollapsed === true,
-      };
-    });
+        parentProjectId: node?.parentId ?? null,
+        depth: node?.depth ?? 0,
+        // Only the children that are themselves on screen. A closed child takes
+        // its own subtree with it, so this can never name a row nobody draws.
+        childProjectIds: (node?.childIds ?? []).filter((c) => visible.has(c)),
+      } satisfies ProjectGroupNode;
+    })
+    .filter((n): n is ProjectGroupNode => n !== null);
 
   // Folder rows for the leftovers. The "fewer than two folders is just noise"
   // rule is kept from the folder-only design, but only when there is nothing
@@ -636,7 +984,7 @@ export function computeGrouping(
           type: 'group',
           key,
           cwd,
-          label: cwd === '' ? UNKNOWN_GROUP_KEY : baseName(cwd),
+          label: cwd === '' ? UNKNOWN_GROUP_LABEL : baseName(cwd),
           rootIds: [],
         };
         byKey.set(key, group);
@@ -684,7 +1032,14 @@ function reuseUnchanged(
       sameIds(old.dirs, p.dirs) &&
       sameIds(old.rootIds, p.rootIds) &&
       old.branchesCollapsed === p.branchesCollapsed &&
-      sameBranches(old.branches, p.branches)
+      sameBranches(old.branches, p.branches) &&
+      // M26. Everything the row's PLACE in the tree draws. Without these a
+      // project that was moved, or that gained a subproject, would hand the
+      // workbench the previous object and keep its old indent until something
+      // else about it happened to change.
+      (old.parentProjectId ?? null) === (p.parentProjectId ?? null) &&
+      (old.depth ?? 0) === (p.depth ?? 0) &&
+      sameIds(old.childProjectIds ?? [], p.childProjectIds ?? [])
     ) {
       return old;
     }

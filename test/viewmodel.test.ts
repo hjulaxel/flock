@@ -620,7 +620,7 @@ describe('buildViewModel: row content', () => {
     // Order is the contract, not just the contents: the client paints the strip
     // left to right, and the `+` is specified to sit RIGHT of the chat glyph.
     expect(rows[0].actions).toEqual([
-      { id: 'chat', icon: 'chat', title: 'Chat in API' },
+      { id: 'chat', icon: 'chat', title: 'New chat in API' },
       { id: 'newSession', icon: 'add', title: 'New Session in API' },
     ]);
   });
@@ -853,7 +853,7 @@ describe('buildViewModel: the row context (native menus + command args)', () => 
     expect(rows[0].tooltip).toContain('/code/api');
   });
 
-  it('shapes a folder row for groupCwdFromArg, including "(unknown)"', () => {
+  it('shapes a folder row for groupCwdFromArg, including "(no directory)"', () => {
     const rows = buildViewModel(
       input(forestOf([]), {
         folders: [
@@ -862,7 +862,7 @@ describe('buildViewModel: the row context (native menus + command args)', () => 
             type: 'group',
             key: '(unknown)',
             cwd: '',
-            label: '(unknown)',
+            label: '(no directory)',
             rootIds: [],
           },
         ],
@@ -873,7 +873,9 @@ describe('buildViewModel: the row context (native menus + command args)', () => 
     // cwd '' is what makes unknownGroupRefusal() explain itself instead of the
     // verb silently retargeting a different folder.
     expect(rows[1].context.cwd).toBe('');
-    expect(rows[1].label).toBe('(unknown)');
+    expect(rows[1].label).toBe('(no directory)');
+    // Identity survives the label: collapse state round-trips through key.
+    expect(rows[1].context.key).toBe('(unknown)');
   });
 });
 

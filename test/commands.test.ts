@@ -10,6 +10,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
+  adoptBackgroundJob,
   chatFlow,
   chatSystemPrompt,
   configureProjectFlow,
@@ -21,6 +22,7 @@ import {
   registerCommands,
   chatHistoryFlow,
   closeProjectFlow,
+  moveProjectFlow,
   reopenProject,
   resumeFlow,
   selectedSessionIds,
@@ -41,6 +43,7 @@ import {
 import { commands as mockCommands, window as mockWindow } from './mocks/vscode';
 import type {
   AccountProfile,
+  BackgroundJob,
   CommandDeps,
   EditorialRecord,
   LaunchOptions,
@@ -619,6 +622,8 @@ interface ChatCalls {
   records: Array<{ id: string; patch: Partial<EditorialRecord> }>;
   launches: LaunchOptions[];
   projectPatches: Array<{ id: string; patch: Partial<ProjectRecord> }>;
+  /** M26. Every setProjectParent this double was asked for. */
+  projectMoves: Array<[string, string | null]>;
   focused: string[];
   reveals: string[];
   inlineRenameProjects: string[];
@@ -634,6 +639,10 @@ function chatDeps(
     beginInlineRenameProject?: (id: string) => boolean;
     /** M24. The store the chat history and the chat ordinal read. */
     records?: Record<string, EditorialRecord>;
+    /** M26. Whether the store accepts a re-file (it refuses cycles). */
+    setProjectParent?: (id: string, parentId: string | null) => boolean;
+    /** M26. Every project the flows can see, not just the one under test. */
+    projects?: ProjectRecord[];
   } = {},
 ): { deps: CommandDeps; calls: ChatCalls } {
   const calls: ChatCalls = {
@@ -641,6 +650,7 @@ function chatDeps(
     records: [],
     launches: [],
     projectPatches: [],
+    projectMoves: [],
     focused: [],
     reveals: [],
     inlineRenameProjects: [],
@@ -698,8 +708,9 @@ function chatDeps(
     removeHooks: nope,
     getHookState: () => ({ installed: false }),
     setHooksEnabled: async () => undefined,
-    allProjects: () => (project ? [project] : []),
-    getProject: (id) => (project && project.id === id ? project : undefined),
+    allProjects: () => over.projects ?? (project ? [project] : []),
+    getProject: (id) =>
+      (over.projects ?? (project ? [project] : [])).find((p) => p.id === id),
     // This double drives chatFlow, which never reaches the branch verb. Empty
     // rather than `nope()`: an empty branch list is a real state (a project
     // that is not a repository) and the honest answer for a fixture with no
@@ -710,6 +721,11 @@ function chatDeps(
     upsertProject: async (id, patch) => {
       calls.order.push('upsertProject');
       calls.projectPatches.push({ id, patch });
+    },
+    setProjectParent: async (projectId, newParentId) => {
+      calls.order.push('setProjectParent');
+      calls.projectMoves.push([projectId, newParentId]);
+      return over.setProjectParent ? over.setProjectParent(projectId, newParentId) : true;
     },
     deleteProject: async () => undefined,
     hiddenFolders: () => [],
@@ -1781,5 +1797,266 @@ describe('M22: removeAccount removes only the list entry, never the config direc
     await harness.run(COMMANDS.removeAccount, WORK.id);
 
     expect(acctCalls.deleted).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------- M25
+//
+// `/fork` ≡ Fork Session. A native /fork dispatches a BACKGROUND JOB — a live
+// process holding the child id, parked on "send a prompt to start", whose pty
+// is a daemon socket no editor can attach to. Adoption stops the job and
+// relaunches the SAME id here as an ordinary fork tab.
+
+describe('adoptBackgroundJob', () => {
+  const CHILD = uuid(3);
+  const PARENT = uuid(4);
+
+  function job(over: Partial<BackgroundJob> = {}): BackgroundJob {
+    return {
+      sessionId: CHILD,
+      parentId: PARENT,
+      name: 'copied from the parent',
+      cwd: '/Users/a/code/magma',
+      configDir: '/Users/a/.lineage/profiles/magma',
+      short: '5d0a7866',
+      attached: false,
+      live: true,
+      ...over,
+    };
+  }
+
+  /** A window where the parent exists and has a transcript to fork from. */
+  function adoptDeps(over: Partial<CommandDeps> = {}): {
+    deps: CommandDeps;
+    calls: ReturnType<typeof chatDeps>['calls'];
+  } {
+    const { deps, calls } = chatDeps(undefined);
+    return {
+      deps: {
+        ...deps,
+        hasTranscript: (id) => id === PARENT,
+        getForest: () =>
+          forestOf([
+            node(PARENT, { label: 'auth' }),
+            node(CHILD, { roster: { sessionId: CHILD, pid: 0 } }),
+          ]),
+        launchSession: async (opts) => {
+          calls.order.push('launchSession');
+          calls.launches.push(opts);
+          return {
+            nodeId: opts.sessionId,
+            sessionId: opts.sessionId,
+            terminalName: 'claude',
+            createdAt: 0,
+          };
+        },
+        ...over,
+      },
+      calls,
+    };
+  }
+
+  it('relaunches the SAME id as a fork of its parent, and names it like one', async () => {
+    const { deps, calls } = adoptDeps();
+
+    expect(await adoptBackgroundJob(deps, CHILD, job())).toBe(true);
+
+    // The clicked row is the row that opens: same id, forked off the parent.
+    expect(calls.launches).toEqual([
+      expect.objectContaining({
+        sessionId: CHILD,
+        parentId: PARENT,
+        cwd: '/Users/a/code/magma',
+        title: 'auth 2',
+      }),
+    ]);
+    // Named the way forkFlow names a branch — NOT the parent's copied title.
+    expect(calls.records).toContainEqual({ id: CHILD, patch: { title: 'auth 2' } });
+    // Edge recorded BEFORE the launch, exactly as forkFlow does it.
+    expect(calls.order.indexOf('recordLaunch')).toBeLessThan(
+      calls.order.indexOf('launchSession'),
+    );
+    expect(calls.reveals).toContain(CHILD);
+  });
+
+  it('keeps a title the user already gave the row', async () => {
+    const { deps, calls } = adoptDeps({
+      getRecord: (id) =>
+        id === CHILD
+          ? {
+              id: CHILD,
+              title: 'the good branch',
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-01T00:00:00.000Z',
+            }
+          : undefined,
+    });
+
+    expect(await adoptBackgroundJob(deps, CHILD, job())).toBe(true);
+    expect(calls.launches[0].title).toBe('the good branch');
+  });
+
+  it('refuses a job a terminal already drives — never a second writer', async () => {
+    const { deps, calls } = adoptDeps();
+    expect(await adoptBackgroundJob(deps, CHILD, job({ attached: true }))).toBe(
+      false,
+    );
+    expect(calls.launches).toEqual([]);
+    expect(calls.order).toEqual([]);
+  });
+
+  it('refuses a FINISHED job — a stale roster row must not resurrect it', async () => {
+    const { deps, calls } = adoptDeps();
+    expect(await adoptBackgroundJob(deps, CHILD, job({ live: false }))).toBe(
+      false,
+    );
+    expect(calls.launches).toEqual([]);
+    expect(calls.order).toEqual([]);
+  });
+
+  it('refuses a background job that is not a fork, and a self-parented one', async () => {
+    const { deps, calls } = adoptDeps();
+    const noParent = job();
+    delete noParent.parentId;
+    expect(await adoptBackgroundJob(deps, CHILD, noParent)).toBe(false);
+    expect(
+      await adoptBackgroundJob(deps, CHILD, job({ parentId: CHILD })),
+    ).toBe(false);
+    expect(calls.launches).toEqual([]);
+  });
+
+  it('refuses when the parent has no transcript to fork from', async () => {
+    const { deps, calls } = adoptDeps({ hasTranscript: () => false });
+    expect(await adoptBackgroundJob(deps, CHILD, job())).toBe(false);
+    expect(calls.launches).toEqual([]);
+  });
+
+  it('reports failure when the relaunch itself fails', async () => {
+    const { deps, calls } = adoptDeps({ launchSession: async () => null });
+    expect(await adoptBackgroundJob(deps, CHILD, job())).toBe(false);
+    // The edge was still recorded — a crash mid-adopt must not lose lineage.
+    expect(calls.order).toContain('recordLaunch');
+  });
+});
+
+// -------------------------------------------------------- M26: moveProject
+//
+// The picker is the whole verb: what it OFFERS is the feature (a list you can
+// trust has no illegal move in it), and what it does with the answer is one
+// call. Both halves are scripted here the same way every other QuickPick flow
+// in this file is.
+
+describe('moveProjectFlow', () => {
+  type Row = { label: string; action: string; payload?: string };
+
+  afterEach(() => {
+    delete (mockWindow as QuickPickHost).showQuickPick;
+    delete (mockWindow as QuickPickHost).showInformationMessage;
+    delete (mockWindow as WarningHost).showWarningMessage;
+  });
+
+  function scriptPicker(pick: (rows: Row[]) => Row | undefined): {
+    shown: Row[];
+    told: string[];
+  } {
+    const state = { shown: [] as Row[], told: [] as string[] };
+    (mockWindow as QuickPickHost).showQuickPick = async (items) => {
+      state.shown = items as Row[];
+      return pick(state.shown);
+    };
+    (mockWindow as QuickPickHost).showInformationMessage = async (message) => {
+      state.told.push(message);
+      return undefined;
+    };
+    return state;
+  }
+
+  const app = (over: Partial<ProjectRecord> = {}): ProjectRecord =>
+    projectOf({ id: 'app', name: 'app', rootDir: '/code/app', dirs: [], ...over });
+  const api = (over: Partial<ProjectRecord> = {}): ProjectRecord =>
+    projectOf({
+      id: 'api',
+      name: 'api',
+      rootDir: '/code/app/api',
+      dirs: [],
+      parentId: 'app',
+      ...over,
+    });
+  const solo = (over: Partial<ProjectRecord> = {}): ProjectRecord =>
+    projectOf({ id: 'solo', name: 'solo', rootDir: '/code/solo', dirs: [], ...over });
+
+  it('offers Top Level only to a project that is nested', async () => {
+    const nested = scriptPicker(() => undefined);
+    const { deps } = chatDeps(undefined, { projects: [app(), api()] });
+    await moveProjectFlow(deps, 'api');
+    expect(nested.shown[0].action).toBe('top');
+
+    const root = scriptPicker(() => undefined);
+    await moveProjectFlow(deps, 'app');
+    expect(root.shown.some((r) => r.action === 'top')).toBe(false);
+  });
+
+  it('leaves its own subtree out of the list', async () => {
+    const state = scriptPicker(() => undefined);
+    const { deps } = chatDeps(undefined, { projects: [app(), api(), solo()] });
+    await moveProjectFlow(deps, 'app');
+    // Not itself, not its child; the unrelated project is the only candidate.
+    expect(state.shown.map((r) => r.payload)).toEqual(['solo']);
+  });
+
+  it('leaves out the parent it is already filed under', async () => {
+    const state = scriptPicker(() => undefined);
+    const { deps } = chatDeps(undefined, { projects: [app(), api(), solo()] });
+    await moveProjectFlow(deps, 'api');
+    expect(state.shown.filter((r) => r.action === 'project').map((r) => r.payload)).toEqual([
+      'solo',
+    ]);
+  });
+
+  it('files the project under the chosen parent', async () => {
+    scriptPicker((rows) => rows.find((r) => r.payload === 'app'));
+    const { deps, calls } = chatDeps(undefined, { projects: [app(), solo()] });
+    expect(await moveProjectFlow(deps, 'solo')).toBe(true);
+    expect(calls.projectMoves).toEqual([['solo', 'app']]);
+    expect(calls.reveals).toContain('solo');
+  });
+
+  it('sends a nested project back to the top level', async () => {
+    scriptPicker((rows) => rows.find((r) => r.action === 'top'));
+    const { deps, calls } = chatDeps(undefined, { projects: [app(), api()] });
+    expect(await moveProjectFlow(deps, 'api')).toBe(true);
+    expect(calls.projectMoves).toEqual([['api', null]]);
+  });
+
+  it('writes nothing when the picker is dismissed', async () => {
+    scriptPicker(() => undefined);
+    const { deps, calls } = chatDeps(undefined, { projects: [app(), solo()] });
+    expect(await moveProjectFlow(deps, 'solo')).toBe(false);
+    expect(calls.projectMoves).toEqual([]);
+  });
+
+  it('says so when there is nowhere to move to', async () => {
+    const state = scriptPicker(() => undefined);
+    const { deps, calls } = chatDeps(undefined, { projects: [app(), api()] });
+    // `app` has one candidate (its own child) and it is refused, so the list
+    // is empty and the verb has to say why rather than open nothing.
+    await moveProjectFlow(deps, 'app');
+    expect(state.told[0]).toContain('nowhere to move');
+    expect(calls.projectMoves).toEqual([]);
+  });
+
+  it('reports a store refusal instead of pretending it moved', async () => {
+    scriptPicker((rows) => rows.find((r) => r.payload === 'app'));
+    const warned: string[] = [];
+    (mockWindow as WarningHost).showWarningMessage = async (message) => {
+      warned.push(message);
+      return undefined;
+    };
+    const { deps } = chatDeps(undefined, {
+      projects: [app(), solo()],
+      setProjectParent: () => false,
+    });
+    expect(await moveProjectFlow(deps, 'solo')).toBe(false);
+    expect(warned[0]).toContain('could not move');
   });
 });
