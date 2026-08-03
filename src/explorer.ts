@@ -1,7 +1,7 @@
 // src/explorer.ts — the Explorer follows the project.
 //
-// THE FEATURE: switching projects in the Canopy sidebar swaps what the
-// built-in Explorer shows. Not a Canopy-flavoured file tree in our own
+// THE FEATURE: switching projects in the Flock sidebar swaps what the
+// built-in Explorer shows. Not a Flock-flavoured file tree in our own
 // container — THE Explorer, with its real folder tree, its Outline and its
 // Timeline. A project with several connected directories renders the way
 // VS Code already renders several directories: one collapsible root each, the
@@ -28,7 +28,7 @@
 //     module is built entirely around avoiding them.
 //
 // THE ANCHOR is what avoids them. The window runs a real multi-root
-// `.code-workspace` whose folder[0] is a directory Canopy owns and NEVER
+// `.code-workspace` whose folder[0] is a directory Flock owns and NEVER
 // touches. Case 2 is gone at the first frame (the workspace is already
 // multi-root when it opens) and case 1 is gone by construction (every splice
 // this module emits starts at index >= 1 — `planSplice` cannot express one that
@@ -43,7 +43,7 @@
 // rewriting `folders[0].name` there is a rename that never goes through
 // `updateWorkspaceFolders` at all. So the anchor carries the ACTIVE PROJECT's
 // name, and the row we were paying for anyway becomes the caption that says
-// which project the tree below it is: no empty "Canopy" decoy, and the
+// which project the tree below it is: no empty "Flock" decoy, and the
 // directory roots go back to being labelled by their own directories.
 //
 // That on-disk rename is the one part of this module resting on OBSERVED
@@ -87,7 +87,7 @@ export interface FolderSplice {
 export type SyncOutcome =
   | 'spliced' // folders changed
   | 'unchanged' // already showing exactly this
-  | 'not-anchored' // this window is not a Canopy workspace; feature is off
+  | 'not-anchored' // this window is not a Flock workspace; feature is off
   | 'rejected'; // the host refused the splice (see log)
 
 /** The workbench surface this module needs. Implemented in extension.ts over
@@ -124,9 +124,9 @@ export const FOLDER_CHANGE_TIMEOUT_MS = 2_000;
 /** The anchor's label when no project is active — the only time it is not the
  *  project's own name. Deliberately the product name: it is a permanent row,
  *  and a row the user cannot explain is worse than a row that is redundant. */
-export const ANCHOR_LABEL = 'Canopy';
+export const ANCHOR_LABEL = 'Flock';
 
-/** Basename of the workspace file Canopy generates, inside globalStorage. */
+/** Basename of the workspace file Flock generates, inside globalStorage. */
 export const WORKSPACE_FILE_NAME = 'lineage.code-workspace';
 /** Basename of the anchor directory, inside globalStorage. Stays EMPTY. */
 export const ANCHOR_DIR_NAME = 'anchor';
@@ -234,7 +234,7 @@ export function planSplice(
 /** The generated `.code-workspace`, as text. Written once, at opt-in; VS Code
  *  itself rewrites the `folders` array on every splice from then on. Settings
  *  are left empty on purpose — this file becomes the window's settings root,
- *  and Canopy putting opinions in it would quietly outrank the user's own
+ *  and Flock putting opinions in it would quietly outrank the user's own
  *  folder settings. */
 export function workspaceFileJson(
   anchorPath: string,
@@ -300,7 +300,7 @@ export class ExplorerSync {
     this.anchorPath = normalizeDir(anchorPath);
   }
 
-  /** Is this window a Canopy workspace — i.e. can the Explorer follow at all?
+  /** Is this window a Flock workspace — i.e. can the Explorer follow at all?
    *  Drives the header view's `when` clause and the opt-in command's wording. */
   anchored(): boolean {
     try {
@@ -359,9 +359,9 @@ export class ExplorerSync {
       if (!this.warnedNotAnchored) {
         this.warnedNotAnchored = true;
         log(
-          'explorer: this window is not a Canopy workspace (folder[0] is not ' +
+          'explorer: this window is not a Flock workspace (folder[0] is not ' +
             'the anchor) — the Explorer will not follow the active project. ' +
-            'Run "Canopy: Follow the Active Project in the Explorer" to set ' +
+            'Run "Flock: Follow the Active Project in the Explorer" to set ' +
             'one up.',
         );
       }

@@ -1084,7 +1084,7 @@ export class LineageTreeProvider
         const movable = ids.filter((id) => roots.has(id));
         if (movable.length === 0) {
           notify(
-            'Canopy: only a top-level session can be moved to a project — ' +
+            'Flock: only a top-level session can be moved to a project — ' +
               'a fork follows the session it branched from.',
           );
           return;

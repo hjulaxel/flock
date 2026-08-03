@@ -630,7 +630,7 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
     --lineage-done: var(--vscode-${DONE_COLOR_ID.replace(/\./g, '-')});
 ${branchPaletteCss()}  }
 </style>
-<title>Canopy</title>
+<title>Flock</title>
 </head>
 <body>
 <!-- The BACKGROUND context, carried by the tree container itself, so a
@@ -909,7 +909,7 @@ ${branchPaletteCss()}  }
    * this view for an editable row before they will consider the quick-input
    * fallback — and that ask only succeeds on a view that is on screen
    * (`beginRename` refuses a hidden one). Without a reveal the fallback is not
-   * a last resort at all but the normal path: running "Canopy: New Session"
+   * a last resort at all but the normal path: running "Flock: New Session"
    * from the command palette with the sidebar collapsed, or with another
    * activity-bar container showing, is the single most common way a session is
    * created and it never has the view up.
@@ -1151,7 +1151,7 @@ ${branchPaletteCss()}  }
       // still appending its cwd to the project's directory list.
       if (!forest.visibleRoots.includes(dragged)) {
         this.notify(
-          'Canopy: only a top-level session can be moved to a project — a ' +
+          'Flock: only a top-level session can be moved to a project — a ' +
             'fork follows the session it branched from.',
         );
         return;

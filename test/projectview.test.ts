@@ -45,7 +45,7 @@ function commandOf(provider: ProjectViewProvider, row: ProjectViewRow): string {
 // ---------------------------------------------------------------- the rows
 
 describe('projectview: rows', () => {
-  it('offers the one-time setup when the window is not a Canopy workspace', () => {
+  it('offers the one-time setup when the window is not a Flock workspace', () => {
     expect(projectRows(project(), false)).toEqual([{ kind: 'setup' }]);
   });
 

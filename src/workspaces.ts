@@ -44,7 +44,7 @@
 //                 both outrank tidiness the same way unsaved work does. Its
 //                 tab stays open, reported, and the next switch sweeps it
 //                 once it is idle (or detaches it, tmux having appeared).
-//               * A terminal Canopy does not own is never touched at all.
+//               * A terminal Flock does not own is never touched at all.
 //               * A tab the TARGET's own saved layout names is spared, even
 //                 when it sits outside every one of the project's directories:
 //                 closing it only to reopen it a moment later is churn the
@@ -449,7 +449,7 @@ export function lingerLines(
   if (terminalsLeft.length > 0) {
     lines.push(
       'terminal tabs, never closed (a live terminal could be running ' +
-        'anything; busy Canopy sessions of other projects stay open until ' +
+        'anything; busy Flock sessions of other projects stay open until ' +
         'they finish): ' +
         terminalsLeft.map(name).join(', '),
     );
@@ -557,7 +557,7 @@ export interface WorkspaceManagerDeps {
    *  splice and not a file tree of our own.
    *
    *  Optional, and a no-op in three ordinary cases: the window was never
-   *  converted to a Canopy workspace, the user turned the feature off, or this
+   *  converted to a Flock workspace, the user turned the feature off, or this
    *  is a unit double. A switch never depends on it — the tabs are the
    *  workspace, the Explorer is a view of it. */
   syncExplorer?(project: ProjectRecord | null): Promise<void>;
@@ -685,7 +685,7 @@ export class WorkspaceManager {
       // are still the old ones. An auto switch is a side effect of just
       // working and gets no chrome at all.
       await this.withIndicator(
-        auto ? null : 'Canopy: switching workspace…',
+        auto ? null : 'Flock: switching workspace…',
         () => this.doSwitch(projectId, auto),
       );
     } finally {
@@ -703,7 +703,7 @@ export class WorkspaceManager {
     const current = this.activeProjectId();
     const target = projectId ? this.deps.getProject(projectId) : undefined;
     if (projectId && !target) {
-      void this.message('Canopy: that project no longer exists.');
+      void this.message('Flock: that project no longer exists.');
       return;
     }
     log(
@@ -772,7 +772,7 @@ export class WorkspaceManager {
     if (projectId === current) {
       if (projectId !== null && !auto) {
         void this.message(
-          `Canopy: "${target?.name ?? projectId}" is already the active ` +
+          `Flock: "${target?.name ?? projectId}" is already the active ` +
             'workspace — layout saved.',
         );
       }
@@ -787,7 +787,7 @@ export class WorkspaceManager {
       // nothing — clearing the folder tree back to the bare anchor would be
       // this verb taking something away, which is the one thing it says it
       // never does. The folders stay until a switch moves them.
-      void this.message('Canopy: left workspace mode — nothing was closed.');
+      void this.message('Flock: left workspace mode — nothing was closed.');
       return;
     }
 
@@ -956,8 +956,8 @@ export class WorkspaceManager {
     ].filter((s) => s !== '');
     const summary =
       bits.length > 0
-        ? `Canopy: switched to the "${target.name}" workspace — ${bits.join(', ')}.`
-        : `Canopy: switched to the "${target.name}" workspace. Everything open ` +
+        ? `Flock: switched to the "${target.name}" workspace — ${bits.join(', ')}.`
+        : `Flock: switched to the "${target.name}" workspace. Everything open ` +
           'already belongs to it; the layout is saved when you switch away and ' +
           'restored when you come back.';
     log('workspaces:', summary);

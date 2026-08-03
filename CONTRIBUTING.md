@@ -1,6 +1,6 @@
 # Contributing
 
-Canopy is a one-person side project. Issues and pull requests are welcome, but
+Flock is a one-person side project. Issues and pull requests are welcome, but
 please open an issue before starting anything large — it may already be decided
 one way or the other, and I would rather say so before you write the code than
 after.
@@ -15,10 +15,10 @@ npm run compile     # esbuild bundle -> dist/extension.js
 npm run watch       # rebuild on change
 ```
 
-Press **F5** in VS Code for an Extension Development Host with Canopy loaded
+Press **F5** in VS Code for an Extension Development Host with Flock loaded
 (the `npm: compile` task runs first). Reload that window with `Cmd+R` to pick up
-a rebuild. Canopy's diagnostics go to the **Canopy** output channel — `View →
-Output → Canopy` — never to `console`.
+a rebuild. Flock's diagnostics go to the **Flock** output channel — `View →
+Output → Flock` — never to `console`.
 
 For anything to appear in the tree, `claude` must be on `PATH` (or
 `lineage.claudeBinary` set) and at least one Claude Code session must be running
@@ -36,13 +36,13 @@ A few constraints look like oversights and are not:
 - **Configuration keys, command ids and the workspace filename keep the
   `lineage.` prefix.** The extension was called Lineage before 0.1.0. Renaming
   those keys would silently discard everyone's existing settings and break their
-  keybindings, so the old prefix stays. New user-visible strings say Canopy.
-- **The extension id `hjulaxel.canopy` is frozen** and asserted by
+  keybindings, so the old prefix stays. New user-visible strings say Flock.
+- **The extension id `hjulaxel.flock` is frozen** and asserted by
   `test/identity.test.ts`. A published id cannot be changed.
-- **No proposed APIs.** Canopy has to run in Cursor, Windsurf and VSCodium, so
+- **No proposed APIs.** Flock has to run in Cursor, Windsurf and VSCodium, so
   `enabledApiProposals` stays empty.
 - **Read-only where it counts.** The only CLI call is `claude agents --json`; the
-  only git call is `git worktree list --porcelain`. Canopy makes no network
+  only git call is `git worktree list --porcelain`. Flock makes no network
   requests, and writes nothing to your repository or to
   `~/.claude/settings.json`. Please keep it that way.
 - **Failures degrade, they do not throw.** A missing file, malformed JSON or a

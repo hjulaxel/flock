@@ -57,7 +57,7 @@ export const CONFIG_DIR_ENV: Readonly<Partial<Record<ProviderId, string>>> = {
 };
 
 /**
- * The providers a Canopy SESSION can actually be launched on.
+ * The providers a Flock SESSION can actually be launched on.
  *
  * PARTIAL for the same reason CONFIG_DIR_ENV is, and it is the other half of
  * the same fact: the launcher execs exactly ONE binary — the Claude CLI — so

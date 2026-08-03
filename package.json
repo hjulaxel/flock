@@ -1,18 +1,18 @@
 {
-  "name": "canopy",
-  "displayName": "Canopy for Claude Code",
+  "name": "flock",
+  "displayName": "Flock for Claude Code",
   "description": "See every Claude Code session you're running as one live tree — who forked from whom, who's working, and who's waiting on you.",
   "version": "0.1.0",
   "publisher": "hjulaxel",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/hjulaxel/canopy.git"
+    "url": "https://github.com/hjulaxel/flock.git"
   },
   "bugs": {
-    "url": "https://github.com/hjulaxel/canopy/issues"
+    "url": "https://github.com/hjulaxel/flock/issues"
   },
-  "homepage": "https://github.com/hjulaxel/canopy#readme",
+  "homepage": "https://github.com/hjulaxel/flock#readme",
   "engines": {
     "vscode": "^1.94.0"
   },
@@ -36,11 +36,11 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": false,
-      "description": "Canopy launches terminals, which VS Code blocks in Restricted Mode."
+      "description": "Flock launches terminals, which VS Code blocks in Restricted Mode."
     },
     "virtualWorkspaces": {
       "supported": false,
-      "description": "Canopy needs a real filesystem and terminals to find and launch Claude Code sessions."
+      "description": "Flock needs a real filesystem and terminals to find and launch Claude Code sessions."
     }
   },
   "contributes": {
@@ -48,7 +48,7 @@
       "activitybar": [
         {
           "id": "lineage",
-          "title": "Canopy",
+          "title": "Flock",
           "icon": "media/bot.svg"
         }
       ]
@@ -84,7 +84,7 @@
           "id": "lineageProject",
           "name": "Project",
           "icon": "media/bot.svg",
-          "contextualTitle": "Canopy Project",
+          "contextualTitle": "Flock Project",
           "when": "lineage.explorerFollow",
           "visibility": "visible",
           "initialSize": 1
@@ -95,219 +95,219 @@
       {
         "command": "lineage.refresh",
         "title": "Refresh",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(refresh)"
       },
       {
         "command": "lineage.newSession",
         "title": "New Claude Session",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(add)"
       },
       {
         "command": "lineage.newSessionIn",
         "title": "New Claude Session in Folder...",
-        "category": "Canopy"
+        "category": "Flock"
       },
       {
         "command": "lineage.newProject",
         "title": "New Project...",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(new-folder)"
       },
       {
         "command": "lineage.newSubproject",
         "title": "New Subproject...",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(new-folder)"
       },
       {
         "command": "lineage.moveProject",
         "title": "Move Project...",
-        "category": "Canopy"
+        "category": "Flock"
       },
       {
         "command": "lineage.configureProject",
         "title": "Configure Project...",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(gear)"
       },
       {
         "command": "lineage.renameProjectInline",
         "title": "Rename Project in Place",
-        "category": "Canopy"
+        "category": "Flock"
       },
       {
         "command": "lineage.renameProject",
         "title": "Rename Project...",
-        "category": "Canopy"
+        "category": "Flock"
       },
       {
         "command": "lineage.closeProject",
         "title": "Close Project...",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(archive)"
       },
       {
         "command": "lineage.reopenProject",
         "title": "Open Project...",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(folder-opened)"
       },
       {
         "command": "lineage.deleteProject",
         "title": "Delete Project",
-        "category": "Canopy"
+        "category": "Flock"
       },
       {
         "command": "lineage.addProjectDirectory",
         "title": "Add Directory to Project...",
-        "category": "Canopy"
+        "category": "Flock"
       },
       {
         "command": "lineage.newSessionInProject",
         "title": "New Session in Project",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(add)"
       },
       {
         "command": "lineage.newSessionInBranch",
         "title": "New Session on Branch",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(git-branch)"
       },
       {
         "command": "lineage.chatInProject",
         "title": "New Chat in Project",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(comment-discussion)"
       },
       {
         "command": "lineage.chatHistory",
         "title": "View Chat History...",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(history)"
       },
       {
         "command": "lineage.projectFromFolder",
         "title": "Make a Project from this Folder...",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(new-folder)"
       },
       {
         "command": "lineage.hideFolder",
         "title": "Hide this Folder",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(eye-closed)"
       },
       {
         "command": "lineage.showHidden",
         "title": "Show Closed Projects and Hidden Folders...",
-        "category": "Canopy"
+        "category": "Flock"
       },
       {
         "command": "lineage.focusSession",
         "title": "Focus Session",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(terminal)"
       },
       {
         "command": "lineage.forkSession",
         "title": "Fork Session",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(git-branch)"
       },
       {
         "command": "lineage.forkAndCompact",
         "title": "Fork and Compact",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(combine)"
       },
       {
         "command": "lineage.resumeSession",
         "title": "Open Session Here",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(debug-restart)"
       },
       {
         "command": "lineage.renameSession",
         "title": "Rename Session...",
-        "category": "Canopy"
+        "category": "Flock"
       },
       {
         "command": "lineage.renameSessionInline",
         "title": "Rename Session in Place",
-        "category": "Canopy"
+        "category": "Flock"
       },
       {
         "command": "lineage.closeSession",
         "title": "Close Session",
-        "category": "Canopy"
+        "category": "Flock"
       },
       {
         "command": "lineage.closeWithSummary",
         "title": "Close with Summary...",
-        "category": "Canopy"
+        "category": "Flock"
       },
       {
         "command": "lineage.wrapSession",
         "title": "Wrap Up Session",
-        "category": "Canopy"
+        "category": "Flock"
       },
       {
         "command": "lineage.copySessionId",
         "title": "Copy Session ID",
-        "category": "Canopy"
+        "category": "Flock"
       },
       {
         "command": "lineage.deleteSession",
         "title": "Delete Session",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(trash)"
       },
       {
         "command": "lineage.deleteSessions",
         "title": "Delete Selected Sessions",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(trash)"
       },
       {
         "command": "lineage.restoreSession",
         "title": "Restore Deleted Session...",
-        "category": "Canopy"
+        "category": "Flock"
       },
       {
         "command": "lineage.deleteStale",
         "title": "Delete Stale Sessions...",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(clear-all)"
       },
       {
         "command": "lineage.openProject",
         "title": "Open Project in New Window",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(folder-opened)"
       },
       {
         "command": "lineage.installHooks",
         "title": "Install Instant-Update Hooks...",
-        "category": "Canopy"
+        "category": "Flock"
       },
       {
         "command": "lineage.removeHooks",
         "title": "Remove Instant-Update Hooks",
-        "category": "Canopy"
+        "category": "Flock"
       },
       {
         "command": "lineage.showNotifications",
         "title": "Show Notifications",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(bell)"
       },
       {
         "command": "lineage.showNotificationsUnread",
         "title": "Show Notifications (unread)",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": {
           "light": "media/icons/bell-dot-light.svg",
           "dark": "media/icons/bell-dot-dark.svg"
@@ -316,141 +316,141 @@
       {
         "command": "lineage.markAllNotificationsRead",
         "title": "Mark All Notifications as Read",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(check-all)"
       },
       {
         "command": "lineage.muteSessionNotifications",
         "title": "Hide Notifications for This Session",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(bell-slash)"
       },
       {
         "command": "lineage.unmuteSessionNotifications",
         "title": "Show Notifications for This Session",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(bell)"
       },
       {
         "command": "lineage.showOnlyActiveSessions",
         "title": "Show Only Active Sessions",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(filter)"
       },
       {
         "command": "lineage.showAllSessions",
         "title": "Show Closed Sessions Too",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(filter-filled)"
       },
       {
         "command": "lineage.switchWorkspace",
         "title": "Switch Workspace...",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(layers)"
       },
       {
         "command": "lineage.followInExplorer",
         "title": "Follow the Active Project in the Explorer",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(gear)"
       },
       {
         "command": "lineage.stopFollowingInExplorer",
         "title": "Stop Following the Active Project in the Explorer",
-        "category": "Canopy"
+        "category": "Flock"
       },
       {
         "command": "lineage.addAccount",
         "title": "Add Account...",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(add)"
       },
       {
         "command": "lineage.loginAccount",
         "title": "Sign In to Account...",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(key)"
       },
       {
         "command": "lineage.removeAccount",
         "title": "Remove Account",
-        "category": "Canopy"
+        "category": "Flock"
       },
       {
         "command": "lineage.setDefaultAccount",
         "title": "Use as Default Account",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(star-full)"
       },
       {
         "command": "lineage.moveAccountUp",
         "title": "Move Account Up",
-        "category": "Canopy"
+        "category": "Flock"
       },
       {
         "command": "lineage.moveAccountDown",
         "title": "Move Account Down",
-        "category": "Canopy"
+        "category": "Flock"
       },
       {
         "command": "lineage.refreshAccountUsage",
         "title": "Refresh Account Usage",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(refresh)"
       },
       {
         "command": "lineage.newSessionFromAccount",
         "title": "New Session on This Account",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(add)"
       },
       {
         "command": "lineage.newSessionFromPicker",
         "title": "New Session From...",
-        "category": "Canopy"
+        "category": "Flock"
       },
       {
         "command": "lineage.setProjectAccount",
         "title": "Set AI Account...",
-        "category": "Canopy"
+        "category": "Flock"
       },
       {
         "command": "lineage.hideBranch",
         "title": "Hide Branch",
-        "category": "Canopy"
+        "category": "Flock"
       },
       {
         "command": "lineage.showBranches",
         "title": "Show Branches...",
-        "category": "Canopy"
+        "category": "Flock"
       },
       {
         "command": "lineage.foldBranches",
         "title": "Hide Branches",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(chevron-down)"
       },
       {
         "command": "lineage.unfoldBranches",
         "title": "Show Branches",
-        "category": "Canopy",
+        "category": "Flock",
         "icon": "$(chevron-right)"
       },
       {
         "command": "lineage.revealBranch",
         "title": "Reveal Worktree in Finder",
-        "category": "Canopy"
+        "category": "Flock"
       },
       {
         "command": "lineage.copyBranchName",
         "title": "Copy Branch Name",
-        "category": "Canopy"
+        "category": "Flock"
       },
       {
         "command": "lineage.copyBranchPath",
         "title": "Copy Worktree Path",
-        "category": "Canopy"
+        "category": "Flock"
       }
     ],
     "menus": {
@@ -1157,7 +1157,7 @@
     "colors": [
       {
         "id": "lineage.brand",
-        "description": "Canopy brand accent used for tree icons.",
+        "description": "Flock brand accent used for tree icons.",
         "defaults": {
           "light": "#0B7F73",
           "dark": "#3BDD9C",
@@ -1200,7 +1200,7 @@
       {
         "view": "lineageSessions",
         "when": "!lineage.onlyActive",
-        "contents": "No live Claude Code sessions found.\n[New Claude Session](command:lineage.newSession)\n[New Project](command:lineage.newProject)\nA project is a name plus one or more directories; sessions running in any of them group under it.\nCanopy reads `claude agents --json` every few seconds. If sessions are running but none appear, set `lineage.claudeBinary` to the full path of your claude CLI."
+        "contents": "No live Claude Code sessions found.\n[New Claude Session](command:lineage.newSession)\n[New Project](command:lineage.newProject)\nA project is a name plus one or more directories; sessions running in any of them group under it.\nFlock reads `claude agents --json` every few seconds. If sessions are running but none appear, set `lineage.claudeBinary` to the full path of your claude CLI."
       },
       {
         "view": "lineageSessions",
@@ -1213,7 +1213,7 @@
       }
     ],
     "configuration": {
-      "title": "Canopy",
+      "title": "Flock",
       "properties": {
         "lineage.pollIntervalMs": {
           "type": "number",
@@ -1235,10 +1235,10 @@
             "off"
           ],
           "enumDescriptions": [
-            "Use tmux when it is installed (never on Windows). Sessions Canopy launches run inside a private tmux server, invisible — no status bar, no prefix key.",
+            "Use tmux when it is installed (never on Windows). Sessions Flock launches run inside a private tmux server, invisible — no status bar, no prefix key.",
             "Never use tmux. Sessions run as bare claude processes; workspace switches park them by closing and resume them from their transcripts."
           ],
-          "description": "Run Canopy-launched Claude sessions inside a private tmux server (`tmux -L lineage`). This upgrades workspace parking from close-and-resume to detach-and-reattach: switching away hides a session's tab while the conversation KEEPS RUNNING — busy ones too — and switching back reattaches it instantly, live state intact. Requires tmux on PATH; without it (and always on Windows) Canopy falls back to close-and-resume. Sessions started outside Canopy are never wrapped either way."
+          "description": "Run Flock-launched Claude sessions inside a private tmux server (`tmux -L lineage`). This upgrades workspace parking from close-and-resume to detach-and-reattach: switching away hides a session's tab while the conversation KEEPS RUNNING — busy ones too — and switching back reattaches it instantly, live state intact. Requires tmux on PATH; without it (and always on Windows) Flock falls back to close-and-resume. Sessions started outside Flock are never wrapped either way."
         },
         "lineage.terminalLocation": {
           "type": "string",
@@ -1295,12 +1295,12 @@
           "type": "number",
           "default": 5,
           "minimum": 1,
-          "description": "How long a session may keep the CLI's \"busy\" status with an untouched transcript before Canopy stops drawing the running (amber) dot and shows it as idle. `claude agents --json` sometimes freezes a session's status at `busy` after its turn actually ended (most often an interactive session you finished with); a genuinely working session writes its transcript within seconds, so silence this long means it is done. Raise it if a long single tool call briefly flips to idle; turn on \"Show Phantom Rows\" to see the raw, uncorrected status."
+          "description": "How long a session may keep the CLI's \"busy\" status with an untouched transcript before Flock stops drawing the running (amber) dot and shows it as idle. `claude agents --json` sometimes freezes a session's status at `busy` after its turn actually ended (most often an interactive session you finished with); a genuinely working session writes its transcript within seconds, so silence this long means it is done. Raise it if a long single tool call briefly flips to idle; turn on \"Show Phantom Rows\" to see the raw, uncorrected status."
         },
         "lineage.hooks.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Read the Claude Code hook event stream for instant updates. \"Install Instant-Update Hooks…\" sets this for you — installing the plugin only makes Claude write the events, this is the switch that makes Canopy read them. The plugin lives in a skills directory and never edits ~/.claude/settings.json."
+          "description": "Read the Claude Code hook event stream for instant updates. \"Install Instant-Update Hooks…\" sets this for you — installing the plugin only makes Claude write the events, this is the switch that makes Flock read them. The plugin lives in a skills directory and never edits ~/.claude/settings.json."
         },
         "lineage.notifications.enabled": {
           "type": "boolean",
@@ -1315,7 +1315,7 @@
         "lineage.workspaces.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Show the workspace switcher in the status bar. A workspace scopes this window to one project: switching saves the current tab layout under the project you leave, hides what does not belong to the target, and restores the target's saved layout. Foreign sessions are parked: with tmux installed (see `lineage.tmux`) their tab hides while the conversation keeps running — busy ones included — and reattaches when you switch back; without tmux the terminal closes and the conversation resumes from its transcript, in which case busy sessions are never closed. Unsaved editors and terminals Canopy does not own are never touched. The terminal panel is never used."
+          "description": "Show the workspace switcher in the status bar. A workspace scopes this window to one project: switching saves the current tab layout under the project you leave, hides what does not belong to the target, and restores the target's saved layout. Foreign sessions are parked: with tmux installed (see `lineage.tmux`) their tab hides while the conversation keeps running — busy ones included — and reattaches when you switch back; without tmux the terminal closes and the conversation resumes from its transcript, in which case busy sessions are never closed. Unsaved editors and terminals Flock does not own are never touched. The terminal panel is never used."
         },
         "lineage.workspaces.resumeSessions": {
           "type": "boolean",
@@ -1330,7 +1330,7 @@
         "lineage.explorer.followProject": {
           "type": "boolean",
           "default": true,
-          "description": "The Explorer follows the active project: switching projects swaps the built-in file tree to that project's directories — the main one on top, any extra connected directories as their own collapsible roots below it, wherever they live on disk. Outline and Timeline are untouched. Requires running \"Canopy: Follow the Active Project in the Explorer\" once per window, which converts it to a Canopy workspace (one reload, then switching is instant and no terminal is lost). With this off, an already-converted window keeps its folders where they are."
+          "description": "The Explorer follows the active project: switching projects swaps the built-in file tree to that project's directories — the main one on top, any extra connected directories as their own collapsible roots below it, wherever they live on disk. Outline and Timeline are untouched. Requires running \"Flock: Follow the Active Project in the Explorer\" once per window, which converts it to a Flock workspace (one reload, then switching is instant and no terminal is lost). With this off, an already-converted window keeps its folders where they are."
         },
         "lineage.accounts.enabled": {
           "type": "boolean",
@@ -1384,26 +1384,26 @@
     ],
     "walkthroughs": [
       {
-        "id": "canopyGettingStarted",
-        "title": "Get started with Canopy",
+        "id": "flockGettingStarted",
+        "title": "Get started with Flock",
         "description": "Three things worth knowing before you run six agents at once.",
         "steps": [
           {
-            "id": "canopy.sessions",
+            "id": "flock.sessions",
             "title": "Your sessions are already here",
-            "description": "Canopy reads the Claude Code CLI's own session registry, so anything you have run `claude` on shows up with no setup.\n[Open the Sessions view](command:workbench.view.extension.lineage)",
+            "description": "Flock reads the Claude Code CLI's own session registry, so anything you have run `claude` on shows up with no setup.\n[Open the Sessions view](command:workbench.view.extension.lineage)",
             "media": { "markdown": "media/walkthrough/sessions.md" },
             "completionEvents": ["onCommand:lineage.refresh"]
           },
           {
-            "id": "canopy.start",
+            "id": "flock.start",
             "title": "Start one from the tree",
             "description": "Press + on any project row. The session appears immediately with its name selected — type over it or press Enter. No dialog.\n[New Claude Session](command:lineage.newSession)",
             "media": { "markdown": "media/walkthrough/start.md" },
             "completionEvents": ["onCommand:lineage.newSession"]
           },
           {
-            "id": "canopy.attention",
+            "id": "flock.attention",
             "title": "Watch the right edge",
             "description": "Amber means working. Red means finished and not yet seen — like an unread message, it clears when you look. Everything else stays blank on purpose.",
             "media": { "markdown": "media/walkthrough/attention.md" }

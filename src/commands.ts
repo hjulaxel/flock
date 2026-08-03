@@ -417,7 +417,7 @@ function isGroupArg(arg: unknown): boolean {
 /** '' when the row is actionable, else the reason it is not. */
 function unknownGroupRefusal(arg: unknown): string {
   if (!isGroupArg(arg) || groupCwdFromArg(arg) !== undefined) return '';
-  return 'Canopy: those sessions report no working directory, so there is no folder to act on.';
+  return 'Flock: those sessions report no working directory, so there is no folder to act on.';
 }
 
 /** A ProjectGroupNode's id, when the command came from a project row. */
@@ -436,7 +436,7 @@ async function copyToClipboard(text: string, said: string): Promise<void> {
   if (typeof text !== 'string' || text === '') return;
   try {
     await vscode.env.clipboard.writeText(text);
-    void vscode.window.showInformationMessage(`Canopy: ${said}`);
+    void vscode.window.showInformationMessage(`Flock: ${said}`);
   } catch (err) {
     logError('commands.copyToClipboard', err);
   }
@@ -785,7 +785,7 @@ async function pickFlaggedSession(
   );
   if (flagged.length === 0) {
     void vscode.window.showInformationMessage(
-      'Canopy: no deleted sessions to restore.',
+      'Flock: no deleted sessions to restore.',
     );
     return undefined;
   }
@@ -830,8 +830,8 @@ async function targetSession(
     (n) => (liveOnly ? isLive(n) : true),
     opts?.emptyMessage ??
       (liveOnly
-        ? 'Canopy: no live Claude sessions right now.'
-        : 'Canopy: no sessions in the tree yet.'),
+        ? 'Flock: no live Claude sessions right now.'
+        : 'Flock: no sessions in the tree yet.'),
   );
 }
 
@@ -980,7 +980,7 @@ async function pickOpenableFolder(
   }
   if (items.length === 0) {
     void vscode.window.showInformationMessage(
-      'Canopy: no project or session directories to open.',
+      'Flock: no project or session directories to open.',
     );
     return undefined;
   }
@@ -1007,7 +1007,7 @@ async function pickHideableFolder(
   }
   if (items.length === 0) {
     void vscode.window.showInformationMessage(
-      'Canopy: every folder in the tree already belongs to a project or is hidden.',
+      'Flock: every folder in the tree already belongs to a project or is hidden.',
     );
     return undefined;
   }
@@ -1073,7 +1073,7 @@ async function pickProject(
     .filter((p) => (opts?.includeHidden ? true : p.hidden !== true));
   if (projects.length === 0) {
     void vscode.window.showInformationMessage(
-      'Canopy: no projects yet — create one with "Canopy: New Project…".',
+      'Flock: no projects yet — create one with "Flock: New Project…".',
     );
     return undefined;
   }
@@ -1851,7 +1851,7 @@ export async function configureProjectFlow(
     const project = deps.getProject(projectId);
     if (!project) {
       void vscode.window.showInformationMessage(
-        'Canopy: that project no longer exists.',
+        'Flock: that project no longer exists.',
       );
       return;
     }
@@ -2089,7 +2089,7 @@ export async function closeProjectFlow(
   log('project: closed', project.id, project.name, `(${running} running)`);
   deps.refresh();
   vscode.window.setStatusBarMessage(
-    `Canopy: closed ${project.name} — reopen it with "Canopy: Open Project…"`,
+    `Flock: closed ${project.name} — reopen it with "Flock: Open Project…"`,
     4000,
   );
   return true;
@@ -2146,7 +2146,7 @@ export async function moveProjectFlow(
 
   if (items.length === 0) {
     void vscode.window.showInformationMessage(
-      `Canopy: there is nowhere to move "${project.name}" — every other project is inside it.`,
+      `Flock: there is nowhere to move "${project.name}" — every other project is inside it.`,
     );
     return false;
   }
@@ -2164,7 +2164,7 @@ export async function moveProjectFlow(
   const ok = await deps.setProjectParent(projectId, target);
   if (!ok) {
     void vscode.window.showWarningMessage(
-      `Canopy: could not move "${project.name}" there.`,
+      `Flock: could not move "${project.name}" there.`,
     );
     return false;
   }
@@ -2539,7 +2539,7 @@ async function closeFlow(
     // running and its row is unchanged after the refresh. Saying nothing here
     // leaves the user believing a confirmed "Close Session" did something.
     void vscode.window.showWarningMessage(
-      'Canopy: this session is not hosted by this window, so it is still ' +
+      'Flock: this session is not hosted by this window, so it is still ' +
         'running — only the editorial record was marked closed.',
     );
   }
@@ -2587,7 +2587,7 @@ function launchAccountOptions(
 function announceAccount(profile: AccountProfile, reason: string): void {
   try {
     vscode.window.setStatusBarMessage(
-      `Canopy: ${profile.label}${reason === '' ? '' : ` — ${reason}`}`,
+      `Flock: ${profile.label}${reason === '' ? '' : ` — ${reason}`}`,
       5000,
     );
   } catch (err) {
@@ -2764,7 +2764,7 @@ function refuseUnlaunchable(profile: AccountProfile): boolean {
   if (canHostSession(profile)) return false;
   const provider = PROVIDERS[profile.provider]?.label ?? profile.provider;
   void vscode.window.showWarningMessage(
-    `Canopy: "${profile.label}" is a ${provider} account. Canopy starts ` +
+    `Flock: "${profile.label}" is a ${provider} account. Flock starts ` +
       'Claude Code sessions, so it cannot start one there — sign in from ' +
       'that row and use the CLI directly.',
   );
@@ -2787,14 +2787,14 @@ async function pickAccount(
   if (profiles.length === 0) {
     if (all.length > 0) {
       void vscode.window.showInformationMessage(
-        'Canopy: none of your accounts can run a session — Canopy starts ' +
+        'Flock: none of your accounts can run a session — Flock starts ' +
           'Claude Code sessions only.',
       );
       return undefined;
     }
     const ADD = 'Add Account…';
     const choice = await vscode.window.showInformationMessage(
-      'Canopy: no AI accounts configured yet.',
+      'Flock: no AI accounts configured yet.',
       ADD,
     );
     if (choice === ADD) await addAccountFlow(deps);
@@ -2901,7 +2901,7 @@ async function addAccountFlow(deps: AccountCommandDeps): Promise<void> {
       {
         modal: true,
         detail:
-          "The key is stored in plain text in Canopy's state file (it is " +
+          "The key is stored in plain text in Flock's state file (it is " +
           'passed to the CLI as an environment variable, so it cannot be ' +
           'kept anywhere the CLI cannot read). Sessions on this account are ' +
           'billed per token instead of against a subscription.',
@@ -2940,7 +2940,7 @@ async function addAccountFlow(deps: AccountCommandDeps): Promise<void> {
     configDir = await accts.createProfileDir(id);
     if (configDir === undefined || configDir === '') {
       void vscode.window.showErrorMessage(
-        'Canopy: could not create a config directory for this account, so ' +
+        'Flock: could not create a config directory for this account, so ' +
           'it was not added — an account without its own directory would ' +
           'share the login you are already signed in as.',
       );
@@ -2958,12 +2958,12 @@ async function addAccountFlow(deps: AccountCommandDeps): Promise<void> {
   log('accounts: added', id, provider.provider);
 
   if (provider.apiKey === true) {
-    vscode.window.setStatusBarMessage(`Canopy: added "${name}".`, 4000);
+    vscode.window.setStatusBarMessage(`Flock: added "${name}".`, 4000);
     return;
   }
   const SIGN_IN = 'Sign In Now';
   const choice = await vscode.window.showInformationMessage(
-    `Canopy: added "${name}". It has no login of its own yet — sign in ` +
+    `Flock: added "${name}". It has no login of its own yet — sign in ` +
       'once and every session on this account reuses it.',
     SIGN_IN,
   );
@@ -2997,7 +2997,7 @@ async function loginAccountFlow(
 
   if (Object.keys(profile.extraEnv ?? {}).length > 0) {
     void vscode.window.showInformationMessage(
-      `Canopy: "${profile.label}" authenticates with an environment ` +
+      `Flock: "${profile.label}" authenticates with an environment ` +
         'variable — there is no sign-in to complete.',
     );
     return;
@@ -3020,7 +3020,7 @@ async function loginAccountFlow(
     command = 'codex login';
   } else {
     void vscode.window.showInformationMessage(
-      `Canopy: Canopy does not know how to sign "${profile.label}" in — ` +
+      `Flock: Flock does not know how to sign "${profile.label}" in — ` +
         'open a terminal and run that CLI’s own login command.',
     );
     return;
@@ -3058,7 +3058,7 @@ async function removeAccountFlow(
 
   const REMOVE = 'Remove Account';
   const answer = await vscode.window.showWarningMessage(
-    `Remove "${profile.label}" from Canopy?`,
+    `Remove "${profile.label}" from Flock?`,
     {
       modal: true,
       detail:
@@ -3125,7 +3125,7 @@ async function setProjectAccountFlow(
   const profiles = accts.accounts();
   if (profiles.length === 0) {
     void vscode.window.showInformationMessage(
-      'Canopy: no AI accounts configured yet — add one in the Accounts view.',
+      'Flock: no AI accounts configured yet — add one in the Accounts view.',
     );
     return;
   }
@@ -3135,7 +3135,7 @@ async function setProjectAccountFlow(
   const choosable = profiles.filter(canHostSession);
   if (choosable.length === 0) {
     void vscode.window.showInformationMessage(
-      'Canopy: none of your accounts can run a session — Canopy starts ' +
+      'Flock: none of your accounts can run a session — Flock starts ' +
         'Claude Code sessions only.',
     );
     return;
@@ -3201,7 +3201,7 @@ async function setProjectAccountFlow(
   await accts.setProjectRouting(projectId, chosen.choice);
   deps.refresh();
   vscode.window.setStatusBarMessage(
-    `Canopy: ${project.name} → ${
+    `Flock: ${project.name} → ${
       chosen.choice === null
         ? 'the global default'
         : describeRouting(chosen.choice, profiles)
@@ -3240,7 +3240,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       } catch (err) {
         logError(`command ${id}`, err);
         void vscode.window.showErrorMessage(
-          `Canopy: ${human} failed — ${errText(err)}`,
+          `Flock: ${human} failed — ${errText(err)}`,
         );
       }
     };
@@ -3308,7 +3308,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     if (job && (await adoptBackgroundJob(deps, id, job))) return;
 
     // The last resort, and it must stay rare: every session of OURS is
-    // reachable above (bound tab, detached-in-tmux, another Canopy window, or
+    // reachable above (bound tab, detached-in-tmux, another Flock window, or
     // an unowned background job). What remains is a process some other host
     // owns — a plain terminal, another tool — whose live state no editor can
     // adopt. Forking a copy is the one genuine "open" such a session has.
@@ -3316,7 +3316,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     const choice = await vscode.window.showInformationMessage(
       `"${label}" is running in another app or terminal` +
         (node?.roster?.pid ? ` (pid ${node.roster.pid})` : '') +
-        ' that Canopy cannot adopt a tab from. Fork it to branch off a ' +
+        ' that Flock cannot adopt a tab from. Fork it to branch off a ' +
         'copy you own here.',
       FORK,
       'Copy Session ID',
@@ -3528,7 +3528,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     // the mistake it prevents.
     await closeFlow(deps, id);
     vscode.window.setStatusBarMessage(
-      `Canopy: closed "${label}" — its row stays in the tree, click it to resume`,
+      `Flock: closed "${label}" — its row stays in the tree, click it to resume`,
       5000,
     );
   });
@@ -3573,7 +3573,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     await deps.upsertRecord(id, { wrapRequestedAt: nowIso() });
     log('wrap: requested for', shortId(id));
     vscode.window.setStatusBarMessage(
-      `Canopy: asked "${labelFor(deps, id)}" to wrap up`,
+      `Flock: asked "${labelFor(deps, id)}" to wrap up`,
       3000,
     );
   });
@@ -3665,7 +3665,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       // opening a picker: this verb means "the rows I have highlighted", and a
       // list to choose from is what Delete Stale Sessions… already is.
       void vscode.window.showInformationMessage(
-        'Canopy: select the sessions you want to remove first — shift-click ' +
+        'Flock: select the sessions you want to remove first — shift-click ' +
           'or ctrl-click rows in the tree.',
       );
       return;
@@ -3694,7 +3694,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     );
     if (candidates.length === 0) {
       void vscode.window.showInformationMessage(
-        'Canopy: nothing in the tree to delete.',
+        'Flock: nothing in the tree to delete.',
       );
       return;
     }
@@ -3826,7 +3826,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       .sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
     if (closed.length === 0) {
       void vscode.window.showInformationMessage(
-        'Canopy: no closed projects — every project you have is already in the tree.',
+        'Flock: no closed projects — every project you have is already in the tree.',
       );
       return;
     }
@@ -3948,7 +3948,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         .find((b) => pathKey(b.dir) === pathKey(parsed.dir));
       if (!known) {
         void vscode.window.showWarningMessage(
-          `Canopy: ${parsed.branch || 'that branch'} is no longer a worktree of ${project.name}.`,
+          `Flock: ${parsed.branch || 'that branch'} is no longer a worktree of ${project.name}.`,
         );
         return;
       }
@@ -4009,7 +4009,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     // has a row on screen.
     if (known.primary) {
       void vscode.window.showInformationMessage(
-        `Canopy: ${known.name} is the repository's main worktree and stays in the list.`,
+        `Flock: ${known.name} is the repository's main worktree and stays in the list.`,
       );
       return;
     }
@@ -4028,7 +4028,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     const hidden = branches.filter((b) => !b.shown);
     if (hidden.length === 0) {
       void vscode.window.showInformationMessage(
-        `Canopy: every branch in ${project.name} is already shown.`,
+        `Flock: every branch in ${project.name} is already shown.`,
       );
       return;
     }
@@ -4162,7 +4162,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     log('hide folder:', cwd);
     deps.refresh();
     vscode.window.setStatusBarMessage(
-      `Canopy: hid ${baseName(cwd)} — restore it with "Canopy: Show Hidden…"`,
+      `Flock: hid ${baseName(cwd)} — restore it with "Flock: Show Hidden…"`,
       4000,
     );
   });
@@ -4177,7 +4177,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     const projects = deps.allProjects().filter((p) => p.hidden === true);
     if (folders.length === 0 && projects.length === 0) {
       void vscode.window.showInformationMessage(
-        'Canopy: nothing is put away — every folder and project is in the tree.',
+        'Flock: nothing is put away — every folder and project is in the tree.',
       );
       return;
     }
@@ -4360,8 +4360,8 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     if (items.length === 0) {
       void vscode.window.showInformationMessage(
         deps.notificationsEnabled()
-          ? 'Canopy: no finished sessions yet — a session appears here when it completes a turn.'
-          : 'Canopy: notifications are off — enable `lineage.notifications.enabled` to track finished sessions.',
+          ? 'Flock: no finished sessions yet — a session appears here when it completes a turn.'
+          : 'Flock: notifications are off — enable `lineage.notifications.enabled` to track finished sessions.',
       );
       return;
     }
@@ -4485,7 +4485,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       for (const item of items) await deps.markSeen(item.sessionId);
       deps.refresh();
       vscode.window.setStatusBarMessage(
-        `Canopy: marked ${items.length} session${items.length === 1 ? '' : 's'} as read`,
+        `Flock: marked ${items.length} session${items.length === 1 ? '' : 's'} as read`,
         3000,
       );
     },
@@ -4516,8 +4516,8 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     deps.refresh();
     vscode.window.setStatusBarMessage(
       on
-        ? `Canopy: notifications shown for "${labelFor(deps, id)}"`
-        : `Canopy: notifications hidden for "${labelFor(deps, id)}" — no dot, no bell entry`,
+        ? `Flock: notifications shown for "${labelFor(deps, id)}"`
+        : `Flock: notifications hidden for "${labelFor(deps, id)}" — no dot, no bell entry`,
       4000,
     );
   };
@@ -4544,14 +4544,14 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   register(COMMANDS.showOnlyActiveSessions, 'show only active sessions', async () => {
     await deps.setOnlyActiveSessions(true);
     vscode.window.setStatusBarMessage(
-      'Canopy: showing only active sessions — closed ones are filtered out, not deleted',
+      'Flock: showing only active sessions — closed ones are filtered out, not deleted',
       4000,
     );
   });
 
   register(COMMANDS.showAllSessions, 'show all sessions', async () => {
     await deps.setOnlyActiveSessions(false);
-    vscode.window.setStatusBarMessage('Canopy: showing closed sessions too', 4000);
+    vscode.window.setStatusBarMessage('Flock: showing closed sessions too', 4000);
   });
 
   // ------------------------------------------------------------ workspaces
@@ -4566,8 +4566,8 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     const projects = deps.allProjects().filter((p) => p.hidden !== true);
     if (projects.length === 0) {
       void vscode.window.showInformationMessage(
-        'Canopy: no projects yet — a workspace is a project\'s saved window ' +
-          'layout. Create one with "Canopy: New Project…".',
+        'Flock: no projects yet — a workspace is a project\'s saved window ' +
+          'layout. Create one with "Flock: New Project…".',
       );
       return;
     }
@@ -4608,7 +4608,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   //
   // Both verbs RELOAD the window — that is what `vscode.openFolder` on the
   // current window means — so both confirm first, modally. This is the one
-  // place in Canopy where a reload is the correct answer rather than the
+  // place in Flock where a reload is the correct answer rather than the
   // thing being designed around: converting a plain folder window into a
   // multi-root workspace (or back) cannot be done in place at all, and the
   // whole point of paying it once is that every project switch afterwards is
@@ -4619,13 +4619,13 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     const follow = deps.followInExplorer;
     if (!follow || !deps.explorerAnchored) {
       void vscode.window.showInformationMessage(
-        'Canopy: this build cannot repoint the Explorer.',
+        'Flock: this build cannot repoint the Explorer.',
       );
       return;
     }
     if (deps.explorerAnchored()) {
       void vscode.window.showInformationMessage(
-        'Canopy: the Explorer already follows the active project in this ' +
+        'Flock: the Explorer already follows the active project in this ' +
           'window.',
       );
       return;
@@ -4636,7 +4636,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       {
         modal: true,
         detail:
-          'This window becomes a Canopy workspace, which takes one reload ' +
+          'This window becomes a Flock workspace, which takes one reload ' +
           'now. After that, switching projects swaps the Explorer instantly ' +
           "— the project's main directory on top, any extra connected " +
           'directories as their own roots below it — without reloading and ' +
@@ -4656,7 +4656,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       if (!stop || !deps.explorerAnchored) return;
       if (!deps.explorerAnchored()) {
         void vscode.window.showInformationMessage(
-          'Canopy: the Explorer does not follow the active project in this ' +
+          'Flock: the Explorer does not follow the active project in this ' +
             'window.',
         );
         return;
@@ -4707,7 +4707,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   register(COMMANDS.removeHooks, 'remove hooks', async () => {
     if (!deps.getHookState().installed) {
       void vscode.window.showInformationMessage(
-        'Canopy: instant-update hooks are not installed.',
+        'Flock: instant-update hooks are not installed.',
       );
       await syncHookContext(false);
       return;
@@ -4777,7 +4777,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       await accts.setDefaultRouting({ kind: 'account', id: profile.id });
       accts.refreshAccounts();
       vscode.window.setStatusBarMessage(
-        `Canopy: new sessions default to ${profile.label}.`,
+        `Flock: new sessions default to ${profile.label}.`,
         4000,
       );
     },

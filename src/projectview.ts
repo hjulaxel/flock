@@ -38,13 +38,13 @@ export type ProjectViewRow =
   | { kind: 'dir'; path: string; label: string; main: boolean }
   /** Anchored, but no project is active — the Explorer shows nothing of ours. */
   | { kind: 'none' }
-  /** Not a Canopy workspace: the feature has never been set up here. */
+  /** Not a Flock workspace: the feature has never been set up here. */
   | { kind: 'setup' };
 
 export interface ProjectViewDeps {
   /** The project this window is currently scoped to, if any. */
   activeProject(): ProjectRecord | undefined;
-  /** Is this window a Canopy workspace (ExplorerSync.anchored())? */
+  /** Is this window a Flock workspace (ExplorerSync.anchored())? */
   anchored(): boolean;
   /** How many sessions the tree is currently rendering under this project.
    *  Optional: without it the header simply omits the count. */
@@ -141,7 +141,7 @@ export class ProjectViewProvider
           COMMANDS.followInExplorer,
           'This window is a plain folder, so the Explorer cannot be ' +
             'repointed without reloading it. Setting up converts the window ' +
-            'to a Canopy workspace once; after that, switching projects ' +
+            'to a Flock workspace once; after that, switching projects ' +
             'swaps the file tree instantly.',
         );
     }

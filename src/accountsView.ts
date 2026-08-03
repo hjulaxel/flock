@@ -515,7 +515,7 @@ export class AccountsViewProvider implements vscode.TreeDataProvider<AccountRow>
       // to sign in and read meters, not a place a session can begin.
       if (!canHostSession(profile)) {
         md.appendMarkdown(
-          'New sessions cannot start on this account — Canopy launches ' +
+          'New sessions cannot start on this account — Flock launches ' +
             'Claude Code.\n\n',
         );
       }
@@ -545,7 +545,7 @@ export class AccountsViewProvider implements vscode.TreeDataProvider<AccountRow>
         md.appendMarkdown(`Config directory: \`${mdEscape(dir)}\`\n\n`);
       } else {
         md.appendMarkdown(
-          `Config directory: \`${mdEscape(dir)}\` — not used. Canopy has no ` +
+          `Config directory: \`${mdEscape(dir)}\` — not used. Flock has no ` +
             `config-directory variable for ${mdEscape(info.label)} accounts, ` +
             'so this one signs in as whatever this machine is already logged ' +
             'in as.\n\n',

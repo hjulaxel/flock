@@ -104,7 +104,7 @@ export const IDENTITY_FILE = '.claude.json';
  * path string the CLI was launched with: no realpath, no trailing-slash
  * folding, no case work. That exactness matters — the hash is of whatever
  * `CLAUDE_CONFIG_DIR` held, so the caller must pass the same spelling the
- * launch env used, which for Canopy profiles is `profile.configDir`
+ * launch env used, which for Flock profiles is `profile.configDir`
  * verbatim (the same string `envForProfile` exports).
  */
 export function keychainServiceFor(configDir: string | undefined): string {

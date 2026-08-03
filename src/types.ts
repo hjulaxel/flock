@@ -1,4 +1,4 @@
-// src/types.ts — the shared type contract for the Canopy extension.
+// src/types.ts — the shared type contract for the Flock extension.
 // It imports nothing (not even vscode), so every layer can depend on it.
 //
 // SCHEMA VERSIONS. Every bump of STATE_SCHEMA_VERSION is additive: no existing
@@ -42,7 +42,7 @@
 // cross-checks both against the manifest rather than against a copy of these
 // literals, which is the only version of that test that can fail.
 export const PUBLISHER = 'hjulaxel';
-export const EXTENSION_NAME = 'canopy';
+export const EXTENSION_NAME = 'flock';
 export const EXTENSION_ID = `${PUBLISHER}.${EXTENSION_NAME}`;
 
 export const VIEW_CONTAINER_ID = 'lineage';
@@ -86,7 +86,7 @@ export const STATUS_DOT = '●';
  *  FileDecoration badge), and a future surface that wants a printable "over"
  *  mark should start from that answer rather than rediscover it. */
 export const CLOSED_DOT = '○';
-/** The numeric badge on the Canopy view container (the activity-bar logo):
+/** The numeric badge on the Flock view container (the activity-bar logo):
  *  how many rendered rows carry a lit attention dot. DEACTIVATED for now —
  *  flip to `true` to bring it back, no other change needed. Both surfaces
  *  (native tree and inline webview) read this at the one line where they
@@ -121,14 +121,14 @@ export const CONTEXT_ONLY_ACTIVE = 'lineage.onlyActive';
 export const CONTEXT_MULTI_SELECT = 'lineage.multiSelect';
 /** Gates the project header view inside the BUILT-IN Explorer container.
  *
- *  NOT simply "this window is a Canopy workspace". It is "this window has
+ *  NOT simply "this window is a Flock workspace". It is "this window has
  *  something to say up there", which is: the feature is enabled AND the window
  *  is either already anchored (so the header names the project the folder tree
  *  is showing) or has an active project (so the header can offer the one-time
  *  opt-in, at the only moment it is meaningful). Gating on `anchored` alone
  *  would hide the setup row from every window that has not run setup — i.e.
  *  from exactly the windows it exists for; not gating at all would put a
- *  Canopy view in the Explorer of every install that never opened a
+ *  Flock view in the Explorer of every install that never opened a
  *  project. */
 export const CONTEXT_EXPLORER_FOLLOW = 'lineage.explorerFollow';
 
@@ -714,7 +714,7 @@ export const COMMANDS = {
   unmuteSessionNotifications: 'lineage.unmuteSessionNotifications',
   // Project workspaces
   switchWorkspace: 'lineage.switchWorkspace',
-  /** One-time opt-in: converts this window into a Canopy workspace (a
+  /** One-time opt-in: converts this window into a Flock workspace (a
    *  generated `.code-workspace` with an anchor at folder[0]) so the Explorer
    *  can be repointed in place from then on. Costs ONE window reload, here and
    *  never again — which is exactly why it is a verb the user runs rather than
@@ -1751,7 +1751,7 @@ export interface ResumeLeafReport {
  * A `/fork` that dispatched a BACKGROUND job rather than taking over a
  * terminal: the process is live and holding the child session id, but no pty
  * belongs to any editor — which is why focusing one used to dead-end at
- * "Canopy cannot adopt a tab from" on a branch the user had just asked for.
+ * "Flock cannot adopt a tab from" on a branch the user had just asked for.
  * Read by daemon.ts out of `<configDir>/jobs/<short>/state.json`, the CLI's
  * own bookkeeping.
  */
@@ -1943,10 +1943,10 @@ export interface CommandDeps {
   // All three are OPTIONAL: a host wiring without them (and every unit double)
   // simply has no Explorer to move, and the two verbs below report that rather
   // than failing.
-  /** Is this window a Canopy workspace — folder[0] our anchor, so the
+  /** Is this window a Flock workspace — folder[0] our anchor, so the
    *  Explorer's folder list can be repointed in place? */
   explorerAnchored?(): boolean;
-  /** Convert this window into a Canopy workspace and reload it once. */
+  /** Convert this window into a Flock workspace and reload it once. */
   followInExplorer?(): Promise<void>;
   /** Leave workspace mode: reopen the active project's main directory as a
    *  plain folder. Also one reload. */

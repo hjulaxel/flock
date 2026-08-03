@@ -5,7 +5,7 @@
 // exclusively through the dependency interfaces in types.ts, and this file is
 // what implements them. The activation sequence is:
 //
-//   1. OutputChannel('Canopy') + setLogSink
+//   1. OutputChannel('Flock') + setLogSink
 //   2. StateStore(globalStorageUri.fsPath).load() + RelativePattern watcher
 //   3. config read, LineageResolver, the fetch -> resolveAll -> buildForest
 //      tick pipeline, forest cache, onForestChanged emitter
@@ -182,7 +182,7 @@ export async function activate(
 ): Promise<void> {
   // ------------------------------------------------------------------ 1. log
 
-  const channel = vscode.window.createOutputChannel('Canopy');
+  const channel = vscode.window.createOutputChannel('Flock');
   context.subscriptions.push(channel);
   setLogSink((line) => channel.appendLine(line));
   context.subscriptions.push({ dispose: () => setLogSink(null) });
@@ -190,7 +190,7 @@ export async function activate(
   // workspace folders in place on the strength of the API's promise that only
   // index 0 restarts the extension host, and a restart is otherwise almost
   // invisible — terminals survive it (the pty host outlives us, which is what
-  // `registry.reassociate()` exists to pick up), so the only symptom is Canopy
+  // `registry.reassociate()` exists to pick up), so the only symptom is Flock
   // quietly rebuilding. If this number climbs when you switch projects, a
   // splice restarted the host and the anchor invariant has a hole in it.
   const activations =
@@ -221,7 +221,7 @@ export async function activate(
     return isTerminalLocationPref(v) ? v : 'editor';
   };
 
-  // Detach tier (src/tmux.ts): wrap Canopy-launched sessions in the private
+  // Detach tier (src/tmux.ts): wrap Flock-launched sessions in the private
   // tmux server so a workspace switch can hide a session's tab while the
   // conversation keeps running. The conf is written once per activation; the
   // binary and the `lineage.tmux` gate are re-probed per launch, so
@@ -1107,7 +1107,7 @@ export async function activate(
     const label = forest.nodes.get(sessionId)?.label ?? shortId(sessionId);
     const FOCUS = 'Focus';
     void vscode.window
-      .showInformationMessage(`Canopy: "${label}" finished its turn.`, FOCUS)
+      .showInformationMessage(`Flock: "${label}" finished its turn.`, FOCUS)
       .then((choice) => {
         if (choice !== FOCUS) return;
         void markSeen(sessionId);
@@ -1346,7 +1346,7 @@ export async function activate(
       const cwd = forest.nodes.get(sessionId)?.cwd ?? store.get(sessionId)?.cwd;
       if (!cwd) {
         void vscode.window.showWarningMessage(
-          'Canopy: that session has no known working directory to add.',
+          'Flock: that session has no known working directory to add.',
         );
         return;
       }
@@ -1375,7 +1375,7 @@ export async function activate(
           // Its only directory was the one being moved away; hiding it would
           // be a silent delete, so leave it and say what happened.
           void vscode.window.showWarningMessage(
-            `Canopy: "${other.name}" only covers ${cwd}, so it still claims ` +
+            `Flock: "${other.name}" only covers ${cwd}, so it still claims ` +
               `it. Remove the directory there, or delete that project.`,
           );
           continue;
@@ -1481,7 +1481,7 @@ export async function activate(
         // same reason, in the only place this path has to put it.
         const refusal = validateProjectName(name, allProjects(), projectId);
         if (refusal !== '') {
-          void vscode.window.showWarningMessage(`Canopy: ${refusal}`);
+          void vscode.window.showWarningMessage(`Flock: ${refusal}`);
           return;
         }
         await store.upsertProject(projectId, { name });
@@ -1999,7 +1999,7 @@ export async function activate(
     terminalLocation,
     // Swap the Explorer's folder tree to the target project as part of
     // the switch. Gated on the setting, and a no-op in any window that was
-    // never converted into a Canopy workspace — the switch itself does not
+    // never converted into a Flock workspace — the switch itself does not
     // care either way (see WorkspaceManagerDeps.syncExplorer).
     syncExplorer: async (project) => {
       if (!boolCfg(CONFIG_KEYS.explorerFollowProject, true)) return;
@@ -2093,8 +2093,8 @@ export async function activate(
       const project = activeId ? store.getProject(activeId) : undefined;
       workspaceStatusBar.text = `$(layers) ${project ? project.name : 'No Workspace'}`;
       workspaceStatusBar.tooltip = project
-        ? `Canopy workspace: ${project.name} — click to switch`
-        : 'Canopy: click to scope this window to a project workspace';
+        ? `Flock workspace: ${project.name} — click to switch`
+        : 'Flock: click to scope this window to a project workspace';
       workspaceStatusBar.show();
     } catch (err) {
       logError('extension.workspaceStatusBar', err);
@@ -2233,7 +2233,7 @@ export async function activate(
       // editor is only reachable on a visible view, and an <input> focused
       // inside a webview whose window does not have focus does not receive
       // keystrokes. Both halves of that are why the quick-input fallback used
-      // to be the normal path for "Canopy: New Session" from the palette —
+      // to be the normal path for "Flock: New Session" from the palette —
       // see LineageWebtreeProvider.focusView.
       //
       // Its answer is load-bearing, not advisory. `false` means the page is not
@@ -2486,7 +2486,7 @@ export async function activate(
         // rather than leaving a title button that silently does nothing.
         logError('extension.setOnlyActiveSessions', err);
         void vscode.window.showWarningMessage(
-          'Canopy: could not save the session filter — check that settings are writable.',
+          'Flock: could not save the session filter — check that settings are writable.',
         );
         return;
       }
@@ -2513,7 +2513,7 @@ export async function activate(
             path: f.uri.fsPath,
             name: f.name,
           }));
-      // The anchor is an EMPTY directory Canopy owns, and it stays empty: it
+      // The anchor is an EMPTY directory Flock owns, and it stays empty: it
       // exists only to hold workspace folder[0] still forever, so that every
       // later splice lands at index >= 1 and never restarts the extension host.
       await vscode.workspace.fs.createDirectory(
@@ -2543,7 +2543,7 @@ export async function activate(
         (vscode.workspace.workspaceFolders ?? [])[1]?.uri.fsPath;
       if (target === undefined) {
         void vscode.window.showWarningMessage(
-          'Canopy: nothing to reopen — this workspace has no project ' +
+          'Flock: nothing to reopen — this workspace has no project ' +
             'directory in it. Switch to a project first.',
         );
         return;

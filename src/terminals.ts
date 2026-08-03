@@ -120,7 +120,7 @@ const MISSING_BINARY_MESSAGE =
   'Claude CLI not found — set lineage.claudeBinary to the full path of your ' +
   'claude executable.';
 const RESTRICTED_MESSAGE =
-  'Canopy cannot start a Claude session here: VS Code blocks terminals in ' +
+  'Flock cannot start a Claude session here: VS Code blocks terminals in ' +
   'Restricted Mode. Trust this workspace and try again.';
 
 /** How a bound terminal ended. `shutdown` = the window closed/reloaded (the

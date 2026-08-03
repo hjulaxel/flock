@@ -503,7 +503,7 @@ describe('buildForest', () => {
   });
 
   // Regression: a ghost had no cwd unless an editorial record supplied one,
-  // and a record's cwd exists only for sessions Canopy launched itself. The
+  // and a record's cwd exists only for sessions Flock launched itself. The
   // ghost IS the visible root of its subtree and grouping keys entirely off
   // the root's cwd, so a fork of a just-closed parent fell out of its project
   // row into "(no directory)" — or vanished under lineage.onlyProjectSessions.

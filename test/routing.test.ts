@@ -229,7 +229,7 @@ describe('resolveRouting: provider tier', () => {
     expect(result.profile?.id).toBe('k1');
   });
 
-  it('a provider whose CLI Canopy does not launch degrades — never a Codex account', () => {
+  it('a provider whose CLI Flock does not launch degrades — never a Codex account', () => {
     const result = resolveRouting({ kind: 'provider', provider: 'codex' }, undefined, profiles, NO_USAGE, NOW);
     expect(result.profile?.id).toBe('c1'); // fell through to auto
     expect(result.reason).toContain('Codex / OpenAI accounts cannot run sessions');

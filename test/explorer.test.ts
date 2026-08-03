@@ -251,7 +251,7 @@ describe('explorer: workspaceFileJson', () => {
     });
   });
 
-  it('writes no settings — the file becomes the window settings root and Canopy has no opinions to put in it', () => {
+  it('writes no settings — the file becomes the window settings root and Flock has no opinions to put in it', () => {
     const parsed = JSON.parse(workspaceFileJson(ANCHOR, [])) as {
       settings: Record<string, unknown>;
     };
@@ -475,7 +475,7 @@ describe('explorer: withAnchorName', () => {
   const file = JSON.stringify(
     {
       folders: [
-        { path: '/anchor', name: 'Canopy' },
+        { path: '/anchor', name: 'Flock' },
         { name: 'web', path: '../../web' },
       ],
       settings: {},
@@ -498,7 +498,7 @@ describe('explorer: withAnchorName', () => {
   });
 
   it('returns the text untouched when the name is already right', () => {
-    expect(withAnchorName(file, 'Canopy')).toBe(file);
+    expect(withAnchorName(file, 'Flock')).toBe(file);
   });
 
   it('refuses to clobber a file it could not parse', () => {

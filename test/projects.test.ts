@@ -172,7 +172,7 @@ describe('validateProjectName', () => {
   const existing = [project('p1', 'Magma OS', '/a')];
 
   it('accepts a fresh name', () => {
-    expect(validateProjectName('Canopy', existing)).toBe('');
+    expect(validateProjectName('Flock', existing)).toBe('');
   });
 
   it('rejects empty, over-long and duplicate names', () => {

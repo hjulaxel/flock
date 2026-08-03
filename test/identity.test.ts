@@ -8,11 +8,17 @@
 // every configured account is still on disk, but under a directory nothing
 // reads any more. The sidebar comes back looking factory-new.
 //
-// That is not hypothetical: it happened twice during the rename that settled on
-// the current id, once for the extension name and once for the publisher. Both
-// times the state had to be merged across by hand with the editor shut down,
-// because `mergeStates` is newest-clock-wins per record (`src/state.ts`) and a
-// running window holding the empty state wins on write.
+// That is not hypothetical: it happened three times before the first release —
+// once for the extension name, once for the publisher, and once more when
+// `canopy` turned out to be taken on the Marketplace and the name became
+// `flock`. Each time the state had to be carried across by hand with the editor
+// shut down, because `mergeStates` is newest-clock-wins per record
+// (`src/state.ts`) and a running window holding the empty state wins on write.
+//
+// Those were survivable because the population was one machine and the fix was
+// `cp -R` between two globalStorage directories. That is the ONLY reason no
+// legacy-import shim exists in this codebase. The moment 0.1.0 is published
+// that reasoning expires, and the paragraph below is the whole rule.
 //
 // Before the first release that was survivable — the population was one machine.
 // After it is not, because a user whose store is orphaned has no way back from
@@ -41,7 +47,7 @@ const ROOT = path.join(__dirname, '..');
 
 /** The published identity. Permanent: see the note at the top of this file. */
 const FROZEN_PUBLISHER = 'hjulaxel';
-const FROZEN_NAME = 'canopy';
+const FROZEN_NAME = 'flock';
 const FROZEN_ID = `${FROZEN_PUBLISHER}.${FROZEN_NAME}`;
 
 const ORPHANS_STATE =
@@ -80,6 +86,6 @@ describe('identity: the extension id is frozen', () => {
   // breaks on a rename — silently, since an unroutable vscode:// URI is simply
   // never delivered. Cheap to assert here alongside the id itself.
   it('composes a focus URI carrying the frozen id', () => {
-    expect(`vscode://${EXTENSION_ID}/focus`).toBe('vscode://hjulaxel.canopy/focus');
+    expect(`vscode://${EXTENSION_ID}/focus`).toBe('vscode://hjulaxel.flock/focus');
   });
 });

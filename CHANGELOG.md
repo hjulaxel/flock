@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to Canopy are recorded here. The format follows
+All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
@@ -15,7 +15,7 @@ All notable changes to Canopy are recorded here. The format follows
   Invisible while the tab existed, because the bound-tab tier answered first;
   the moment the window went away those rows fell all the way through to
   "running in another app or terminal", offering to fork a copy of a process
-  sitting in Canopy's own server. On a restart here that was 21 of 40 live
+  sitting in Flock's own server. On a restart here that was 21 of 40 live
   wraps. The wrap name is derived from the session id, so the detach tier now
   derives and probes it when no name was recorded. The probe is ground truth,
   which keeps it safe next to a kill-tier park: that writes `tmux: null`

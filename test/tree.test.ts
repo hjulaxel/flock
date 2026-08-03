@@ -939,7 +939,7 @@ describe('LineageTreeProvider drag and drop', () => {
 
     await drop(p, projectRow as ProjectGroupNode, [B]);
     expect(h.assigned).toEqual([[B, 'p1']]);
-    // Canopy is untouched — this gesture is about addresses, not ancestry.
+    // Flock is untouched — this gesture is about addresses, not ancestry.
     expect(h.reparented).toEqual([]);
   });
 

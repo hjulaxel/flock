@@ -278,7 +278,7 @@ class FocusIntegrationImpl implements FocusIntegration {
     try {
       const target = wanted ? withSessionQuery(handle, wanted) : handle;
       vscode.window.setStatusBarMessage(
-        'Canopy: handing focus to another window…',
+        'Flock: handing focus to another window…',
         3000,
       );
       const ok = await vscode.env.openExternal(vscode.Uri.parse(target));
@@ -330,9 +330,9 @@ class FocusIntegrationImpl implements FocusIntegration {
     if (this.permissionHintShown) return;
     this.permissionHintShown = true;
     void vscode.window.showInformationMessage(
-      'Canopy could not hand focus to the window that owns this session. ' +
-        'The editor asks "Allow \'Canopy\' to open this URI?" the first ' +
-        'time — choose Open to let Canopy raise other windows.',
+      'Flock could not hand focus to the window that owns this session. ' +
+        'The editor asks "Allow \'Flock\' to open this URI?" the first ' +
+        'time — choose Open to let Flock raise other windows.',
     );
   }
 }

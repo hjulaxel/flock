@@ -150,7 +150,7 @@ export function renderPluginJson(): string {
       version: PLUGIN_SEMVER,
       description:
         'Appends Claude Code session events to ~/.lineage/events.ndjson so the ' +
-        'Canopy VS Code extension can refresh instantly. Delete this directory ' +
+        'Flock VS Code extension can refresh instantly. Delete this directory ' +
         'to uninstall.',
     },
     null,
@@ -326,8 +326,8 @@ export class HooksManager implements DisposableLike {
     const stored = this.getState();
     if (process.platform === 'win32') {
       void showWarning(
-        'Canopy hooks need a POSIX shell (/bin/sh) and are not supported on ' +
-          'Windows. Canopy keeps updating by polling.',
+        'Flock hooks need a POSIX shell (/bin/sh) and are not supported on ' +
+          'Windows. Flock keeps updating by polling.',
       );
       log('hooks: install skipped (win32)');
       return stored;
@@ -338,12 +338,12 @@ export class HooksManager implements DisposableLike {
       // Fully idempotent path: nothing changes, so nothing to consent to.
       log('hooks: already installed at', this.directory());
       const state = await this.markInstalled();
-      void showInfo(`Canopy hooks are already installed at ${this.directory()}.`);
+      void showInfo(`Flock hooks are already installed at ${this.directory()}.`);
       return state;
     }
 
     const consent = await showInfo(
-      'Install the Canopy instant-update hooks?',
+      'Install the Flock instant-update hooks?',
       { modal: true, detail: this.consentDetail(files) },
       'Install',
     );
@@ -367,7 +367,7 @@ export class HooksManager implements DisposableLike {
     } catch (err) {
       logError('hooks: write plugin files', err);
       void showWarning(
-        `Could not write ${this.directory()} — see the Canopy output channel.`,
+        `Could not write ${this.directory()} — see the Flock output channel.`,
       );
       return stored;
     }
@@ -376,7 +376,7 @@ export class HooksManager implements DisposableLike {
     if (!verdict.ok) {
       log('hooks: install did not verify —', verdict.reason ?? 'unknown');
       void showWarning(
-        `Canopy hooks were not installed: ${verdict.reason ?? 'unknown error'}.`,
+        `Flock hooks were not installed: ${verdict.reason ?? 'unknown error'}.`,
       );
       return stored;
     }
@@ -384,7 +384,7 @@ export class HooksManager implements DisposableLike {
     this.ensureEventsDir();
     const state = await this.markInstalled();
     void showInfo(
-      'Canopy hooks installed. Run /reload-plugins in existing Claude ' +
+      'Flock hooks installed. Run /reload-plugins in existing Claude ' +
         'sessions (or restart them) to activate.',
     );
     log('hooks: installed at', this.directory());
@@ -402,7 +402,7 @@ export class HooksManager implements DisposableLike {
     }
     if (path.basename(dir) !== PLUGIN_NAME || manifestName(manifest) !== PLUGIN_NAME) {
       void showWarning(
-        `Refusing to remove ${dir}: it is not the Canopy hook plugin. ` +
+        `Refusing to remove ${dir}: it is not the Flock hook plugin. ` +
           'Delete it by hand if you are sure.',
       );
       log('hooks: remove refused — foreign directory at', dir);
@@ -413,13 +413,13 @@ export class HooksManager implements DisposableLike {
     } catch (err) {
       logError('hooks: remove plugin directory', err);
       void showWarning(
-        `Could not remove ${dir} — see the Canopy output channel.`,
+        `Could not remove ${dir} — see the Flock output channel.`,
       );
       return this.getState();
     }
     const state = await this.markRemoved();
     void showInfo(
-      'Canopy hook plugin removed. Existing Claude sessions keep it until ' +
+      'Flock hook plugin removed. Existing Claude sessions keep it until ' +
         `/reload-plugins or a restart. Recorded events remain in ${this.eventsPath()}.`,
     );
     log('hooks: removed', dir);
@@ -480,7 +480,7 @@ export class HooksManager implements DisposableLike {
     log('hooks: self-healed', String(drifted.length), 'file(s)');
     const state = await this.markInstalled();
     void showInfo(
-      'Canopy refreshed its hook plugin files. Run /reload-plugins in ' +
+      'Flock refreshed its hook plugin files. Run /reload-plugins in ' +
         'existing Claude sessions to pick up the change.',
     );
     return state;
@@ -575,7 +575,7 @@ export class HooksManager implements DisposableLike {
 
   private consentDetail(files: DesiredFile[]): string {
     return [
-      'Canopy will create a Claude Code plugin directory. No marketplace, no',
+      'Flock will create a Claude Code plugin directory. No marketplace, no',
       'install step, and no shared file (including ~/.claude/settings.json) is',
       'touched:',
       '',
@@ -620,7 +620,7 @@ export class HooksManager implements DisposableLike {
     if (!carriesOurCommand(hooksJson)) {
       return {
         ok: false,
-        reason: 'hooks.json no longer runs the Canopy hook command',
+        reason: 'hooks.json no longer runs the Flock hook command',
       };
     }
     return { ok: true };
@@ -896,8 +896,8 @@ export class HooksManager implements DisposableLike {
     );
     if (this.rosterActivityTicks >= SILENCE_MIN_ACTIVITY_TICKS) {
       void showWarning(
-        'Canopy hooks are installed but no hook events have arrived. Run ' +
-          '/reload-plugins in your Claude sessions (or restart them). Canopy ' +
+        'Flock hooks are installed but no hook events have arrived. Run ' +
+          '/reload-plugins in your Claude sessions (or restart them). Flock ' +
           'keeps updating by polling meanwhile.',
       );
     }

@@ -1,6 +1,6 @@
 ## Your sessions are already here
 
-Canopy reads `claude agents --json` — the Claude Code CLI's own global session
+Flock reads `claude agents --json` — the Claude Code CLI's own global session
 registry. Anything you have ever run `claude` on shows up in the sidebar on its
 own.
 

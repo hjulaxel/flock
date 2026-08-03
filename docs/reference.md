@@ -1,4 +1,4 @@
-# Canopy — reference
+# Flock — reference
 
 The depth that does not belong on a marketplace page. For the pitch and the
 feature list, see the [README](../README.md); for every setting, see
@@ -8,19 +8,19 @@ feature list, see the [README](../README.md); for every setting, see
 
 Every window independently polls `claude agents --json` — the CLI's own
 scriptable, global session registry — and reads session transcripts to recover
-parent/child edges for sessions it did not launch itself. Sessions Canopy
+parent/child edges for sessions it did not launch itself. Sessions Flock
 launches get a pre-minted `--session-id`, so their lineage is exact by
 construction rather than inferred.
 
 **One row per conversation.** Claude Code sometimes re-mints a session's id: a
 plain resume, `/clear`, or compaction can start a fresh transcript that
-continues the same conversation under a new id. Canopy detects these
+continues the same conversation under a new id. Flock detects these
 *generation chains* — from the transcripts themselves, and instantly via hooks
 when installed — and shows a single row: the current generation, wearing the
 conversation's name and history. Fork and resume always act on that newest
 generation, never on a stale copy.
 
-**Worktrees are read, never written.** The one git command Canopy ever runs is
+**Worktrees are read, never written.** The one git command Flock ever runs is
 `git worktree list --porcelain`, once per project directory, cached for 30
 seconds. It creates no worktrees, switches no branches, and writes nothing to
 your repository. A directory that is not a repository, a machine with no `git`
@@ -31,9 +31,9 @@ There is no daemon, no background service, and no Python. Your editorial layer
 (titles, summaries, deleted flags) lives in the extension's own `globalStorage`
 directory; nothing else on disk is modified.
 
-**Hooks are optional.** Canopy is fully functional without them. If you opt in,
+**Hooks are optional.** Flock is fully functional without them. If you opt in,
 they install as a self-contained plugin under `~/.claude/skills/lineage-events/`
-and are removed by deleting that directory. Canopy **never** edits
+and are removed by deleting that directory. Flock **never** edits
 `~/.claude/settings.json`.
 
 ## Projects
@@ -92,7 +92,7 @@ It applies to a project with two or more worktrees, which is the same threshold
 the branch rows themselves appear at. Anything the branch rows do not account
 for — a session on a branch you folded away into **Others**, or in a project
 directory outside the repository — keeps its place directly under the project.
-It is a layout, never a filter: no setting in Canopy hides a session's row.
+It is a layout, never a filter: no setting in Flock hides a session's row.
 
 ## Notifications
 
@@ -128,7 +128,7 @@ focus**: start working in a session that belongs to another project and the
 window switches to that project's workspace by itself — nothing is stopped and
 nothing asks a question. Turn that off with `lineage.workspaces.autoSwitch`. You
 can always switch explicitly with the `$(layers)` status-bar item, the palette
-(**Canopy: Switch Workspace…**), or a project row's context menu.
+(**Flock: Switch Workspace…**), or a project row's context menu.
 
 Switching:
 
@@ -137,7 +137,7 @@ Switching:
 2. **hides** what does not belong to the target. Foreign *session* tabs are
    **stowed**: the terminal moves into the terminal panel and **keeps running**.
    Nothing is stopped, nothing asks to terminate. Unsaved editors are never
-   closed, and terminals Canopy does not own are never touched;
+   closed, and terminals Flock does not own are never touched;
 3. **restores** the target's saved layout: files reopen in their editor groups,
    stowed sessions move back into the editor area, and a session that died while
    out of sight is resumed from its transcript.
@@ -162,7 +162,7 @@ neither of which loses data:
 | **Close** | **Closed.** | **Stays** — flips to inactive: dimmed, sorted below live work, forks still nested under it. |
 | **Delete** | Left alone. | Gone. Forks move up to the nearest visible ancestor, so no lineage is lost. |
 
-**Close ends the tab, not the row — and never asks.** Because a Canopy terminal
+**Close ends the tab, not the row — and never asks.** Because a Flock terminal
 *is* the `claude` process, closing the tab ends the run; but the row stays right
 where it was, so there is nothing to confirm. Click it, or the inline resume
 button, and the session picks up from its last saved turn. Closing the tab with
@@ -193,7 +193,7 @@ Neither `+` asks **where**. The one in the view title starts the session in the
 project this window is open on — the folder you have open, or, if it sits inside
 a project, that project's main directory. It falls back to a folder list only
 when the window makes no such claim. To start one somewhere else, the palette
-has **Canopy: New Claude Session in Folder…**, which always asks and can browse
+has **Flock: New Claude Session in Folder…**, which always asks and can browse
 to a directory no session has ever run in.
 
 The session is **created first and named after**, which is the Explorer's "New
@@ -233,7 +233,7 @@ Changing it takes effect on the next window reload.
 
 ## Privacy
 
-Nothing leaves your machine. Canopy makes no network requests. It reads the
+Nothing leaves your machine. Flock makes no network requests. It reads the
 local session roster and local transcript files, and writes only to its own
 extension storage — plus, if you explicitly opt in, the hooks plugin directory
 and `~/.lineage/events.ndjson`.

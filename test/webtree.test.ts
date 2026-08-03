@@ -585,7 +585,7 @@ describe('LineageWebtreeProvider.focusView', () => {
   }
 
   // REGRESSION. Nothing revealed the view before asking it for an
-  // editable row, so "Canopy: New Session" from the palette with the sidebar
+  // editable row, so "Flock: New Session" from the palette with the sidebar
   // collapsed always failed `beginRename`'s visibility check and landed in the
   // quick-input popup — the one thing the inline editor exists to replace.
   it('focuses the contributed view rather than merely revealing it', async () => {

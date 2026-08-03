@@ -1,4 +1,4 @@
-// test/hooks.test.ts — the hook plugin Canopy writes into the user's
+// test/hooks.test.ts — the hook plugin Flock writes into the user's
 // ~/.claude, and the filesystem-side behaviour that must degrade rather than
 // break: the safety-gated remove, activate-time self-heal, and the incremental
 // events tail.

@@ -22,13 +22,6 @@ STATUS.md
 # The README links into docs/ — those links resolve against the repository on
 # the marketplace page, so the files themselves do not need to ship.
 docs/**
-# Parked artwork: the name "Canopy" was adopted in 0.1.0, but the tree mark
-# drawn for it was not — the shipped marks are the bot, media/bot.svg and
-# media/icon.png. These are kept so the tree direction can be picked up later
-# without redrawing it. Referenced by nothing.
-media/canopy.svg
-media/canopy-logo.svg
-media/canopy-mark.png
 **/*.map
 **/*.ts
 !dist/extension.js

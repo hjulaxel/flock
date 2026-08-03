@@ -2,7 +2,7 @@
   <img src="media/icon.png" width="88" height="88" alt="">
 </p>
 
-<h1 align="center">Canopy for Claude Code</h1>
+<h1 align="center">Flock for Claude Code</h1>
 
 <p align="center">
   See every Claude Code session you're running as one live tree —<br>
@@ -17,7 +17,7 @@ is still thinking, which one finished twenty minutes ago and has been waiting
 since, which three came from the same conversation, and which worktree each of
 them is standing in.
 
-Canopy puts all of it in the sidebar as a single live tree. Fork ancestry is
+Flock puts all of it in the sidebar as a single live tree. Fork ancestry is
 drawn, not guessed. A finished session gets an unread mark that clears when you
 look at it. Sessions group under projects you define, colour-coded by git
 branch. And it is read-only where it counts — no daemon, no network, and nothing
@@ -53,7 +53,7 @@ written to your repository.
 
 - **Branches, when there are branches.** Running one agent per `git worktree` is
   how parallel work actually gets done, and grouping by directory throws away
-  the only fact that mattered: that five checkouts are one repository. Canopy
+  the only fact that mattered: that five checkouts are one repository. Flock
   reads `git worktree list`, files every checkout of a project's repo under that
   project wherever it sits on disk, and gives each branch a colour-coded row.
   Click a branch to start a session in that worktree. Turn on
@@ -106,9 +106,9 @@ written to your repository.
 ## Requirements
 
 - The `claude` CLI on your `PATH`, or `lineage.claudeBinary` set to its full path.
-- VS Code 1.94 or newer. Also runs in Cursor, Windsurf and VSCodium — Canopy
+- VS Code 1.94 or newer. Also runs in Cursor, Windsurf and VSCodium — Flock
   uses no proposed APIs.
-- A trusted workspace. Restricted Mode blocks terminal creation, which Canopy
+- A trusted workspace. Restricted Mode blocks terminal creation, which Flock
   needs.
 
 ## Documentation
@@ -119,7 +119,7 @@ written to your repository.
 
 ## Privacy
 
-Nothing leaves your machine. Canopy makes no network requests. It reads the
+Nothing leaves your machine. Flock makes no network requests. It reads the
 local session roster and local transcript files, and writes only to its own
 extension storage — plus, if you explicitly opt in, the hooks plugin directory
 and `~/.lineage/events.ndjson`.
@@ -134,7 +134,7 @@ npm run compile     # esbuild bundle -> dist/extension.js
 npm run watch       # rebuild on change
 ```
 
-Press **F5** to open an Extension Development Host with Canopy loaded. There are
+Press **F5** to open an Extension Development Host with Flock loaded. There are
 no runtime dependencies — the extension is Node builtins plus the `vscode` API,
 bundled into a single file by esbuild. See
 [CONTRIBUTING.md](CONTRIBUTING.md) for the rest.

@@ -8,7 +8,7 @@
 // hides the view while the process keeps running is to have something OUTSIDE
 // the window own the pty: tmux.
 //
-// Every Canopy-launched session is wrapped — when tmux is installed and
+// Every Flock-launched session is wrapped — when tmux is installed and
 // `lineage.tmux` is not 'off' — in a PRIVATE tmux server:
 //
 //   tmux -L lineage -f <conf> new-session -A -s lineage-<uuid> \
@@ -76,8 +76,8 @@ export const TMUX_CONF_NAME = 'tmux.conf';
  * reachable — `mouse on` maps wheel-scroll into it, which is how scrollback
  * works in a wrapped session.
  */
-export const TMUX_CONF = `# Written by the Canopy extension on every activation — edits do not survive.
-# This is the conf for Canopy's PRIVATE tmux server (tmux -L ${TMUX_SOCKET}); your own
+export const TMUX_CONF = `# Written by the Flock extension on every activation — edits do not survive.
+# This is the conf for Flock's PRIVATE tmux server (tmux -L ${TMUX_SOCKET}); your own
 # tmux and ~/.tmux.conf are not involved. Read at server start only.
 set -g status off
 set -g prefix None
@@ -94,7 +94,7 @@ set -g set-titles off
 `;
 
 /**
- * The tmux session name for a Canopy session. Prefixed so a hand-run
+ * The tmux session name for a Flock session. Prefixed so a hand-run
  * `list-sessions` reads as ours, and stable across generations only by
  * CHOICE of the caller: a launch derives it from the id it launches with,
  * and the park/restore path carries the recorded name instead of re-deriving
