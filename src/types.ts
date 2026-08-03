@@ -35,8 +35,13 @@
 
 // ------------------------------------------------------------------ identity
 
-export const PUBLISHER = 'creemux'; // provisional publisher placeholder
-export const EXTENSION_NAME = 'lineage-sessions'; // permanent, neutral
+// These two MUST equal `publisher` and `name` in package.json: the extension id
+// is what VS Code resolves `vscode://<id>/focus` against, so a mismatch breaks
+// cross-window focus silently — the URI simply never reaches us. The scaffold
+// test cross-checks both against the manifest rather than against a copy of
+// these literals, which is the only version of that test that can fail.
+export const PUBLISHER = 'hjulaxel';
+export const EXTENSION_NAME = 'canopy';
 export const EXTENSION_ID = `${PUBLISHER}.${EXTENSION_NAME}`;
 
 export const VIEW_CONTAINER_ID = 'lineage';

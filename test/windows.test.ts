@@ -9,12 +9,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as vscodeMock from 'vscode';
 
 import { registerFocusIntegration, withSessionQuery } from '../src/windows';
+import { EXTENSION_ID } from '../src/types';
 import type { WindowDeps, WindowRecord } from '../src/types';
 
 const SESSION = '0f0000a1-0000-4000-8000-0000000000a1';
-const HANDLE_WITH_QUERY =
-  'vscode://creemux.lineage-sessions/focus?windowId=abc';
-const HANDLE_NO_QUERY = 'vscode://creemux.lineage-sessions/focus';
+// Derived from EXTENSION_ID rather than spelled out: these handles are the real
+// focus URIs, and hardcoding the id here would let the extension be renamed out
+// from under the tests without a single failure.
+const HANDLE_NO_QUERY = `vscode://${EXTENSION_ID}/focus`;
+const HANDLE_WITH_QUERY = `${HANDLE_NO_QUERY}?windowId=abc`;
 
 function queryOf(uri: string): string {
   const i = uri.indexOf('?');
@@ -39,16 +42,16 @@ describe('withSessionQuery', () => {
 
   it('leaves scheme, authority and path untouched', () => {
     expect(beforeQuery(withSessionQuery(HANDLE_WITH_QUERY, SESSION))).toBe(
-      'vscode://creemux.lineage-sessions/focus',
+      HANDLE_NO_QUERY,
     );
     expect(beforeQuery(withSessionQuery(HANDLE_NO_QUERY, SESSION))).toBe(
-      'vscode://creemux.lineage-sessions/focus',
+      HANDLE_NO_QUERY,
     );
   });
 
   it('preserves every pre-existing parameter', () => {
     const out = withSessionQuery(
-      'vscode://creemux.lineage-sessions/focus?windowId=abc&x=1',
+      `${HANDLE_NO_QUERY}?windowId=abc&x=1`,
       SESSION,
     );
     expect(queryOf(out)).toBe(`windowId=abc&x=1&session=${SESSION}`);
@@ -103,7 +106,7 @@ describe('withSessionQuery', () => {
   it('keeps a fragment behind the query', () => {
     const out = withSessionQuery(`${HANDLE_WITH_QUERY}#frag`, SESSION);
     expect(out).toBe(
-      `vscode://creemux.lineage-sessions/focus?windowId=abc&session=${SESSION}#frag`,
+      `${HANDLE_NO_QUERY}?windowId=abc&session=${SESSION}#frag`,
     );
   });
 

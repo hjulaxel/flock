@@ -19,6 +19,7 @@ import {
   nowIso,
 } from '../src/state';
 import {
+  EXTENSION_ID,
   STATE_SCHEMA_VERSION,
   type ChainRecord,
   type EditorialRecord,
@@ -74,7 +75,7 @@ function record(id: string, updatedAt: string, extra: Partial<EditorialRecord> =
 function windowRec(id: string, pid: number, publishedAt = nowIso()): WindowRecord {
   return {
     windowId: id,
-    focusHandle: { uri: `vscode://creemux.lineage-sessions/focus?windowId=${id}` },
+    focusHandle: { uri: `vscode://${EXTENSION_ID}/focus?windowId=${id}` },
     pid,
     publishedAt,
   };

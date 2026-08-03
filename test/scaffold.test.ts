@@ -51,8 +51,16 @@ describe('scaffold: transcript fixtures', () => {
 });
 
 describe('scaffold: frozen types contract', () => {
-  it('exposes the neutral extension id', () => {
-    expect(EXTENSION_ID).toBe('creemux.lineage-sessions');
+  // Cross-checked against the manifest, NOT against a copy of the literals in
+  // types.ts. VS Code resolves `vscode://<publisher>.<name>/focus` by extension
+  // id, so if these drift apart cross-window focus breaks and nothing else
+  // notices — the URI just never arrives. A test that restates the constant
+  // cannot catch that; this one can.
+  it('derives an extension id that matches package.json', () => {
+    const pkg = JSON.parse(
+      fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'),
+    ) as { publisher: string; name: string };
+    expect(EXTENSION_ID).toBe(`${pkg.publisher}.${pkg.name}`);
     // v2 added `projects` and `hiddenFolders` (M7); v3 added `chains` (M10);
     // v4 added `workspaces` (M13); v5 added `accounts` and `accountSettings`
     // (M22).
