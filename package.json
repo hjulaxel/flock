@@ -49,7 +49,7 @@
         {
           "id": "lineage",
           "title": "Flock",
-          "icon": "media/bot.svg"
+          "icon": "media/flock.svg"
         }
       ]
     },
@@ -59,21 +59,21 @@
           "type": "webview",
           "id": "lineageSessionsInline",
           "name": "Sessions",
-          "icon": "media/bot.svg",
+          "icon": "media/flock.svg",
           "contextualTitle": "Claude Code Sessions",
           "when": "!lineage.nativeTree"
         },
         {
           "id": "lineageSessions",
           "name": "Sessions",
-          "icon": "media/bot.svg",
+          "icon": "media/flock.svg",
           "contextualTitle": "Claude Code Sessions",
           "when": "lineage.nativeTree"
         },
         {
           "id": "lineageAccounts",
           "name": "Accounts",
-          "icon": "media/bot.svg",
+          "icon": "media/flock.svg",
           "contextualTitle": "AI Accounts",
           "when": "config.lineage.accounts.enabled",
           "visibility": "collapsed"
@@ -83,7 +83,7 @@
         {
           "id": "lineageProject",
           "name": "Project",
-          "icon": "media/bot.svg",
+          "icon": "media/flock.svg",
           "contextualTitle": "Flock Project",
           "when": "lineage.explorerFollow",
           "visibility": "visible",
