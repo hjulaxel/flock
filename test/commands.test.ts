@@ -1498,6 +1498,187 @@ describe('M22: fork inherits the PARENT pin, never the routing choice of the day
   });
 });
 
+/**
+ * Forking an UNSTARTED branch — the row that shows a full conversation and has
+ * written nothing.
+ *
+ * `--fork-session --resume` renders the inherited history as soon as the
+ * terminal opens, but claude writes the transcript lazily, so until the branch
+ * takes its first turn there is no file under its own id. Reported as "I
+ * clicked Fork and Compact and got 'session has no transcript yet' on a session
+ * I have been reading all afternoon".
+ */
+describe('fork falls back to the parent of a branch that never took a turn', () => {
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockWindow as { showWarningMessage?: unknown }).showWarningMessage;
+  });
+
+  interface ForkHarness {
+    launches: LaunchOptions[];
+    edges: Array<[string, string | null]>;
+    titles: string[];
+    warnings: string[];
+    run: (command: string, arg: string) => Promise<void>;
+  }
+
+  /** `started` owns a transcript; every other id in `records` does not. */
+  function forkHarness(
+    started: string,
+    records: Record<string, EditorialRecord>,
+  ): ForkHarness {
+    const launches: LaunchOptions[] = [];
+    const edges: Array<[string, string | null]> = [];
+    const titles: string[] = [];
+    const warnings: string[] = [];
+    (
+      mockWindow as { showWarningMessage?: (m: unknown) => Promise<unknown> }
+    ).showWarningMessage = async (message: unknown) => {
+      warnings.push(String(message));
+      return undefined;
+    };
+    const { accounts } = fakeAccountDeps([], {
+      sessionProfileId: () => undefined,
+    });
+    const { deps } = chatDeps(undefined, {
+      records,
+      hasTranscript: (id) => id === started,
+      beginInlineRename: () => true,
+    });
+    const withAccounts: AccountCommandDeps = {
+      ...deps,
+      getForest: () =>
+        forestOf(
+          Object.keys(records).map((id) =>
+            // 8 chars, not 3: `uuid(n)` only differs at index 7, and a fork's
+            // generated name is derived from its parent's LABEL — a 3-char
+            // slice makes every node here read as '000' and quietly defeats
+            // any assertion about which row the name came from.
+            node(id, { cwd: '/code/api', label: id.slice(0, 8) }),
+          ),
+        ),
+      recordLaunch: async (childId, parentId) => {
+        edges.push([childId, parentId]);
+      },
+      upsertRecord: async (id, patch) => {
+        if (typeof patch.title === 'string') titles.push(patch.title);
+        return deps.upsertRecord(id, patch);
+      },
+      launchSession: async (opts) => {
+        launches.push(opts);
+        return {
+          nodeId: opts.sessionId,
+          sessionId: opts.sessionId,
+          terminalName: 'claude',
+          createdAt: 0,
+        };
+      },
+      accounts,
+    };
+    const harness = withRegisteredCommands(withAccounts);
+    return {
+      launches,
+      edges,
+      titles,
+      warnings,
+      run: (command, arg) => harness.run(command, arg),
+    };
+  }
+
+  function record(id: string, parentId: string | null): EditorialRecord {
+    return {
+      id,
+      parentId,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    };
+  }
+
+  it('resumes the parent transcript, but lands the branch UNDER the clicked row', async () => {
+    const STARTED = uuid(1);
+    const UNSTARTED = uuid(2);
+    const h = forkHarness(STARTED, {
+      [STARTED]: record(STARTED, null),
+      [UNSTARTED]: record(UNSTARTED, STARTED),
+    });
+
+    await h.run(COMMANDS.forkAndCompact, UNSTARTED);
+
+    expect(h.warnings).toEqual([]);
+    expect(h.launches).toHaveLength(1);
+    // The launch reads the only transcript that exists — forced by disk.
+    expect(h.launches[0].parentId).toBe(STARTED);
+    expect(h.launches[0].prompt).toBe('/compact');
+    // The EDGE is the free choice, and it follows the click. Recording STARTED
+    // here is what put forks beside the branch the user aimed at instead of
+    // under it; the bytes are identical either way, so the tie breaks on intent.
+    expect(h.edges).toEqual([[h.launches[0].sessionId, UNSTARTED]]);
+  });
+
+  it('names the branch after the clicked row, not the transcript it replayed', async () => {
+    const STARTED = uuid(1);
+    const UNSTARTED = uuid(2);
+    const h = forkHarness(STARTED, {
+      [STARTED]: record(STARTED, null),
+      [UNSTARTED]: record(UNSTARTED, STARTED),
+    });
+
+    // forkHarness labels every node `id.slice(0, 8)`, so the two are distinct.
+    await h.run(COMMANDS.forkSession, UNSTARTED);
+
+    // The visible tell of the old mix-up: forking `accounts` produced a branch
+    // called `shipping 3`, announcing the silent retarget as the user's choice.
+    expect(h.titles).toHaveLength(1);
+    expect(h.titles[0]).toContain(UNSTARTED.slice(0, 8));
+    expect(h.titles[0]).not.toContain(STARTED.slice(0, 8));
+  });
+
+  it('walks up a run of unstarted branches to the last one that wrote', async () => {
+    const STARTED = uuid(1);
+    const MIDDLE = uuid(2);
+    const LEAF = uuid(3);
+    const h = forkHarness(STARTED, {
+      [STARTED]: record(STARTED, null),
+      [MIDDLE]: record(MIDDLE, STARTED),
+      [LEAF]: record(LEAF, MIDDLE),
+    });
+
+    await h.run(COMMANDS.forkSession, LEAF);
+
+    // Walks past MIDDLE for the bytes...
+    expect(h.launches[0].parentId).toBe(STARTED);
+    // ...but the branch still hangs off the row that was clicked, however many
+    // unstarted hops the walk crossed to find a transcript.
+    expect(h.edges).toEqual([[h.launches[0].sessionId, LEAF]]);
+  });
+
+  it('still refuses a session with no transcript anywhere above it', async () => {
+    const FRESH = uuid(1);
+    const h = forkHarness(uuid(9), { [FRESH]: record(FRESH, null) });
+
+    await h.run(COMMANDS.forkSession, FRESH);
+
+    expect(h.launches).toEqual([]);
+    expect(h.warnings).toEqual([
+      'Session has no transcript yet — send one message first.',
+    ]);
+  });
+
+  it('refuses rather than looping when the recorded edges form a cycle', async () => {
+    const A = uuid(1);
+    const B = uuid(2);
+    const h = forkHarness(uuid(9), {
+      [A]: record(A, B),
+      [B]: record(B, A),
+    });
+
+    await h.run(COMMANDS.forkSession, A);
+
+    expect(h.launches).toEqual([]);
+    expect(h.warnings).toHaveLength(1);
+  });
+});
+
 describe('M22: a new session (newSessionInBranch) is routed and its pin recorded', () => {
   const PROJECT = 'p1';
 

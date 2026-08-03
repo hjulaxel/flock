@@ -8,6 +8,20 @@ All notable changes to Canopy are recorded here. The format follows
 
 ### Fixed
 
+- **Forking a branch you have not typed in yet no longer refuses with "session
+  has no transcript yet".** `--fork-session --resume` renders the inherited
+  history the moment the terminal opens, but claude writes the transcript lazily,
+  so a branch that has taken no turn shows a full conversation on screen and has
+  no file under its own id. Fork and Fork and Compact now replay that branch's
+  own parent instead — its history is the same bytes — while the new branch
+  still lands **under the row you clicked**, and is named after it. Which
+  transcript is replayed is forced by what exists on disk; where the branch
+  hangs is not, and an unstarted branch is displaying its ancestor's history
+  verbatim, so both candidate edges describe the same content and the tie breaks
+  on what the click meant. Recorded edges only, so the substitution is never
+  inferred; walks up a run of unstarted branches, bounded and cycle-guarded;
+  still refuses a session with no transcript anywhere above it, which is the
+  case the message was written for.
 - **A fork no longer inherits its parent's last turn only up to the first tool
   call.** claude picks the message a `--resume` / `--fork-session` walks back
   from out of the transcript's `last-prompt` records; those are written mid-turn,

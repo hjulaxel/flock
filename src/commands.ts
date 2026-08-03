@@ -1385,6 +1385,47 @@ function reportResumeLeaf(
   }
 }
 
+/** How far `forkableAncestor` walks up a run of unstarted branches. A fork of a
+ *  fork of a fork, none of them ever messaged, is already unusual; the bound is
+ *  what keeps a corrupted or hand-edited `parentId` chain from becoming a loop
+ *  in a click handler. */
+const UNSTARTED_FORK_HOPS = 8;
+
+/**
+ * The id whose transcript a fork of `sessionId` must actually read, or
+ * undefined when there is no history to fork anywhere.
+ *
+ * Normally `sessionId` itself. The exception is a branch that has never taken a
+ * turn: `--fork-session --resume` makes claude RENDER the inherited history the
+ * moment the terminal opens, but nothing reaches disk until the first turn — so
+ * the row shows a full conversation while `hasTranscript` says there is none.
+ * Refusing to fork it is the one wrong answer, because its history IS its
+ * parent's, byte for byte: forking the parent produces exactly the child the
+ * click asked for. It lands as a SIBLING of the unstarted branch rather than
+ * under it, which is where the `--resume` edge honestly points.
+ *
+ * Only recorded edges are followed. An unstarted branch has no transcript for
+ * inference to read, so any `parentId` on its record was written by
+ * `recordLaunch` at mint time — the exact-by-construction edge, never a guess.
+ */
+function forkableAncestor(
+  deps: AccountCommandDeps,
+  sessionId: string,
+): string | undefined {
+  let current = sessionId;
+  const seen = new Set([current]);
+  for (let hop = 0; hop <= UNSTARTED_FORK_HOPS; hop++) {
+    if (deps.hasTranscript(current)) return current;
+    const recorded = deps.getRecord(current)?.parentId;
+    if (typeof recorded !== 'string' || recorded === '') return undefined;
+    const next = deps.tipOf(recorded);
+    if (seen.has(next)) return undefined;
+    seen.add(next);
+    current = next;
+  }
+  return undefined;
+}
+
 /**
  * Fork = mint a child uuid, record the parent edge BEFORE launching, then
  * launch `--fork-session --resume <parent> --session-id <child>`. The edge is
@@ -1411,13 +1452,38 @@ async function forkFlow(
   // held. A row can be superseded between render and click (a resume that
   // re-minted the id, a /clear, a compaction), and forking the id as-clicked
   // is exactly the fork-an-older-version bug this milestone removes.
-  const parentId = deps.tipOf(parentIdArg);
+  const clickedId = deps.tipOf(parentIdArg);
   // Claude writes a transcript lazily; there is nothing to resume until it has.
-  if (!deps.hasTranscript(parentId)) {
+  // An unstarted BRANCH is the exception, and the common one — see
+  // forkableAncestor: what it is showing on screen is its parent's transcript,
+  // so that is what gets read.
+  //
+  // Two DIFFERENT ids fall out of that, and conflating them is what put forks
+  // in the wrong place:
+  //   * `resumeFrom` — whose bytes we replay. Forced by what exists on disk:
+  //     `--fork-session --resume` can only name a transcript that is there.
+  //   * `clickedId`  — whose child this becomes in the tree. A free editorial
+  //     choice, because the two candidate edges describe the SAME bytes: an
+  //     unstarted branch is displaying its ancestor's history verbatim, so
+  //     "child of the branch" and "child of the ancestor" are equally true of
+  //     the content. Only one of them is what the click meant.
+  // So the transcript decides `resumeFrom`, and the click decides the edge.
+  const resumeFrom = forkableAncestor(deps, clickedId);
+  if (resumeFrom === undefined) {
     void vscode.window.showWarningMessage(
       'Session has no transcript yet — send one message first.',
     );
     return undefined;
+  }
+  if (resumeFrom !== clickedId) {
+    log(
+      'fork:',
+      shortId(clickedId),
+      'has taken no turn — replaying',
+      shortId(resumeFrom),
+      'but recording the branch under',
+      shortId(clickedId),
+    );
   }
   // Before anything else reads that transcript: make its recorded resume leaf
   // name its actual tip. `--fork-session --resume` inherits the chain claude
@@ -1426,16 +1492,27 @@ async function forkFlow(
   // only as far as the first tool result, and the parent's final answer is
   // simply absent from the child. Reported as "I only get the first part of the
   // last message"; see resumeLeaf.ts for the claude-side selection.
-  reportResumeLeaf(deps, parentId, 'fork');
+  reportResumeLeaf(deps, resumeFrom, 'fork');
 
   const forest = deps.getForest();
-  const node = forest.nodes.get(parentId);
-  const cwd = node?.cwd ?? deps.getRecord(parentId)?.cwd;
+  // Naming and placement both follow the CLICKED row, not the transcript. A
+  // fork of `accounts` that gets named `shipping 3` is the same mix-up as one
+  // that lands beside `accounts` — it announces the retarget as if it were the
+  // user's choice.
+  const node = forest.nodes.get(clickedId);
+  const resumeNode = forest.nodes.get(resumeFrom);
+  // cwd is a launch detail, so fall back through the transcript's side too —
+  // an unstarted branch that somehow recorded none still has to open somewhere.
+  const cwd =
+    node?.cwd ??
+    deps.getRecord(clickedId)?.cwd ??
+    resumeNode?.cwd ??
+    deps.getRecord(resumeFrom)?.cwd;
 
   let title = opts?.title;
   const titleGiven = title !== undefined;
   if (title === undefined) {
-    const parentLabel = node?.label ?? labelFor(deps, parentId);
+    const parentLabel = node?.label ?? labelFor(deps, clickedId);
     const siblings = (node?.children ?? [])
       .map((id) => forest.nodes.get(id)?.label)
       .filter((l): l is string => typeof l === 'string');
@@ -1447,18 +1524,25 @@ async function forkFlow(
   // M22: a fork INHERITS its parent's account, never a routed one. The launch
   // is `--fork-session --resume <parent>`, so it has to read the parent's
   // transcript — which lives inside the parent account's config directory and
-  // nowhere else. Routing a fork would break it, not merely misbill it.
-  const routed = pinnedLaunch(deps, parentId);
+  // nowhere else. Routing a fork would break it, not merely misbill it. This
+  // one follows `resumeFrom`, because it is the transcript that has to be
+  // readable, not the row that was clicked.
+  const routed = pinnedLaunch(deps, resumeFrom);
 
   // Record the edge at mint time — before the terminal exists, so a crash
-  // between here and launch still leaves the lineage correct.
-  await deps.recordLaunch(childId, parentId, cwd);
+  // between here and launch still leaves the lineage correct. The edge names
+  // the CLICKED row: `recordedResolution` (lineage.ts) puts a 'minted' edge
+  // first in the cascade and treats it as exact, so this is what the tree
+  // shows and inference never overrides it back to the transcript's owner.
+  await deps.recordLaunch(childId, clickedId, cwd);
   await deps.upsertRecord(childId, { title });
 
-  log('fork:', shortId(childId), 'from', shortId(parentId), cwd ?? '(no cwd)');
+  log('fork:', shortId(childId), 'from', shortId(clickedId), cwd ?? '(no cwd)');
   const binding = await deps.launchSession({
     sessionId: childId,
-    parentId,
+    // NOT the edge: this becomes `--fork-session --resume <id>`, which can only
+    // name a transcript that exists (terminals.ts).
+    parentId: resumeFrom,
     cwd,
     prompt: opts?.prompt,
     title,
