@@ -1229,7 +1229,7 @@ describe('detach tier: resumeFlow is the attach verb for hidden sessions', () =>
     return state;
   }
 
-  it('detachedTmuxName reads the name off the id or its chain tip', () => {
+  it('detachedTmuxName reads the name off the id or its chain tip', async () => {
     const { deps } = chatDeps(undefined);
     const tip = uuid(9);
     const viaTip: CommandDeps = {
@@ -1237,14 +1237,95 @@ describe('detach tier: resumeFlow is the attach verb for hidden sessions', () =>
       tipOf: () => tip,
       getRecord: (id) => (id === tip ? rec({ id: tip, tmux: TMUX }) : undefined),
     };
-    expect(detachedTmuxName(viaTip, VALID)).toBe(TMUX);
+    expect(await detachedTmuxName(viaTip, VALID)).toBe(TMUX);
     // A kill park writes `tmux: null` — that is NOT a detached session.
     const killed: CommandDeps = {
       ...deps,
       getRecord: () => rec({ tmux: null, parked: true }),
     };
-    expect(detachedTmuxName(killed, VALID)).toBeUndefined();
-    expect(detachedTmuxName(deps, VALID)).toBeUndefined();
+    expect(await detachedTmuxName(killed, VALID)).toBeUndefined();
+    // No probe wired (every unit double): recorded names only.
+    expect(await detachedTmuxName(deps, VALID)).toBeUndefined();
+  });
+
+  /**
+   * A record only names a wrap that a PARK created, but the launch wraps
+   * everything it starts. A session that was launched, bound to a tab and
+   * never parked therefore has a live wrap nothing recorded — invisible while
+   * the tab answers first, and the reason 21 of 40 live wraps became "running
+   * in another app or terminal" after a VS Code restart.
+   */
+  describe('an unrecorded wrap is still found, by deriving the name', () => {
+    it('probes the derived name when the record carries none', async () => {
+      const { deps } = chatDeps(undefined);
+      const asked: string[] = [];
+      const probed: CommandDeps = {
+        ...deps,
+        tmuxSessionLive: async (name) => {
+          asked.push(name);
+          return name === `lineage-${VALID}`;
+        },
+      };
+
+      expect(await detachedTmuxName(probed, VALID)).toBe(`lineage-${VALID}`);
+      expect(asked).toEqual([`lineage-${VALID}`]);
+    });
+
+    it('does not resurrect a wrap a kill-tier park really killed', async () => {
+      const { deps } = chatDeps(undefined);
+      // `tmux: null` says the park killed it; the server agrees by not
+      // answering. The probe is ground truth, so deriving is safe here.
+      const killed: CommandDeps = {
+        ...deps,
+        getRecord: () => rec({ tmux: null, parked: true }),
+        tmuxSessionLive: async () => false,
+      };
+
+      expect(await detachedTmuxName(killed, VALID)).toBeUndefined();
+    });
+
+    it('prefers the recorded name over deriving, and skips the probe', async () => {
+      const { deps } = chatDeps(undefined);
+      let probes = 0;
+      // A re-key while parked leaves the wrap under the id it was LAUNCHED
+      // with; only the record remembers which that was, so it must win.
+      const recorded: CommandDeps = {
+        ...deps,
+        getRecord: () => rec({ tmux: TMUX }),
+        tmuxSessionLive: async () => {
+          probes += 1;
+          return true;
+        },
+      };
+
+      expect(await detachedTmuxName(recorded, VALID)).toBe(TMUX);
+      expect(probes).toBe(0);
+    });
+
+    it('tries the chain tip and the clicked id, and gives up quietly if the probe throws', async () => {
+      const { deps } = chatDeps(undefined);
+      const tip = uuid(9);
+      const asked: string[] = [];
+      const viaTip: CommandDeps = {
+        ...deps,
+        tipOf: () => tip,
+        tmuxSessionLive: async (name) => {
+          asked.push(name);
+          return name === `lineage-${VALID}`;
+        },
+      };
+
+      expect(await detachedTmuxName(viaTip, VALID)).toBe(`lineage-${VALID}`);
+      expect(asked).toEqual([`lineage-${tip}`, `lineage-${VALID}`]);
+
+      const throws: CommandDeps = {
+        ...deps,
+        tmuxSessionLive: async () => {
+          throw new Error('tmux: no server running');
+        },
+      };
+      expect(await detachedTmuxName(throws, VALID)).toBeUndefined();
+    });
   });
 
   it('attaches to a LIVE detached session instead of refusing it', async () => {

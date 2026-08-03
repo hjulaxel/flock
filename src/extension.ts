@@ -2190,6 +2190,15 @@ export async function activate(
     // native `/fork` dispatches. Stat-cached inside the reader, so asking on
     // every focus costs nothing.
     backgroundJob: (sessionId) => daemonReader.read().jobs.get(sessionId),
+    // Detach tier: does the private server still hold this wrap? Same probe
+    // the registry uses for pane pids — a name that answers with one is a
+    // session that exists. Probed even when the config gate is off, like
+    // tmuxPanePid above: sessions wrapped before the flip are still wrapped.
+    tmuxSessionLive: async (name) => {
+      const binary = tmuxSpawn()?.binary ?? findTmuxBinary();
+      if (binary === null) return false;
+      return (await queryPanePid(binary, name)) !== undefined;
+    },
     revealSession,
 
     /** No wait-for-it loop, unlike revealSession: a project exists in the model

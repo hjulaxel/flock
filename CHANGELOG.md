@@ -8,6 +8,20 @@ All notable changes to Canopy are recorded here. The format follows
 
 ### Fixed
 
+- **Sessions running in the private tmux server are reachable again after the
+  editor restarts.** A record only names the wrap a workspace switch PARKED it
+  into, but the launch wraps every session it starts — so one that was
+  launched, bound to a tab and never parked had a live wrap nothing recorded.
+  Invisible while the tab existed, because the bound-tab tier answered first;
+  the moment the window went away those rows fell all the way through to
+  "running in another app or terminal", offering to fork a copy of a process
+  sitting in Canopy's own server. On a restart here that was 21 of 40 live
+  wraps. The wrap name is derived from the session id, so the detach tier now
+  derives and probes it when no name was recorded. The probe is ground truth,
+  which keeps it safe next to a kill-tier park: that writes `tmux: null`
+  deliberately, and a killed wrap does not answer. A recorded name still wins,
+  because a re-key while parked leaves the wrap under the id it was launched
+  with and only the record remembers which that was.
 - **Forking a branch you have not typed in yet no longer refuses with "session
   has no transcript yet".** `--fork-session --resume` renders the inherited
   history the moment the terminal opens, but claude writes the transcript lazily,

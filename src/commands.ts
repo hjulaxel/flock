@@ -87,6 +87,9 @@ import {
   pinnedLaunchProfile,
   resolveRouting,
 } from './routing';
+// Pure, like projects/accounts/routing above — node builtins only, no vscode.
+// Just the name composer: every tmux CALL still goes through CommandDeps.
+import { tmuxSessionName } from './tmux';
 import { accountIdOf, usageSummaryOf } from './accountsView';
 import type { AccountDeps } from './accountsView';
 
@@ -1672,21 +1675,59 @@ export async function adoptBackgroundJob(
 }
 
 /**
- * Detach tier (src/tmux.ts): the tmux session name this conversation's record
- * carries, probed under the clicked id and its chain tip. A name here was
- * written when a workspace switch parked the session by DETACH — the process
- * is running HIDDEN in the private tmux server, no window shows a tab — and
- * the way back in is to ATTACH, never to fork it or `--resume` a second
- * process beside it.
+ * Detach tier (src/tmux.ts): the tmux session this conversation is reachable
+ * in, if any. The way back into one is to ATTACH, never to fork it or
+ * `--resume` a second process beside it.
+ *
+ * Two ways to find one, in order:
+ *
+ *  1. `record.tmux` — written when a workspace switch parked the session by
+ *     DETACH. Authoritative when present, and preferred, because a park
+ *     CARRIES the name rather than re-deriving it: a re-key while parked
+ *     leaves the wrap under the id it was launched with, and only the record
+ *     remembers which that was.
+ *
+ *  2. Derived and probed. A record only names a wrap it PARKED, but the
+ *     launch wraps every session it starts (`new-session -A -s
+ *     lineage-<id>`), so a session that was launched, bound to a tab and
+ *     never parked has a live wrap nothing recorded. That is invisible while
+ *     the tab exists — the bound-tab tier answers first — and surfaces the
+ *     moment the window goes away: restart VS Code and every such session
+ *     falls past this tier to "running in another app or terminal", offering
+ *     to fork a copy of a process sitting right there in our own server. The
+ *     name is deterministic, so the record was never needed to find it.
+ *
+ * The probe is ground truth, which is what makes (2) safe next to a kill-tier
+ * park: that writes `tmux: null` deliberately, so a stale name can never
+ * outlive a park that really killed — and a killed wrap does not answer, so
+ * deriving cannot resurrect one. Both the tip and the clicked id are tried,
+ * since the wrap carries the id it was LAUNCHED with, which a re-key may have
+ * since superseded.
+ *
+ * Falls back to recorded-only when the host wires no probe (the unit doubles),
+ * which is the behaviour this had before.
  */
-export function detachedTmuxName(
+export async function detachedTmuxName(
   deps: CommandDeps,
   sessionId: string,
-): string | undefined {
-  const name =
-    deps.getRecord(deps.tipOf(sessionId))?.tmux ??
-    deps.getRecord(sessionId)?.tmux;
-  return typeof name === 'string' && name !== '' ? name : undefined;
+): Promise<string | undefined> {
+  const tip = deps.tipOf(sessionId);
+  const recorded = deps.getRecord(tip)?.tmux ?? deps.getRecord(sessionId)?.tmux;
+  if (typeof recorded === 'string' && recorded !== '') return recorded;
+
+  const probe = deps.tmuxSessionLive;
+  if (!probe) return undefined;
+  for (const id of tip === sessionId ? [tip] : [tip, sessionId]) {
+    const name = tmuxSessionName(id);
+    try {
+      if (await probe(name)) return name;
+    } catch {
+      // A probe that cannot run is not evidence of absence, but it is not
+      // evidence of presence either — and the tiers below still apply.
+      return undefined;
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -1712,7 +1753,7 @@ export async function resumeFlow(
   // would branch the conversation's history without the user asking for it.
   const sessionId = deps.tipOf(sessionIdArg);
   const node = deps.getForest().nodes.get(sessionId);
-  const detached = detachedTmuxName(deps, sessionIdArg);
+  const detached = await detachedTmuxName(deps, sessionIdArg);
 
   if (node && !node.archived && node.status !== 'exited' && detached === undefined) {
     const FORK = 'Fork It Instead';
@@ -3229,7 +3270,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     // name). The fork toast below would read as "somebody else owns this",
     // which is exactly wrong here. Works dead-or-alive: a detached session
     // that died while hidden falls through `-A` to its `--resume` argv.
-    if (detachedTmuxName(deps, id) !== undefined) {
+    if ((await detachedTmuxName(deps, id)) !== undefined) {
       await resumeFlow(deps, id);
       return;
     }

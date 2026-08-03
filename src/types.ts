@@ -1797,6 +1797,18 @@ export interface CommandDeps {
    *  a wiring without it (and every unit double) simply never offers to adopt
    *  one, which is exactly the pre-M25 behaviour. */
   backgroundJob?(sessionId: string): BackgroundJob | undefined;
+  /** Detach tier: is `name` a session the private tmux server still holds?
+   *
+   *  A record only names a wrap that a workspace switch PARKED, but the launch
+   *  wraps everything it starts — so a session that was launched, bound to a
+   *  tab and never parked has a live wrap nothing recorded, and it becomes
+   *  unreachable the moment its window goes away. The name is derivable, so
+   *  this probe is all that is needed to find one. Ground truth, which is also
+   *  what keeps it safe beside a kill-tier park: a killed wrap does not answer.
+   *
+   *  Optional — a wiring without it (and every unit double) falls back to
+   *  recorded names only, which is the pre-probe behaviour. */
+  tmuxSessionLive?(name: string): Promise<boolean>;
   /** M24. Bounded, cached facts read off one transcript — see TranscriptFacts.
    *  Optional: a wiring without it (and every unit double) gets a chat history
    *  ordered and labelled from the editorial records alone, which is coarser

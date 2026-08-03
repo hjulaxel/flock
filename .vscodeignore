@@ -4,6 +4,7 @@
 .gitignore
 .vscodeignore
 esbuild.mjs
+scripts/**
 # Source for media/icon.png. The tile is what ships; the SVG is not referenced
 # at runtime, and the marketplace rejects SVGs in the README anyway.
 media/bot-logo.svg
