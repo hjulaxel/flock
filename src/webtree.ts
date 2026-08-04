@@ -488,6 +488,16 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
       // the thing that makes a post wait.
       branchStatusOf: (dir) =>
         this.safe('branchStatusOf', () => this.deps.branchStatusOf?.(dir), undefined),
+      // The one lookup here that can reach the network — and cannot on THIS call:
+      // the cache behind it answers from memory, schedules its own refresh, and
+      // will not schedule one unless a visible view asked. See
+      // src/pullRequests.ts.
+      pullRequestFor: (repoDir, branch) =>
+        this.safe(
+          'pullRequestFor',
+          () => this.deps.pullRequestFor?.(repoDir, branch),
+          undefined,
+        ),
     });
   }
 
@@ -1310,6 +1320,11 @@ export interface WebtreeController extends DisposableLike {
    *  chip-click verb resolves against this rather than re-probing git, so it can
    *  only ever start a session in a worktree the user was looking at. */
   branchesOf(projectId: string): readonly BranchInfo[];
+  /** Is this view on screen? Asked by the pull-request cache, which must not talk
+   *  to GitHub for a tree nobody is looking at. The provider already tracks it —
+   *  this exposes it, because `post()` runs whether the view is visible or not and
+   *  the network gate cannot be inferred from that. */
+  readonly visible: boolean;
 }
 
 export function registerWebtree(
@@ -1347,6 +1362,9 @@ export function registerWebtree(
     beginRename: (sessionId) => provider.beginRename(sessionId),
     beginRenameProject: (projectId) => provider.beginRenameProject(projectId),
     branchesOf: (projectId) => provider.branchesOf(projectId),
+    get visible(): boolean {
+      return provider.visible;
+    },
     dispose(): void {
       try {
         dataSub?.dispose();

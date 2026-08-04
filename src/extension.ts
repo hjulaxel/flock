@@ -117,6 +117,7 @@ import {
 } from './daemon';
 import { WorktreeCache } from './git';
 import { BranchStatusCache } from './gitBranches';
+import { PullRequestCache, openPullRequestCreatePage } from './pullRequests';
 import {
   DEFAULT_WORKTREE_PATH_PATTERN,
   readLocalBranches,
@@ -948,6 +949,28 @@ export async function activate(
   context.subscriptions.push(branchStatus);
   context.subscriptions.push(branchStatus.onDidChange(() => refreshViews()));
 
+  // PULL REQUESTS — the one thing in this extension that reaches the network, and
+  // the only cache here with a gate in front of its refresh. Two conditions, ANDed,
+  // and both are needed:
+  //
+  //   * `lineage.git.pullRequests` is on. Off by default, and reading it per call
+  //     rather than at construction means turning it off stops the traffic on the
+  //     next tick rather than on a window reload.
+  //   * a view that would DRAW the answer is on screen. There is no timer in
+  //     src/pullRequests.ts: a render is the only thing that schedules a refresh,
+  //     so this predicate is the whole of "poll only while the view is visible" —
+  //     without it, `post()` on a hidden webview would keep asking GitHub about a
+  //     tree nobody can see.
+  //
+  // The controllers are `let` and are assigned further down, which is exactly why
+  // this is a closure and not a captured value.
+  const pullRequestsEnabled = (): boolean =>
+    boolCfg(CONFIG_KEYS.gitPullRequests, false) &&
+    (webtreeController?.visible === true || treeController?.visible === true);
+  const pullRequests = new PullRequestCache({ enabled: pullRequestsEnabled });
+  context.subscriptions.push(pullRequests);
+  context.subscriptions.push(pullRequests.onDidChange(() => refreshViews()));
+
   const pokeNow = (): void => {
     try {
       poller?.pokeNow();
@@ -1404,6 +1427,7 @@ export async function activate(
     showTokens: () => boolCfg(CONFIG_KEYS.showTokens, false),
     worktreesOf: (dir) => worktrees.get(dir),
     branchStatusOf: (dir) => branchStatus.get(dir),
+    pullRequestFor: (repoDir, branch) => pullRequests.get(repoDir, branch),
     // Read raw and sanitised at the point of use, not here: the value is a
     // user-editable array that lands in an inline <style> block, and the one
     // place that knows what a legal palette entry looks like is the function
@@ -2571,6 +2595,20 @@ export async function activate(
     localBranches: (dir) => readLocalBranches(dir),
     addWorktree: (opts) => runWorktreeAdd(opts),
     removeWorktree: (opts) => runWorktreeRemove(opts),
+    pullRequestFor: (repoDir, branch) => pullRequests.get(repoDir, branch),
+    // Gated on the SETTING and not on view visibility, unlike the cache's own
+    // refresh: this is a verb somebody just picked, and refusing it because the
+    // sidebar happened to be collapsed would be refusing for a reason nobody can
+    // see. Off means off, though — `lineage.git.pullRequests` is the promise that
+    // Flock does not reach the network, and a verb is not an exception to it.
+    createPullRequest: (dir) =>
+      boolCfg(CONFIG_KEYS.gitPullRequests, false)
+        ? openPullRequestCreatePage(dir)
+        : Promise.resolve({
+            ok: false,
+            output:
+              'lineage.git.pullRequests is off, so Flock does not run gh.',
+          }),
     // Both caches, both wholesale. A worktree that appeared or disappeared
     // changes the LIST for every directory of the repository (any checkout
     // reports the same set), and the per-worktree statuses keyed under it are
@@ -2929,6 +2967,27 @@ export async function activate(
         )
       ) {
         updateWorkspaceStatusBar();
+      }
+      // Turning pull requests ON has to clear the cache, and specifically the
+      // FAILURES in it: the cache holds a failed probe for fifteen minutes on
+      // purpose (see src/pullRequests.ts), so somebody who turned the setting on,
+      // installed `gh` and turned it on again would otherwise sit in front of a
+      // remembered "no" for a quarter of an hour. Turning it OFF clears it too,
+      // which is what stops a request that is no longer being refreshed from
+      // staying on a row.
+      if (
+        e.affectsConfiguration(
+          `${CONFIG_SECTION}.${CONFIG_KEYS.gitPullRequests}`,
+        )
+      ) {
+        pullRequests.invalidate();
+        log(
+          'pr:',
+          boolCfg(CONFIG_KEYS.gitPullRequests, false)
+            ? 'enabled — Flock will run `gh pr list` while the view is visible'
+            : 'disabled — Flock makes no network requests',
+        );
+        refreshViews();
       }
       // The accounts view is contributed under a `config.` when-clause, so
       // turning the setting on reveals a view whose provider does not exist yet

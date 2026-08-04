@@ -869,6 +869,57 @@ body {
   margin-right: 6px;
 }
 
+/* The pull request, `#42 ✓`, right of the sync token.
+ *
+ * ORDER-DEPENDENT, and this is the only place in this file where a cascade does
+ * real work: the four state rules below set the colour, and `.checks-fail` comes
+ * AFTER all of them so it wins. That is deliberate and not a shortcut — a failing
+ * check on an open request is the one combination that has to resolve to "look at
+ * this", and a green number with a red cross beside it reads as neither.
+ *
+ * Theme colours, never literals: `charts.*` is the palette VS Code publishes for
+ * exactly this — small categorical marks — and it is themed for both light and
+ * dark. A hex here would be a colour that survives one theme. */
+.branch-pr {
+  flex: 0 0 auto;
+  font-size: 0.9em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  margin-right: 6px;
+}
+
+/* Open: the same green everything else on screen uses for "fine". */
+.branch-pr.open {
+  color: var(--vscode-charts-green, var(--vscode-descriptionForeground));
+}
+
+/* Draft: grey, and the same grey as a description. A draft is a request that is
+ * not asking anything of anybody yet, which is what "no colour" says. */
+.branch-pr.draft {
+  color: var(--vscode-descriptionForeground);
+}
+
+/* Merged: purple, which is GitHub's own colour for it and therefore the one
+ * somebody arriving from a browser tab already reads without being told. */
+.branch-pr.merged {
+  color: var(--vscode-charts-purple, var(--vscode-descriptionForeground));
+}
+
+/* Closed-unmerged: dimmed rather than red. It is over and it did not land, which
+ * is a fact and not a problem — red is reserved for the row that wants
+ * something. */
+.branch-pr.closed {
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.7;
+  text-decoration: line-through;
+}
+
+/* A failing check wins over every state above. See the note on .branch-pr. */
+.branch-pr.checks-fail {
+  color: var(--vscode-charts-red, var(--vscode-errorForeground));
+  opacity: 1;
+}
+
 /* The branch tint on a SESSION's name. A custom property set by the client
  * (renderRow) rather than a class per colour, so the palette can grow without a
  * matching rule here for every entry. */

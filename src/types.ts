@@ -689,6 +689,16 @@ export const COMMANDS = {
    *  checkout — an editor there rather than an agent — and the reason it is a
    *  verb of its own rather than something `revealBranch` could cover. */
   openWorktreeWindow: 'lineage.openWorktreeWindow',
+  /** The pull request on this branch, in the browser. Only ever drawn on a row
+   *  that HAS one (the `pullRequest` context token), and only reachable at all
+   *  with `lineage.git.pullRequests` on. */
+  openPullRequest: 'lineage.openPullRequest',
+  /** `gh pr create --web`: the compare page, in the browser, for the user to
+   *  finish. Deliberately NOT a request Flock opens itself. Every outward action
+   *  in this product ends with a human pressing the button — a verb that silently
+   *  created a pull request would be the first exception, and it would be one on
+   *  a mis-click. */
+  createPullRequest: 'lineage.createPullRequest',
   /** A scratch conversation ABOUT a project: opened at the project's rootDir
    *  with every extra directory added, and deliberately absent from the tree
    *  (see EditorialRecord.chat).
@@ -818,6 +828,11 @@ export const CONFIG_KEYS = {
    *  checkout in `~/worktrees` wants that for every repository, not a dialog per
    *  worktree. See worktreePathFor. */
   gitWorktreePath: 'git.worktreePath',
+  /** THE ONE SETTING THAT REACHES THE NETWORK, and the reason it is off by
+   *  default rather than merely documented. Everything else in Flock reads local
+   *  files and local processes; turning this on has the extension run `gh pr
+   *  list`, which talks to GitHub as the user. See src/pullRequests.ts. */
+  gitPullRequests: 'git.pullRequests',
   staleAfterHours: 'staleAfterHours',
   busyStaleMinutes: 'busyStaleMinutes',
   // Notifications
@@ -1099,6 +1114,37 @@ export interface GitCommandResult {
   output: string;
 }
 
+/** How a pull request stands. `draft` is a state of its own rather than a flag
+ *  on `open`, because a row has one word of room and draft is the one of the two
+ *  you do something different about. */
+export type PullRequestState = 'draft' | 'open' | 'merged' | 'closed';
+
+/** The check rollup, reduced to the four outcomes a row can usefully draw.
+ *  `none` covers both "no checks configured" and "gh reported none", which a row
+ *  cannot tell apart and must not pretend to. */
+export type PullRequestChecks = 'none' | 'pending' | 'pass' | 'fail';
+
+/**
+ * One pull request, as the `gh` CLI reported it.
+ *
+ * THE ONLY THING IN FLOCK THAT COMES FROM THE NETWORK, and it does not come from
+ * Flock: `gh pr list` is a binary the user installed, authenticated and pointed
+ * at their own host, and the extension reads its stdout. That indirection is the
+ * design, not a shortcut — see src/pullRequests.ts. Behind
+ * `lineage.git.pullRequests`, off by default.
+ */
+export interface PullRequest {
+  number: number;
+  title: string;
+  state: PullRequestState;
+  checks: PullRequestChecks;
+  /** The branch the request is FROM (`headRefName`) — the join key onto a branch
+   *  row, and the reason nothing else needs matching. */
+  branch: string;
+  /** The html url `gh` gave us. Opened in a browser, never fetched. */
+  url: string;
+}
+
 /**
  * A branch as the tree renders it: one chip under a project row.
  *
@@ -1188,6 +1234,15 @@ export interface BranchTreeNode {
   branch: string;
   /** The worktree directory a session started here would run in. */
   dir: string;
+  /** The repository's MAIN worktree — the same value for every branch row under
+   *  one project, and the anchor the pull-request lookup is keyed on.
+   *
+   *  Carried rather than looked up because this node is INTERNED (see branchRef):
+   *  the workbench keys expansion state on element identity, so the fields have
+   *  to be things that change when the row genuinely becomes a different row. A
+   *  repository's main worktree qualifies; its pull request, which changes when a
+   *  colleague pushes, very much does not — that is read live in branchItem. */
+  repoDir: string;
   colorIndex: number;
   primary: boolean;
   rootIds: string[];
@@ -1232,6 +1287,13 @@ export type ContextToken =
   /** The "Others (N)" tail row. Distinct from 'branch' because none of the
    *  branch verbs apply — there is no single worktree behind it. */
   | 'branchOthers'
+  /** This branch row has a pull request behind it. A THIRD token on a branch
+   *  row, never alone, and it exists for exactly one `when` clause: "Open Pull
+   *  Request in Browser" is a verb with nothing to open on a branch that has no
+   *  request, and a menu entry that reports "no pull request" when clicked is a
+   *  menu entry that should not have been drawn. Absent for everybody with
+   *  `lineage.git.pullRequests` off, which is everybody by default. */
+  | 'pullRequest'
   /** A project row that is filed under another project. A SECOND token on the
    *  row, never alone, so `viewItem =~ /;project;/` keeps matching every
    *  project row while a verb that only makes sense on a nested one (Move to
@@ -1659,6 +1721,16 @@ export interface TreeDeps {
    *  decides what a row says. Keeping it out of computeGrouping is what stops a
    *  `git status` from ever being able to move a row. */
   branchStatusOf?(dir: string): BranchStatus | undefined;
+  /** The pull request whose head is `branch`, from the `gh` cache
+   *  (src/pullRequests.ts). Synchronous from cache like the two above, and
+   *  `undefined` whenever `lineage.git.pullRequests` is off — which is the
+   *  default, and which is why every renderer treats absent as the normal case
+   *  rather than as a failure.
+   *
+   *  `repoDir` anchors the lookup at ONE directory per repository (the main
+   *  worktree), so a project with six checkouts asks `gh` once rather than six
+   *  times for an answer that is the same either way. */
+  pullRequestFor?(repoDir: string, branch: string): PullRequest | undefined;
   /** `lineage.branchColors` — a user palette for the branch chips. Entries are
    *  positional (index 0 is the first branch's colour); a short list fills from
    *  the built-in one, and every entry is re-validated before it reaches the
@@ -2024,6 +2096,14 @@ export interface CommandDeps {
    *  the two verbs that KNOW the answer changed, so the new row appears at once
    *  instead of at the end of a TTL. */
   worktreesChanged?(dir: string): void;
+  /** The pull request on `branch`, from the same cache the rows render from.
+   *  undefined whenever `lineage.git.pullRequests` is off — so the verb refuses,
+   *  which is correct: with the setting off there is no request to know about. */
+  pullRequestFor?(repoDir: string, branch: string): PullRequest | undefined;
+  /** `gh pr create --web` in `dir`. Opens the compare page in the user's
+   *  browser and returns; it does not create anything, which is the whole
+   *  point. */
+  createPullRequest?(dir: string): Promise<GitCommandResult>;
   upsertProject(id: string, patch: Partial<ProjectRecord>): Promise<void>;
   /** Re-file a project under another one, or at the top level (null).
    *  Refuses a cycle (a project cannot be filed under its own descendant) and

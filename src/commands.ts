@@ -1848,6 +1848,79 @@ async function removeWorktreeFlow(
   deps.refresh();
 }
 
+/**
+ * Open the pull request on this branch, in the user's browser.
+ *
+ * The url is read back out of the SAME cache the row rendered from rather than
+ * off the argument, and that is not the usual re-resolution habit here — it is a
+ * harder rule. `vscode.env.openExternal` will open anything; a url that arrived in
+ * a command argument is a url some other extension, a keybinding or a stale
+ * webview message chose, and Flock is not going to hand one of those to a
+ * browser. What the cache holds came from `gh` reporting on this repository.
+ */
+async function openPullRequestFlow(
+  deps: CommandDeps,
+  project: ProjectRecord,
+  branch: BranchInfo,
+): Promise<void> {
+  const { repoDir } = branchesOfProject(deps, project.id);
+  const pr = safeCall('pullRequestFor', () =>
+    deps.pullRequestFor?.(repoDir, branch.name),
+  );
+  if (!pr || pr.url === '') {
+    // Reachable from the palette, where there is no context token to hide the
+    // verb behind — and after a merge, on a row whose chip has gone. Said once,
+    // plainly; the setting being off lands here too, which is correct, because
+    // with it off there is no request to know about.
+    void vscode.window.showInformationMessage(
+      `Flock: no pull request for ${branch.name}.`,
+    );
+    return;
+  }
+  try {
+    await vscode.env.openExternal(vscode.Uri.parse(pr.url));
+  } catch (err) {
+    logError('commands.openPullRequest', err);
+  }
+}
+
+/**
+ * `gh pr create --web`: the compare page, in the browser, for the user to finish.
+ *
+ * FLOCK NEVER CREATES THE REQUEST. `--web` is the whole design of this verb, not
+ * a convenience: opening a pre-filled page leaves the title, the body, the base
+ * branch and the decision to press the button with the person, where a
+ * `gh pr create --fill` would make a mis-click in a sidebar into a notification
+ * for everybody watching the repository. There is no confirmation modal in front
+ * of it for the same reason there is none in front of a link: the browser page IS
+ * the confirmation.
+ */
+async function createPullRequestFlow(
+  deps: CommandDeps,
+  branch: BranchInfo,
+): Promise<void> {
+  if (!deps.createPullRequest) {
+    void vscode.window.showWarningMessage(
+      'Flock: creating pull requests needs lineage.git.pullRequests turned on.',
+    );
+    return;
+  }
+  log('pr: opening the create page for', branch.name);
+  const result = await deps.createPullRequest(branch.dir);
+  if (!result.ok) {
+    // `gh`'s own words, and there are several worth reading verbatim: the branch
+    // has no commits, has never been pushed, `gh` is not authenticated, the
+    // repository has no GitHub remote. This is the one place in the feature where
+    // a failure is NOT silent — the user asked for something outward-facing and
+    // is waiting for a browser tab that is not going to appear.
+    log('pr: create page failed:', result.output);
+    void vscode.window.showWarningMessage(
+      `Flock could not open a pull request page for ${branch.name}.\n\n${result.output}`,
+      { modal: true },
+    );
+  }
+}
+
 /** A CommandDeps read that must not be able to take a verb down with it. The
  *  optional members it reads are wired by extension.ts and absent from every unit
  *  double, so "threw" and "was not there" have to land in the same place. */
@@ -4596,6 +4669,34 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       } catch (err) {
         logError('commands.openWorktreeWindow', err);
       }
+    },
+  );
+
+  register(
+    COMMANDS.openPullRequest,
+    'open pull request',
+    async (arg?: unknown) => {
+      const target = await resolveWorktree(
+        deps,
+        arg,
+        'Open the pull request on which branch?',
+      );
+      if (!target) return;
+      await openPullRequestFlow(deps, target.project, target.branch);
+    },
+  );
+
+  register(
+    COMMANDS.createPullRequest,
+    'create pull request',
+    async (arg?: unknown) => {
+      const target = await resolveWorktree(
+        deps,
+        arg,
+        'Open a pull request from which branch?',
+      );
+      if (!target) return;
+      await createPullRequestFlow(deps, target.branch);
     },
   );
 

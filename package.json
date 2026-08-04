@@ -467,6 +467,17 @@
         "command": "lineage.openWorktreeWindow",
         "title": "Open Worktree in New Window",
         "category": "Flock"
+      },
+      {
+        "command": "lineage.openPullRequest",
+        "title": "Open Pull Request in Browser",
+        "category": "Flock",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "lineage.createPullRequest",
+        "title": "Create Pull Request...",
+        "category": "Flock"
       }
     ],
     "menus": {
@@ -777,6 +788,16 @@
           "command": "lineage.newWorktree",
           "when": "view == lineageSessions && viewItem =~ /;project;/",
           "group": "1_actions@8"
+        },
+        {
+          "command": "lineage.openPullRequest",
+          "when": "view == lineageSessions && viewItem =~ /;pullRequest;/",
+          "group": "0_open@4"
+        },
+        {
+          "command": "lineage.createPullRequest",
+          "when": "view == lineageSessions && viewItem =~ /;branch;/ && config.lineage.git.pullRequests && !(viewItem =~ /;pullRequest;/)",
+          "group": "0_open@5"
         },
         {
           "command": "lineage.projectFromFolder",
@@ -1196,6 +1217,16 @@
           "group": "1_actions@6"
         },
         {
+          "command": "lineage.openPullRequest",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;pullRequest;/",
+          "group": "0_open@4"
+        },
+        {
+          "command": "lineage.createPullRequest",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/ && config.lineage.git.pullRequests && !(viewItem =~ /;pullRequest;/)",
+          "group": "0_open@5"
+        },
+        {
           "command": "lineage.showBranches",
           "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;branchOthers;/",
           "group": "0_open@1"
@@ -1415,6 +1446,11 @@
           },
           "default": [],
           "markdownDescription": "Colours for the branch chips, in order — index 0 is the first branch under a project (usually `main`). Each entry is either a hex colour (`#7aa2f7`) or a VS Code theme colour id (`charts.blue`, `terminal.ansiCyan`). A short list fills the rest from the built-in muted palette; anything that is not one of those two shapes is ignored. Empty = the built-in palette, which softens the theme's own `charts.*` colours toward the editor foreground."
+        },
+        "lineage.git.pullRequests": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "**The one thing in Flock that reaches the network.** With this on, Flock runs `gh pr list --state all --limit 100 --json ...` in each project's repository and shows the pull request on each branch row — number, state and check rollup as a small chip, with **Open Pull Request in Browser** on the row's menu. It shells out to the [`gh` CLI](https://cli.github.com) you installed and authenticated: Flock makes no HTTP requests of its own, bundles no API client and never sees a token. Polled only while the Sessions view is visible, at most once every five minutes per repository, and cached. If `gh` is missing, not signed in, or the repository has no GitHub remote, the rows render exactly as they do with this off and one line goes to the **Flock** output channel. Off by default, because everything else in Flock is local."
         },
         "lineage.git.worktreePath": {
           "type": "string",

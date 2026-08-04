@@ -516,6 +516,24 @@
       el.appendChild(sync);
     }
 
+    // The pull request: `#42 ✓`, coloured by its state — and by its checks when
+    // those are failing, because a red cross on a green number is the one
+    // combination that has to resolve to "look at this". The state is a CLASS
+    // rather than a word: four colours cost no width, and the row has none to
+    // spare next to a branch name. The hover says the word.
+    //
+    // Absent for everybody with `lineage.git.pullRequests` off, which is
+    // everybody by default — so this draws nothing at all unless somebody asked
+    // for it.
+    if (chip.pr && chip.pr.label) {
+      const pr = document.createElement('span');
+      pr.className =
+        'branch-pr ' + String(chip.pr.state || 'open') +
+        ' checks-' + String(chip.pr.checks || 'none');
+      pr.textContent = chip.pr.label;
+      el.appendChild(pr);
+    }
+
     // The session count, and ONLY where it says something. Grouped, a collapsed
     // branch row has no other content — the number is all it can report about
     // what is inside. Flat, the sessions are already on screen underneath in

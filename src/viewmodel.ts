@@ -23,6 +23,9 @@ import type {
   GroupNode,
   ProjectGroupNode,
   ProviderId,
+  PullRequest,
+  PullRequestChecks,
+  PullRequestState,
   SessionForest,
   SessionNode,
 } from './types';
@@ -133,6 +136,50 @@ export function branchStatusLines(status: BranchStatus | undefined): string[] {
   if (status.dirty && status.untracked) out.push('uncommitted changes and untracked files');
   else if (status.dirty) out.push('uncommitted changes');
   else if (status.untracked) out.push('untracked files');
+  return out;
+}
+
+/**
+ * A pull request as the branch row draws it: `#42`, `#42 ✓`, `#42 ✕`, `#42 •`.
+ *
+ * The NUMBER first, because it is the thing you say out loud and the thing you
+ * search for. The check glyph after it, and only one: a row has no width for
+ * "3 of 4 passed", and the useful reduction of a rollup is whether you can stop
+ * looking at it. `•` for pending rather than a spinner, because a branch row
+ * repaints on a roster tick and an animation there would be a moving part in the
+ * corner of somebody's eye all day.
+ *
+ * The STATE is not in the text. It is a class on the chip (see webtree.css) —
+ * open, draft, merged, closed are four colours, and spelling them out would cost
+ * the row more width than the branch name has to spare. The hover says the word.
+ */
+export function formatPullRequestChip(pr: PullRequest): string {
+  const mark =
+    pr.checks === 'pass'
+      ? ' ✓'
+      : pr.checks === 'fail'
+        ? ' ✕'
+        : pr.checks === 'pending'
+          ? ' •'
+          : '';
+  return `#${pr.number}${mark}`;
+}
+
+/** The request as sentences, for the hover: the state and the checks in words,
+ *  then the title. Two lines, because the title is the part that says what the
+ *  branch is FOR and deserves its own. */
+export function pullRequestLines(pr: PullRequest | undefined): string[] {
+  if (!pr) return [];
+  const checks =
+    pr.checks === 'pass'
+      ? ', checks passing'
+      : pr.checks === 'fail'
+        ? ', checks failing'
+        : pr.checks === 'pending'
+          ? ', checks running'
+          : '';
+  const out = [`pull request #${pr.number} — ${pr.state}${checks}`];
+  if (pr.title.trim() !== '') out.push(pr.title.trim());
   return out;
 }
 
@@ -377,6 +424,22 @@ export interface BranchChip {
    * reserves no width at all — the same rule `actions` and `marks` follow.
    */
   sync?: string;
+  /**
+   * The pull request on this branch, reduced to what a chip draws.
+   *
+   * `label` is pre-formatted for the same reason `sync` is; `state` and `checks`
+   * travel as words because they are CLASS NAMES on the far side — the client
+   * picks a colour from them, which is a lookup and not a formatting decision, and
+   * a colour is the only thing this chip has left to say the state with.
+   *
+   * Absent unless `lineage.git.pullRequests` is on AND there is a request on this
+   * branch, which for everybody who has not turned it on is always.
+   */
+  pr?: {
+    label: string;
+    state: PullRequestState;
+    checks: PullRequestChecks;
+  };
 }
 
 /** What glyph leads the row. `provider` resolves to a brand svg in the webview
@@ -534,6 +597,12 @@ export interface ViewModelInput {
    *  paint. Absent, or returning undefined, means the branch rows carry no
    *  numbers, which is exactly how they looked before this existed. */
   branchStatusOf?(dir: string): BranchStatus | undefined;
+  /** The pull request on `branch`, from the `gh` cache in src/pullRequests.ts.
+   *  Synchronous by contract like the lookup above. `repoDir` is the project's
+   *  MAIN worktree, so one repository is asked once however many checkouts it has.
+   *  Absent, or returning undefined, means no chip — which is the default state of
+   *  this feature and the way every existing test describes a branch row. */
+  pullRequestFor?(repoDir: string, branch: string): PullRequest | undefined;
 }
 
 export const sessionRowKey = (id: string): string => `session:${id}`;
@@ -578,6 +647,24 @@ export const othersRowKey = (projectId: string): string =>
  * checkout with a handful of forks in it, where it would put every row in the
  * project one level deeper for no information at all.
  */
+/**
+ * The context tokens on a branch row, in one place because BOTH renderers build
+ * this string and a `when` clause that matched one and not the other would be a
+ * menu entry that appears in one sidebar style only.
+ *
+ * `primary` and `pullRequest` are both SECOND tokens, never alone: every clause
+ * that wants any branch row keeps matching `/;branch;/`, and the two that want a
+ * subset single it out positively. The manifest never negates a viewItem regex
+ * except where it already did (Hide Branch on the primary), so a fact a verb needs
+ * has to be a token that is present rather than one that is absent.
+ */
+export function branchTokens(primary: boolean, hasPullRequest: boolean): ContextToken[] {
+  const tokens: ContextToken[] = ['branch'];
+  if (primary) tokens.push('primary');
+  if (hasPullRequest) tokens.push('pullRequest');
+  return tokens;
+}
+
 function branchRow(
   el: ProjectGroupNode,
   chip: BranchChip,
@@ -588,6 +675,10 @@ function branchRow(
    *  sentences, which is a thing only the tooltip has room for. Passed rather
    *  than put on the chip so the client is never handed text it cannot use. */
   status: BranchStatus | undefined,
+  /** The pull request, for the hover and for the context token. Same argument as
+   *  `status`: the chip carries the four characters the row draws, and the title —
+   *  which is the part worth reading — belongs in the tooltip. */
+  pr: PullRequest | undefined,
 ): ViewRow {
   const what = chip.count
     ? `${chip.count} session${chip.count === 1 ? '' : 's'}`
@@ -628,9 +719,7 @@ function branchRow(
       projectId: el.projectId,
       dir: chip.dir,
       branch: chip.full,
-      viewItem: contextValueOf(
-        chip.primary ? ['branch', 'primary'] : ['branch'],
-      ),
+      viewItem: contextValueOf(branchTokens(chip.primary, pr !== undefined)),
       preventDefaultContextMenuItems: true,
     },
     tooltip: [
@@ -641,6 +730,10 @@ function branchRow(
       // nothing when the status was never read, so the hover of an unprobed row
       // is the hover it always had.
       ...branchStatusLines(status),
+      // After the branch's own standing and before the path, because a pull
+      // request is a fact about the branch. Contributes nothing at all with
+      // `lineage.git.pullRequests` off, which is the default.
+      ...pullRequestLines(pr),
       chip.dir,
       place.expandable
         ? 'Click to show its sessions · + starts a new one here'
@@ -933,8 +1026,22 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
         return undefined;
       }
     };
+    // The repository's anchor: ONE directory per project, so a project with six
+    // checkouts asks `gh` once for an answer that is the same from any of them.
+    // The main worktree, because git lists it first and buildBranches keeps it
+    // first, which makes it the one stable choice.
+    const repoDir = (branches.find((b) => b.primary) ?? branches[0])?.dir ?? '';
+    const prOf = (branch: string): PullRequest | undefined => {
+      if (repoDir === '') return undefined;
+      try {
+        return input.pullRequestFor?.(repoDir, branch);
+      } catch {
+        return undefined;
+      }
+    };
     const toChip = (b: BranchInfo): BranchChip => {
       const sync = formatBranchSync(statusOf(b.dir));
+      const pr = prOf(b.name);
       return {
         name: b.name,
         full: b.name,
@@ -946,6 +1053,15 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
         // Absent rather than '' — see the field's note: a row with nothing to
         // report must cost no width.
         ...(sync === '' ? {} : { sync }),
+        ...(pr === undefined
+          ? {}
+          : {
+              pr: {
+                label: formatPullRequestChip(pr),
+                state: pr.state,
+                checks: pr.checks,
+              },
+            }),
       };
     };
     // The block splits into what is on screen and what "Others" stands for.
@@ -1129,6 +1245,7 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
               expanded: !collapsed.has(chipKey),
             },
             statusOf(chip.dir),
+            prOf(chip.full),
           ),
         );
         if (!expandableChip || collapsed.has(chipKey)) continue;
