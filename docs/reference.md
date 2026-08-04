@@ -20,12 +20,88 @@ when installed — and shows a single row: the current generation, wearing the
 conversation's name and history. Fork and resume always act on that newest
 generation, never on a stale copy.
 
-**Worktrees are read, never written.** The one git command Flock ever runs is
-`git worktree list --porcelain`, once per project directory, cached for 30
-seconds. It creates no worktrees, switches no branches, and writes nothing to
-your repository. A directory that is not a repository, a machine with no `git`
-on `PATH`, and a probe that times out all produce the same result — no branch
-chips — and the tree renders as it did before the feature existed.
+**Worktrees are read on a timer, and changed only when you ask.** Two git
+commands run by themselves, both reads, both cached:
+
+| Command | When | Cached |
+| --- | --- | --- |
+| `git worktree list --porcelain` | once per project directory | 30 s |
+| `git status --porcelain=v2 --branch` | once per worktree, for the `↑2 ↓1 *` on its row | 15 s |
+
+The status probe runs with `GIT_OPTIONAL_LOCKS=0`, because `git status` otherwise
+rewrites the index to save the stat cache it just refreshed — which would be a
+write to your repository from a probe you did not ask for. A directory that is not
+a repository, a machine with no `git` on `PATH`, and a probe that times out all
+produce the same result — no branch rows, or a row with no numbers — and the tree
+renders as it did before the feature existed.
+
+Three more git commands exist and none of them can run without you:
+`git for-each-ref …refs/heads/` when the **New Worktree…** picker opens, and
+`git worktree add` / `git worktree remove` from the two verbs below, each behind a
+confirmation that quotes the exact command. Nothing on a timer writes anything,
+and no branch is ever switched or deleted.
+
+### Making and unmaking worktrees
+
+**New Worktree…** is on a branch row, on a project row (a repository with one
+checkout has no branch rows, and that is exactly when you want this) and in the
+command palette. It offers the repository's local branches — minus any that
+already have a checkout, which `git worktree add` refuses — plus **New branch…**
+for a name that does not exist yet. Typing the name of a branch that does exist
+means "check that one out here", and Flock drops the `-b` accordingly.
+
+The path is not asked for: `lineage.git.worktreePath` decides it, defaulting to a
+sibling of the main worktree. The exact path appears inside the command the
+confirmation shows you. Afterwards Flock starts a session in the new checkout,
+through the same path a click on an existing branch row takes.
+
+**Remove Worktree** refuses the main worktree outright — that is the checkout your
+`.git` lives in. It warns when a running Flock session has its working directory
+inside the one you are removing (Flock cannot stop an agent mid-turn, and will not
+pretend the removal is unrelated to it). And it asks a **second** time when the
+checkout is dirty: `git worktree remove` refuses a worktree with modified or
+untracked files, so getting past that needs `--force`, and `--force` deletes them.
+The branch itself always survives — only the checkout goes away — so a worktree
+you remove can be added back.
+
+### Pull requests
+
+Off by default, behind `lineage.git.pullRequests`, and the only thing in Flock
+that reaches the network. Turning it on has Flock run
+
+```sh
+gh pr list --state all --limit 100 \
+  --json number,title,state,isDraft,headRefName,url,statusCheckRollup
+```
+
+in each project's repository — through the [`gh` CLI](https://cli.github.com) you
+installed and authenticated, never as an HTTP request from the extension, and
+never with a bundled API client. Flock does not see, store or refresh a token, and
+`gh` decides which host it talks to.
+
+`--state all` rather than the default open-only, because **merged** is the state
+that matters most on a branch row: it is the signal that the worktree beside it is
+finished and can be removed. When a branch has several requests, a live one wins
+over a finished one and the higher number wins within a tier, so the chip does not
+alternate.
+
+There is no polling timer. A repaint schedules the refresh, and the refresh is
+gated on the setting *and* a visible Sessions view — so a hidden sidebar asks
+nothing. At most once every five minutes per repository, anchored on the main
+worktree so a project with six checkouts makes one call, not six. A failure is
+remembered for fifteen minutes instead of five, because failure is the common case
+and usually permanent.
+
+Failure is silent by design. Missing `gh`, no `gh auth login`, no GitHub remote and
+a branch with no request are one outcome from the outside: the row renders exactly
+as it does with the setting off. One line goes to the **Flock** output channel, once
+per repository per window; there is no dialog and no repeating toast.
+
+**Create Pull Request…** runs `gh pr create --web`, which opens the compare page
+in your browser. Flock never submits it. The title, the body, the base branch and
+the decision to press the button are yours — a verb that created a request from a
+sidebar would turn a mis-click into a notification for everybody watching the
+repository.
 
 There is no daemon, no background service, and no Python. Your editorial layer
 (titles, summaries, deleted flags) lives in the extension's own `globalStorage`
@@ -370,7 +446,24 @@ Changing it takes effect on the next window reload.
 
 ## Privacy
 
-Nothing leaves your machine. Flock makes no network requests. It reads the
-local session roster and local transcript files, and writes only to its own
-extension storage — plus, if you explicitly opt in, the hooks plugin directory
-and `~/.lineage/events.ndjson`.
+Nothing leaves your machine unless you turn on `lineage.git.pullRequests`, which
+is off by default. Flock reads the local session roster and local transcript
+files, and writes only to its own extension storage — plus, if you explicitly opt
+in, the hooks plugin directory and `~/.lineage/events.ndjson`.
+
+The complete list of processes Flock ever starts:
+
+| Process | Reads or writes | When |
+| --- | --- | --- |
+| `claude agents --json` | read | on the roster poll |
+| `git worktree list --porcelain` | read | on the roster poll, cached 30 s |
+| `git status --porcelain=v2 --branch` | read | on repaint, cached 15 s |
+| `git for-each-ref …refs/heads/` | read | when the New Worktree… picker opens |
+| `git worktree add` | **writes** | New Worktree…, after a confirmation |
+| `git worktree remove` | **writes** | Remove Worktree, after one or two |
+| `gh pr list …` | read, **network** | only with `lineage.git.pullRequests` on |
+| `gh pr create --web` | opens a browser page | Create Pull Request… |
+| `claude`, and `tmux -L lineage` around it | — | when you start a session |
+
+Flock never edits `~/.claude/settings.json`, and there is no HTTP client anywhere
+in the extension.

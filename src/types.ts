@@ -672,6 +672,33 @@ export const COMMANDS = {
   revealBranch: 'lineage.revealBranch',
   copyBranchName: 'lineage.copyBranchName',
   copyBranchPath: 'lineage.copyBranchPath',
+  /** THE TWO VERBS THAT WRITE. Everything else in this table reads, renders or
+   *  launches; these two create and delete a checkout of the user's repository,
+   *  which is why they are the only pair here that always confirms first and
+   *  always shows the exact command it is about to run.
+   *
+   *  Both are offered in the palette as well as on a row, unlike the branch
+   *  verbs above: `newSessionInBranch` needs a worktree the tree already drew,
+   *  where the whole point of `newWorktree` is that there is not one yet — a
+   *  single-checkout repository has no branch rows at all (see
+   *  BRANCH_CHIPS_MIN), so a row-only verb would be unreachable in exactly the
+   *  case it is for. They open a picker when they arrive with no argument. */
+  newWorktree: 'lineage.newWorktree',
+  removeWorktree: 'lineage.removeWorktree',
+  /** A worktree in its own VS Code window. The other way to work in a second
+   *  checkout — an editor there rather than an agent — and the reason it is a
+   *  verb of its own rather than something `revealBranch` could cover. */
+  openWorktreeWindow: 'lineage.openWorktreeWindow',
+  /** The pull request on this branch, in the browser. Only ever drawn on a row
+   *  that HAS one (the `pullRequest` context token), and only reachable at all
+   *  with `lineage.git.pullRequests` on. */
+  openPullRequest: 'lineage.openPullRequest',
+  /** `gh pr create --web`: the compare page, in the browser, for the user to
+   *  finish. Deliberately NOT a request Flock opens itself. Every outward action
+   *  in this product ends with a human pressing the button — a verb that silently
+   *  created a pull request would be the first exception, and it would be one on
+   *  a mis-click. */
+  createPullRequest: 'lineage.createPullRequest',
   /** A scratch conversation ABOUT a project: opened at the project's rootDir
    *  with every extra directory added, and deliberately absent from the tree
    *  (see EditorialRecord.chat).
@@ -799,6 +826,17 @@ export const CONFIG_KEYS = {
    *  flat list is right for the common case of one checkout with a handful of
    *  forks in it. See viewmodel.buildViewModel. */
   groupSessionsByBranch: 'groupSessionsByBranch',
+  /** Where New Worktree… puts a new checkout. A PATTERN over `${repo}` and
+   *  `${branch}`, resolved against the repository's main worktree, because the
+   *  answer is a convention rather than a path: somebody who keeps every
+   *  checkout in `~/worktrees` wants that for every repository, not a dialog per
+   *  worktree. See worktreePathFor. */
+  gitWorktreePath: 'git.worktreePath',
+  /** THE ONE SETTING THAT REACHES THE NETWORK, and the reason it is off by
+   *  default rather than merely documented. Everything else in Flock reads local
+   *  files and local processes; turning this on has the extension run `gh pr
+   *  list`, which talks to GitHub as the user. See src/pullRequests.ts. */
+  gitPullRequests: 'git.pullRequests',
   staleAfterHours: 'staleAfterHours',
   busyStaleMinutes: 'busyStaleMinutes',
   // Notifications
@@ -1030,6 +1068,88 @@ export interface Worktree {
 }
 
 /**
+ * What one checkout can say about itself beyond its name: how far it has
+ * diverged from its upstream, and whether there is work in it that no commit
+ * holds yet.
+ *
+ * Read per WORKTREE, not per repository — that is the whole reason it is a type
+ * of its own rather than three fields on Worktree. `git worktree list` reports
+ * the same answer from any checkout of the repo; ahead/behind and dirt are
+ * facts about one directory, so they need one probe each (see src/gitBranches.ts
+ * for the caching that keeps that off the render path).
+ *
+ * Every field has a meaning for "we could not tell", and none of them is a
+ * guess: `upstream === ''` is "this branch tracks nothing", which is NOT the
+ * same as `ahead === 0 && behind === 0` ("in sync"), and the absence of the
+ * whole object is "not read yet, or not readable at all". A row with no status
+ * renders exactly as it did before this existed.
+ */
+export interface BranchStatus {
+  /** Commits this checkout has that its upstream does not. 0 when there is no
+   *  upstream to compare against — read `upstream` to tell the two apart. */
+  ahead: number;
+  /** Commits the upstream has that this checkout does not. */
+  behind: number;
+  /** The upstream ref, short (`origin/feat/x`), or '' when the branch tracks
+   *  nothing. Carried for the hover: "2 ahead" is only useful next to what it
+   *  is ahead OF. */
+  upstream: string;
+  /** TRACKED changes: staged, unstaged, or a merge conflict. */
+  dirty: boolean;
+  /** Files git has never been told about. Kept apart from `dirty` because the
+   *  two answer different questions — a row shows them as the same mark, and
+   *  Remove Worktree has to name which one it is about to delete. */
+  untracked: boolean;
+}
+
+/**
+ * The outcome of a git command Flock ran on the user's behalf.
+ *
+ * Only the two WORKTREE verbs produce one: everything else this extension asks
+ * git is a read whose failure means "render the row plainly" and needs no
+ * report. A verb the user confirmed is different — it either happened or it did
+ * not, and if it did not, the reason is git's and belongs on screen verbatim
+ * rather than paraphrased into "something went wrong".
+ */
+export interface GitCommandResult {
+  ok: boolean;
+  /** git's own output, both streams, trimmed and length-capped. Shown to the
+   *  user on failure and logged either way. */
+  output: string;
+}
+
+/** How a pull request stands. `draft` is a state of its own rather than a flag
+ *  on `open`, because a row has one word of room and draft is the one of the two
+ *  you do something different about. */
+export type PullRequestState = 'draft' | 'open' | 'merged' | 'closed';
+
+/** The check rollup, reduced to the four outcomes a row can usefully draw.
+ *  `none` covers both "no checks configured" and "gh reported none", which a row
+ *  cannot tell apart and must not pretend to. */
+export type PullRequestChecks = 'none' | 'pending' | 'pass' | 'fail';
+
+/**
+ * One pull request, as the `gh` CLI reported it.
+ *
+ * THE ONLY THING IN FLOCK THAT COMES FROM THE NETWORK, and it does not come from
+ * Flock: `gh pr list` is a binary the user installed, authenticated and pointed
+ * at their own host, and the extension reads its stdout. That indirection is the
+ * design, not a shortcut — see src/pullRequests.ts. Behind
+ * `lineage.git.pullRequests`, off by default.
+ */
+export interface PullRequest {
+  number: number;
+  title: string;
+  state: PullRequestState;
+  checks: PullRequestChecks;
+  /** The branch the request is FROM (`headRefName`) — the join key onto a branch
+   *  row, and the reason nothing else needs matching. */
+  branch: string;
+  /** The html url `gh` gave us. Opened in a browser, never fetched. */
+  url: string;
+}
+
+/**
  * A branch as the tree renders it: one chip under a project row.
  *
  * `colorIndex` is assigned by the grouping (see assignBranchColors) rather than
@@ -1118,6 +1238,15 @@ export interface BranchTreeNode {
   branch: string;
   /** The worktree directory a session started here would run in. */
   dir: string;
+  /** The repository's MAIN worktree — the same value for every branch row under
+   *  one project, and the anchor the pull-request lookup is keyed on.
+   *
+   *  Carried rather than looked up because this node is INTERNED (see branchRef):
+   *  the workbench keys expansion state on element identity, so the fields have
+   *  to be things that change when the row genuinely becomes a different row. A
+   *  repository's main worktree qualifies; its pull request, which changes when a
+   *  colleague pushes, very much does not — that is read live in branchItem. */
+  repoDir: string;
   colorIndex: number;
   primary: boolean;
   rootIds: string[];
@@ -1171,6 +1300,13 @@ export type ContextToken =
   /** The "Others (N)" tail row. Distinct from 'branch' because none of the
    *  branch verbs apply — there is no single worktree behind it. */
   | 'branchOthers'
+  /** This branch row has a pull request behind it. A THIRD token on a branch
+   *  row, never alone, and it exists for exactly one `when` clause: "Open Pull
+   *  Request in Browser" is a verb with nothing to open on a branch that has no
+   *  request, and a menu entry that reports "no pull request" when clicked is a
+   *  menu entry that should not have been drawn. Absent for everybody with
+   *  `lineage.git.pullRequests` off, which is everybody by default. */
+  | 'pullRequest'
   /** A project row that is filed under another project. A SECOND token on the
    *  row, never alone, so `viewItem =~ /;project;/` keeps matching every
    *  project row while a verb that only makes sense on a nested one (Move to
@@ -1594,6 +1730,27 @@ export interface TreeDeps {
    *  two above — a wiring without it produces the tree as it looked before
    *  branch chips existed. */
   worktreesOf?(dir: string): readonly Worktree[];
+  /** Ahead/behind and dirt for ONE checkout, from a second cache with exactly
+   *  the discipline of the one above (src/gitBranches.ts): synchronous from
+   *  cache, refreshed in the background, never blocking a paint. `undefined`
+   *  covers "not probed yet" and "not readable" alike, and both render the row
+   *  as it looked before this existed.
+   *
+   *  Deliberately NOT part of the GROUPING input the way `worktreesOf` is: the
+   *  worktree list decides which project a session belongs to, where this only
+   *  decides what a row says. Keeping it out of computeGrouping is what stops a
+   *  `git status` from ever being able to move a row. */
+  branchStatusOf?(dir: string): BranchStatus | undefined;
+  /** The pull request whose head is `branch`, from the `gh` cache
+   *  (src/pullRequests.ts). Synchronous from cache like the two above, and
+   *  `undefined` whenever `lineage.git.pullRequests` is off — which is the
+   *  default, and which is why every renderer treats absent as the normal case
+   *  rather than as a failure.
+   *
+   *  `repoDir` anchors the lookup at ONE directory per repository (the main
+   *  worktree), so a project with six checkouts asks `gh` once rather than six
+   *  times for an answer that is the same either way. */
+  pullRequestFor?(repoDir: string, branch: string): PullRequest | undefined;
   /** `lineage.branchColors` — a user palette for the branch chips. Entries are
    *  positional (index 0 is the first branch's colour); a short list fills from
    *  the built-in one, and every entry is re-validated before it reaches the
@@ -1953,6 +2110,55 @@ export interface CommandDeps {
   ): Promise<void>;
   /** Fold or unfold a project's whole branch block. */
   setBranchesCollapsed(projectId: string, collapsed: boolean): Promise<void>;
+  // ---- the worktree verbs ---------------------------------------------
+  // Every one of these is OPTIONAL and every one of them is absent from the unit
+  // doubles, which is the shape the refusal takes: a wiring without them has the
+  // verbs registered and refusing, never half-performing. They are also the only
+  // members of this interface behind which a repository gets WRITTEN to, which is
+  // why the write pair is spelled out rather than folded into one `git()`.
+  /** Where the checkout stands, from the same cache the rows render from
+   *  (src/gitBranches.ts). Remove Worktree reads it to decide how many
+   *  confirmations to ask for; undefined means it asks for one and lets git
+   *  refuse on its own, which is the safe direction. */
+  branchStatusOf?(dir: string): BranchStatus | undefined;
+  /** `lineage.git.worktreePath` — the pattern a new worktree's path is built
+   *  from. Absent falls back to the shipped default. */
+  worktreePathPattern?(): string;
+  /** The repository's local branches, most recently committed first. Read once,
+   *  when the user opens the New Worktree picker; [] leaves the picker as a
+   *  free-text field, which is the half of it that needs no git. */
+  localBranches?(dir: string): Promise<readonly string[]>;
+  /** `git worktree add`. Runs ONLY after a confirmation that showed the exact
+   *  command. `create` says which half of the picker was used — a new branch
+   *  (`-b`) or an existing one — and is not a preference. */
+  addWorktree?(opts: {
+    /** The repository's main worktree: the command's cwd, and therefore the
+     *  only repository it can possibly affect. */
+    repoDir: string;
+    path: string;
+    branch: string;
+    create: boolean;
+  }): Promise<GitCommandResult>;
+  /** `git worktree remove`. `force` may come from exactly one place — the user's
+   *  SECOND confirmation over a dirty checkout (see planWorktreeRemoval) — and
+   *  never from a default or a setting. */
+  removeWorktree?(opts: {
+    repoDir: string;
+    path: string;
+    force: boolean;
+  }): Promise<GitCommandResult>;
+  /** Drop every cached git answer for the repository at `dir` and repaint. For
+   *  the two verbs that KNOW the answer changed, so the new row appears at once
+   *  instead of at the end of a TTL. */
+  worktreesChanged?(dir: string): void;
+  /** The pull request on `branch`, from the same cache the rows render from.
+   *  undefined whenever `lineage.git.pullRequests` is off — so the verb refuses,
+   *  which is correct: with the setting off there is no request to know about. */
+  pullRequestFor?(repoDir: string, branch: string): PullRequest | undefined;
+  /** `gh pr create --web` in `dir`. Opens the compare page in the user's
+   *  browser and returns; it does not create anything, which is the whole
+   *  point. */
+  createPullRequest?(dir: string): Promise<GitCommandResult>;
   upsertProject(id: string, patch: Partial<ProjectRecord>): Promise<void>;
   /** Re-file a project under another one, or at the top level (null).
    *  Refuses a cycle (a project cannot be filed under its own descendant) and

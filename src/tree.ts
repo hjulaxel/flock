@@ -20,12 +20,14 @@ import {
 } from './types';
 import type {
   BranchInfo,
+  BranchStatus,
   BranchTreeNode,
   DisposableLike,
   GroupNode,
   ProjectGroupNode,
   ProjectRecord,
   ProviderId,
+  PullRequest,
   SessionForest,
   SessionNode,
   SessionRef,
@@ -66,9 +68,14 @@ const EMPTY_FOREST: SessionForest = {
 // change. Re-exported so importers and tests keep their existing entry point.
 import {
   BRANCH_CHIPS_MIN,
+  branchStatusLines,
+  branchTokens,
   formatAge,
+  formatBranchSync,
+  formatPullRequestChip,
   formatTokens,
   projectContextValue,
+  pullRequestLines,
   sessionContextValue,
   statusDescriptor,
   statusTone,
@@ -355,6 +362,34 @@ export class LineageTreeProvider
    * a permanent count with no row anywhere to open or dismiss — and hiding a
    * noisy folder is exactly when a user reaches for that setting.
    */
+  /**
+   * The branches this view currently accounts for, under one project — the same
+   * answer webtree.ts's `branchesOf` gives, from this view's own grouping.
+   *
+   * It exists because the worktree verbs are in the COMMAND PALETTE. The chip
+   * verbs before them were not, so "only the inline view can reach this" was a
+   * true statement and the native tree needed no way to answer; a verb reachable
+   * from the palette can be run with either view style on screen — or with the
+   * native one, whose branch rows carry the same context menu — so the answer has
+   * to come from whichever view drew the rows.
+   *
+   * Not filtered by `groupSessionsByBranch`. That setting decides whether this
+   * view draws branch rows, not which worktrees a project HAS, and a verb that
+   * refused to work because of a layout preference would be refusing for a reason
+   * the user cannot see.
+   */
+  branchesOf(projectId: string): readonly BranchInfo[] {
+    try {
+      const grouping = this.groupingFor(this.forest());
+      return (
+        grouping.projects.find((p) => p.projectId === projectId)?.branches ?? []
+      );
+    } catch (err) {
+      logError('tree.branchesOf', err);
+      return [];
+    }
+  }
+
   attentionCount(): number {
     try {
       const forest = this.forest();
@@ -486,9 +521,10 @@ export class LineageTreeProvider
     // Only the branches the user has on screen; the folded-away ones keep their
     // sessions directly under the project (unbranchedRoots), which is what stops
     // a curation decision about ROWS from hiding SESSIONS.
+    const repoDir = (branches.find((b) => b.primary) ?? branches[0])?.dir ?? '';
     for (const branch of branches) {
       if (branch.shown === false) continue;
-      out.push(this.branchRef(el.projectId, branch));
+      out.push(this.branchRef(el.projectId, branch, repoDir));
     }
     out.push(
       ...unbranchedRoots(el.rootIds, branches).map((id) => this.sessionRef(id)),
@@ -499,7 +535,14 @@ export class LineageTreeProvider
   /** Interned branch node, for the same reason sessionRef interns: the
    *  workbench keys expansion state on element identity, so a fresh object per
    *  refresh would collapse every open branch on every roster tick. */
-  private branchRef(projectId: string, branch: BranchInfo): BranchTreeNode {
+  private branchRef(
+    projectId: string,
+    branch: BranchInfo,
+    /** The repository's main worktree, the same for every branch under this
+     *  project. Passed in rather than derived here because the caller already has
+     *  the whole branch list and this function only ever sees one entry of it. */
+    repoDir: string,
+  ): BranchTreeNode {
     const key = `${projectId}\u0000${branch.name}`;
     const existing = this.branchRefs.get(key);
     const next: BranchTreeNode = {
@@ -507,6 +550,7 @@ export class LineageTreeProvider
       projectId,
       branch: branch.name,
       dir: branch.dir,
+      repoDir,
       colorIndex: branch.colorIndex,
       primary: branch.primary,
       rootIds: branch.rootIds.slice(),
@@ -514,6 +558,10 @@ export class LineageTreeProvider
     if (
       existing &&
       existing.dir === next.dir &&
+      // In the identity comparison because it is ON the node: a repository that
+      // moved is a different row, and an interned node that kept the old anchor
+      // would keep asking `gh` about a directory that is gone.
+      existing.repoDir === next.repoDir &&
       existing.primary === next.primary &&
       existing.colorIndex === next.colorIndex &&
       existing.rootIds.length === next.rootIds.length &&
@@ -598,6 +646,12 @@ export class LineageTreeProvider
    * so the colour, which is the whole of the inline row's language, has nothing
    * to live in here. What survives is what the row is FOR: the branch's name,
    * how many sessions are on it, and the fact that it opens.
+   *
+   * The status is read LIVE here rather than carried on the node, on purpose.
+   * `branchRef` interns its nodes so the workbench's expansion state survives a
+   * roster tick, which means anything stored on one has to be part of its
+   * identity — and a node whose identity changed every time a file was saved
+   * would collapse the row the user had just opened.
    */
   private branchItem(el: BranchTreeNode): vscode.TreeItem {
     const item = new vscode.TreeItem(
@@ -609,12 +663,41 @@ export class LineageTreeProvider
           : vscode.TreeItemCollapsibleState.Expanded,
     );
     item.id = nodeKey(el);
-    item.description =
-      el.rootIds.length > 0 ? String(el.rootIds.length) : undefined;
-    item.iconPath = new vscode.ThemeIcon('git-branch');
-    item.contextValue = contextValueOf(
-      el.primary ? ['branch', 'primary'] : ['branch'],
+    const status = this.safe<BranchStatus | undefined>(
+      'branchStatusOf',
+      () => this.deps.branchStatusOf?.(el.dir),
+      undefined,
     );
+    const pr = this.safe<PullRequest | undefined>(
+      'pullRequestFor',
+      () => this.deps.pullRequestFor?.(el.repoDir, el.branch),
+      undefined,
+    );
+    // Same order as the inline row draws them in — where the checkout stands, the
+    // request, then how many sessions are on it — so somebody switching renderers
+    // reads the same line in the same place. Joined by a space rather than a
+    // separator: a TreeItem description is already dim, small and right-aligned,
+    // and ' · ' in it reads as a third field.
+    const description = [
+      formatBranchSync(status),
+      pr ? formatPullRequestChip(pr) : '',
+      String(el.rootIds.length || ''),
+    ]
+      .filter((part) => part !== '')
+      .join(' ');
+    item.description = description === '' ? undefined : description;
+    item.iconPath = new vscode.ThemeIcon('git-branch');
+    // The native tree had no hover on a branch row at all, because the label and
+    // the description said everything there was. The status changes that: `↑2 ↓1
+    // *` needs somewhere to say what it is ahead OF, and `#42` needs somewhere to
+    // say what it is called.
+    item.tooltip = [
+      el.branch,
+      ...branchStatusLines(status),
+      ...pullRequestLines(pr),
+      el.dir,
+    ].join('\n');
+    item.contextValue = contextValueOf(branchTokens(el.primary, pr !== undefined));
     // Clicking an EMPTY branch starts a session in it — there is nothing to
     // open, and that is what the row is for. A branch with sessions under it
     // opens instead (the workbench toggles it), and the `+` for a new one is on
@@ -880,7 +963,11 @@ export class LineageTreeProvider
             )
           : undefined;
         return branch
-          ? this.branchRef(project.projectId, branch)
+          ? this.branchRef(
+              project.projectId,
+              branch,
+              (branches.find((b) => b.primary) ?? branches[0])?.dir ?? '',
+            )
           : project;
       }
       return grouping.folders.find((g) => g.rootIds.indexOf(el.id) >= 0);
@@ -937,6 +1024,28 @@ export class LineageTreeProvider
   ): void {
     md.appendMarkdown(`**${mdEscape(el.branch)}**${el.primary ? ' — main worktree' : ''}\n\n`);
     md.appendMarkdown(`${mdCode(el.dir)}\n\n`);
+    // The same lines branchItem put on the plain-string tooltip, because this
+    // MarkdownString REPLACES it the moment the hover resolves — a fact only
+    // stated in the plain one would appear for a frame and then vanish.
+    const status = this.safe<BranchStatus | undefined>(
+      'branchStatusOf',
+      () => this.deps.branchStatusOf?.(el.dir),
+      undefined,
+    );
+    const pr = this.safe<PullRequest | undefined>(
+      'pullRequestFor',
+      () => this.deps.pullRequestFor?.(el.repoDir, el.branch),
+      undefined,
+    );
+    for (const line of [...branchStatusLines(status), ...pullRequestLines(pr)]) {
+      md.appendMarkdown(`${mdEscape(line)}\n\n`);
+    }
+    // The url as a LINK, which is the one thing this hover can offer that the
+    // inline sidebar's plain-text tooltip cannot. `isTrusted` is on for this
+    // MarkdownString, so it is escaped like every other interpolation here.
+    if (pr && pr.url !== '') {
+      md.appendMarkdown(`[pull request #${pr.number}](${mdEscape(pr.url)})\n\n`);
+    }
     const count = el.rootIds.length;
     md.appendMarkdown(
       count === 0
@@ -1235,6 +1344,15 @@ function isDescendantOf(
 export interface TreeController extends DisposableLike {
   refresh(): void;
   revealSession(sessionId: string): Promise<void>;
+  /** The worktrees this view accounts for under one project — what a worktree
+   *  verb re-resolves its target against when the native tree is the one on
+   *  screen. See LineageTreeProvider.branchesOf. */
+  branchesOf(projectId: string): readonly BranchInfo[];
+  /** Is this view on screen? Asked by the pull-request cache, which must not talk
+   *  to GitHub for a tree nobody is looking at — the webview half already answers
+   *  the same question (WebtreeController.visible) and the two are ORed, because
+   *  either view being visible is a reason to have the answer. */
+  readonly visible: boolean;
 }
 
 /** createTreeView(VIEW_ID, {...}) + attention-badge wiring + expansion
@@ -1311,6 +1429,14 @@ export function registerTree(deps: TreeDeps): TreeController {
     refresh(): void {
       provider.refresh();
       updateBadge();
+    },
+
+    branchesOf(projectId: string): readonly BranchInfo[] {
+      return provider.branchesOf(projectId);
+    },
+
+    get visible(): boolean {
+      return view.visible === true;
     },
 
     async revealSession(sessionId: string): Promise<void> {

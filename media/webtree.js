@@ -96,6 +96,12 @@
   const RING_RADIUS = 5;
   const DOT_RADIUS = 2;
 
+  /** The pull-request chip's two class vocabularies, and the allowlist for both.
+   *  Each has a rule in webtree.css; anything not in here falls back to the
+   *  neutral member rather than becoming a class nothing styles. */
+  const PR_STATES = ['draft', 'open', 'merged', 'closed'];
+  const PR_CHECKS = ['none', 'pending', 'pass', 'fail'];
+
   // ------------------------------------------------------- the device grid
   //
   // A 1px CSS line is only ONE pixel on screen when the page is scaled by a
@@ -501,6 +507,46 @@
     el.appendChild(name);
 
     el.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
+
+    // Where the checkout stands: `↑2 ↓1 *`, already composed by the extension
+    // (formatBranchSync) because the native tree has to say the same thing and
+    // two formatters would eventually disagree. Absent on a clean, in-sync or
+    // never-probed checkout, which is why this reserves no width of its own —
+    // the common case is a row that looks exactly as it did before the numbers
+    // existed. Left of the count, so the counts stay in one column down the
+    // block whatever each row has to report.
+    if (chip.sync) {
+      const sync = document.createElement('span');
+      sync.className = 'branch-sync';
+      sync.textContent = chip.sync;
+      el.appendChild(sync);
+    }
+
+    // The pull request: `#42 ✓`, coloured by its state — and by its checks when
+    // those are failing, because a red cross on a green number is the one
+    // combination that has to resolve to "look at this". The state is a CLASS
+    // rather than a word: four colours cost no width, and the row has none to
+    // spare next to a branch name. The hover says the word.
+    //
+    // Absent for everybody with `lineage.git.pullRequests` off, which is
+    // everybody by default — so this draws nothing at all unless somebody asked
+    // for it.
+    if (chip.pr && chip.pr.label) {
+      const pr = document.createElement('span');
+      // Allowlisted, not interpolated. Both words come from the extension's own
+      // union types, so this cannot currently be anything else — but a class name
+      // built by concatenation is the sort of thing that stops being safe when
+      // somebody widens the field at the other end, and the fallbacks here are
+      // also the reason an unknown state renders as a plain chip rather than as an
+      // unstyled one.
+      pr.className =
+        'branch-pr ' +
+        (PR_STATES.indexOf(chip.pr.state) >= 0 ? chip.pr.state : 'open') +
+        ' checks-' +
+        (PR_CHECKS.indexOf(chip.pr.checks) >= 0 ? chip.pr.checks : 'none');
+      pr.textContent = chip.pr.label;
+      el.appendChild(pr);
+    }
 
     // The session count, and ONLY where it says something. Grouped, a collapsed
     // branch row has no other content — the number is all it can report about

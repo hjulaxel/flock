@@ -1,3 +1,9 @@
+# Both spellings on purpose. `node_modules/` matches a directory and NOT a
+# symlink, so working in a `git worktree` — where the usual trick is to symlink
+# node_modules at the real checkout instead of installing twice — leaves the link
+# itself untracked-but-not-ignored, and one `git add -A` commits an absolute path
+# from somebody's machine.
+node_modules
 node_modules/
 out/
 dist/
@@ -9,6 +15,11 @@ dist/
 
 # Local Claude Code settings — machine-specific, contains absolute paths.
 .claude/settings.local.json
+
+# Scratch `git worktree` checkouts made by agents working on this repo. Each is
+# a repository of its own, so `git add -A` would otherwise stage it as a
+# submodule nobody can clone.
+.claude/worktrees/
 
 # Internal planning docs — private, kept locally only.
 SPEC.md
