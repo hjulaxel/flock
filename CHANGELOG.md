@@ -4,6 +4,53 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- **Flock works with the Claude you already run.** The session list has always
+  been machine-wide, so `claude` typed into the bottom panel — or a conversation
+  the official Claude Code extension started — was already in the tree with its
+  age, its dot and its place in the fork tree. What was missing was honesty about
+  the rest: the row looked like any other and offered verbs that could not
+  possibly work on it.
+
+  A row Flock does not own now says **elsewhere** after its age, explains itself
+  in the hover, and no longer offers **Close** or **Close with Summary** —
+  closing a session Flock cannot signal only ever wrote a timestamp onto a
+  conversation that carried on running. **Wrap up** now names the host instead of
+  reporting a missing terminal.
+
+- **Clicking such a row reveals the terminal it is already in.** Flock
+  identifies it from the process tree, not from the tab's title (Claude rewrites
+  that while it runs) and not from the working directory (a shell that has `cd`'d
+  is the normal case). Revealing is the only thing done to a terminal Flock does
+  not own: nothing is typed, nothing is signalled, no transcript is touched. When
+  the evidence is ambiguous — two conversations under one shell after a `/fork`,
+  a terminal inside a terminal — it declines and you get the old offer to fork a
+  copy instead. Two Claudes on one transcript is the outcome the whole feature is
+  arranged to avoid.
+
+- **`lineage.launch.mode`.** Set it to `claudeExtension` and Flock's `+` hands new
+  conversations to the official extension's **New Conversation** command, then
+  files the session onto a tree row under the project and name your click
+  implied. The setting's description lists exactly what stops working in that
+  mode; the [reference](docs/reference.md#using-flock-alongside-the-claude-code-extension)
+  has the full per-setup table. Only offered while that extension is installed.
+
+- **A new section in the reference**, "Using Flock alongside the Claude Code
+  extension", saying per setup — Flock-launched, official extension, hand-run
+  terminal — which benefits you get and which you do not.
+
+### Fixed
+
+- **Resume no longer risks a second writer on a transcript Flock cannot see.** A
+  row reads as closed whenever the roster does not carry it, which is also what a
+  session running under a config directory no configured account names looks
+  like. A transcript written to *after* the moment Flock recorded the session
+  closed now asks before resuming, rather than starting a second Claude on it.
+  The ordinary close-then-reopen is unaffected.
+
 ## [0.1.1] — unreleased
 
 ### Added

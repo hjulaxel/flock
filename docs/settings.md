@@ -1,6 +1,6 @@
 # Settings
 
-All 24 settings, as contributed. The keys keep the `lineage.` prefix — Flock
+All 25 settings, as contributed. The keys keep the `lineage.` prefix — Flock
 was named Lineage before 0.1.0, and renaming settings keys would silently
 discard everyone's existing configuration.
 
@@ -10,6 +10,7 @@ discard everyone's existing configuration.
 | `lineage.pollIntervalMs` | `3000` | How often to poll `claude agents --json`, in milliseconds. |
 | `lineage.claudeBinary` | `""` | Full path to the `claude` CLI. Empty searches `PATH`. |
 | `lineage.terminalLocation` | `"editor"` | Where a session opens: `editor` tab, terminal `panel`, or `newWindow`. |
+| `lineage.launch.mode` | `"flock"` | Who opens a **new** conversation. `flock` opens it here, in a terminal Flock owns. `claudeExtension` runs the official Claude Code extension's **New Conversation** command instead and adopts the session onto a row once the CLI reports it — at the cost of tmux parking, the two Close verbs, account pinning, the wrap prompt and Flock-named tabs. Requires that extension; without it Flock falls back to opening the session itself and says so once. Fork is never delegated. [Details →](reference.md#using-flock-alongside-the-claude-code-extension) |
 | `lineage.tmux` | `"auto"` | Run Flock-launched sessions inside a private tmux server (`tmux -L lineage`). This upgrades workspace parking from close-and-resume to detach-and-reattach: switching away hides a session's tab while the conversation **keeps running** — busy ones too — and switching back reattaches it instantly. Requires tmux on `PATH`; without it, and always on Windows, Flock falls back to close-and-resume. Sessions started outside Flock are never wrapped either way. |
 | `lineage.groupByFolder` | `true` | Group sessions no project claims by their working directory. |
 | `lineage.onlyProjectSessions` | `false` | Show only sessions belonging to one of your projects. The roster is machine-wide, so this is the fastest way to stop seeing every directory anyone ever ran `claude` in. Ignored while you have no projects. |

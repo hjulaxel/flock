@@ -78,6 +78,14 @@ temporary chats, and much more.
   stays one click from resuming. Only **Delete** removes a row, and that is also
   undoable.
 
+- **It works with the Claude you already run.** The session list is
+  machine-wide, so `claude` typed into the bottom panel, or a conversation
+  started by the official Claude Code extension, is in the tree too — with its
+  age, its status dot and its place in the fork tree. Click one and Flock reveals
+  the terminal it is already running in rather than opening a second copy. Rows
+  Flock does not own say **elsewhere** and are never offered a verb that would
+  lie about them. [Full table →](docs/reference.md#using-flock-alongside-the-claude-code-extension)
+
 ## Requirements
 
 - **tmux.** See below. Install it before you start.
@@ -116,9 +124,10 @@ Windows does not get this, sorry. Sessions there always close and resume.
 
 ## Documentation
 
-- **[Settings](docs/settings.md)** — all 24, with defaults.
+- **[Settings](docs/settings.md)** — all 25, with defaults.
 - **[Reference](docs/reference.md)** — how it works, projects, notifications,
-  workspaces, close vs delete, naming, and the sidebar rendering modes.
+  workspaces, close vs delete, naming, the sidebar rendering modes, and what you
+  get alongside the Claude Code extension.
 
 ## Privacy
 

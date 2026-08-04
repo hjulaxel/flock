@@ -192,6 +192,89 @@ what. Set `lineage.tmux` to `off` to force the fallback anywhere else.
 Flock says this once, in a notice you can dismiss, if it finds you without tmux
 while workspaces are on. It never asks twice.
 
+## Using Flock alongside the Claude Code extension
+
+Flock does not need to be the only way you run Claude. The session list comes
+from `claude agents --json`, which is **machine-wide**, so a conversation shows
+up in the tree whoever started it. What changes between setups is not whether
+you get a row — you always do — but how much Flock is allowed to *do* with it.
+
+There are three setups, and the difference between them is one thing: whether
+Flock owns the process.
+
+| | **Flock-launched** | **Claude Code extension** | **`claude` in a terminal** |
+| --- | --- | --- | --- |
+| A row in the tree, in its project | yes | yes | yes |
+| Age, token count, status dot | yes | yes | yes |
+| Fork tree — who forked from whom | exact | inferred | inferred |
+| Notifications: dot, bell, toast | yes | yes | yes |
+| Branch colour, worktree grouping | yes | yes | yes |
+| Rename the row, mute it, delete it | yes | yes | yes |
+| **Fork Here** — branch off a copy | yes | yes | yes |
+| Copy Session ID | yes | yes | yes |
+| Click the row → the session | reveals its tab | reveals the terminal, when it is running in one | reveals that terminal |
+| **Close** / **Close with Summary** | yes | no | no |
+| **Wrap up** prompt | yes | no | no |
+| tmux parking on a workspace switch | yes | no | no |
+| Account routing and pinning | yes | no | no |
+| Flock-named tab | yes | no | no |
+
+**Exact versus inferred lineage.** Flock's own launches pre-mint the session id,
+so a fork's parent is recorded rather than worked out. For everything else the
+edge is read back from the transcript, and from the launching process's command
+line where that is readable — good enough that a `/fork` typed into a panel
+terminal nests correctly, and honest enough to leave a row at the top level
+rather than guess. A wrong edge is worse than no edge.
+
+**Rows Flock does not own say so.** They carry a quiet **elsewhere** after the
+age, and the hover spells it out. The verbs that could only lie about such a row
+are not in its menu: closing a session Flock cannot signal would write a
+timestamp onto a conversation that carries on running, and Wrap needs a terminal
+to type into.
+
+**Clicking a row reveals, it never duplicates.** For a session running in an
+integrated terminal — `claude` in the bottom panel, or the extension with
+`claudeCode.useTerminal` on — Flock identifies that terminal from the process
+tree (`Terminal.processId` is the shell; the session's row carries Claude's pid;
+Claude is a descendant) and brings the tab forward. That is the whole of the
+interaction: nothing is typed into it, nothing is signalled, no transcript is
+opened. The match declines whenever it is not certain — two conversations under
+one shell after a `/fork`, a terminal inside a terminal — and then you get the
+old behaviour, an offer to fork a copy you own. Two Claudes on one transcript is
+the outcome all of this exists to avoid.
+
+**Handing new conversations to the extension.** Set `lineage.launch.mode` to
+`claudeExtension` and Flock's `+` runs the extension's **New Conversation**
+command instead of opening a terminal. Flock then watches for the session to
+appear on the roster and files it under the project and name your click implied.
+The right-hand column of the table above is what you get from then on — the row
+and the tree, not the ownership verbs. The setting is only honoured while that
+extension is installed; without it Flock opens the session itself and says so
+once.
+
+Two things the mode deliberately does not do:
+
+- **Fork is never delegated.** Nothing the extension contributes accepts a
+  session id or a resume target, so there is no way to ask it for a branch of a
+  specific conversation. Fork always opens Flock's own terminal, which is also
+  the only way it can inherit the parent's history.
+- **Picking an account by hand overrides it.** A delegated launch runs under the
+  delegate's own environment, so it cannot be pinned to one of your
+  subscriptions. **New Session From…** therefore keeps launching here.
+
+**What Flock never does to somebody else's session.** It does not attach to a
+pty it did not create, write to a transcript another process is holding, send
+keystrokes to a terminal it does not own, or close one. Terminals Flock does not
+own are also left alone by workspace switching.
+
+### Codex, Gemini and other CLIs
+
+Session rows come from the Claude CLI's own registry, so today every observed
+session is a Claude session. The other provider ids exist so a **project** can
+declare what it runs — that is what picks the logo — and so an account can keep
+its own config directory. They are not yet somewhere a session starts: the
+launcher execs one binary.
+
 ## Close and delete
 
 The tree is a map of your work, and **tab state is not tree membership**: a
