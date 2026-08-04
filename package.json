@@ -218,6 +218,12 @@
         "icon": "$(git-branch)"
       },
       {
+        "command": "lineage.forkActiveSession",
+        "title": "Fork Active Session",
+        "category": "Flock",
+        "icon": "$(repo-forked)"
+      },
+      {
         "command": "lineage.forkAndCompact",
         "title": "Fork and Compact",
         "category": "Flock",
@@ -501,24 +507,29 @@
           "group": "navigation@1"
         },
         {
-          "command": "lineage.newProject",
-          "when": "view == lineageSessions",
+          "command": "lineage.forkActiveSession",
+          "when": "view == lineageSessions && lineage.hasForkable",
           "group": "navigation@2"
         },
         {
-          "command": "lineage.reopenProject",
+          "command": "lineage.newProject",
           "when": "view == lineageSessions",
           "group": "navigation@3"
         },
         {
+          "command": "lineage.reopenProject",
+          "when": "view == lineageSessions",
+          "group": "navigation@4"
+        },
+        {
           "command": "lineage.showOnlyActiveSessions",
           "when": "view == lineageSessions && !lineage.onlyActive",
-          "group": "navigation@4"
+          "group": "navigation@5"
         },
         {
           "command": "lineage.showAllSessions",
           "when": "view == lineageSessions && lineage.onlyActive",
-          "group": "navigation@4"
+          "group": "navigation@5"
         },
         {
           "command": "lineage.refresh",
@@ -556,24 +567,29 @@
           "group": "navigation@1"
         },
         {
-          "command": "lineage.newProject",
-          "when": "view == lineageSessionsInline",
+          "command": "lineage.forkActiveSession",
+          "when": "view == lineageSessionsInline && lineage.hasForkable",
           "group": "navigation@2"
         },
         {
-          "command": "lineage.reopenProject",
+          "command": "lineage.newProject",
           "when": "view == lineageSessionsInline",
           "group": "navigation@3"
         },
         {
+          "command": "lineage.reopenProject",
+          "when": "view == lineageSessionsInline",
+          "group": "navigation@4"
+        },
+        {
           "command": "lineage.showOnlyActiveSessions",
           "when": "view == lineageSessionsInline && !lineage.onlyActive",
-          "group": "navigation@4"
+          "group": "navigation@5"
         },
         {
           "command": "lineage.showAllSessions",
           "when": "view == lineageSessionsInline && lineage.onlyActive",
-          "group": "navigation@4"
+          "group": "navigation@5"
         },
         {
           "command": "lineage.refresh",

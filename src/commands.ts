@@ -1492,6 +1492,136 @@ function forkableAncestor(
 }
 
 /**
+ * Does the tree hold a row a fork could target at all?
+ *
+ * The predicate behind `CONTEXT_HAS_FORKABLE`, exported so the button's `when`
+ * clause and the verb's own refusal are computed from one line rather than two
+ * that can drift — the same rule the ownership answer follows (see hosts.ts).
+ *
+ * Ghosts are excluded because a ghost is INFERRED from a child's edge and may
+ * have no transcript anywhere; deleted rows because they are not on screen, and
+ * a button must never be lit by something the user cannot see.
+ */
+export function hasForkableRow(forest: SessionForest): boolean {
+  for (const node of forest.nodes.values()) {
+    if (!node.deleted && !node.ghost) return true;
+  }
+  return false;
+}
+
+/** Why the view title's fork button chose what it chose. Carried out of the
+ *  resolution rather than thrown away, because two of the five answers are not
+ *  a session at all and the handler has to do something different with each. */
+export type ForkTargetWhy =
+  /** A terminal in this window is bound to a session and is the ACTIVE one.
+   *  Whatever else is in the tree, that is the conversation on screen. */
+  | 'active'
+  /** No bound terminal has the focus, but one live session was prompted
+   *  strictly more recently than every other — the conversation you were last
+   *  talking to, which is the same thing the age column on each row reports. */
+  | 'recent'
+  /** Exactly one live session has any history to branch off, so there is
+   *  nothing for the answer to be ambiguous about. */
+  | 'only'
+  /** Several candidates and no way to rank them, or only closed ones. Ask. */
+  | 'ask'
+  /** Nothing in the tree at all. */
+  | 'empty';
+
+export interface ForkTargetResolution {
+  /** The session to fork, or undefined when the verb must ask (or refuse). */
+  sessionId?: string;
+  why: ForkTargetWhy;
+}
+
+/**
+ * WHICH conversation the fork button in the view title is about.
+ *
+ * A `view/title` command is invoked with no argument, so unlike every row verb
+ * this one cannot be handed its target — and a toolbar button whose first act is
+ * a QuickPick is not a button. So it resolves "the session you are looking at"
+ * from the window itself, in the order the window can actually answer it:
+ *
+ *  1. The ACTIVE terminal, when Flock owns it. Direct evidence: that tab has the
+ *     keyboard, so that is the conversation on screen.
+ *  2. Failing that, the live session prompted most recently — the age on the row
+ *     is exactly this number, so the top candidate is the row that reads
+ *     freshest. Only a STRICT maximum counts.
+ *  3. Failing that, the only live session there is.
+ *
+ * Everything else asks. That refusal is the point of the function: forking the
+ * wrong conversation cannot be undone by clicking again — you are left with a
+ * branch of a thread you were not in, beside the one you meant — so a tie, an
+ * unranked pair, or a tree holding nothing but closed rows all fall through to
+ * the picker `forkSession` has always used. Guessing is only allowed where the
+ * evidence is singular.
+ */
+export function activeForkTarget(deps: CommandDeps): ForkTargetResolution {
+  const forest = deps.getForest();
+
+  // (1) The bound terminal with the keyboard. Read through `tipOf` because the
+  // binding lives under the id the terminal LAUNCHED with, while the row may
+  // have been re-minted since (a resume, a /clear, a compaction).
+  let active: string | null = null;
+  try {
+    active = deps.activeSessionId?.() ?? null;
+  } catch (err) {
+    // A missing or throwing host is not a reason to fail the click; the tiers
+    // below still answer.
+    logError('commands.activeForkTarget', err);
+  }
+  if (active !== null && active !== '') {
+    const tip = deps.tipOf(active);
+    // Only a DELETED row disqualifies it — that row is off screen, so it cannot
+    // be the one being looked at. Anything else is trusted even when the forest
+    // has no row for it yet: a session launched a second ago is bound here and
+    // not yet on the roster, and falling through from it would fork a DIFFERENT
+    // conversation, which is the single outcome this resolution exists to
+    // prevent. `forkFlow` still says "send one message first" if there is no
+    // history to branch off, which is the honest answer to that click.
+    if (forest.nodes.get(tip)?.deleted !== true) {
+      return { sessionId: tip, why: 'active' };
+    }
+  }
+
+  // (2)/(3) A live row with history. `forkableAncestor` rather than
+  // `hasTranscript`, so an unstarted branch counts through its parent's
+  // transcript exactly as it does when its own row is clicked.
+  const candidates = orderedNodes(forest).filter(
+    (node) =>
+      !node.deleted &&
+      isLive(node) &&
+      forkableAncestor(deps, node.id) !== undefined,
+  );
+  if (candidates.length === 1) {
+    return { sessionId: candidates[0].id, why: 'only' };
+  }
+  if (candidates.length > 1) {
+    // Descending by when the USER last spoke to it. A strict maximum is
+    // required: two rows that both report no prompt at all (or the same one)
+    // are not ranked by this, they are simply unordered, and picking the first
+    // would be the coin flip the whole function refuses to make.
+    const ranked = [...candidates].sort(
+      (a, b) => (b.lastPromptAt ?? -1) - (a.lastPromptAt ?? -1),
+    );
+    const top = ranked[0];
+    const runnerUp = ranked[1];
+    if (
+      top.lastPromptAt !== undefined &&
+      (runnerUp.lastPromptAt ?? -1) < top.lastPromptAt
+    ) {
+      return { sessionId: top.id, why: 'recent' };
+    }
+    return { why: 'ask' };
+  }
+
+  // No live candidate. The tree may still hold CLOSED conversations, which a
+  // fork branches off perfectly well (that is what Fork on an archived row is),
+  // but nothing here can say which — so the picker lists them.
+  return hasForkableRow(forest) ? { why: 'ask' } : { why: 'empty' };
+}
+
+/**
  * Fork = mint a child uuid, record the parent edge BEFORE launching, then
  * launch `--fork-session --resume <parent> --session-id <child>`. The edge is
  * exact by construction; nothing about it is ever inferred.
@@ -3586,6 +3716,36 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
 
   register(COMMANDS.forkSession, 'fork session', async (arg?: unknown) => {
     const parentId = await targetSession(deps, arg, 'Fork which session?', {
+      liveOnly: false,
+    });
+    if (!parentId) return;
+    await forkFlow(deps, parentId);
+  });
+
+  // The fork button in the view title, which is handed no row and no argument —
+  // so it works out which conversation it is about (see `activeForkTarget`) and
+  // asks only where the evidence genuinely runs out.
+  register(COMMANDS.forkActiveSession, 'fork the active session', async () => {
+    const target = activeForkTarget(deps);
+    if (target.sessionId !== undefined) {
+      // Logged with the reason: "why did the top bar fork THAT one" is the
+      // question this button will be asked, and the tier is the answer.
+      log('fork: top-bar target', shortId(target.sessionId), `(${target.why})`);
+      await forkFlow(deps, target.sessionId);
+      return;
+    }
+    if (target.why === 'empty') {
+      // Reachable from the palette only — the button's `when` clause is off in
+      // this state — but a verb that silently does nothing is worse than one
+      // that says why.
+      void vscode.window.showInformationMessage(
+        'Flock: nothing to fork yet — no Claude sessions in the tree.',
+      );
+      return;
+    }
+    // Several candidates and no way to rank them. Ask, rather than fork a
+    // conversation the user was not in.
+    const parentId = await targetSession(deps, undefined, 'Fork which session?', {
       liveOnly: false,
     });
     if (!parentId) return;
