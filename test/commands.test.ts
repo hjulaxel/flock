@@ -735,6 +735,7 @@ function chatDeps(
     markSeen: async () => undefined,
     notificationsEnabled: () => true,
     setOnlyActiveSessions: async () => undefined,
+    setAccountsSection: async () => undefined,
     selectedSessions: () => [],
     switchWorkspace: async () => undefined,
     activeWorkspace: () => null,

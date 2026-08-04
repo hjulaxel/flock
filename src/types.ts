@@ -110,6 +110,19 @@ export const CONTEXT_NATIVE_TREE = 'lineage.nativeTree';
  *  and off halves are two commands with complementary `when` clauses and
  *  different icons, the same shape the bell already uses (CONTEXT_HAS_UNSEEN). */
 export const CONTEXT_ONLY_ACTIVE = 'lineage.onlyActive';
+/** The tree holds at least one row a fork could target. Gates the fork button
+ *  in the view title, whose whole job is to branch off the conversation you are
+ *  looking at — on a machine with no sessions running there is nothing for it to
+ *  be about, and a button that can only ever report "nothing to fork" is worse
+ *  than no button.
+ *
+ *  DELIBERATELY COARSE. It answers "is there a row at all", not "does that row
+ *  have a transcript on disk yet": the precise refusal costs a `hasTranscript`
+ *  stat per node and would have to be recomputed on every rebuild, and
+ *  `forkFlow` already declines an unstarted conversation with the one sentence
+ *  that actually helps ("send one message first"). So this hides the button when
+ *  the tree is empty, and the verb stays honest for everything past that. */
+export const CONTEXT_HAS_FORKABLE = 'lineage.hasForkable';
 /** TWO OR MORE session rows are selected in whichever view is on screen.
  *
  *  It exists to make a menu entry honest. The workbench opens a row's context
@@ -588,6 +601,19 @@ export const COMMANDS = {
    *  history you wanted to keep, or forking a context that is already too big
    *  to work in. The parent is never touched. */
   forkAndCompact: 'lineage.forkAndCompact',
+  /** Fork from the VIEW TITLE, where there is no row to read a target off.
+   *
+   *  A separate id rather than a second `forkSession` entry, for two reasons
+   *  that both matter. A `view/title` command is invoked with no argument at
+   *  all, so `forkSession` up there would reach `targetSession`'s QuickPick
+   *  every single time — a picker is the one thing a toolbar button must not
+   *  be. And a contributed command carries exactly one icon: `forkSession`
+   *  wears `$(git-branch)` on every session row's inline strip, and the top bar
+   *  wants `$(repo-forked)`, which is the glyph for "branch off THIS one".
+   *
+   *  It resolves its own target — see `activeForkTarget` — and asks only when
+   *  the answer would otherwise be a guess. */
+  forkActiveSession: 'lineage.forkActiveSession',
   /** REMOVED — `lineage.askSession`, "Ask in a Fork…". A fork whose
    *  first turn came out of an input box. Every fork already opens a terminal
    *  with a cursor in it, so the verb's whole contribution was moving the
@@ -755,6 +781,22 @@ export const COMMANDS = {
   // a switch needs one command per position.
   showOnlyActiveSessions: 'lineage.showOnlyActiveSessions',
   showAllSessions: 'lineage.showAllSessions',
+  /** The Accounts SECTION's switch, split in two for the same reason as the pair
+   *  above: one setting, two ids, complementary `when` clauses, because a
+   *  contributed entry cannot say which way it is about to go.
+   *
+   *  Why the section has a switch at all. VS Code merges a view's title-bar
+   *  buttons into the CONTAINER header — the row that reads FLOCK — only while
+   *  that container has exactly one visible view. Accounts was the second one, so
+   *  every Flock button sat a row below the name with its own `...` beside it.
+   *  Folding Accounts away is what puts the bell up on the FLOCK row.
+   *
+   *  It hides a SECTION, never a feature: the ten account verbs stay registered,
+   *  routing and pinning are untouched, and this pair lives in the gear menu so
+   *  the way back is one click from where the section used to be. Reads and
+   *  writes `lineage.accounts.section`. */
+  showAccountsSection: 'lineage.showAccountsSection',
+  hideAccountsSection: 'lineage.hideAccountsSection',
   // ACCOUNTS. Ten verbs, and they live here rather than in a table of their own
   // next to the view for the reason every other id does: a test cross-checks
   // THIS object against the manifest in both directions, so a second table is a
@@ -854,6 +896,13 @@ export const CONFIG_KEYS = {
    *  manifest's view contribution matches on `config.lineage.accounts.enabled`,
    *  which is this key spelled the way a when-clause spells it. */
   accountsEnabled: 'accounts.enabled',
+  /** Draw Accounts as a SECTION of the Flock container. OFF by default, and
+   *  that default is the reason the bell sits on the FLOCK row: a container
+   *  showing two views gives each of them a header of its own, so every button
+   *  landed a row lower behind an overflow `...`. AND-ed with `accountsEnabled`
+   *  in the view's when-clause — `accountsEnabled` stays the feature's off
+   *  switch, this only decides whether the list is drawn in the sidebar. */
+  accountsSection: 'accounts.section',
 } as const;
 
 /** Age past which `lineage.deleteStale` pre-selects a session. Not a filter —
@@ -2075,6 +2124,17 @@ export interface CommandDeps {
     title?: string;
   }): Promise<{ label: string } | null>;
   focusSession(sessionId: string): boolean;         // bound-terminal show
+  /** The session whose terminal is the ACTIVE one in this window, or null when
+   *  the active terminal is not one of ours (or there is none).
+   *
+   *  This is the closest thing the extension has to "the conversation you are
+   *  looking at", and it is what the view title's fork and `+` buttons resolve
+   *  their target through: a toolbar button gets no row and no argument, so
+   *  without it the only honest answer either of them could give is a picker.
+   *
+   *  Optional, and every unit double may omit it: absent means those two verbs
+   *  simply skip that tier and fall through to the next one. */
+  activeSessionId?(): string | null;
   renameTerminal(sessionId: string, name: string): Promise<boolean>;
   sendTextToSession(sessionId: string, text: string): boolean;
   closeTerminal(sessionId: string): boolean;
@@ -2183,6 +2243,13 @@ export interface CommandDeps {
    *  two commands that call it each know the value they mean, and the state the
    *  user reads is the view-title icon, which the context key drives. */
   setOnlyActiveSessions(on: boolean): Promise<void>;
+  // ---- the Accounts section -----------------------------------------------
+  /** Write `lineage.accounts.section` — whether Accounts is drawn as a second
+   *  section of the Flock container. A setter and no getter, exactly like the
+   *  filter above: the two commands that call it each know the value they mean,
+   *  and the state the user reads is which of the two the gear menu is
+   *  offering, which the view's own `when` clause decides. */
+  setAccountsSection(on: boolean): Promise<void>;
   // ---- multi-select -------------------------------------------------------
   /** The session ids selected in whichever view is on screen, top to bottom, or
    *  [] when nothing is or no view has reported one.

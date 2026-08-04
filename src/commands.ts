@@ -896,21 +896,106 @@ function openWorkspaceFolder(): string | undefined {
   }
 }
 
+/** Which of the four questions "where does this session go" got answered, and
+ *  by what. Carried out of the resolution so the log line can say why the `+`
+ *  landed where it did — the only question this button ever gets asked. */
+export type NewSessionWhy =
+  /** This window is scoped to a project workspace. The most explicit statement
+   *  of "the project I am working in" the product has: the user switched to it. */
+  | 'workspace'
+  /** A project claims the folder this window is open on. */
+  | 'folder-project'
+  /** No project claims the window, but the session with the keyboard belongs to
+   *  one — so that is the project being worked in right now. */
+  | 'session-project'
+  /** No project anywhere near this window, but it is open on a folder. Start
+   *  there, exactly as the `+` always has. */
+  | 'folder'
+  /** The window makes no claim at all. The one case that still asks. */
+  | 'ask';
+
+export interface NewSessionTarget {
+  /** Hand to `newSessionInProjectFlow` — the path that asks nothing and names
+   *  the session after the project. */
+  projectId?: string;
+  /** Hand to `newSessionFlow` — no project claims this, so the directory's own
+   *  basename is the name. */
+  cwd?: string;
+  why: NewSessionWhy;
+}
+
 /**
- * Where the view title's `+` starts a session, with nothing asked: the project
- * the window is open on.
+ * Where the view title's `+` starts a session, with nothing asked.
  *
- * An open folder INSIDE a project launches at the project's own directory
- * rather than at the folder — the `+` files the session under the project row
- * you are already looking at, and that is the directory every other session in
- * it was started from. Undefined means the window makes no claim, and the
- * caller falls back to the picker.
+ * A `+` that opens a dialog is not a `+` (see `newSessionInProjectFlow`, which
+ * has said so since the project rows got theirs), and this button used to open
+ * one for a whole class of windows that plainly did have an answer. It read the
+ * WINDOW's open folder and nothing else, so a window scoped to a Flock project
+ * workspace — the feature whose entire purpose is to say which project you are
+ * working in — got a folder picker whenever the workspace happened not to be
+ * open on a folder as well. Worse, a window open inside project A while scoped
+ * to project B silently started the session in A.
+ *
+ * So the project scope is asked FIRST, and the three answers below it are the
+ * remaining ways a window can name a project, strongest evidence first. Only a
+ * window that claims nothing at all — no workspace, no folder, no session of
+ * ours with the keyboard — still gets the picker.
+ *
+ * A project resolves to a PROJECT rather than to its directory, so the launch
+ * goes through the same no-questions path the project row's `+` uses and is
+ * named after the project. A folder that no project claims stays a folder.
  */
-function defaultLaunchFolder(deps: CommandDeps): string | undefined {
-  const open = openWorkspaceFolder();
-  if (open === undefined) return undefined;
+export function newSessionTarget(deps: CommandDeps): NewSessionTarget {
   const visible = deps.allProjects().filter((p) => p.hidden !== true);
-  return matchProject(visible, open)?.dir ?? open;
+  /** Hidden projects are excluded above, so a workspace or a cwd pointing at
+   *  one falls through rather than starting a session under a row that has been
+   *  closed out of the tree. */
+  const claims = (cwd: string | undefined): string | undefined =>
+    matchProject(visible, cwd ?? '')?.project.id;
+
+  // (1) The project workspace this window is scoped to. Re-checked against the
+  // visible set: the id is persisted per window, so it outlives the project
+  // being closed or deleted.
+  try {
+    const scoped = deps.activeWorkspace();
+    if (scoped !== null && visible.some((p) => p.id === scoped)) {
+      return { projectId: scoped, why: 'workspace' };
+    }
+  } catch (err) {
+    logError('commands.newSessionTarget.workspace', err);
+  }
+
+  const open = openWorkspaceFolder();
+
+  // (2) A project owning the folder this window is open on.
+  const ofFolder = claims(open);
+  if (ofFolder !== undefined) {
+    return { projectId: ofFolder, why: 'folder-project' };
+  }
+
+  // (3) The project of the session with the keyboard. Below the folder's
+  // project and above the bare folder: a window open on something no project
+  // claims, with a project's session active in it, is a window working in that
+  // project — which is what the `+` is being asked about.
+  try {
+    const active = deps.activeSessionId?.() ?? null;
+    if (active !== null && active !== '') {
+      const tip = deps.tipOf(active);
+      const node = deps.getForest().nodes.get(tip);
+      const ofSession = claims(node?.cwd ?? deps.getRecord(tip)?.cwd);
+      if (ofSession !== undefined) {
+        return { projectId: ofSession, why: 'session-project' };
+      }
+    }
+  } catch (err) {
+    logError('commands.newSessionTarget.session', err);
+  }
+
+  // (4) The folder itself, unclaimed. Unchanged behaviour for a window that is
+  // simply open on a directory somebody runs claude in.
+  if (open !== undefined) return { cwd: open, why: 'folder' };
+
+  return { why: 'ask' };
 }
 
 /** Projects first — they are the unit of organisation, so they are the unit of
@@ -2007,6 +2092,41 @@ async function safeAsync<T>(
 }
 
 /**
+ * The `+`'s hand-off: start the session `newSessionTarget` resolved, and ask
+ * only when it resolved nothing.
+ *
+ * Shared with "New Session on This Account" — the same click with the
+ * subscription named by hand. The two used to resolve a directory through one
+ * helper and then diverge into their own launch calls, which is exactly how a
+ * change to what `+` means goes missing from the account variant.
+ */
+async function newSessionAt(
+  deps: AccountCommandDeps,
+  target: NewSessionTarget,
+  account?: AccountProfile,
+): Promise<void> {
+  if (target.projectId !== undefined) {
+    // The reason, not just the answer: "why did `+` start it THERE" is the only
+    // question this button gets, and the tier is the whole answer.
+    log(
+      'new: in project',
+      deps.getProject(target.projectId)?.name ?? shortId(target.projectId),
+      `(${target.why})`,
+    );
+    await newSessionInProjectFlow(deps, target.projectId, account);
+    return;
+  }
+  if (target.cwd !== undefined) {
+    log('new: in folder', target.cwd, `(${target.why})`);
+    await newSessionFlow(deps, target.cwd, account);
+    return;
+  }
+  const folder = await pickLaunchFolder(deps);
+  if (!folder) return;
+  await newSessionFlow(deps, folder.cwd, account);
+}
+
+/**
  * Repair the transcript's resume leaf, and say so in the log.
  *
  * Deliberately silent in the UI. The repair restores the history the user
@@ -2075,6 +2195,136 @@ function forkableAncestor(
     current = next;
   }
   return undefined;
+}
+
+/**
+ * Does the tree hold a row a fork could target at all?
+ *
+ * The predicate behind `CONTEXT_HAS_FORKABLE`, exported so the button's `when`
+ * clause and the verb's own refusal are computed from one line rather than two
+ * that can drift — the same rule the ownership answer follows (see hosts.ts).
+ *
+ * Ghosts are excluded because a ghost is INFERRED from a child's edge and may
+ * have no transcript anywhere; deleted rows because they are not on screen, and
+ * a button must never be lit by something the user cannot see.
+ */
+export function hasForkableRow(forest: SessionForest): boolean {
+  for (const node of forest.nodes.values()) {
+    if (!node.deleted && !node.ghost) return true;
+  }
+  return false;
+}
+
+/** Why the view title's fork button chose what it chose. Carried out of the
+ *  resolution rather than thrown away, because two of the five answers are not
+ *  a session at all and the handler has to do something different with each. */
+export type ForkTargetWhy =
+  /** A terminal in this window is bound to a session and is the ACTIVE one.
+   *  Whatever else is in the tree, that is the conversation on screen. */
+  | 'active'
+  /** No bound terminal has the focus, but one live session was prompted
+   *  strictly more recently than every other — the conversation you were last
+   *  talking to, which is the same thing the age column on each row reports. */
+  | 'recent'
+  /** Exactly one live session has any history to branch off, so there is
+   *  nothing for the answer to be ambiguous about. */
+  | 'only'
+  /** Several candidates and no way to rank them, or only closed ones. Ask. */
+  | 'ask'
+  /** Nothing in the tree at all. */
+  | 'empty';
+
+export interface ForkTargetResolution {
+  /** The session to fork, or undefined when the verb must ask (or refuse). */
+  sessionId?: string;
+  why: ForkTargetWhy;
+}
+
+/**
+ * WHICH conversation the fork button in the view title is about.
+ *
+ * A `view/title` command is invoked with no argument, so unlike every row verb
+ * this one cannot be handed its target — and a toolbar button whose first act is
+ * a QuickPick is not a button. So it resolves "the session you are looking at"
+ * from the window itself, in the order the window can actually answer it:
+ *
+ *  1. The ACTIVE terminal, when Flock owns it. Direct evidence: that tab has the
+ *     keyboard, so that is the conversation on screen.
+ *  2. Failing that, the live session prompted most recently — the age on the row
+ *     is exactly this number, so the top candidate is the row that reads
+ *     freshest. Only a STRICT maximum counts.
+ *  3. Failing that, the only live session there is.
+ *
+ * Everything else asks. That refusal is the point of the function: forking the
+ * wrong conversation cannot be undone by clicking again — you are left with a
+ * branch of a thread you were not in, beside the one you meant — so a tie, an
+ * unranked pair, or a tree holding nothing but closed rows all fall through to
+ * the picker `forkSession` has always used. Guessing is only allowed where the
+ * evidence is singular.
+ */
+export function activeForkTarget(deps: CommandDeps): ForkTargetResolution {
+  const forest = deps.getForest();
+
+  // (1) The bound terminal with the keyboard. Read through `tipOf` because the
+  // binding lives under the id the terminal LAUNCHED with, while the row may
+  // have been re-minted since (a resume, a /clear, a compaction).
+  let active: string | null = null;
+  try {
+    active = deps.activeSessionId?.() ?? null;
+  } catch (err) {
+    // A missing or throwing host is not a reason to fail the click; the tiers
+    // below still answer.
+    logError('commands.activeForkTarget', err);
+  }
+  if (active !== null && active !== '') {
+    const tip = deps.tipOf(active);
+    // Only a DELETED row disqualifies it — that row is off screen, so it cannot
+    // be the one being looked at. Anything else is trusted even when the forest
+    // has no row for it yet: a session launched a second ago is bound here and
+    // not yet on the roster, and falling through from it would fork a DIFFERENT
+    // conversation, which is the single outcome this resolution exists to
+    // prevent. `forkFlow` still says "send one message first" if there is no
+    // history to branch off, which is the honest answer to that click.
+    if (forest.nodes.get(tip)?.deleted !== true) {
+      return { sessionId: tip, why: 'active' };
+    }
+  }
+
+  // (2)/(3) A live row with history. `forkableAncestor` rather than
+  // `hasTranscript`, so an unstarted branch counts through its parent's
+  // transcript exactly as it does when its own row is clicked.
+  const candidates = orderedNodes(forest).filter(
+    (node) =>
+      !node.deleted &&
+      isLive(node) &&
+      forkableAncestor(deps, node.id) !== undefined,
+  );
+  if (candidates.length === 1) {
+    return { sessionId: candidates[0].id, why: 'only' };
+  }
+  if (candidates.length > 1) {
+    // Descending by when the USER last spoke to it. A strict maximum is
+    // required: two rows that both report no prompt at all (or the same one)
+    // are not ranked by this, they are simply unordered, and picking the first
+    // would be the coin flip the whole function refuses to make.
+    const ranked = [...candidates].sort(
+      (a, b) => (b.lastPromptAt ?? -1) - (a.lastPromptAt ?? -1),
+    );
+    const top = ranked[0];
+    const runnerUp = ranked[1];
+    if (
+      top.lastPromptAt !== undefined &&
+      (runnerUp.lastPromptAt ?? -1) < top.lastPromptAt
+    ) {
+      return { sessionId: top.id, why: 'recent' };
+    }
+    return { why: 'ask' };
+  }
+
+  // No live candidate. The tree may still hold CLOSED conversations, which a
+  // fork branches off perfectly well (that is what Fork on an archived row is),
+  // but nothing here can say which — so the picker lists them.
+  return hasForkableRow(forest) ? { why: 'ask' } : { why: 'empty' };
 }
 
 /**
@@ -4144,19 +4394,13 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
 
   // ---------------------------------------------------------------- new
 
-  // The `+` in the view title. It asks nothing when the window is open on a
-  // folder — that folder, or the project owning it, IS the answer — and falls
-  // back to the picker only when there is genuinely no window to read it off:
-  // no folder open, or a multi-root window with no editor to break the tie.
+  // The `+` in the view title, and it asks NOTHING that a window can answer for
+  // it: the project this window is scoped to, the project owning its folder, the
+  // project of the session holding the keyboard, or that folder — see
+  // `newSessionTarget`. The picker is left for the one window that claims none of
+  // the four, which is a window with no folder and nothing of ours running in it.
   register(COMMANDS.newSession, 'new session', async () => {
-    const cwd = defaultLaunchFolder(deps);
-    if (cwd !== undefined) {
-      await newSessionFlow(deps, cwd);
-      return;
-    }
-    const folder = await pickLaunchFolder(deps);
-    if (!folder) return;
-    await newSessionFlow(deps, folder.cwd);
+    await newSessionAt(deps, newSessionTarget(deps));
   });
 
   // The same verb with the question forced back on, for the one case the
@@ -4172,6 +4416,36 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
 
   register(COMMANDS.forkSession, 'fork session', async (arg?: unknown) => {
     const parentId = await targetSession(deps, arg, 'Fork which session?', {
+      liveOnly: false,
+    });
+    if (!parentId) return;
+    await forkFlow(deps, parentId);
+  });
+
+  // The fork button in the view title, which is handed no row and no argument —
+  // so it works out which conversation it is about (see `activeForkTarget`) and
+  // asks only where the evidence genuinely runs out.
+  register(COMMANDS.forkActiveSession, 'fork the active session', async () => {
+    const target = activeForkTarget(deps);
+    if (target.sessionId !== undefined) {
+      // Logged with the reason: "why did the top bar fork THAT one" is the
+      // question this button will be asked, and the tier is the answer.
+      log('fork: top-bar target', shortId(target.sessionId), `(${target.why})`);
+      await forkFlow(deps, target.sessionId);
+      return;
+    }
+    if (target.why === 'empty') {
+      // Reachable from the palette only — the button's `when` clause is off in
+      // this state — but a verb that silently does nothing is worse than one
+      // that says why.
+      void vscode.window.showInformationMessage(
+        'Flock: nothing to fork yet — no Claude sessions in the tree.',
+      );
+      return;
+    }
+    // Several candidates and no way to rank them. Ask, rather than fork a
+    // conversation the user was not in.
+    const parentId = await targetSession(deps, undefined, 'Fork which session?', {
       liveOnly: false,
     });
     if (!parentId) return;
@@ -5413,6 +5687,37 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     vscode.window.setStatusBarMessage('Flock: showing closed sessions too', 4000);
   });
 
+  // --------------------------------------------------- the Accounts section
+  //
+  // The same two-command switch as the filter above, on
+  // `lineage.accounts.section`, and it exists for a layout reason rather than a
+  // feature one: VS Code merges a view's title buttons into the CONTAINER header
+  // — the row that reads FLOCK — only while the container has exactly one
+  // visible view. With Accounts drawn as a second section every Flock button sat
+  // a row below the name behind an overflow `...`, so the section is off by
+  // default and the bell is up where it belongs.
+  //
+  // Both halves live in the gear menu, which is the point: this hides a list, and
+  // it has to be as easy to find as it was to lose. Nothing about accounts stops
+  // working — the ten verbs stay registered, routing and pinning are untouched —
+  // so the wording says "section", never "accounts".
+
+  register(COMMANDS.showAccountsSection, 'show the accounts section', async () => {
+    await deps.setAccountsSection(true);
+    vscode.window.setStatusBarMessage(
+      'Flock: Accounts is back in the sidebar — the buttons move to their own row',
+      5000,
+    );
+  });
+
+  register(COMMANDS.hideAccountsSection, 'hide the accounts section', async () => {
+    await deps.setAccountsSection(false);
+    vscode.window.setStatusBarMessage(
+      'Flock: Accounts hidden — every account verb is still in the palette',
+      5000,
+    );
+  });
+
   // ------------------------------------------------------------ workspaces
 
   register(COMMANDS.switchWorkspace, 'switch workspace', async (arg?: unknown) => {
@@ -5687,14 +5992,9 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       // row from a Claude one — so the refusal lives here, where it can say
       // which account and why.
       if (refuseUnlaunchable(profile)) return;
-      const cwd = defaultLaunchFolder(deps);
-      if (cwd !== undefined) {
-        await newSessionFlow(deps, cwd, profile);
-        return;
-      }
-      const folder = await pickLaunchFolder(deps);
-      if (!folder) return;
-      await newSessionFlow(deps, folder.cwd, profile);
+      // The `+`'s own resolution, so "start one on this account" lands where
+      // `+` would have and never asks a question `+` does not.
+      await newSessionAt(deps, newSessionTarget(deps), profile);
     },
   );
 

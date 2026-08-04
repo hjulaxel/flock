@@ -30,6 +30,7 @@ import {
   COMMANDS,
   CONFIG_KEYS,
   CONFIG_SECTION,
+  CONTEXT_HAS_FORKABLE,
   CONTEXT_HAS_UNSEEN,
   CONTEXT_EXPLORER_FOLLOW,
   CONTEXT_HOOKS_INSTALLED,
@@ -166,6 +167,7 @@ import { TerminalRegistry } from './terminals';
 import { TerminalMatcher, terminalPid } from './terminalMatch';
 import {
   adoptBackgroundJob,
+  hasForkableRow,
   notificationItems,
   registerCommands,
   tabTitleFrom,
@@ -971,6 +973,7 @@ export async function activate(
     fireForestChanged();
     detectTurnTransitions();
     void syncUnseenContext();
+    void syncForkableContext();
   };
 
   /** Serialize rebuilds so two overlapping ticks cannot fire out of order.
@@ -1394,6 +1397,41 @@ export async function activate(
       await vscode.commands.executeCommand('setContext', CONTEXT_HAS_UNSEEN, has);
     } catch (err) {
       logError('extension.unseenContext', err);
+    }
+  }
+
+  let lastHasForkable: boolean | null = null;
+
+  /**
+   * Light the view title's fork button only while there is something for it to
+   * be about.
+   *
+   * The predicate lives in commands.ts (`hasForkableRow`), beside the verb that
+   * refuses when it is false — one line for the button's `when` clause and the
+   * verb's own answer, so the two cannot come to disagree about an empty tree.
+   *
+   * Only on a CHANGE, like the multi-select key: `setContext` is a round trip to
+   * the workbench and a rebuild happens every poll interval, whereas this flips
+   * roughly twice in a session — once when the first row appears.
+   */
+  async function syncForkableContext(): Promise<void> {
+    let has = false;
+    try {
+      has = hasForkableRow(forest);
+    } catch (err) {
+      logError('extension.forkableContext', err);
+      return;
+    }
+    if (has === lastHasForkable) return;
+    lastHasForkable = has;
+    try {
+      await vscode.commands.executeCommand(
+        'setContext',
+        CONTEXT_HAS_FORKABLE,
+        has,
+      );
+    } catch (err) {
+      logError('extension.forkableContext', err);
     }
   }
 
@@ -2672,6 +2710,11 @@ export async function activate(
       }
       return registry.focus(bound);
     },
+    // "The conversation you are looking at", for the two view-title buttons that
+    // are handed no row: the fork button's first tier, and the `+`'s last one.
+    // The registry answers only for a terminal it bound itself, so a shell
+    // someone typed `claude` into is correctly not mistaken for one of ours.
+    activeSessionId: () => registry.activeSessionId(),
     renameTerminal: async (sessionId, name) => {
       for (const id of chainAliases(sessionId)) {
         if (await registry.rename(id, name)) return true;
@@ -2851,6 +2894,28 @@ export async function activate(
         return;
       }
       await syncOnlyActiveContext();
+    },
+
+    // The Accounts section. No context key to follow: the view's `when` clause
+    // and the gear menu's two halves all read `config.lineage.accounts.section`
+    // directly, and the workbench re-evaluates a `config.` clause itself.
+    setAccountsSection: async (on) => {
+      try {
+        await cfg().update(
+          CONFIG_KEYS.accountsSection,
+          on,
+          vscode.ConfigurationTarget.Global,
+        );
+      } catch (err) {
+        // Same failure mode as the filter above, and the same reason to say so
+        // out loud: silently leaving the section where it was would read as a
+        // menu entry that does nothing.
+        logError('extension.setAccountsSection', err);
+        void vscode.window.showWarningMessage(
+          'Flock: could not save the Accounts section setting — check that ' +
+            'settings are writable.',
+        );
+      }
     },
 
     // Project workspaces

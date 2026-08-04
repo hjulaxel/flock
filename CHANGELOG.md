@@ -8,6 +8,29 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Added
 
+- **A fork button on the top bar, and it knows which conversation you mean.** The
+  sidebar could fork from a row and from the palette's picker, and from nowhere
+  else. Forking is one of the two things the top bar is for, so it has a button —
+  and because a fork button that opens a list of every session on the machine is
+  not one, it resolves its own target: the session whose terminal is active in
+  this window, else the live session you prompted most recently, else the only
+  live one there is. Anything less clear than that asks, with the same list **Fork
+  Session** always used. It is also the first fork this extension has had that you
+  can reach from the keyboard.
+
+- **The top bar is the FLOCK row.** The bell, `+`, fork, the two project buttons,
+  the filter and a new gear all sit beside the name instead of on a row of their
+  own with an overflow `...` beside it. VS Code merges a view's buttons into the
+  container header only while the container shows one section, so **Accounts is
+  now off by default** — `lineage.accounts.section`, the one price of this — and
+  the way back is **Show Accounts Section** in the gear menu. Nothing about
+  accounts stops working while it is off: usage is still read, sessions are still
+  routed and pinned for life, and every account verb is in the palette.
+
+- **A gear instead of the three dots.** Same items, same order, same sections —
+  hooks, then housekeeping, then the Accounts toggle — behind an icon that says
+  what it is rather than an ellipsis that says nothing.
+
 - **Flock works with the Claude you already run.** The session list has always
   been machine-wide, so `claude` typed into the bottom panel — or a conversation
   the official Claude Code extension started — was already in the tree with its
@@ -101,6 +124,16 @@ All notable changes to Flock are recorded here. The format follows
   The ordinary close-then-reopen is unaffected.
 
 ### Changed
+
+- **`+` starts a session in the project you are working in.** It used to read the
+  window's open folder and nothing else, so a window scoped to a Flock project
+  **workspace** — the feature whose whole purpose is to say which project you are
+  in — got a folder picker whenever the workspace was not also open on a folder;
+  and a window open inside project A while scoped to project B silently started
+  the session in A. It now takes the first of: the scoped workspace, the project
+  owning the open folder, the project of the active session, that folder. Only a
+  window that answers none of the four still asks. A session landing in a project
+  is named after the project, the way the `+` on a project row already named it.
 
 - **The documented promise now matches the code, exactly.** The README's Privacy
   section, `CONTRIBUTING.md`'s read-only bullet and `docs/reference.md` used to say
