@@ -881,21 +881,106 @@ function openWorkspaceFolder(): string | undefined {
   }
 }
 
+/** Which of the four questions "where does this session go" got answered, and
+ *  by what. Carried out of the resolution so the log line can say why the `+`
+ *  landed where it did — the only question this button ever gets asked. */
+export type NewSessionWhy =
+  /** This window is scoped to a project workspace. The most explicit statement
+   *  of "the project I am working in" the product has: the user switched to it. */
+  | 'workspace'
+  /** A project claims the folder this window is open on. */
+  | 'folder-project'
+  /** No project claims the window, but the session with the keyboard belongs to
+   *  one — so that is the project being worked in right now. */
+  | 'session-project'
+  /** No project anywhere near this window, but it is open on a folder. Start
+   *  there, exactly as the `+` always has. */
+  | 'folder'
+  /** The window makes no claim at all. The one case that still asks. */
+  | 'ask';
+
+export interface NewSessionTarget {
+  /** Hand to `newSessionInProjectFlow` — the path that asks nothing and names
+   *  the session after the project. */
+  projectId?: string;
+  /** Hand to `newSessionFlow` — no project claims this, so the directory's own
+   *  basename is the name. */
+  cwd?: string;
+  why: NewSessionWhy;
+}
+
 /**
- * Where the view title's `+` starts a session, with nothing asked: the project
- * the window is open on.
+ * Where the view title's `+` starts a session, with nothing asked.
  *
- * An open folder INSIDE a project launches at the project's own directory
- * rather than at the folder — the `+` files the session under the project row
- * you are already looking at, and that is the directory every other session in
- * it was started from. Undefined means the window makes no claim, and the
- * caller falls back to the picker.
+ * A `+` that opens a dialog is not a `+` (see `newSessionInProjectFlow`, which
+ * has said so since the project rows got theirs), and this button used to open
+ * one for a whole class of windows that plainly did have an answer. It read the
+ * WINDOW's open folder and nothing else, so a window scoped to a Flock project
+ * workspace — the feature whose entire purpose is to say which project you are
+ * working in — got a folder picker whenever the workspace happened not to be
+ * open on a folder as well. Worse, a window open inside project A while scoped
+ * to project B silently started the session in A.
+ *
+ * So the project scope is asked FIRST, and the three answers below it are the
+ * remaining ways a window can name a project, strongest evidence first. Only a
+ * window that claims nothing at all — no workspace, no folder, no session of
+ * ours with the keyboard — still gets the picker.
+ *
+ * A project resolves to a PROJECT rather than to its directory, so the launch
+ * goes through the same no-questions path the project row's `+` uses and is
+ * named after the project. A folder that no project claims stays a folder.
  */
-function defaultLaunchFolder(deps: CommandDeps): string | undefined {
-  const open = openWorkspaceFolder();
-  if (open === undefined) return undefined;
+export function newSessionTarget(deps: CommandDeps): NewSessionTarget {
   const visible = deps.allProjects().filter((p) => p.hidden !== true);
-  return matchProject(visible, open)?.dir ?? open;
+  /** Hidden projects are excluded above, so a workspace or a cwd pointing at
+   *  one falls through rather than starting a session under a row that has been
+   *  closed out of the tree. */
+  const claims = (cwd: string | undefined): string | undefined =>
+    matchProject(visible, cwd ?? '')?.project.id;
+
+  // (1) The project workspace this window is scoped to. Re-checked against the
+  // visible set: the id is persisted per window, so it outlives the project
+  // being closed or deleted.
+  try {
+    const scoped = deps.activeWorkspace();
+    if (scoped !== null && visible.some((p) => p.id === scoped)) {
+      return { projectId: scoped, why: 'workspace' };
+    }
+  } catch (err) {
+    logError('commands.newSessionTarget.workspace', err);
+  }
+
+  const open = openWorkspaceFolder();
+
+  // (2) A project owning the folder this window is open on.
+  const ofFolder = claims(open);
+  if (ofFolder !== undefined) {
+    return { projectId: ofFolder, why: 'folder-project' };
+  }
+
+  // (3) The project of the session with the keyboard. Below the folder's
+  // project and above the bare folder: a window open on something no project
+  // claims, with a project's session active in it, is a window working in that
+  // project — which is what the `+` is being asked about.
+  try {
+    const active = deps.activeSessionId?.() ?? null;
+    if (active !== null && active !== '') {
+      const tip = deps.tipOf(active);
+      const node = deps.getForest().nodes.get(tip);
+      const ofSession = claims(node?.cwd ?? deps.getRecord(tip)?.cwd);
+      if (ofSession !== undefined) {
+        return { projectId: ofSession, why: 'session-project' };
+      }
+    }
+  } catch (err) {
+    logError('commands.newSessionTarget.session', err);
+  }
+
+  // (4) The folder itself, unclaimed. Unchanged behaviour for a window that is
+  // simply open on a directory somebody runs claude in.
+  if (open !== undefined) return { cwd: open, why: 'folder' };
+
+  return { why: 'ask' };
 }
 
 /** Projects first — they are the unit of organisation, so they are the unit of
@@ -1418,6 +1503,41 @@ async function newSessionInProjectFlow(
   deps.refresh();
   void deps.revealSession(sessionId);
   await nameJustCreatedSession(deps, sessionId);
+}
+
+/**
+ * The `+`'s hand-off: start the session `newSessionTarget` resolved, and ask
+ * only when it resolved nothing.
+ *
+ * Shared with "New Session on This Account" — the same click with the
+ * subscription named by hand. The two used to resolve a directory through one
+ * helper and then diverge into their own launch calls, which is exactly how a
+ * change to what `+` means goes missing from the account variant.
+ */
+async function newSessionAt(
+  deps: AccountCommandDeps,
+  target: NewSessionTarget,
+  account?: AccountProfile,
+): Promise<void> {
+  if (target.projectId !== undefined) {
+    // The reason, not just the answer: "why did `+` start it THERE" is the only
+    // question this button gets, and the tier is the whole answer.
+    log(
+      'new: in project',
+      deps.getProject(target.projectId)?.name ?? shortId(target.projectId),
+      `(${target.why})`,
+    );
+    await newSessionInProjectFlow(deps, target.projectId, account);
+    return;
+  }
+  if (target.cwd !== undefined) {
+    log('new: in folder', target.cwd, `(${target.why})`);
+    await newSessionFlow(deps, target.cwd, account);
+    return;
+  }
+  const folder = await pickLaunchFolder(deps);
+  if (!folder) return;
+  await newSessionFlow(deps, folder.cwd, account);
 }
 
 /**
@@ -3688,19 +3808,13 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
 
   // ---------------------------------------------------------------- new
 
-  // The `+` in the view title. It asks nothing when the window is open on a
-  // folder — that folder, or the project owning it, IS the answer — and falls
-  // back to the picker only when there is genuinely no window to read it off:
-  // no folder open, or a multi-root window with no editor to break the tie.
+  // The `+` in the view title, and it asks NOTHING that a window can answer for
+  // it: the project this window is scoped to, the project owning its folder, the
+  // project of the session holding the keyboard, or that folder — see
+  // `newSessionTarget`. The picker is left for the one window that claims none of
+  // the four, which is a window with no folder and nothing of ours running in it.
   register(COMMANDS.newSession, 'new session', async () => {
-    const cwd = defaultLaunchFolder(deps);
-    if (cwd !== undefined) {
-      await newSessionFlow(deps, cwd);
-      return;
-    }
-    const folder = await pickLaunchFolder(deps);
-    if (!folder) return;
-    await newSessionFlow(deps, folder.cwd);
+    await newSessionAt(deps, newSessionTarget(deps));
   });
 
   // The same verb with the question forced back on, for the one case the
@@ -5214,14 +5328,9 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       // row from a Claude one — so the refusal lives here, where it can say
       // which account and why.
       if (refuseUnlaunchable(profile)) return;
-      const cwd = defaultLaunchFolder(deps);
-      if (cwd !== undefined) {
-        await newSessionFlow(deps, cwd, profile);
-        return;
-      }
-      const folder = await pickLaunchFolder(deps);
-      if (!folder) return;
-      await newSessionFlow(deps, folder.cwd, profile);
+      // The `+`'s own resolution, so "start one on this account" lands where
+      // `+` would have and never asks a question `+` does not.
+      await newSessionAt(deps, newSessionTarget(deps), profile);
     },
   );
 
