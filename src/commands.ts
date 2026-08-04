@@ -1735,6 +1735,65 @@ export async function detachedTmuxName(
   return undefined;
 }
 
+/** How recently a transcript must have been written for its session to count as
+ *  plausibly still running. A minute rather than a couple of seconds, because a
+ *  single long tool call is silence, and the question here is not "is it
+ *  mid-token" but "is anything holding this file". */
+const LIVE_WRITER_WINDOW_MS = 60_000;
+
+/**
+ * True when something looks like it is still writing this session's transcript,
+ * in which case this has already asked and the user declined.
+ *
+ * Evidence, and both halves are required:
+ *
+ *   * the transcript was written within LIVE_WRITER_WINDOW_MS, and
+ *   * that write happened AFTER the moment Flock recorded the session closed —
+ *     or Flock never recorded one at all, which is every foreign transcript.
+ *
+ * The second clause is what keeps this from firing on the ordinary
+ * close-then-reopen: claude writes a final record or two on the way out, so a
+ * freshness test alone would put a dialog in front of the commonest resume in
+ * the product.
+ *
+ * A wiring with no `transcriptFacts` (every unit double) answers "no evidence"
+ * and resumes exactly as it did before — the guard needs a reading and cannot
+ * invent one.
+ */
+async function refusedLiveWriter(
+  deps: CommandDeps,
+  sessionId: string,
+): Promise<boolean> {
+  let lastActiveAt: number | undefined;
+  try {
+    lastActiveAt = deps.transcriptFacts?.(sessionId)?.lastActiveAt;
+  } catch (err) {
+    logError('commands.transcriptFacts', err);
+    return false;
+  }
+  if (typeof lastActiveAt !== 'number' || !Number.isFinite(lastActiveAt)) {
+    return false;
+  }
+  if (Date.now() - lastActiveAt > LIVE_WRITER_WINDOW_MS) return false;
+
+  const closedAt = Date.parse(deps.getRecord(sessionId)?.closed ?? '');
+  if (Number.isFinite(closedAt) && lastActiveAt <= closedAt) return false;
+
+  const RESUME = 'Resume Anyway';
+  const label = labelFor(deps, sessionId);
+  const choice = await vscode.window.showWarningMessage(
+    `"${label}" is not on the roster, but its transcript was written to seconds ` +
+      'ago — something outside Flock may still be running it. Resuming now would ' +
+      'put a second Claude on the same transcript.',
+    { modal: true },
+    RESUME,
+    'Fork Instead',
+  );
+  if (choice === RESUME) return false;
+  if (choice === 'Fork Instead') await forkFlow(deps, sessionId);
+  return true;
+}
+
 /**
  * Resume = reopen a CLOSED session in a terminal here, under its own id.
  *
@@ -1780,6 +1839,28 @@ export async function resumeFlow(
     void vscode.window.showWarningMessage(
       'No transcript on disk for this session — there is nothing to reopen.',
     );
+    return false;
+  }
+
+  // THE SECOND-WRITER BACKSTOP. The refusal above reads the FOREST, and the
+  // forest can be wrong in exactly one direction that matters here: a row shows
+  // as closed whenever the roster does not carry it, which is also what a
+  // session running somewhere the roster cannot see looks like — a `claude`
+  // under a config directory no configured account names, a home directory
+  // shared with another machine, an archived row surfaced by
+  // `lineage.showArchived` that Flock has never met. Resuming one of those puts
+  // a second claude on a transcript the first is still appending to, and that is
+  // the worst thing this file can do.
+  //
+  // The transcript is the independent witness, and the test is deliberately
+  // narrower than "was it written to recently": it must have been written AFTER
+  // the moment we recorded it closed. A session we closed ourselves five seconds
+  // ago therefore never asks, however fresh its final records are — that is the
+  // false positive that would make this an obstacle instead of a guard.
+  //
+  // Not for the attach path: that hands back the very process already writing
+  // the file, which is the whole point of the detach tier.
+  if (detached === undefined && (await refusedLiveWriter(deps, sessionId))) {
     return false;
   }
 

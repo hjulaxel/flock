@@ -154,6 +154,7 @@ import type { TreeController } from './tree';
 import { registerWebtree } from './webtree';
 import type { WebtreeController } from './webtree';
 import { TerminalRegistry } from './terminals';
+import { TerminalMatcher, terminalPid } from './terminalMatch';
 import {
   adoptBackgroundJob,
   notificationItems,
@@ -1000,6 +1001,17 @@ export async function activate(
     },
   });
   context.subscriptions.push(registry);
+
+  // The read-only half of the terminal story: which OPEN terminal is running a
+  // session Flock never launched, so clicking that row reveals the tab instead
+  // of offering to fork a duplicate of a conversation sitting in the panel. The
+  // roster it matches against is `lastEntries` — the same rows the tree is drawn
+  // from, so the answer can never be about a session the user cannot see.
+  const terminalMatcher = new TerminalMatcher({
+    pidOf: (terminal) => terminalPid(terminal),
+    roster: () => lastEntries,
+  });
+  context.subscriptions.push(terminalMatcher);
 
   context.subscriptions.push(
     registry.onDidExit((sessionId) => {
@@ -2292,6 +2304,24 @@ export async function activate(
     // The same ownership answer the rows are drawn from, so a verb's refusal
     // and the marker on the row it refused can never disagree.
     hostOf: sessionHostOf,
+    // A terminal in this window that we did not create but that is running this
+    // session — `claude` typed into the bottom panel, most often. Asked under
+    // every generation id, like every other terminal lookup here.
+    //
+    // Marking it seen is the second half of the verb, not an extra: the focus
+    // path for a session we own clears the attention dot through
+    // onDidChangeActiveTerminal, and the registry does not recognise a terminal
+    // it never bound — so without this, revealing a foreign session would leave
+    // its dot lit with no way to put it out.
+    revealHostTerminal: async (sessionId) => {
+      const revealed = await terminalMatcher.reveal(
+        sessionId,
+        chainAliases(sessionId),
+      );
+      if (!revealed) return false;
+      await markSeen(sessionId);
+      return true;
+    },
     tipOf: (sessionId) => chainIndex.tipOf(sessionId),
     // The background job holding this id, if one does — the shape a
     // native `/fork` dispatches. Stat-cached inside the reader, so asking on

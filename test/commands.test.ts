@@ -2442,6 +2442,230 @@ describe('close refuses a session running outside Flock', () => {
   });
 });
 
+// ------------------------------- clicking a row whose terminal is not ours
+//
+// `claude` typed into the bottom panel is in the tree like anything else, and
+// clicking it used to walk every tier Flock has, find nothing, and offer to fork
+// a copy of a conversation sitting three inches below the sidebar. The reveal
+// tier goes in front of that dialog and nowhere else: it sits BELOW every tier
+// that knows its answer exactly, and above the last resort.
+
+describe('focus reveals a terminal Flock did not create', () => {
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockWindow as { showInformationMessage?: unknown })
+      .showInformationMessage;
+  });
+
+  const SESSION = uuid(3);
+
+  function focusHarness(over: {
+    revealHostTerminal?: (id: string) => Promise<boolean>;
+    focusSession?: (id: string) => boolean;
+  }): {
+    told: string[];
+    seen: string[];
+    run: (command: string, arg: string) => Promise<void>;
+  } {
+    const told: string[] = [];
+    const seen: string[] = [];
+    (
+      mockWindow as {
+        showInformationMessage?: (
+          m: unknown,
+          ...rest: unknown[]
+        ) => Promise<unknown>;
+      }
+    ).showInformationMessage = async (message) => {
+      told.push(String(message));
+      return undefined;
+    };
+    const { deps } = chatDeps(undefined, {
+      focusSession: over.focusSession ?? (() => false),
+    });
+    const harness = withRegisteredCommands({
+      ...deps,
+      getForest: () =>
+        forestOf([
+          node(SESSION, {
+            status: 'idle',
+            roster: { sessionId: SESSION, pid: 4242 },
+          }),
+        ]),
+      markSeen: async (id) => {
+        seen.push(id);
+      },
+      ...(over.revealHostTerminal === undefined
+        ? {}
+        : { revealHostTerminal: over.revealHostTerminal }),
+    });
+    return { told, seen, run: (command, arg) => harness.run(command, arg) };
+  }
+
+  it('reveals the terminal instead of offering to fork a duplicate', async () => {
+    const asked: string[] = [];
+    const h = focusHarness({
+      revealHostTerminal: async (id) => {
+        asked.push(id);
+        return true;
+      },
+    });
+    await h.run(COMMANDS.focusSession, SESSION);
+    expect(asked).toEqual([SESSION]);
+    expect(h.told).toEqual([]); // no dialog at all
+  });
+
+  it('falls through to the fork dialog when the match declines', async () => {
+    const h = focusHarness({ revealHostTerminal: async () => false });
+    await h.run(COMMANDS.focusSession, SESSION);
+    expect(h.told[0]).toContain('outside Flock');
+    expect(h.told[0]).toContain('pid 4242');
+  });
+
+  it('behaves exactly as before on a wiring with no matcher', async () => {
+    const h = focusHarness({});
+    await h.run(COMMANDS.focusSession, SESSION);
+    expect(h.told[0]).toContain('outside Flock');
+  });
+
+  it('never asks once a bound terminal here has answered', async () => {
+    const asked: string[] = [];
+    const h = focusHarness({
+      focusSession: () => true,
+      revealHostTerminal: async (id) => {
+        asked.push(id);
+        return true;
+      },
+    });
+    await h.run(COMMANDS.focusSession, SESSION);
+    expect(asked).toEqual([]);
+    expect(h.told).toEqual([]);
+  });
+});
+
+// --------------------------------------------- resume: the second-writer guard
+//
+// Two claude processes on one transcript is the worst thing this file can cause.
+// resumeFlow already refuses a session the FOREST calls live; this covers the
+// direction the forest gets wrong — a row reads as closed whenever the roster
+// does not carry it, which is also what a session running somewhere the roster
+// cannot see looks like.
+
+describe('resume asks before starting a second writer', () => {
+  afterEach(() => {
+    delete (mockWindow as { showWarningMessage?: unknown }).showWarningMessage;
+  });
+
+  const SESSION = uuid(4);
+
+  function resumeHarness(
+    over: {
+      lastActiveAt?: number;
+      closed?: string;
+      answer?: string;
+    } = {},
+  ): {
+    launches: LaunchOptions[];
+    warnings: string[];
+    deps: AccountCommandDeps;
+  } {
+    const launches: LaunchOptions[] = [];
+    const warnings: string[] = [];
+    (
+      mockWindow as {
+        showWarningMessage?: (m: unknown, ...rest: unknown[]) => Promise<unknown>;
+      }
+    ).showWarningMessage = async (message) => {
+      warnings.push(String(message));
+      return over.answer;
+    };
+    const records: Record<string, EditorialRecord> = {
+      [SESSION]: {
+        id: SESSION,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        ...(over.closed === undefined ? {} : { closed: over.closed }),
+      },
+    };
+    const { deps } = chatDeps(undefined, {
+      records,
+      hasTranscript: () => true,
+    });
+    return {
+      launches,
+      warnings,
+      deps: {
+        ...deps,
+        // An ARCHIVED row: the forest's live-session refusal does not apply, so
+        // this guard is the only thing between the click and a second process.
+        getForest: () =>
+          forestOf([
+            node(SESSION, { archived: true, status: 'exited', cwd: '/code/api' }),
+          ]),
+        ...(over.lastActiveAt === undefined
+          ? {}
+          : { transcriptFacts: () => ({ lastActiveAt: over.lastActiveAt }) }),
+        launchSession: async (opts) => {
+          launches.push(opts);
+          return {
+            nodeId: opts.sessionId,
+            sessionId: opts.sessionId,
+            terminalName: 'claude',
+            createdAt: 0,
+          };
+        },
+      },
+    };
+  }
+
+  it('refuses when the transcript was written after we recorded it closed', async () => {
+    const h = resumeHarness({
+      lastActiveAt: Date.now() - 5_000,
+      closed: '2026-01-01T00:00:00.000Z',
+    });
+    expect(await resumeFlow(h.deps, SESSION)).toBe(false);
+    expect(h.launches).toEqual([]);
+    expect(h.warnings[0]).toContain('second Claude');
+  });
+
+  it('resumes anyway when the user says so out loud', async () => {
+    const h = resumeHarness({
+      lastActiveAt: Date.now() - 5_000,
+      answer: 'Resume Anyway',
+    });
+    expect(await resumeFlow(h.deps, SESSION)).toBe(true);
+    expect(h.launches).toHaveLength(1);
+  });
+
+  it('does NOT ask on the ordinary close-then-reopen', async () => {
+    // claude writes a final record or two on its way out, so a freshness test
+    // alone would put a modal in front of the commonest resume in the product.
+    // The write has to be LATER than the recorded close for the guard to fire.
+    const closedAt = new Date().toISOString();
+    const h = resumeHarness({
+      lastActiveAt: Date.parse(closedAt) - 1_000,
+      closed: closedAt,
+    });
+    expect(await resumeFlow(h.deps, SESSION)).toBe(true);
+    expect(h.warnings).toEqual([]);
+    expect(h.launches).toHaveLength(1);
+  });
+
+  it('does not ask about a transcript nothing has touched in a while', async () => {
+    const h = resumeHarness({ lastActiveAt: Date.now() - 10 * 60_000 });
+    expect(await resumeFlow(h.deps, SESSION)).toBe(true);
+    expect(h.warnings).toEqual([]);
+  });
+
+  it('resumes unchanged on a wiring that cannot read a transcript mtime', async () => {
+    // The guard needs a reading and must never invent one — every unit double,
+    // and any host without the transcript cache, keeps the old behaviour.
+    const h = resumeHarness({});
+    expect(await resumeFlow(h.deps, SESSION)).toBe(true);
+    expect(h.warnings).toEqual([]);
+  });
+});
+
 describe('wrap names the host when there is no terminal to type into', () => {
   afterEach(() => {
     delete (mockCommands as { registerCommand?: unknown }).registerCommand;
