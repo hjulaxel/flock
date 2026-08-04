@@ -1026,6 +1026,41 @@ export interface Worktree {
 }
 
 /**
+ * What one checkout can say about itself beyond its name: how far it has
+ * diverged from its upstream, and whether there is work in it that no commit
+ * holds yet.
+ *
+ * Read per WORKTREE, not per repository — that is the whole reason it is a type
+ * of its own rather than three fields on Worktree. `git worktree list` reports
+ * the same answer from any checkout of the repo; ahead/behind and dirt are
+ * facts about one directory, so they need one probe each (see src/gitBranches.ts
+ * for the caching that keeps that off the render path).
+ *
+ * Every field has a meaning for "we could not tell", and none of them is a
+ * guess: `upstream === ''` is "this branch tracks nothing", which is NOT the
+ * same as `ahead === 0 && behind === 0` ("in sync"), and the absence of the
+ * whole object is "not read yet, or not readable at all". A row with no status
+ * renders exactly as it did before this existed.
+ */
+export interface BranchStatus {
+  /** Commits this checkout has that its upstream does not. 0 when there is no
+   *  upstream to compare against — read `upstream` to tell the two apart. */
+  ahead: number;
+  /** Commits the upstream has that this checkout does not. */
+  behind: number;
+  /** The upstream ref, short (`origin/feat/x`), or '' when the branch tracks
+   *  nothing. Carried for the hover: "2 ahead" is only useful next to what it
+   *  is ahead OF. */
+  upstream: string;
+  /** TRACKED changes: staged, unstaged, or a merge conflict. */
+  dirty: boolean;
+  /** Files git has never been told about. Kept apart from `dirty` because the
+   *  two answer different questions — a row shows them as the same mark, and
+   *  Remove Worktree has to name which one it is about to delete. */
+  untracked: boolean;
+}
+
+/**
  * A branch as the tree renders it: one chip under a project row.
  *
  * `colorIndex` is assigned by the grouping (see assignBranchColors) rather than
@@ -1574,6 +1609,17 @@ export interface TreeDeps {
    *  two above — a wiring without it produces the tree as it looked before
    *  branch chips existed. */
   worktreesOf?(dir: string): readonly Worktree[];
+  /** Ahead/behind and dirt for ONE checkout, from a second cache with exactly
+   *  the discipline of the one above (src/gitBranches.ts): synchronous from
+   *  cache, refreshed in the background, never blocking a paint. `undefined`
+   *  covers "not probed yet" and "not readable" alike, and both render the row
+   *  as it looked before this existed.
+   *
+   *  Deliberately NOT part of the GROUPING input the way `worktreesOf` is: the
+   *  worktree list decides which project a session belongs to, where this only
+   *  decides what a row says. Keeping it out of computeGrouping is what stops a
+   *  `git status` from ever being able to move a row. */
+  branchStatusOf?(dir: string): BranchStatus | undefined;
   /** `lineage.branchColors` — a user palette for the branch chips. Entries are
    *  positional (index 0 is the first branch's colour); a short list fills from
    *  the built-in one, and every entry is re-validated before it reaches the

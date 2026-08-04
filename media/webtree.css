@@ -847,6 +847,28 @@ body {
   color: var(--vscode-descriptionForeground);
 }
 
+/* Ahead / behind / dirty, as one small token left of the count.
+ *
+ * Neutral grey rather than the branch's own colour, unlike the count beside it:
+ * the count belongs to the row (how many of YOUR sessions are here), where this
+ * is a fact about the repository that the branch's identity has nothing to do
+ * with. Colouring it would also put two saturated things in one 40px column and
+ * make the arrows read as a status light.
+ *
+ * `flex: 0 0 auto` and `white-space: nowrap` because this must never be the
+ * thing that wraps or shrinks: .branch-name is the flex item with min-width: 0
+ * and is the one that gives way, which is the right order — a truncated ref is
+ * still recognisable, half an arrow is not. */
+.branch-sync {
+  flex: 0 0 auto;
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.9;
+  font-size: 0.9em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  margin-right: 6px;
+}
+
 /* The branch tint on a SESSION's name. A custom property set by the client
  * (renderRow) rather than a class per colour, so the palette can grow without a
  * matching rule here for every entry. */

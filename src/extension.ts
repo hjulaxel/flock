@@ -116,6 +116,7 @@ import {
   describeForkEdge,
 } from './daemon';
 import { WorktreeCache } from './git';
+import { BranchStatusCache } from './gitBranches';
 import type { GenerationFacts } from './generations';
 import { TranscriptStatsCache, readFirstPrompt } from './usage';
 import type { TranscriptStats } from './usage';
@@ -931,6 +932,16 @@ export async function activate(
   context.subscriptions.push(worktrees);
   context.subscriptions.push(worktrees.onDidChange(() => refreshViews()));
 
+  // What each of those checkouts can say about itself: ahead/behind and dirt.
+  // A second cache rather than more fields on the first, because the two probes
+  // cost different amounts — one spawn per PROJECT versus one per WORKTREE — and
+  // therefore cannot share a schedule. Same discipline either way: read
+  // synchronously from cache, refresh in the background, repaint on a landed
+  // change through the path a roster tick already uses.
+  const branchStatus = new BranchStatusCache();
+  context.subscriptions.push(branchStatus);
+  context.subscriptions.push(branchStatus.onDidChange(() => refreshViews()));
+
   const pokeNow = (): void => {
     try {
       poller?.pokeNow();
@@ -1386,6 +1397,7 @@ export async function activate(
     noteSelection,
     showTokens: () => boolCfg(CONFIG_KEYS.showTokens, false),
     worktreesOf: (dir) => worktrees.get(dir),
+    branchStatusOf: (dir) => branchStatus.get(dir),
     // Read raw and sanitised at the point of use, not here: the value is a
     // user-editable array that lands in an inline <style> block, and the one
     // place that knows what a legal palette entry looks like is the function

@@ -18,6 +18,7 @@
 import { STATUS_DOT, contextValueOf } from './types';
 import type {
   BranchInfo,
+  BranchStatus,
   ContextToken,
   GroupNode,
   ProjectGroupNode,
@@ -69,6 +70,70 @@ export function formatTokens(tokens: number | undefined): string {
   if (tokens < 1_000_000) return `${Math.round(tokens / 1000)}k`;
   const m = (tokens / 1_000_000).toFixed(1);
   return `${m.endsWith('.0') ? m.slice(0, -2) : m}M`;
+}
+
+/**
+ * A checkout's standing, as the one short token a branch row has room for:
+ * `↑2`, `↓1 *`, `↑3 ↓2 *`.
+ *
+ * '' when there is nothing to report, which covers BOTH "clean and in sync" and
+ * "not read yet" — on a row those two are the same thing, and a row that spent
+ * width saying "in sync" would be spending it on the default state of every
+ * checkout anybody has. The hover tells them apart (see branchStatusLines),
+ * because it is the one place a permanent fact is worth a full sentence.
+ *
+ * Ahead before behind, because that is the order the phrase is said in and the
+ * order the arrows read in. Dirt last and unnumbered: a count of changed files
+ * is a number nobody acts on, where the existence of uncommitted work is the
+ * whole of what a branch row can usefully warn about — and it is what Remove
+ * Worktree will ask a second time over.
+ *
+ * Lives here rather than in gitBranches.ts for the same reason formatAge does:
+ * this is a RENDERING decision and both surfaces have to make it identically.
+ * gitBranches.ts also imports node:child_process, and this module's whole
+ * discipline is that it imports ./types and ./projects and nothing else.
+ */
+export function formatBranchSync(status: BranchStatus | undefined): string {
+  if (!status) return '';
+  const parts: string[] = [];
+  if (Number.isFinite(status.ahead) && status.ahead > 0) {
+    parts.push(`↑${status.ahead}`);
+  }
+  if (Number.isFinite(status.behind) && status.behind > 0) {
+    parts.push(`↓${status.behind}`);
+  }
+  if (status.dirty || status.untracked) parts.push('*');
+  return parts.join(' ');
+}
+
+/**
+ * The same facts as sentences, for the hover — where "nothing to report" is
+ * worth saying out loud and "*" is not enough.
+ *
+ * Two lines at most: where the branch stands against its upstream, and what is
+ * uncommitted. A branch that tracks nothing says so rather than reporting a
+ * meaningless zero-zero, and a status that was never read contributes no lines at
+ * all, so the hover of an unprobed row is the hover it always had.
+ */
+export function branchStatusLines(status: BranchStatus | undefined): string[] {
+  if (!status) return [];
+  const out: string[] = [];
+  const ahead = Number.isFinite(status.ahead) ? Math.max(0, status.ahead) : 0;
+  const behind = Number.isFinite(status.behind) ? Math.max(0, status.behind) : 0;
+  if (status.upstream === '') {
+    out.push('no upstream branch');
+  } else if (ahead === 0 && behind === 0) {
+    out.push(`up to date with ${status.upstream}`);
+  } else {
+    const moves: string[] = [];
+    if (ahead > 0) moves.push(`${ahead} ahead`);
+    if (behind > 0) moves.push(`${behind} behind`);
+    out.push(`${moves.join(', ')} ${status.upstream}`);
+  }
+  if (status.dirty && status.untracked) out.push('uncommitted changes and untracked files');
+  else if (status.dirty) out.push('uncommitted changes');
+  else if (status.untracked) out.push('untracked files');
+  return out;
 }
 
 /**
@@ -300,6 +365,18 @@ export interface BranchChip {
   /** The repository's main worktree. Drawn no differently, but the hide verb
    *  refuses it — see hideBranch. */
   primary: boolean;
+  /**
+   * Where this checkout stands, PRE-FORMATTED: `↑2 ↓1 *` — see
+   * formatBranchSync. A string rather than the BranchStatus it came from,
+   * because the client is a dumb painter: handing it three numbers and a flag
+   * would put the decision of how they read into the one place that cannot be
+   * unit-tested, and the native tree would then have to make the same decision
+   * again and eventually differently.
+   *
+   * Absent (not '') when there is nothing to say, so a row with no status
+   * reserves no width at all — the same rule `actions` and `marks` follow.
+   */
+  sync?: string;
 }
 
 /** What glyph leads the row. `provider` resolves to a brand svg in the webview
@@ -452,6 +529,11 @@ export interface ViewModelInput {
    *  row for the worktree they run in. Absent = off, which is the setting's
    *  default and the layout every existing test describes. */
   groupByBranch?: boolean;
+  /** Ahead/behind and dirt for one checkout, from the cache in
+   *  src/gitBranches.ts. Synchronous by contract — this is called inside a
+   *  paint. Absent, or returning undefined, means the branch rows carry no
+   *  numbers, which is exactly how they looked before this existed. */
+  branchStatusOf?(dir: string): BranchStatus | undefined;
 }
 
 export const sessionRowKey = (id: string): string => `session:${id}`;
@@ -501,6 +583,11 @@ function branchRow(
   chip: BranchChip,
   viewId: string,
   place: { depth: number; indent: number; expandable: boolean; expanded: boolean },
+  /** The checkout's standing, for the HOVER. The chip already carries the
+   *  one-token form the row draws (`chip.sync`); this is the same facts as
+   *  sentences, which is a thing only the tooltip has room for. Passed rather
+   *  than put on the chip so the client is never handed text it cannot use. */
+  status: BranchStatus | undefined,
 ): ViewRow {
   const what = chip.count
     ? `${chip.count} session${chip.count === 1 ? '' : 's'}`
@@ -549,6 +636,11 @@ function branchRow(
     tooltip: [
       chip.full,
       `${what}${chip.attention ? ', finished work waiting' : ''}`,
+      // Between the session count and the path, because it is a fact about the
+      // BRANCH and the path below it is a fact about the disk. Contributes
+      // nothing when the status was never read, so the hover of an unprobed row
+      // is the hover it always had.
+      ...branchStatusLines(status),
       chip.dir,
       place.expandable
         ? 'Click to show its sessions · + starts a new one here'
@@ -831,15 +923,31 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
     // start one level below that.
     const level = Math.max(0, el.depth ?? 0);
     const grouped = active && input.groupByBranch === true;
-    const toChip = (b: BranchInfo): BranchChip => ({
-      name: b.name,
-      full: b.name,
-      dir: b.dir,
-      colorIndex: b.colorIndex,
-      count: b.rootIds.length,
-      attention: subtreeHasUnseen(forest, b.rootIds),
-      primary: b.primary,
-    });
+    /** The checkout's standing, read through the same `safe`-less contract every
+     *  other input here has: a lookup that throws is a lookup that answered
+     *  nothing, and a branch row with no numbers is a valid branch row. */
+    const statusOf = (dir: string): BranchStatus | undefined => {
+      try {
+        return input.branchStatusOf?.(dir);
+      } catch {
+        return undefined;
+      }
+    };
+    const toChip = (b: BranchInfo): BranchChip => {
+      const sync = formatBranchSync(statusOf(b.dir));
+      return {
+        name: b.name,
+        full: b.name,
+        dir: b.dir,
+        colorIndex: b.colorIndex,
+        count: b.rootIds.length,
+        attention: subtreeHasUnseen(forest, b.rootIds),
+        primary: b.primary,
+        // Absent rather than '' — see the field's note: a row with nothing to
+        // report must cost no width.
+        ...(sync === '' ? {} : { sync }),
+      };
+    };
     // The block splits into what is on screen and what "Others" stands for.
     // Both halves are needed even when the block is FOLDED: the fold hides the
     // rows, and the project row still has to say how many there were.
@@ -1010,12 +1118,18 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
         const expandableChip = grouped && chip.count > 0;
         const chipKey = branchRowKey(el.projectId, chip.full);
         rows.push(
-          branchRow(el, chip, input.viewId, {
-            depth: level + 1,
-            indent: level,
-            expandable: expandableChip,
-            expanded: !collapsed.has(chipKey),
-          }),
+          branchRow(
+            el,
+            chip,
+            input.viewId,
+            {
+              depth: level + 1,
+              indent: level,
+              expandable: expandableChip,
+              expanded: !collapsed.has(chipKey),
+            },
+            statusOf(chip.dir),
+          ),
         );
         if (!expandableChip || collapsed.has(chipKey)) continue;
         const branch = branches.find((b) => b.name === chip.full);

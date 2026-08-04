@@ -502,6 +502,20 @@
 
     el.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
 
+    // Where the checkout stands: `↑2 ↓1 *`, already composed by the extension
+    // (formatBranchSync) because the native tree has to say the same thing and
+    // two formatters would eventually disagree. Absent on a clean, in-sync or
+    // never-probed checkout, which is why this reserves no width of its own —
+    // the common case is a row that looks exactly as it did before the numbers
+    // existed. Left of the count, so the counts stay in one column down the
+    // block whatever each row has to report.
+    if (chip.sync) {
+      const sync = document.createElement('span');
+      sync.className = 'branch-sync';
+      sync.textContent = chip.sync;
+      el.appendChild(sync);
+    }
+
     // The session count, and ONLY where it says something. Grouped, a collapsed
     // branch row has no other content — the number is all it can report about
     // what is inside. Flat, the sessions are already on screen underneath in

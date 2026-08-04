@@ -20,6 +20,7 @@ import {
 } from './types';
 import type {
   BranchInfo,
+  BranchStatus,
   BranchTreeNode,
   DisposableLike,
   GroupNode,
@@ -66,7 +67,9 @@ const EMPTY_FOREST: SessionForest = {
 // change. Re-exported so importers and tests keep their existing entry point.
 import {
   BRANCH_CHIPS_MIN,
+  branchStatusLines,
   formatAge,
+  formatBranchSync,
   formatTokens,
   projectContextValue,
   sessionContextValue,
@@ -583,6 +586,12 @@ export class LineageTreeProvider
    * so the colour, which is the whole of the inline row's language, has nothing
    * to live in here. What survives is what the row is FOR: the branch's name,
    * how many sessions are on it, and the fact that it opens.
+   *
+   * The status is read LIVE here rather than carried on the node, on purpose.
+   * `branchRef` interns its nodes so the workbench's expansion state survives a
+   * roster tick, which means anything stored on one has to be part of its
+   * identity — and a node whose identity changed every time a file was saved
+   * would collapse the row the user had just opened.
    */
   private branchItem(el: BranchTreeNode): vscode.TreeItem {
     const item = new vscode.TreeItem(
@@ -594,9 +603,25 @@ export class LineageTreeProvider
           : vscode.TreeItemCollapsibleState.Expanded,
     );
     item.id = nodeKey(el);
-    item.description =
-      el.rootIds.length > 0 ? String(el.rootIds.length) : undefined;
+    const status = this.safe<BranchStatus | undefined>(
+      'branchStatusOf',
+      () => this.deps.branchStatusOf?.(el.dir),
+      undefined,
+    );
+    // Same order as the inline row draws them in — where the checkout stands,
+    // then how many sessions are on it — so somebody switching renderers reads
+    // the same line in the same place. Joined by a space rather than a
+    // separator: a TreeItem description is already dim, small and right-aligned,
+    // and ' · ' in it reads as a third field.
+    const description = [formatBranchSync(status), String(el.rootIds.length || '')]
+      .filter((part) => part !== '')
+      .join(' ');
+    item.description = description === '' ? undefined : description;
     item.iconPath = new vscode.ThemeIcon('git-branch');
+    // The native tree had no hover on a branch row at all, because the label and
+    // the description said everything there was. The status changes that: `↑2 ↓1
+    // *` needs somewhere to say what it is ahead OF.
+    item.tooltip = [el.branch, ...branchStatusLines(status), el.dir].join('\n');
     item.contextValue = contextValueOf(
       el.primary ? ['branch', 'primary'] : ['branch'],
     );

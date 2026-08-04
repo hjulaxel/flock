@@ -483,6 +483,11 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
         () => this.deps.groupSessionsByBranch?.(),
         false,
       ),
+      // Synchronous by contract, like `worktreesOf` above: the cache behind it
+      // answers from memory and refreshes in the background, so this cannot be
+      // the thing that makes a post wait.
+      branchStatusOf: (dir) =>
+        this.safe('branchStatusOf', () => this.deps.branchStatusOf?.(dir), undefined),
     });
   }
 
