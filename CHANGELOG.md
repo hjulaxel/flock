@@ -18,18 +18,25 @@ All notable changes to Flock are recorded here. The format follows
   Session** always used. It is also the first fork this extension has had that you
   can reach from the keyboard.
 
-- **The top bar is the FLOCK row.** The bell, `+`, fork, the two project buttons,
-  the filter and a new gear all sit beside the name instead of on a row of their
-  own with an overflow `...` beside it. VS Code merges a view's buttons into the
-  container header only while the container shows one section, so **Accounts is
-  now off by default** — `lineage.accounts.section`, the one price of this — and
-  the way back is **Show Accounts Section** in the gear menu. Nothing about
-  accounts stops working while it is off: usage is still read, sessions are still
-  routed and pinned for life, and every account verb is in the palette.
+- **A gear instead of the three dots**, holding what the overflow `...` used to:
+  the filter, the housekeeping verbs, **New Project…**, the closed-projects list,
+  the hooks pair and the Accounts switch. Each toggle is labelled with the
+  direction it goes — *Hide Accounts Section* while the section is showing, never
+  both at once — which a contributed menu cannot do, so the menu is built when it
+  opens.
 
-- **A gear instead of the three dots.** Same items, same order, same sections —
-  hooks, then housekeeping, then the Accounts toggle — behind an icon that says
-  what it is rather than an ellipsis that says nothing.
+  The row is down to five buttons for it: bell, `+`, fork, filter, gear. A toolbar
+  the workbench cannot fit collapses into an `...` and takes the last buttons with
+  it, and the gear is last — a crowded row would have hidden the very menu that
+  replaced the ellipsis. **New Project…** and the closed-projects list moved into
+  the menu because they are the two you reach for least.
+
+- **`lineage.accounts.section`** decides whether Accounts is drawn as a second
+  section of the sidebar. It is **on**, which is where it was. The setting exists
+  because VS Code merges a view's buttons into the container header — the row
+  reading **FLOCK** — only while that container shows exactly one section: turn
+  Accounts off and the five buttons move up onto that row. That trade is offered,
+  not taken, and the switch is in the gear menu.
 
 - **Flock works with the Claude you already run.** The session list has always
   been machine-wide, so `claude` typed into the bottom panel — or a conversation
@@ -115,6 +122,24 @@ All notable changes to Flock are recorded here. The format follows
   no dialog.
 
 ### Fixed
+
+- **A new subproject no longer swallows its parent's sessions.** The directory
+  dialog opens inside the parent, so accepting it without navigating anywhere
+  chose the parent's OWN directory — and since membership is containment, the new
+  subproject then claimed everything the parent did. Two projects on one directory
+  have no defined owner for the sessions in it at all: the tie breaks on project
+  name, so the sessions go to whichever sorts first and the other row displays
+  nothing while still claiming all of it.
+
+  Creating a project on a directory another project already lists is now refused,
+  by name, with the two ways forward — a subdirectory, or adding the directory to
+  the project that has it. **Add Directory to Project…** refuses the same thing for
+  the same reason. Dropping a session onto a project row is untouched: that one is
+  a move, and it already takes the directory off its previous owner and says so.
+
+  Nesting itself is unchanged, because the refusal is on the exact path only. A
+  subproject on `app/api` still takes the sessions under `app/api` off `app` —
+  that is the whole feature.
 
 - **Resume no longer risks a second writer on a transcript Flock cannot see.** A
   row reads as closed whenever the roster does not carry it, which is also what a

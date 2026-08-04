@@ -76,9 +76,10 @@ temporary chats, and much more.
   it they close and resume from transcript. Unsaved editors are never touched.
 
 - **Orchestration verbs.** New, fork, **fork and compact**, rename in place,
-  close, **close with summary**. New and fork are one click on the **FLOCK** row
-  and neither asks a question: `+` starts a session in the project you are
-  working in, and fork branches off the conversation you are looking at.
+  close, **close with summary**. New and fork are one click at the top of the
+  sidebar and neither asks a question: `+` starts a session in the project you are
+  working in, and fork branches off the conversation you are looking at. A gear
+  beside them holds the housekeeping.
 
 - **Temporary chats.** The chat button on a project row opens a scratch
   conversation about that project. Right-click the project and **View Chat

@@ -2918,6 +2918,17 @@ export async function activate(
       }
     },
 
+    // What the gear menu labels itself with. Read here, together, at the moment
+    // the menu opens — the same three facts the `when` clauses this replaced read
+    // off two context keys and one configuration value. `hookState` is the live
+    // record the context key is set from, so the menu and the palette cannot
+    // disagree about whether hooks are installed.
+    menuState: () => ({
+      hooksInstalled: store.getHookState().installed === true,
+      onlyActive: boolCfg(CONFIG_KEYS.onlyActiveSessions, false),
+      accountsSection: boolCfg(CONFIG_KEYS.accountsSection, true),
+    }),
+
     // Project workspaces
     switchWorkspace: (projectId) => workspaceManager.switchTo(projectId),
     activeWorkspace: () => workspaceManager.activeProjectId(),

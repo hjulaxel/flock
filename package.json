@@ -350,6 +350,12 @@
         "icon": "$(filter-filled)"
       },
       {
+        "command": "lineage.settingsMenu",
+        "title": "Settings and Housekeeping...",
+        "category": "Flock",
+        "icon": "$(gear)"
+      },
+      {
         "command": "lineage.showAccountsSection",
         "title": "Show Accounts Section",
         "category": "Flock"
@@ -496,13 +502,6 @@
         "category": "Flock"
       }
     ],
-    "submenus": [
-      {
-        "id": "lineage.settings",
-        "label": "Flock Settings",
-        "icon": "$(gear)"
-      }
-    ],
     "menus": {
       "view/title": [
         {
@@ -546,29 +545,19 @@
           "group": "navigation@2"
         },
         {
-          "command": "lineage.newProject",
-          "when": "view == lineageSessions",
-          "group": "navigation@3"
-        },
-        {
-          "command": "lineage.reopenProject",
-          "when": "view == lineageSessions",
-          "group": "navigation@4"
-        },
-        {
           "command": "lineage.showOnlyActiveSessions",
           "when": "view == lineageSessions && !lineage.onlyActive",
-          "group": "navigation@5"
+          "group": "navigation@3"
         },
         {
           "command": "lineage.showAllSessions",
           "when": "view == lineageSessions && lineage.onlyActive",
-          "group": "navigation@5"
+          "group": "navigation@3"
         },
         {
-          "submenu": "lineage.settings",
+          "command": "lineage.settingsMenu",
           "when": "view == lineageSessions",
-          "group": "navigation@9"
+          "group": "navigation@4"
         },
         {
           "command": "lineage.newSession",
@@ -581,29 +570,19 @@
           "group": "navigation@2"
         },
         {
-          "command": "lineage.newProject",
-          "when": "view == lineageSessionsInline",
-          "group": "navigation@3"
-        },
-        {
-          "command": "lineage.reopenProject",
-          "when": "view == lineageSessionsInline",
-          "group": "navigation@4"
-        },
-        {
           "command": "lineage.showOnlyActiveSessions",
           "when": "view == lineageSessionsInline && !lineage.onlyActive",
-          "group": "navigation@5"
+          "group": "navigation@3"
         },
         {
           "command": "lineage.showAllSessions",
           "when": "view == lineageSessionsInline && lineage.onlyActive",
-          "group": "navigation@5"
+          "group": "navigation@3"
         },
         {
-          "submenu": "lineage.settings",
+          "command": "lineage.settingsMenu",
           "when": "view == lineageSessionsInline",
-          "group": "navigation@9"
+          "group": "navigation@4"
         },
         {
           "command": "lineage.addAccount",
@@ -614,48 +593,6 @@
           "command": "lineage.refreshAccountUsage",
           "when": "view == lineageAccounts",
           "group": "navigation@2"
-        }
-      ],
-      "lineage.settings": [
-        {
-          "command": "lineage.installHooks",
-          "when": "!lineage.hooksInstalled",
-          "group": "1_hooks@1"
-        },
-        {
-          "command": "lineage.removeHooks",
-          "when": "lineage.hooksInstalled",
-          "group": "1_hooks@2"
-        },
-        {
-          "command": "lineage.showHidden",
-          "group": "2_manage@0"
-        },
-        {
-          "command": "lineage.deleteStale",
-          "group": "2_manage@1"
-        },
-        {
-          "command": "lineage.restoreSession",
-          "group": "2_manage@2"
-        },
-        {
-          "command": "lineage.refresh",
-          "group": "2_manage@3"
-        },
-        {
-          "command": "lineage.markAllNotificationsRead",
-          "group": "2_manage@4"
-        },
-        {
-          "command": "lineage.showAccountsSection",
-          "when": "!config.lineage.accounts.section",
-          "group": "3_accounts@0"
-        },
-        {
-          "command": "lineage.hideAccountsSection",
-          "when": "config.lineage.accounts.section",
-          "group": "3_accounts@0"
         }
       ],
       "view/item/context": [
@@ -1442,12 +1379,12 @@
         "lineage.accounts.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Show the Accounts view, where each AI subscription you can launch sessions on gets a row: which plan it is, how much of its five-hour and weekly windows is gone, and which one new sessions use by default. Each account keeps its own config directory, so signing in to one never signs you out of another, and a session stays on the account it started on for life — resuming or forking it re-uses that account whatever the routing says today. Turn off if you only ever use one account; nothing about how sessions launch changes, the view just stops taking up sidebar space. The section is also gated on lineage.accounts.section, which is off by default."
+          "description": "Show the Accounts view, where each AI subscription you can launch sessions on gets a row: which plan it is, how much of its five-hour and weekly windows is gone, and which one new sessions use by default. Each account keeps its own config directory, so signing in to one never signs you out of another, and a session stays on the account it started on for life — resuming or forking it re-uses that account whatever the routing says today. Turn off if you only ever use one account; nothing about how sessions launch changes, the view just stops taking up sidebar space. The section is also gated on lineage.accounts.section, which is on by default and is the switch to reach for if you would rather have Flock's buttons on the FLOCK row."
         },
         "lineage.accounts.section": {
           "type": "boolean",
-          "default": false,
-          "markdownDescription": "Draw **Accounts** as a second section of the Flock sidebar. Off by default, and the trade is a deliberate one: VS Code merges a view's buttons into the container header — the row that reads **FLOCK** — only while that container shows exactly one section, so with Accounts drawn every Flock button sat a row lower behind an overflow `...`. Off puts the bell, `+`, fork and the rest up on the FLOCK row. Turning it on costs you that row again.\n\nNothing about accounts stops working while it is off. Usage is still read, new sessions are still routed, a session is still pinned to its account for life, and every account verb — **Add Account…**, **Sign In**, **Set Default Account**, **Set Project Account…** — is in the Command Palette under **Flock**. The switch is also in the gear menu at the top of the sidebar, as **Show Accounts Section**."
+          "default": true,
+          "markdownDescription": "Draw **Accounts** as a second section of the Flock sidebar. On by default: the accounts are worth a row of their own.\n\nThe only reason to turn it off is the top bar. VS Code merges a view's buttons into the container header — the row that reads **FLOCK** — only while that container shows exactly one section, so while Accounts is drawn the bell, `+`, fork and the gear sit on the **SESSIONS** row just below it instead. Off moves them up one row, and costs you the Accounts section.\n\nNothing about accounts stops working while it is off. Usage is still read, new sessions are still routed, a session is still pinned to its account for life, and every account verb — **Add Account…**, **Sign In**, **Set Default Account**, **Set Project Account…** — is in the Command Palette under **Flock**. The switch is also in the gear menu at the top of the sidebar."
         },
         "lineage.viewStyle": {
           "type": "string",

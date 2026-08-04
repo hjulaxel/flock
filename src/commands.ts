@@ -68,6 +68,7 @@ import {
   matchProject,
   normalizeDir,
   pathKey,
+  projectClaiming,
   projectDirs,
   projectSubtree,
   providerOfProject,
@@ -1271,6 +1272,29 @@ async function newProjectFlow(
       parent ? projectDirs(parent)[0] : undefined,
     ));
   if (!rootDir) return undefined;
+
+  // Refused before anything is written: two projects listing one directory have
+  // no defined owner for the sessions in it (see projectClaiming), and a
+  // subproject is where that used to happen by accident — the dialog opens inside
+  // the parent, so accepting it without navigating chose the parent's own
+  // directory and the new project silently took the parent's sessions.
+  //
+  // The message names the project that has it and the two ways forward, because
+  // "no" on its own here reads as a bug: the directory the user picked is a
+  // perfectly real directory, and nothing on screen said it was taken.
+  const claimed = projectClaiming(deps.allProjects(), rootDir);
+  if (claimed) {
+    void vscode.window.showWarningMessage(
+      `Flock: "${claimed.name}" already covers ${rootDir}, so a second project ` +
+        'on it would have no defined owner for the sessions in there.\n\n' +
+        (parent && claimed.id === parent.id
+          ? 'Pick a subdirectory instead — a subproject on ' +
+            `${baseName(rootDir)}/something takes just the sessions under it.`
+          : 'Pick a subdirectory, or add this directory to that project.'),
+      { modal: true },
+    );
+    return undefined;
+  }
 
   const existing = deps.allProjects();
   const name = nextFreeName(
@@ -3272,6 +3296,20 @@ async function addDirectoryToProject(
   if (dirs.some((d) => pathKey(d) === pathKey(dir))) {
     void vscode.window.showInformationMessage(
       `"${baseName(dir)}" is already in "${project.name}".`,
+    );
+    return false;
+  }
+  // The same refusal the create flow makes, for the same reason: this is the
+  // other way a directory ends up claimed twice. Not applied to a DROP — a drag
+  // onto a project row is a move, and assignToProject deliberately takes the
+  // directory off its previous owner and says so.
+  const claimed = projectClaiming(deps.allProjects(), dir, projectId);
+  if (claimed) {
+    void vscode.window.showWarningMessage(
+      `Flock: "${claimed.name}" already covers ${dir}. Two projects on one ` +
+        'directory have no defined owner for the sessions in it — move the ' +
+        'directory there instead, or add a subdirectory of it here.',
+      { modal: true },
     );
     return false;
   }
@@ -5693,14 +5731,143 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   // `lineage.accounts.section`, and it exists for a layout reason rather than a
   // feature one: VS Code merges a view's title buttons into the CONTAINER header
   // — the row that reads FLOCK — only while the container has exactly one
-  // visible view. With Accounts drawn as a second section every Flock button sat
-  // a row below the name behind an overflow `...`, so the section is off by
-  // default and the bell is up where it belongs.
+  // visible view. Accounts is the second one, so while it is drawn every Flock
+  // button sits on the SESSIONS row just below the name instead.
+  //
+  // It is ON by default anyway. The accounts are worth a row of their own, and
+  // the bell being one row lower is a smaller loss than a list of subscriptions
+  // that is no longer on screen — so this switch is offered, not taken.
   //
   // Both halves live in the gear menu, which is the point: this hides a list, and
   // it has to be as easy to find as it was to lose. Nothing about accounts stops
   // working — the ten verbs stay registered, routing and pinning are untouched —
   // so the wording says "section", never "accounts".
+
+  /**
+   * The gear: everything the view title used to keep behind its `...`.
+   *
+   * See COMMANDS.settingsMenu for why this is a command opening a quick pick
+   * rather than a contributed submenu. The consequence worth stating here is that
+   * the ORDER and the GROUPING below are this function's, not the manifest's —
+   * the `1_hooks` / `2_manage` / `3_accounts` sections the items used to carry
+   * survive as the separators, so the menu reads the way the old overflow did.
+   *
+   * Every entry delegates to the command that already implements it. Nothing is
+   * reimplemented here, which is the only reason a second surface onto ten verbs
+   * cannot drift from the palette's.
+   */
+  register(COMMANDS.settingsMenu, 'settings menu', async () => {
+    // Absent state means offer both halves of each pair: a menu that cannot read
+    // which way a toggle goes must not guess, because the wrong label on a
+    // toggle is worse than two entries.
+    const state = safeCall('menuState', () => deps.menuState?.());
+    const hooksKnown = state !== undefined;
+
+    // The separator kind is read defensively: this module runs against a
+    // unit-test double of the vscode API, and a host without it should get a flat
+    // menu rather than an exception.
+    const separator = vscode.QuickPickItemKind?.Separator;
+    const items: (vscode.QuickPickItem & { command?: string })[] = [];
+    const group = (label: string): void => {
+      if (separator !== undefined) items.push({ label, kind: separator });
+    };
+
+    group('Sessions');
+    if (state === undefined || !state.onlyActive) {
+      items.push({
+        label: '$(filter) Show Only Active Sessions',
+        description: 'Hide every session that has stopped',
+        command: COMMANDS.showOnlyActiveSessions,
+      });
+    }
+    if (state === undefined || state.onlyActive) {
+      items.push({
+        label: '$(filter-filled) Show All Sessions',
+        description: 'Closed rows come back',
+        command: COMMANDS.showAllSessions,
+      });
+    }
+    items.push(
+      {
+        label: '$(eye) Show Hidden Folders...',
+        command: COMMANDS.showHidden,
+      },
+      {
+        label: '$(bell-slash) Mark All Notifications Read',
+        command: COMMANDS.markAllNotificationsRead,
+      },
+      {
+        label: '$(history) Restore Deleted Session...',
+        command: COMMANDS.restoreSession,
+      },
+      {
+        label: '$(trash) Delete Stale Sessions...',
+        command: COMMANDS.deleteStale,
+      },
+    );
+
+    group('Projects');
+    items.push(
+      {
+        label: '$(new-folder) New Project...',
+        command: COMMANDS.newProject,
+      },
+      {
+        label: '$(folder-opened) Open a Closed Project...',
+        command: COMMANDS.reopenProject,
+      },
+    );
+
+    group('Accounts');
+    if (state === undefined || !state.accountsSection) {
+      items.push({
+        label: '$(account) Show Accounts Section',
+        description: 'A second section in the sidebar, below the sessions',
+        command: COMMANDS.showAccountsSection,
+      });
+    }
+    if (state === undefined || state.accountsSection) {
+      items.push({
+        label: '$(account) Hide Accounts Section',
+        description: "Moves Flock's buttons up onto the FLOCK row",
+        command: COMMANDS.hideAccountsSection,
+      });
+    }
+
+    group('Hooks');
+    if (!hooksKnown || state?.hooksInstalled === false) {
+      items.push({
+        label: '$(plug) Install Session Hooks',
+        description: 'Faster, exact attention routing',
+        command: COMMANDS.installHooks,
+      });
+    }
+    if (!hooksKnown || state?.hooksInstalled === true) {
+      items.push({
+        label: '$(debug-disconnect) Remove Session Hooks',
+        command: COMMANDS.removeHooks,
+      });
+    }
+
+    group('');
+    items.push({
+      label: '$(sync) Refresh',
+      command: COMMANDS.refresh,
+    });
+
+    const chosen = await vscode.window.showQuickPick(items, {
+      title: 'Flock',
+      placeHolder: 'Settings and housekeeping',
+    });
+    // A separator cannot be picked, so `command` is only ever absent on a host
+    // whose quick pick returns something this function did not put in.
+    if (!chosen?.command) return;
+    try {
+      await vscode.commands.executeCommand(chosen.command);
+    } catch (err) {
+      logError('commands.settingsMenu', err);
+    }
+  });
 
   register(COMMANDS.showAccountsSection, 'show the accounts section', async () => {
     await deps.setAccountsSection(true);

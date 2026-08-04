@@ -499,7 +499,7 @@ interface MenuEntry {
 
 interface Manifest {
   contributes: {
-    commands: { command: string }[];
+    commands: { command: string; icon?: string }[];
     submenus?: { id: string; label: string; icon?: string }[];
     views: Record<string, { id: string; when?: string }[]>;
     menus: Record<string, MenuEntry[]>;
@@ -605,22 +605,40 @@ describe('manifest: the view title contributions', () => {
     }
   });
 
-  it('carries the gear on the submenu, and puts it last on the row', () => {
-    const gear = (pkg.contributes.submenus ?? []).find(
-      (s) => s.id === 'lineage.settings',
+  // A COMMAND with a gear icon, not a submenu. The submenu shipped first and was
+  // not drawn in the sidebar at all: nothing documents a submenu rendering as a
+  // button in a VIEW title, and a toolbar too narrow for its buttons collapses
+  // into the very `...` the gear replaces. A command with an icon is drawn
+  // wherever a command can be drawn.
+  it('carries the gear on a command, and puts it last on the row', () => {
+    const gear = pkg.contributes.commands.find(
+      (c) => c.command === 'lineage.settingsMenu',
     );
-    // Without an icon the workbench renders an empty slot in a toolbar, not a
-    // labelled button (microsoft/vscode#206326).
     expect(gear?.icon).toBe('$(gear)');
 
     for (const viewId of [SESSIONS, INLINE]) {
       const entries = titleEntriesFor(viewId);
-      const placed = entries.find((e) => e.submenu === 'lineage.settings');
+      const placed = entries.find((e) => e.command === 'lineage.settingsMenu');
       expect(placed, viewId).toBeDefined();
       const order = (group: string): number =>
         Number(group.split('@')[1] ?? '0');
       const last = Math.max(...entries.map((e) => order(e.group)));
       expect(order(placed?.group ?? ''), viewId).toBe(last);
+    }
+  });
+
+  // The row is narrow, and the workbench overflows a toolbar it cannot fit into
+  // an ellipsis — which would swallow the gear, since the gear is last. Five
+  // buttons is what fits: the bell, `+`, fork, the filter and the gear, with the
+  // two project verbs moved into the gear menu.
+  it('keeps the row down to five buttons', () => {
+    for (const viewId of [SESSIONS, INLINE]) {
+      // Count SLOTS, not entries: the bell and the filter each contribute two
+      // complementary entries and only ever draw one of them.
+      const slots = new Set(
+        titleEntriesFor(viewId).map((e) => e.group),
+      );
+      expect(slots.size, viewId).toBeLessThanOrEqual(5);
     }
   });
 
@@ -637,42 +655,52 @@ describe('manifest: the view title contributions', () => {
     }
   });
 
-  it('keeps every moved item in the gear menu, grouped as it was', () => {
-    const items = pkg.contributes.menus['lineage.settings'] ?? [];
-    const byCommand = new Map(items.map((e) => [e.command, e.group] as const));
-    // The exact set that used to live in `2_manage` and `1_hooks` on the view
-    // title, plus the Accounts toggle. A verb that goes missing from here is a
-    // verb with no menu at all — invisible, not merely misplaced.
-    expect([...byCommand.keys()].sort()).toEqual(
-      [
-        'lineage.deleteStale',
-        'lineage.hideAccountsSection',
-        'lineage.installHooks',
-        'lineage.markAllNotificationsRead',
-        'lineage.refresh',
-        'lineage.removeHooks',
-        'lineage.restoreSession',
-        'lineage.showAccountsSection',
-        'lineage.showHidden',
-      ].sort(),
-    );
-    // Still sectioned, so the menu reads the way the overflow did.
-    expect(byCommand.get('lineage.installHooks')).toBe('1_hooks@1');
-    expect(byCommand.get('lineage.showHidden')).toBe('2_manage@0');
-    expect(byCommand.get('lineage.showAccountsSection')).toBe('3_accounts@0');
+  // The gear menu is built in code (commands.settingsMenu) rather than declared,
+  // which is what lets it label a toggle with the direction it goes. The manifest
+  // can still check the half that matters: every verb the menu offers has to be a
+  // contributed command, or the menu entry fires nothing and the verb is
+  // unreachable from the palette too.
+  it('contributes every verb the gear menu delegates to', () => {
+    const declared = new Set(pkg.contributes.commands.map((c) => c.command));
+    for (const id of [
+      'lineage.showOnlyActiveSessions',
+      'lineage.showAllSessions',
+      'lineage.showHidden',
+      'lineage.markAllNotificationsRead',
+      'lineage.restoreSession',
+      'lineage.deleteStale',
+      'lineage.newProject',
+      'lineage.reopenProject',
+      'lineage.showAccountsSection',
+      'lineage.hideAccountsSection',
+      'lineage.installHooks',
+      'lineage.removeHooks',
+      'lineage.refresh',
+    ]) {
+      expect(declared.has(id), id).toBe(true);
+    }
   });
 
-  // The items are declared ONCE rather than per view: a submenu only renders
-  // where it is placed, and it is placed in both view titles, so a `view ==`
-  // clause there would only have been doing the mirroring by hand.
-  it('declares the gear menu once, not per view', () => {
-    for (const entry of pkg.contributes.menus['lineage.settings'] ?? []) {
-      expect(entry.when ?? '', entry.command).not.toContain('view ==');
+  // Moved off the row into the gear menu. On the row they were the two buttons
+  // most likely to be the ones VS Code overflowed away, and they are the two you
+  // reach for least — you make a project rarely and reopen one rarer still.
+  it('keeps the two project verbs off the row', () => {
+    for (const viewId of [SESSIONS, INLINE]) {
+      const ids = titleEntriesFor(viewId).map((e) => e.command);
+      expect(ids, viewId).not.toContain('lineage.newProject');
+      expect(ids, viewId).not.toContain('lineage.reopenProject');
     }
+  });
+
+  // Nothing declares a submenu any more. Left behind, the declaration would be a
+  // contribution the workbench validates and nothing places.
+  it('declares no submenus at all', () => {
+    expect(pkg.contributes.submenus ?? []).toHaveLength(0);
+    expect(pkg.contributes.menus['lineage.settings']).toBeUndefined();
   });
 });
 
-describe('manifest: the Accounts section is what frees the FLOCK row', () => {
+describe('manifest: the Accounts section, and the row it costs', () => {
   // The bell only reaches the container header while the container has ONE
   // visible view, so this when-clause is load-bearing for the whole top bar.
   it('gates the Accounts view on both of its settings', () => {
@@ -683,11 +711,17 @@ describe('manifest: the Accounts section is what frees the FLOCK row', () => {
     expect(accounts?.when).toContain('config.lineage.accounts.section');
   });
 
-  // A `visibility` default would not reach an existing profile — VS Code
-  // persists a user's view visibility per container — so the gate has to be a
-  // when-clause or the row silently stays as it was for everyone who has ever
+  // ON by default, which means the buttons sit on the SESSIONS row rather than
+  // the FLOCK row. That is the deliberate answer to the trade: a list of
+  // subscriptions on screen is worth more than the bell being one row higher, and
+  // the gear menu offers the switch to anybody who disagrees.
+  //
+  // The gate is a when-clause rather than a `visibility` default because
+  // `visibility` would not reach an existing profile — VS Code persists a user's
+  // view visibility per container — so the setting has to be the thing the view
+  // reads, or turning it off would silently do nothing for everyone who has ever
   // opened the sidebar.
-  it('ships the section off by default', () => {
+  it('ships the section on by default', () => {
     const props = (
       pkg as unknown as {
         contributes: {
@@ -695,7 +729,7 @@ describe('manifest: the Accounts section is what frees the FLOCK row', () => {
         };
       }
     ).contributes.configuration.properties;
-    expect(props['lineage.accounts.section'].default).toBe(false);
+    expect(props['lineage.accounts.section'].default).toBe(true);
     expect(props['lineage.accounts.enabled'].default).toBe(true);
   });
 });

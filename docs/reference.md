@@ -179,7 +179,7 @@ you — green is what everything else on screen uses to mean "nothing to do here
 It rolls up onto the project row, so a collapsed project still shows there is
 something to come back to, and the badge on the view is the count of red dots.
 
-The **bell** — leftmost on the FLOCK row — lists the latest finished sessions,
+The **bell** — leftmost in the view title — lists the latest finished sessions,
 unseen above a divider, then history, each with its project and how long ago it
 finished. Clicking an entry focuses the session and marks it read; *Mark All
 Notifications as Read* is in the gear menu, and a command of its own.
@@ -402,7 +402,7 @@ selected:
 | New session in a project | the project's name, e.g. `Storefront` |
 | Fork | the parent's, plus the next free number: `auth` → `auth 2` → `auth 3` |
 
-Neither `+` asks **where**. The one on the FLOCK row starts the session in the
+Neither `+` asks **where**. The one in the view title starts the session in the
 project you are working in, taking the first of these that answers:
 
 1. the project this window's **workspace** is scoped to;
@@ -435,18 +435,22 @@ clicking away commits.
 
 ### The top bar
 
-Everything Flock does from the sidebar sits on the **FLOCK** row itself, left to
-right:
+Five buttons, left to right — on the **SESSIONS** row, or on the **FLOCK** row
+itself if you turn the Accounts section off (see the note below):
 
 | Button | What it does |
 | --- | --- |
 | **bell** | The notifications list. Fills in when something is unread. |
 | **+** | A new session, asking nothing. See [Naming](#naming) for where it lands. |
 | **fork** | A branch off the conversation you are looking at — see below. |
-| **new folder** | **New Project…** |
-| **open folder** | The list of closed projects. |
 | **filter** | Show only running sessions, or closed ones too. |
-| **gear** | Everything else: hooks, housekeeping, the Accounts section. |
+| **gear** | Everything else: projects, hooks, housekeeping, the Accounts section. |
+
+Five and not eight, deliberately. A toolbar the workbench cannot fit collapses
+into an overflow `...`, taking the buttons at the end with it — and the gear is at
+the end, so a crowded row would hide the very menu that exists to replace that
+ellipsis. **New Project…** and the closed-projects list moved into the gear menu
+for that reason: they are the two you reach for least.
 
 The **fork** button is handed no row, so it works out which conversation it is
 about: the session whose terminal is the active one in this window, else the live
@@ -457,25 +461,30 @@ from the palette. Forking the wrong thread leaves you a branch of a conversation
 you were not in, sitting next to the one you meant, so it guesses only where the
 evidence is singular. It disappears while the tree is empty.
 
-The **gear** is a menu rather than a button, and it holds what used to be behind
-the `...`: **Install Instant-Update Hooks…**, **Show Closed Projects and Hidden
-Folders…**, **Delete Stale Sessions…**, **Restore Deleted Session…**,
-**Refresh**, **Mark All Notifications as Read**, and **Show Accounts Section**.
+The **gear** opens a menu holding everything that used to be behind the `...`:
+the active-sessions filter, **Show Closed Projects and Hidden Folders…**, **Mark
+All Notifications as Read**, **Restore Deleted Session…**, **Delete Stale
+Sessions…**, **New Project…**, the closed-projects list, the Accounts section
+switch, the hooks pair, and **Refresh**. Each toggle is labelled with the
+direction it goes — you get *Hide Accounts Section* when the section is showing,
+never both — which is why it is built when it opens rather than declared in the
+manifest.
 
-> Why the buttons are on that row at all, and what it costs. VS Code has no menu
-> id for a view container's title bar — there is `view/title` and no
-> `viewsContainer/title` — so an extension cannot put a button on the FLOCK row
-> directly. What it can do is give the container exactly **one** visible view, at
-> which point the workbench merges that view's buttons into the container header
-> and draws no separate section header. Flock had two views, Sessions and
-> Accounts, which is why every button used to sit a row lower with its own `...`.
+> Where the buttons sit, and why it is a choice. VS Code has no menu id for a view
+> container's title bar — there is `view/title` and no `viewsContainer/title` — so
+> an extension cannot put a button on the FLOCK row directly. What it can do is
+> give the container exactly **one** visible view, at which point the workbench
+> merges that view's buttons into the container header and draws no separate
+> section header.
 >
-> So **Accounts is off by default** (`lineage.accounts.section`) and that is the
-> whole price of this row. Nothing about accounts stops working: usage is still
-> read, new sessions are still routed, a session is still pinned to its account
-> for life, and every account verb is in the Command Palette under **Flock**. Turn
-> the section back on from the gear menu — **Show Accounts Section** — and the
-> buttons move back down to their own row, which is the trade being made.
+> Flock has two views, Sessions and Accounts, so by default the buttons sit on the
+> SESSIONS row just below the name. Turn **Accounts** off
+> (`lineage.accounts.section`, or the gear menu) and they move up onto the FLOCK
+> row. That is the entire trade, and it is settled in favour of Accounts: a list of
+> subscriptions on screen is worth more than one row of height. Nothing about
+> accounts stops working either way — usage is still read, new sessions are still
+> routed, a session is still pinned to its account for life, and every account verb
+> is in the Command Palette under **Flock**.
 
 ### How the rows are drawn
 

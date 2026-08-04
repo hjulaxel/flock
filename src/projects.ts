@@ -440,6 +440,46 @@ export function validateProjectName(
 
 // ---------------------------------------------------------------- matching
 
+/**
+ * The project that already lists `dir` itself, by exact path — or undefined.
+ *
+ * THE FAILURE THIS EXISTS TO REFUSE. Membership is containment, and the deepest
+ * claim wins (see matchProject), so two projects listing the SAME directory is
+ * the one arrangement the model has no answer for: the tie breaks on name, which
+ * means every session in that directory belongs to whichever project sorts
+ * first, and the other one displays nothing while still claiming everything.
+ *
+ * A subproject is where this used to happen by accident. Its directory pick opens
+ * inside its parent, so accepting the dialog without navigating anywhere chose
+ * the parent's OWN directory — and the new subproject then took the parent's
+ * whole session list with it, which is not a thing anybody asks a new, empty
+ * project to do.
+ *
+ * Exact paths only, deliberately. A subproject rooted at `app/api` SHOULD take
+ * the sessions running under `app/api` off its parent — that is the entire
+ * feature, and nesting by containment is how a project spanning a monorepo is
+ * meant to be split up. What is refused is the duplicate claim, not the deeper
+ * one.
+ */
+export function projectClaiming(
+  projects: readonly ProjectRecord[],
+  dir: string,
+  /** Ignore this project — the one being edited, which is allowed to already
+   *  list the directory it is being asked to keep. */
+  exceptId?: string,
+): ProjectRecord | undefined {
+  const target = pathKey(normalizeDir(dir));
+  if (target === '') return undefined;
+  for (const project of projects ?? []) {
+    if (!project || project.id === exceptId) continue;
+    if (project.deleted === true) continue;
+    for (const own of projectDirs(project)) {
+      if (pathKey(own) === target) return project;
+    }
+  }
+  return undefined;
+}
+
 export interface ProjectMatch {
   project: ProjectRecord;
   /** The specific directory of the project that matched. */

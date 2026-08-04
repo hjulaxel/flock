@@ -797,6 +797,23 @@ export const COMMANDS = {
    *  writes `lineage.accounts.section`. */
   showAccountsSection: 'lineage.showAccountsSection',
   hideAccountsSection: 'lineage.hideAccountsSection',
+  /** The gear at the end of the view title, and everything that used to be
+   *  behind the `...` beside it.
+   *
+   *  A COMMAND, deliberately, where the obvious answer is a `contributes.submenus`
+   *  entry placed in the navigation group. Two things go wrong with the submenu:
+   *  it is not reliably drawn as a toolbar button in a VIEW title (the reference
+   *  documents no such rendering, and it did not appear in the sidebar), and even
+   *  when a toolbar does draw everything, VS Code collapses a row too narrow for
+   *  its buttons into an overflow `...` — which would put the gear back inside
+   *  the ellipsis it exists to replace. A command with an icon is drawn wherever
+   *  a command can be drawn, and this one opens the menu itself.
+   *
+   *  It is therefore also the one menu in Flock that can label itself with STATE:
+   *  a quick pick is built when it opens, so "Hide Accounts Section" and "Show
+   *  All Sessions" say which way they go rather than needing a `when` clause and
+   *  a second command id each. */
+  settingsMenu: 'lineage.settingsMenu',
   // ACCOUNTS. Ten verbs, and they live here rather than in a table of their own
   // next to the view for the reason every other id does: a test cross-checks
   // THIS object against the manifest in both directions, so a second table is a
@@ -2250,6 +2267,22 @@ export interface CommandDeps {
    *  and the state the user reads is which of the two the gear menu is
    *  offering, which the view's own `when` clause decides. */
   setAccountsSection(on: boolean): Promise<void>;
+  // ---- the gear menu ------------------------------------------------------
+  /** The state the gear menu labels itself with, read when it opens.
+   *
+   *  One member for three answers because they are read together, once, at the
+   *  moment the quick pick is built — and because the alternative is three
+   *  getters whose only caller is that one function. The `when` clauses this
+   *  replaces read the same three facts off context keys and configuration.
+   *
+   *  Optional: absent (an older wiring, every unit double) means the menu offers
+   *  BOTH halves of each pair rather than guessing which way it goes, which is
+   *  wrong-looking but never wrong. */
+  menuState?(): {
+    hooksInstalled: boolean;
+    onlyActive: boolean;
+    accountsSection: boolean;
+  };
   // ---- multi-select -------------------------------------------------------
   /** The session ids selected in whichever view is on screen, top to bottom, or
    *  [] when nothing is or no view has reported one.

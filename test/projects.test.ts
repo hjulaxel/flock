@@ -18,6 +18,7 @@ import {
   matchProject,
   normalizeDir,
   pathKey,
+  projectClaiming,
   projectDirs,
   providerOfProject,
   validateProjectName,
@@ -183,6 +184,57 @@ describe('validateProjectName', () => {
 
   it('lets a project keep its own name while renaming', () => {
     expect(validateProjectName('Magma OS', existing, 'p1')).toBe('');
+  });
+});
+
+// ------------------------------------------------------ the duplicate claim
+
+describe('projectClaiming: two projects on one directory', () => {
+  const outer = project('outer', 'Code', '/code');
+  const extra = project('extra', 'Docs', '/docs', { dirs: ['/notes'] });
+
+  it('names the project that already lists the directory', () => {
+    expect(projectClaiming([outer], '/code')?.id).toBe('outer');
+  });
+
+  it('looks at the extra directories too, not just rootDir', () => {
+    expect(projectClaiming([extra], '/notes')?.id).toBe('extra');
+  });
+
+  // The whole point of the refusal: a subproject on the PARENT's own directory
+  // would take the parent's entire session list with it, which is what a new,
+  // empty subproject must never do.
+  it('catches a subproject being created on its parent', () => {
+    expect(projectClaiming([outer], '/code')?.name).toBe('Code');
+  });
+
+  // And the whole point of it being EXACT: nesting by containment is the feature.
+  // A subproject one level down is allowed, and takes only what is under it.
+  it('allows a subdirectory, which is how nesting is meant to work', () => {
+    expect(projectClaiming([outer], '/code/api')).toBeUndefined();
+    expect(projectClaiming([outer], '/code/api/src')).toBeUndefined();
+  });
+
+  it('allows a parent directory of an existing claim', () => {
+    expect(projectClaiming([project('p', 'API', '/code/api')], '/code')).toBeUndefined();
+  });
+
+  it('ignores the project being edited', () => {
+    expect(projectClaiming([outer], '/code', 'outer')).toBeUndefined();
+  });
+
+  it('ignores a tombstone', () => {
+    const gone = project('gone', 'Old', '/code', { deleted: true });
+    expect(projectClaiming([gone], '/code')).toBeUndefined();
+  });
+
+  it('normalizes before comparing, so a trailing slash is the same directory', () => {
+    expect(projectClaiming([outer], '/code/')?.id).toBe('outer');
+  });
+
+  it('answers nothing for an empty directory or an empty list', () => {
+    expect(projectClaiming([outer], '')).toBeUndefined();
+    expect(projectClaiming([], '/code')).toBeUndefined();
   });
 });
 
