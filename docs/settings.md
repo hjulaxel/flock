@@ -1,8 +1,12 @@
 # Settings
 
-All 24 settings, as contributed. The keys keep the `lineage.` prefix — Flock
+All 26 settings, as contributed. The keys keep the `lineage.` prefix — Flock
 was named Lineage before 0.1.0, and renaming settings keys would silently
 discard everyone's existing configuration.
+
+One of them, `lineage.git.pullRequests`, is the only setting in Flock that makes
+anything leave your machine. It is off by default and its row below says exactly
+what turning it on runs.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
@@ -22,6 +26,8 @@ discard everyone's existing configuration.
 | `lineage.showTokens` | `false` | Put a session's token count left of its age — the context its last turn ran with (prompt + cache + output), the same number `/context` reports. Off by default: it is a second number on every row. |
 | `lineage.groupSessionsByBranch` | `false` | Nest a project's sessions under the git branch they are running on. Each branch row becomes a container you can fold shut, with a `+` that starts a session in that worktree; a session no shown branch accounts for stays directly under the project. Only applies to a project with two or more worktrees. Off by default — it is the right shape for one-agent-per-worktree and the wrong one for a single checkout with a few forks in it. |
 | `lineage.branchColors` | `[]` | Colours for the branch chips, in order; index 0 is the first branch under a project (usually `main`). Each entry is a hex colour (`#7aa2f7`) or a theme colour id (`charts.blue`). A short list fills the rest from the built-in muted palette. |
+| `lineage.git.worktreePath` | `"../${repo}-${branch}"` | Where **New Worktree…** puts a new checkout. `${repo}` is the repository directory's name, `${branch}` the branch name with anything a path cannot carry replaced by `-`. A relative pattern resolves against the repository's **main** worktree, so the default puts `feat/x` of `~/code/app` at `~/code/app-feat-x`; an absolute path is used as written, and a leading `~/` expands. Must contain `${branch}`, or every branch would resolve to the same directory. Flock always shows the exact `git worktree add` command before running it. |
+| `lineage.git.pullRequests` | `false` | **The one thing in Flock that reaches the network.** On, Flock runs `gh pr list --state all --limit 100 --json number,title,state,isDraft,headRefName,url,statusCheckRollup` in each project's repository and puts the pull request on each branch row as a chip — number, state, check rollup — with **Open Pull Request in Browser** on the row's menu and **Create Pull Request…** (`gh pr create --web`, which opens the page for *you* to submit). It shells out to the [`gh` CLI](https://cli.github.com) you installed and authenticated: no HTTP request from the extension, no bundled API client, no token ever seen or stored. Polled only while the Sessions view is visible, at most once every five minutes per repository, and cached. Missing `gh`, no `gh auth login`, or no GitHub remote all render the rows exactly as this being off does, with one line in the **Flock** output channel and no dialog. |
 | `lineage.notifications.enabled` | `true` | Track finished sessions: red dot until looked at, project-row roll-up, and the bell. Off restores the plain waiting-only dot. Overridable per session from each row's context menu. |
 | `lineage.notifications.popup` | `false` | Also show a toast with a **Focus** button when a session finishes while you are elsewhere. Off by default — with many parallel sessions the bell and dots carry the same information without the interruption. |
 | `lineage.workspaces.enabled` | `true` | Show the workspace switcher in the status bar. |

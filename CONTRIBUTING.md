@@ -41,9 +41,27 @@ A few constraints look like oversights and are not:
   `test/identity.test.ts`. A published id cannot be changed.
 - **No proposed APIs.** Flock has to run in Cursor, Windsurf and VSCodium, so
   `enabledApiProposals` stays empty.
-- **Read-only where it counts.** The only CLI call is `claude agents --json`; the
-  only git call is `git worktree list --porcelain`. Flock makes no network
-  requests, and writes nothing to your repository or to
+- **Read-only on its own; explicit when not.** Everything Flock does by itself is
+  a read, on a timer, cached: `claude agents --json`, `git worktree list
+  --porcelain`, and `git status --porcelain=v2 --branch` for a branch row's
+  ahead/behind and dirty state. That last one runs with `GIT_OPTIONAL_LOCKS=0`,
+  because `git status` otherwise rewrites the index to save the stat cache it
+  refreshed — a write to somebody's repository from a probe nobody asked for.
+
+  Four things sit outside that, and every one of them needs a person first:
+
+  - `git for-each-ref …refs/heads/`, when the **New Worktree…** picker opens.
+  - `git worktree add` and `git worktree remove`, each behind a confirmation
+    that quotes the exact command, and `--force` behind a second one.
+  - `gh pr list` and `gh pr create --web`, only with `lineage.git.pullRequests`
+    on. That setting is the one thing in Flock that reaches the network, and it
+    reaches it through a CLI the user installed and authenticated: there is no
+    HTTP client in the extension, no bundled API client, and no token is ever
+    seen or stored. It degrades to nothing — no `gh`, no auth, no GitHub remote
+    all render the row exactly as the setting being off does, with one line to
+    the output channel and no modal.
+
+  Nothing on a timer writes anything, and Flock still never writes to
   `~/.claude/settings.json`. Please keep it that way.
 - **Failures degrade, they do not throw.** A missing file, malformed JSON or a
   dead process returns nothing and the row renders plainly. For session ancestry

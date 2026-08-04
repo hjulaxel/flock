@@ -48,6 +48,22 @@ temporary chats, and much more.
   that worktree. Turn on `lineage.groupSessionsByBranch` and each branch becomes
   a container instead.
 
+  Each row also says where its checkout stands: `↑2 ↓1` against the upstream, and
+  `*` when something is uncommitted.
+
+- **Worktrees you can make and unmake.** **New Worktree…** picks an existing
+  branch or takes a new name, puts the checkout beside the main one
+  (`../<repo>-<branch>`, configurable), and starts a session in it. **Remove
+  Worktree** never touches the main one, asks a second time before deleting
+  uncommitted work, and tells you when a running session lives in there. Both
+  show you the exact `git` command before running it.
+
+- **Pull requests, if you want them.** `lineage.git.pullRequests` — off by
+  default — puts the request on each branch row as a small chip: number, state,
+  and whether the checks passed. It works by shelling out to your own `gh` CLI,
+  and it is the only thing in Flock that reaches the network. See
+  [Privacy](#privacy).
+
 - **Use several accounts.** A row per subscription, whether it's a work plan, a
   personal plan, or an API key. Each account shows its current usage. An account
   also keeps its own config directory, so you only need to sign in **once per
@@ -116,16 +132,33 @@ Windows does not get this, sorry. Sessions there always close and resume.
 
 ## Documentation
 
-- **[Settings](docs/settings.md)** — all 24, with defaults.
+- **[Settings](docs/settings.md)** — all 26, with defaults.
 - **[Reference](docs/reference.md)** — how it works, projects, notifications,
   workspaces, close vs delete, naming, and the sidebar rendering modes.
 
 ## Privacy
 
-Nothing leaves your machine. Flock makes no network requests. It reads the local
-session roster and local transcript files, and writes only to its own extension
-storage — plus, if you explicitly opt in, the hooks plugin directory and
-`~/.lineage/events.ndjson`.
+Nothing leaves your machine unless you turn on one setting, named below. Flock
+reads the local session roster and local transcript files, and writes only to its
+own extension storage — plus, if you explicitly opt in, the hooks plugin
+directory and `~/.lineage/events.ndjson`.
+
+**Your repositories are read on a timer and changed only when you ask.** By
+itself Flock runs `git worktree list --porcelain` and `git status
+--porcelain=v2 --branch`, both reads, both cached. **New Worktree…** and **Remove
+Worktree** run `git worktree add` and `git worktree remove` — after a
+confirmation that shows you the exact command, and a second one before anything
+uncommitted is deleted.
+
+**`lineage.git.pullRequests` is the one thing in Flock that reaches the network,
+and it is off by default.** With it on, Flock shells out to the
+[`gh` CLI](https://cli.github.com) that you installed and signed in yourself:
+`gh pr list` while the Sessions view is visible, at most once every five minutes
+per repository, and `gh pr create --web` when you ask for it. Flock makes no HTTP
+requests of its own, bundles no API client, and never sees or stores a token. If
+`gh` is missing, not signed in, or the repository has no GitHub remote, the rows
+render exactly as they do with the setting off — one line in the **Flock** output
+channel, no dialog.
 
 ## Development
 

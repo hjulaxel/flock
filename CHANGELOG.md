@@ -4,6 +4,67 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- **Branch rows say where each checkout stands.** `↑2 ↓1` against the upstream,
+  and `*` when there is work in the worktree that no commit holds yet. From one
+  cheap read — `git status --porcelain=v2 --branch`, once per worktree, cached for
+  15 seconds — on the same discipline the worktree list already used: the read side
+  is synchronous from cache, the refresh happens in the background, and nothing
+  about it can make the sidebar wait. It runs with `GIT_OPTIONAL_LOCKS=0`, because
+  `git status` otherwise rewrites the index to save the stat cache it refreshed,
+  and a probe nobody asked for must not write to your repository. A clean,
+  in-sync or not-yet-read checkout says nothing at all, so a single-checkout
+  repository looks exactly as it did. The hover says it in words — "2 ahead, 1
+  behind origin/feat/x", or "no upstream branch", which is a different thing from
+  being up to date.
+
+- **New Worktree…** picks one of the repository's local branches or takes a name
+  that does not exist yet, creates the checkout, and starts a session in it. The
+  path comes from `lineage.git.worktreePath`, which defaults to a sibling of the
+  main worktree (`../<repo>-<branch>`); the exact `git worktree add` command,
+  path and all, is in the confirmation. It is on a branch row, on a **project**
+  row and in the command palette — a repository with one checkout has no branch
+  rows, and that is precisely when you want this.
+
+- **Remove Worktree**, with the refusals spelled out. Never the main worktree.
+  A second confirmation before `--force`, which is what deletes uncommitted
+  changes and untracked files — `git worktree remove` refuses those on its own, so
+  the second dialog is about exactly that and says so. A warning when a running
+  Flock session has its working directory in there. The branch itself always
+  survives, so a worktree you remove can be added back.
+
+- **Open Worktree in New Window**, plus **Reveal Worktree in Finder** and **Copy
+  Worktree Path**, which existed on a row and are now in the command palette too.
+  All of them fall back to a picker when they are invoked without a row.
+
+- **Pull requests on branch rows** — number, state and check rollup as a small
+  chip, with **Open Pull Request in Browser**, and **Create Pull Request…** which
+  runs `gh pr create --web` and leaves the submitting to you. Behind
+  `lineage.git.pullRequests`, **off by default**, because it is the one thing in
+  Flock that reaches the network.
+
+  It reaches it through the `gh` CLI you installed and authenticated, never as an
+  HTTP request from the extension and never with a bundled API client: Flock does
+  not see, store or refresh a token, and `gh` decides which host it talks to. It
+  is polled only while the Sessions view is visible, at most once every five
+  minutes per repository, anchored on the main worktree so a project with six
+  checkouts makes one call rather than six. Missing `gh`, no `gh auth login`, no
+  GitHub remote and a branch with no request all produce the same thing: the row
+  as it looks with the setting off, one line in the **Flock** output channel, and
+  no dialog.
+
+### Changed
+
+- **The documented promise now matches the code, exactly.** The README's Privacy
+  section, `CONTRIBUTING.md`'s read-only bullet and `docs/reference.md` used to say
+  "Flock makes no network requests" and "the only git call is `git worktree list
+  --porcelain`". Both were true and neither is any more, so all three now list
+  every process Flock starts, which of them write, and which one setting can make
+  something leave your machine.
+
 ## [0.1.1] — unreleased
 
 ### Added
