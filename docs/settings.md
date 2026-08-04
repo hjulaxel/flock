@@ -1,6 +1,6 @@
 # Settings
 
-All 25 settings, as contributed. The keys keep the `lineage.` prefix — Flock
+All 26 settings, as contributed. The keys keep the `lineage.` prefix — Flock
 was named Lineage before 0.1.0, and renaming settings keys would silently
 discard everyone's existing configuration.
 
@@ -29,5 +29,6 @@ discard everyone's existing configuration.
 | `lineage.workspaces.resumeSessions` | `true` | Resume a project's parked sessions when switching to its workspace, up to 8 per switch. Parking closes a session's terminal on switch-away, so with this off nothing is parked at all. |
 | `lineage.workspaces.autoSwitch` | `true` | Focus follows project: working in a session that belongs to another project switches the window to that project's workspace by itself. |
 | `lineage.explorer.followProject` | `true` | The Explorer follows the active project, swapping the built-in file tree to that project's directories. Requires running **Flock: Follow the Active Project in the Explorer** once per window, which converts it to a Flock workspace (one reload). |
-| `lineage.accounts.enabled` | `true` | Show the **Accounts** view. Off hides the list only — routing, pinning and the account verbs all keep working from the palette. |
+| `lineage.accounts.enabled` | `true` | The accounts feature's off switch. Off hides the list only — routing, pinning and the account verbs all keep working from the palette. Whether the list is *drawn* is `lineage.accounts.section` below; both have to be on. |
+| `lineage.accounts.section` | `false` | Draw **Accounts** as a second section of the Flock sidebar. **Off by default, and that is the price of the top bar:** VS Code merges a view's buttons into the container header — the row reading **FLOCK** — only while that container shows exactly one section, so with Accounts drawn every Flock button drops to a row of its own behind an overflow `...`. Off puts the bell, `+`, fork, the project buttons and the gear up on the FLOCK row. Nothing about accounts stops working while it is off: usage is still read, new sessions are still routed, a session is still pinned to its account for life, and every account verb is in the palette under **Flock**. The way back is one click — **Show Accounts Section** in the gear menu — and it costs you the shared row again. |
 | `lineage.hooks.enabled` | `false` | Read the hook event stream for instant updates. **Install Instant-Update Hooks…** turns this on for you; set it to `false` to stop reading without uninstalling the plugin. |

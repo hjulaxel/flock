@@ -103,10 +103,10 @@ you — green is what everything else on screen uses to mean "nothing to do here
 It rolls up onto the project row, so a collapsed project still shows there is
 something to come back to, and the badge on the view is the count of red dots.
 
-The **bell** at the top of the sidebar lists the latest finished sessions —
-unseen above a divider, then history — each with its project and how long ago it
-finished. Clicking an entry focuses the session and marks it read; *Mark all as
-read* is one entry further down, and a command of its own.
+The **bell** — leftmost on the FLOCK row — lists the latest finished sessions,
+unseen above a divider, then history, each with its project and how long ago it
+finished. Clicking an entry focuses the session and marks it read; *Mark All
+Notifications as Read* is in the gear menu, and a command of its own.
 
 Each row carries an **×** that takes it off the list without going near the
 session. That is per *finish*, not per session: the next turn that session
@@ -326,12 +326,20 @@ selected:
 | New session in a project | the project's name, e.g. `Storefront` |
 | Fork | the parent's, plus the next free number: `auth` → `auth 2` → `auth 3` |
 
-Neither `+` asks **where**. The one in the view title starts the session in the
-project this window is open on — the folder you have open, or, if it sits inside
-a project, that project's main directory. It falls back to a folder list only
-when the window makes no such claim. To start one somewhere else, the palette
-has **Flock: New Claude Session in Folder…**, which always asks and can browse
-to a directory no session has ever run in.
+Neither `+` asks **where**. The one on the FLOCK row starts the session in the
+project you are working in, taking the first of these that answers:
+
+1. the project this window's **workspace** is scoped to;
+2. the project owning the **folder** this window is open on;
+3. the project of the **session** whose terminal is active here;
+4. that folder, when no project claims it.
+
+A session that lands in a project is named after the project, exactly as the `+`
+on a project row does; one that lands in a bare folder is named after the
+directory. Only a window that answers none of the four — no workspace, no folder,
+nothing of ours running in it — gets a folder list. To start one somewhere else,
+the palette has **Flock: New Claude Session in Folder…**, which always asks and
+can browse to a directory no session has ever run in.
 
 The session is **created first and named after**, which is the Explorer's "New
 File" gesture: its row appears the instant you click — before the CLI has
@@ -348,6 +356,52 @@ double-click turns the row into a text field. Enter commits, Escape cancels,
 clicking away commits.
 
 ## The sidebar
+
+### The top bar
+
+Everything Flock does from the sidebar sits on the **FLOCK** row itself, left to
+right:
+
+| Button | What it does |
+| --- | --- |
+| **bell** | The notifications list. Fills in when something is unread. |
+| **+** | A new session, asking nothing. See [Naming](#naming) for where it lands. |
+| **fork** | A branch off the conversation you are looking at — see below. |
+| **new folder** | **New Project…** |
+| **open folder** | The list of closed projects. |
+| **filter** | Show only running sessions, or closed ones too. |
+| **gear** | Everything else: hooks, housekeeping, the Accounts section. |
+
+The **fork** button is handed no row, so it works out which conversation it is
+about: the session whose terminal is the active one in this window, else the live
+session you prompted most recently, else the only live session there is. If none
+of those is a single clear answer — two rows equally stale, or a tree holding
+nothing but closed sessions — it asks, with the same list **Fork Session** uses
+from the palette. Forking the wrong thread leaves you a branch of a conversation
+you were not in, sitting next to the one you meant, so it guesses only where the
+evidence is singular. It disappears while the tree is empty.
+
+The **gear** is a menu rather than a button, and it holds what used to be behind
+the `...`: **Install Instant-Update Hooks…**, **Show Closed Projects and Hidden
+Folders…**, **Delete Stale Sessions…**, **Restore Deleted Session…**,
+**Refresh**, **Mark All Notifications as Read**, and **Show Accounts Section**.
+
+> Why the buttons are on that row at all, and what it costs. VS Code has no menu
+> id for a view container's title bar — there is `view/title` and no
+> `viewsContainer/title` — so an extension cannot put a button on the FLOCK row
+> directly. What it can do is give the container exactly **one** visible view, at
+> which point the workbench merges that view's buttons into the container header
+> and draws no separate section header. Flock had two views, Sessions and
+> Accounts, which is why every button used to sit a row lower with its own `...`.
+>
+> So **Accounts is off by default** (`lineage.accounts.section`) and that is the
+> whole price of this row. Nothing about accounts stops working: usage is still
+> read, new sessions are still routed, a session is still pinned to its account
+> for life, and every account verb is in the Command Palette under **Flock**. Turn
+> the section back on from the gear menu — **Show Accounts Section** — and the
+> buttons move back down to their own row, which is the trade being made.
+
+### How the rows are drawn
 
 `lineage.viewStyle` chooses how the Sessions view is drawn:
 
