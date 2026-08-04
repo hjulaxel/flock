@@ -1467,10 +1467,17 @@ export async function activate(
    * forward when a conversation re-mints its id (see generations.ts), so a
    * re-keyed session of ours has its liveness on the new id and its ownership on
    * an older one. Asking the tip alone would call it foreign.
+   *
+   * Liveness comes from `prevLiveIds` rather than from `lastEntries`, for both
+   * reasons: it is a Set, and this runs once per rendered row on every repaint;
+   * and it is assigned by the same rebuild that produced the forest the rows are
+   * drawn from, so a row that renders as live is always a row this can see. A
+   * scan of the raw roster can be a tick AHEAD of the forest, which is exactly
+   * the window in which a row and its ownership marker would disagree.
    */
   const sessionHostOf = (sessionId: string): SessionHost =>
     hostOfChain(chainAliases(sessionId), {
-      live: (id) => lastEntries.some((e) => e.sessionId === id),
+      live: (id) => prevLiveIds.has(id),
       boundHere: (id) => registry.isBoundHere(id),
       record: (id) => store.get(id),
       windowId: focusIntegration.windowId,
