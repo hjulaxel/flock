@@ -423,6 +423,22 @@ describe('workspaces: restorePlan', () => {
     expect('activeUri' in plan).toBe(false);
   });
 
+  it('reports the active SESSION tab, so a restore has somewhere to land', () => {
+    // Without this the switch had no focus target at all when the layout was
+    // left on a session tab, and ended on whichever session came home last.
+    const plan = restorePlan(
+      [session(S1), { ...session(S2), active: true }],
+      nothingOpen,
+    );
+    expect(plan.activeSessionId).toBe(S2);
+    expect(plan.activeUri).toBeUndefined();
+  });
+
+  it('has no active session when the layout named none', () => {
+    const plan = restorePlan([session(S1)], nothingOpen);
+    expect('activeSessionId' in plan).toBe(false);
+  });
+
   it('drops a file with no uri and a session with a bad id', () => {
     const plan = restorePlan(
       [
@@ -639,6 +655,9 @@ interface Calls {
   killed: string[];
   unstowed: string[];
   launched: string[];
+  /** Every session the switch put the keyboard on, in order. There should
+   *  never be more than one: the focus decision is made once, at the end. */
+  focused: string[];
 }
 
 function harness(over: Partial<WorkspaceManagerDeps> = {}): {
@@ -651,6 +670,7 @@ function harness(over: Partial<WorkspaceManagerDeps> = {}): {
     killed: [],
     unstowed: [],
     launched: [],
+    focused: [],
   };
   const deps: WorkspaceManagerDeps = {
     getProject: () => undefined,
@@ -677,7 +697,10 @@ function harness(over: Partial<WorkspaceManagerDeps> = {}): {
       return true;
     },
     activeSessionId: () => null,
-    focusSession: () => true,
+    focusSession: (id) => {
+      calls.focused.push(id);
+      return true;
+    },
     launchSession: async (opts) => {
       calls.launched.push(opts.sessionId);
       return null;
@@ -1026,6 +1049,11 @@ describe('workspaces: parking closes, never the panel', () => {
     stubTabModel(groups, []);
 
     let active: string | null = 'pa';
+    // The registry, honestly: a park DISPOSES the terminal, so it stops
+    // listing the session — and the restore refuses to launch a session that
+    // still has a terminal here, because that would be a second process on one
+    // transcript.
+    const bound = new Set([S1]);
     const { deps, calls } = harness({
       getProject: twoProjects,
       getWorkspace: (id) => (id === 'pa' ? snapshot : undefined),
@@ -1038,13 +1066,14 @@ describe('workspaces: parking closes, never the panel', () => {
         records[id] = { ...(records[id] ?? record(id)), ...patch };
         calls.written.push({ id, patch });
       },
-      bindings: () => [binding(S1, 'claude')],
+      bindings: () => [...bound].map((id) => binding(id, 'claude')),
       sessionCwd: () => '/code/api',
       // The roster never notices the kill inside this test — the stale case.
       isLive: () => true,
       hasTranscript: () => true,
       closeSessionTab: (id) => {
         calls.killed.push(id);
+        bound.delete(id);
         closeOneTerminalTab(groups);
         return true;
       },
@@ -1052,6 +1081,7 @@ describe('workspaces: parking closes, never the panel', () => {
       unstowSessionTab: async () => false,
       launchSession: async (opts) => {
         calls.launched.push(opts.sessionId);
+        bound.add(opts.sessionId);
         return {
           nodeId: opts.sessionId,
           sessionId: opts.sessionId,
@@ -1176,6 +1206,11 @@ describe('workspaces: the detach tier (tmux)', () => {
 
     let active: string | null = 'pa';
     const launchedWith: Array<{ sessionId: string; tmuxName?: string }> = [];
+    // A detach park disposes the terminal too — only the tmux server keeps the
+    // process. So the registry stops listing the session, which is what lets
+    // the restore re-attach: a session that still has a terminal here is one
+    // the restore leaves alone rather than opening a second client onto.
+    const bound = new Set([S1]);
     const { deps, calls } = harness({
       getProject: twoProjects,
       getWorkspace: (id) => (id === 'pa' ? snapshot : undefined),
@@ -1188,13 +1223,14 @@ describe('workspaces: the detach tier (tmux)', () => {
         records[id] = { ...(records[id] ?? record(id)), ...patch };
         calls.written.push({ id, patch });
       },
-      bindings: () => [binding(S1, 'claude')],
+      bindings: () => [...bound].map((id) => binding(id, 'claude')),
       sessionCwd: () => '/code/api',
       isLive: () => true, // the detached process really is running
       hasTranscript: () => true,
       tmuxNameOf: (id) => (id === S1 ? TMUX_S1 : undefined),
       closeSessionTab: (id) => {
         calls.killed.push(id);
+        bound.delete(id);
         closeOneTerminalTab(groups);
         return true;
       },
@@ -1207,6 +1243,7 @@ describe('workspaces: the detach tier (tmux)', () => {
           sessionId: opts.sessionId,
           ...(opts.tmuxName !== undefined ? { tmuxName: opts.tmuxName } : {}),
         });
+        bound.add(opts.sessionId);
         return {
           nodeId: opts.sessionId,
           sessionId: opts.sessionId,
@@ -1337,5 +1374,243 @@ describe('workspaces: the Explorer follows the switch', () => {
     await expect(
       new WorkspaceManager(deps).switchTo('pw'),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe('workspaces: a switch ends on the tab you asked for', () => {
+  const binding = (sessionId: string, terminalName: string) => ({
+    nodeId: sessionId,
+    sessionId,
+    terminalName,
+    createdAt: 0,
+  });
+  const parkedIn = (dir: string) => ({ parked: true, cwd: dir });
+  const resumes = (calls: Calls): WorkspaceManagerDeps['launchSession'] =>
+    async (opts) => {
+      calls.launched.push(opts.sessionId);
+      return {
+        nodeId: opts.sessionId,
+        sessionId: opts.sessionId,
+        terminalName: 'claude',
+        createdAt: 0,
+      };
+    };
+
+  it('an auto switch ends on the session that TRIGGERED it', async () => {
+    // THE BUG. Clicking a session of another project resumes it, which triggers
+    // the auto switch, whose restore then brings its siblings home — and
+    // revealing a terminal takes the front of its editor group whatever
+    // preserveFocus says. So the click landed you on a sibling tab, and only a
+    // second click (with the workspace already switched) went where you asked.
+    const records: Record<string, EditorialRecord> = {
+      [S1]: record(S1, parkedIn('/code/api')),
+      [S2]: record(S2, parkedIn('/code/api')),
+    };
+    const snapshot: WorkspaceSnapshot = {
+      projectId: 'pa',
+      tabs: [
+        { kind: 'session', sessionId: S1, viewColumn: 1 },
+        { kind: 'session', sessionId: S2, viewColumn: 1 },
+      ],
+      savedAt: ISO,
+      updatedAt: ISO,
+    };
+    stubTabModel([{ viewColumn: 1, isActive: true, tabs: [] }], []);
+
+    const { deps, calls } = harness({
+      getProject: twoProjects,
+      getWorkspace: (id) => (id === 'pa' ? snapshot : undefined),
+      getActive: () => 'pw',
+      getRecord: (id) => records[id],
+      allRecords: () => records,
+      sessionCwd: () => '/code/api',
+      isLive: () => false,
+      hasTranscript: () => true,
+    });
+    deps.launchSession = resumes(calls);
+
+    await new WorkspaceManager(deps).switchTo('pa', {
+      auto: true,
+      focusSessionId: S1,
+    });
+
+    // Both sessions came home...
+    expect(calls.launched).toEqual([S1, S2]);
+    // ...and the keyboard ends on the one that was clicked, not on whichever
+    // restore finished last.
+    expect(calls.focused).toEqual([S1]);
+  });
+
+  it('a manual switch ends on the session tab its layout was left on', async () => {
+    // Same defect through the other door: the status-bar switcher. The layout
+    // knows which tab had the keyboard, and when that tab was a session the
+    // switch used to drop the target and land on a race winner.
+    const records: Record<string, EditorialRecord> = {
+      [S1]: record(S1, parkedIn('/code/api')),
+      [S2]: record(S2, parkedIn('/code/api')),
+    };
+    const snapshot: WorkspaceSnapshot = {
+      projectId: 'pa',
+      tabs: [
+        { kind: 'session', sessionId: S1, viewColumn: 1 },
+        { kind: 'session', sessionId: S2, viewColumn: 1, active: true },
+      ],
+      savedAt: ISO,
+      updatedAt: ISO,
+    };
+    stubTabModel([{ viewColumn: 1, isActive: true, tabs: [] }], []);
+
+    const { deps, calls } = harness({
+      getProject: twoProjects,
+      getWorkspace: (id) => (id === 'pa' ? snapshot : undefined),
+      getActive: () => 'pw',
+      getRecord: (id) => records[id],
+      allRecords: () => records,
+      sessionCwd: () => '/code/api',
+      isLive: () => false,
+      hasTranscript: () => true,
+    });
+    deps.launchSession = resumes(calls);
+
+    await new WorkspaceManager(deps).switchTo('pa');
+
+    expect(calls.focused).toEqual([S2]);
+  });
+
+  it('saves WHICH session tab had the keyboard, for that way back', async () => {
+    // The tab API cannot link a terminal tab to its Terminal, so this is
+    // triangulated: the active tab is a terminal tab, and the workbench's
+    // active terminal is one of ours.
+    const front = fakeTerminalTab('claude · progress');
+    front.isActive = true;
+    const groups: FakeGroup[] = [
+      { viewColumn: 1, isActive: true, tabs: [front, fakeTerminalTab('claude · specs')] },
+    ];
+    stubTabModel(groups, []);
+
+    const { deps, calls } = harness({
+      getProject: twoProjects,
+      getActive: () => 'pa',
+      bindings: () => [
+        binding(S1, 'claude · progress'),
+        binding(S2, 'claude · specs'),
+      ],
+      activeSessionId: () => S1,
+      sessionCwd: () => '/code/api',
+    });
+
+    await new WorkspaceManager(deps).switchTo('pw');
+
+    const tabs = calls.saved.find((s) => s.projectId === 'pa')?.tabs ?? [];
+    expect(tabs).toContainEqual({
+      kind: 'session',
+      sessionId: S1,
+      viewColumn: 1,
+      active: true,
+    });
+    expect(tabs).toContainEqual({
+      kind: 'session',
+      sessionId: S2,
+      viewColumn: 1,
+    });
+  });
+
+  it('leaves the active tab to the FILE when a file has the keyboard', async () => {
+    // `window.activeTerminal` keeps naming the last terminal long after focus
+    // moved to an editor. Recording the session as active on that alone would
+    // put two active tabs in one snapshot, and the file — the one the user is
+    // actually looking at — would lose the tie.
+    const front = fakeFileTab('file:///code/api/a.ts');
+    front.isActive = true;
+    const groups: FakeGroup[] = [
+      { viewColumn: 1, isActive: true, tabs: [front, fakeTerminalTab('claude · progress')] },
+    ];
+    stubTabModel(groups, []);
+
+    const { deps, calls } = harness({
+      getProject: twoProjects,
+      getActive: () => 'pa',
+      bindings: () => [binding(S1, 'claude · progress')],
+      activeSessionId: () => S1,
+      sessionCwd: () => '/code/api',
+    });
+
+    await new WorkspaceManager(deps).switchTo('pw');
+
+    const tabs = calls.saved.find((s) => s.projectId === 'pa')?.tabs ?? [];
+    expect(tabs.filter((t) => t.active === true)).toEqual([
+      { kind: 'file', uri: 'file:///code/api/a.ts', viewColumn: 1, active: true },
+    ]);
+  });
+
+  it('never launches a session that already has a terminal here', async () => {
+    // The click that triggers an auto switch resumes the session itself, and
+    // `resumeFlow` clears `parked` only once its launch resolves — so the
+    // restore can still read "parked" about a tab that is already on screen.
+    // Launching then puts a second tmux client (or a second claude, on one
+    // transcript) on the conversation and orphans the first tab.
+    const records: Record<string, EditorialRecord> = {
+      [S1]: record(S1, parkedIn('/code/api')),
+    };
+    const snapshot: WorkspaceSnapshot = {
+      projectId: 'pa',
+      tabs: [{ kind: 'session', sessionId: S1, viewColumn: 1 }],
+      savedAt: ISO,
+      updatedAt: ISO,
+    };
+    stubTabModel(
+      [{ viewColumn: 1, isActive: true, tabs: [fakeTerminalTab('claude')] }],
+      [],
+    );
+
+    const { deps, calls } = harness({
+      getProject: twoProjects,
+      getWorkspace: (id) => (id === 'pa' ? snapshot : undefined),
+      getActive: () => 'pw',
+      getRecord: (id) => records[id],
+      allRecords: () => records,
+      bindings: () => [binding(S1, 'claude')],
+      sessionCwd: () => '/code/api',
+      isLive: () => true,
+      hasTranscript: () => true,
+    });
+    deps.launchSession = resumes(calls);
+
+    await new WorkspaceManager(deps).switchTo('pa', {
+      auto: true,
+      focusSessionId: S1,
+    });
+
+    expect(calls.launched).toEqual([]);
+    // And the record stops claiming a visible tab is hidden.
+    expect(calls.written).toContainEqual({
+      id: S1,
+      patch: { parked: false, tmux: null },
+    });
+    expect(calls.focused).toEqual([S1]);
+  });
+
+  it('never focuses a session the same switch parked', async () => {
+    // The trigger belongs to the target by construction, so this is defensive:
+    // its terminal is disposed, and the reveal would land on whatever the
+    // workbench promoted in its place.
+    stubTabModel(
+      [{ viewColumn: 1, isActive: true, tabs: [fakeTerminalTab('claude')] }],
+      [],
+    );
+    const { deps, calls } = harness({
+      getProject: twoProjects,
+      getActive: () => 'pa',
+      bindings: () => [binding(S1, 'claude')],
+      sessionCwd: () => '/other/place',
+    });
+
+    await new WorkspaceManager(deps).switchTo('pw', {
+      auto: true,
+      focusSessionId: S1,
+    });
+
+    expect(calls.killed).toEqual([S1]);
+    expect(calls.focused).toEqual([]);
   });
 });

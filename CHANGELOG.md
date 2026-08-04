@@ -123,6 +123,24 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Fixed
 
+- **Clicking a session in another project now takes you to that session.** It
+  switched to the right workspace and then landed you on one of that project's
+  *other* tabs; clicking the same row a second time worked. Restoring a layout
+  reveals a terminal per session it brings home, and revealing a terminal takes
+  the front of its editor group whatever the "don't take focus" flag says — so
+  the tab you ended on was whichever session came home last. A switch now decides
+  where the keyboard goes, once, after everything has settled: the session that
+  triggered it, else the tab the layout was left on. Layouts remember that tab
+  even when it was a session, which they previously only did for files, so the
+  status-bar switcher lands deliberately too.
+
+  Two smaller things fell out of the same path. A session whose terminal is
+  already open here is no longer relaunched by a restore — the click that
+  triggers the switch resumes the session itself, and losing that race put a
+  second client on one conversation and orphaned the first tab. And
+  `docs/reference.md` described switching as it worked before tmux, moving
+  terminals into the panel; it now describes parking.
+
 - **A new subproject no longer swallows its parent's sessions.** The directory
   dialog opens inside the parent, so accepting it without navigating anywhere
   chose the parent's OWN directory — and since membership is containment, the new

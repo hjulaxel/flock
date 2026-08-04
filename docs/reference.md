@@ -209,14 +209,20 @@ can always switch explicitly with the `$(layers)` status-bar item, the palette
 Switching:
 
 1. **saves** the current layout — file tabs with their editor groups and
-   pinning, plus your session tabs — under the project you are leaving;
-2. **hides** what does not belong to the target. Foreign *session* tabs are
-   **stowed**: the terminal moves into the terminal panel and **keeps running**.
-   Nothing is stopped, nothing asks to terminate. Unsaved editors are never
-   closed, and terminals Flock does not own are never touched;
+   pinning, plus your session tabs, including which tab had the keyboard —
+   under the project you are leaving;
+2. **hides** what does not belong to the target. A foreign *session* is
+   **parked**: its terminal closes, and with tmux the conversation **keeps
+   running** in the private server, hidden. Nothing asks to terminate. Unsaved
+   editors are never closed, terminals Flock does not own are never touched, and
+   a session mid-turn is left open rather than interrupted;
 3. **restores** the target's saved layout: files reopen in their editor groups,
-   stowed sessions move back into the editor area, and a session that died while
-   out of sight is resumed from its transcript.
+   parked sessions re-attach to the tmux session they were detached from, and one
+   that died while out of sight is resumed from its transcript;
+4. **lands** on one tab, chosen rather than raced. When the switch happened
+   because you clicked a session of another project, that is the session you end
+   up in; otherwise it is the tab the target's layout was left on, file or
+   session.
 
 Layouts persist in the extension's own storage, so they survive window reloads
 and full app restarts. *Leave Workspace Mode* saves and closes nothing. Browser

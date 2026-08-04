@@ -2340,7 +2340,15 @@ export async function activate(
           match.project.name,
           '— auto-switching',
         );
-        void workspaceManager.switchTo(match.project.id, { auto: true });
+        // The trigger travels with the switch. It is what the user just moved
+        // into, and the restore reveals terminals of its own — each of which
+        // takes the front of its editor group — so without naming it here the
+        // switch ends on whichever session came home last. That is the "clicked
+        // progress, landed on update-specs, clicked again and it worked" bug.
+        void workspaceManager.switchTo(match.project.id, {
+          auto: true,
+          focusSessionId: sessionId,
+        });
       } catch (err) {
         logError('extension.autoSwitch', err);
       }

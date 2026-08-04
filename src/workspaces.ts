@@ -363,6 +363,12 @@ export interface RestorePlan {
   /** The layout's active file, reported even when it is already open. */
   activeUri?: string;
   activeColumn?: number;
+  /** The layout's active SESSION tab — the tab that held the keyboard when the
+   *  layout was saved, when that tab was a session rather than a file. Never
+   *  set alongside `activeUri`: exactly one tab in a window is the active one,
+   *  and `captureTabs` only records a session as active when the active tab is
+   *  a terminal tab. */
+  activeSessionId?: string;
 }
 
 /**
@@ -387,6 +393,7 @@ export function restorePlan(
   const sessions: WorkspaceTabRecord[] = [];
   let activeUri: string | undefined;
   let activeColumn: number | undefined;
+  let activeSessionId: string | undefined;
   for (const tab of tabs) {
     if (tab.kind === 'file') {
       if (typeof tab.uri !== 'string' || tab.uri === '') continue;
@@ -397,6 +404,11 @@ export function restorePlan(
       if (isOpen(tab.uri)) continue;
       files.push(tab);
     } else if (tab.kind === 'session' && isSessionId(tab.sessionId)) {
+      // Reported whether or not this session has to be resumed below: a
+      // session already on screen is still the tab the layout was left on, and
+      // dropping the target with the launch is what left the switch ending on
+      // whichever restore happened to finish last.
+      if (tab.active === true) activeSessionId = tab.sessionId;
       sessions.push(tab);
     }
   }
@@ -408,6 +420,7 @@ export function restorePlan(
     plan.activeUri = activeUri;
     plan.activeColumn = activeColumn;
   }
+  if (activeSessionId !== undefined) plan.activeSessionId = activeSessionId;
   return plan;
 }
 
@@ -596,6 +609,8 @@ const KILL_GRACE_MS = 30_000;
 interface RestoreResult {
   files: number;
   sessions: number;
+  /** The session tab the layout was left on, when it named one. */
+  activeSessionId?: string;
   activeUri?: string;
   activeColumn?: number;
 }
@@ -650,10 +665,15 @@ export class WorkspaceManager {
    * must never interrupt: its summary goes to the status bar rather than a
    * toast. Busy foreign sessions are kept open on BOTH paths — parking kills
    * the process now, and a switch never aborts work in flight.
+   *
+   * `opts.focusSessionId` is the session that TRIGGERED an auto switch, and it
+   * is what the switch must end on — see `settleFocus`. The caller passes it
+   * because it knows it for certain; by the time the switch finishes,
+   * `window.activeTerminal` names whichever terminal the restore revealed last.
    */
   async switchTo(
     projectId: string | null,
-    opts?: { auto?: boolean },
+    opts?: { auto?: boolean; focusSessionId?: string },
   ): Promise<void> {
     const auto = opts?.auto === true;
     if (this.switching) {
@@ -686,7 +706,7 @@ export class WorkspaceManager {
       // working and gets no chrome at all.
       await this.withIndicator(
         auto ? null : 'Flock: switching workspace…',
-        () => this.doSwitch(projectId, auto),
+        () => this.doSwitch(projectId, auto, opts?.focusSessionId ?? null),
       );
     } finally {
       try {
@@ -699,7 +719,11 @@ export class WorkspaceManager {
     }
   }
 
-  private async doSwitch(projectId: string | null, auto: boolean): Promise<void> {
+  private async doSwitch(
+    projectId: string | null,
+    auto: boolean,
+    trigger: string | null,
+  ): Promise<void> {
     const current = this.activeProjectId();
     const target = projectId ? this.deps.getProject(projectId) : undefined;
     if (projectId && !target) {
@@ -889,32 +913,8 @@ export class WorkspaceManager {
 
     await this.deps.setActive(projectId);
 
-    // ONE focus decision, and it is the LAST thing the switch does. Nothing
-    // above steals the keyboard on purpose — closes preserve focus, parks
-    // dispose background tabs, resumes launch with preserveFocus — but the
-    // workbench hands focus somewhere when the ACTIVE tab is among the closed,
-    // and that somewhere is not a decision.
-    if (!auto && restored.activeUri !== undefined) {
-      // A manual switch is a request to LOOK at the project: its layout's
-      // active file gets the keyboard, whether or not it had to be opened.
-      await this.focusFile(restored.activeUri, restored.activeColumn);
-    } else if (!auto && wasActive !== null) {
-      // No layout focus to apply: if the user was in a session that SURVIVED
-      // the switch (it belongs to the target), make sure it keeps the
-      // keyboard rather than whatever tab the closes promoted.
-      const goneIds = new Set<string>();
-      for (const id of parkIds) {
-        goneIds.add(id);
-        goneIds.add(this.safeTip(id));
-      }
-      if (!goneIds.has(wasActive) && !goneIds.has(this.safeTip(wasActive))) {
-        try {
-          this.deps.focusSession(wasActive);
-        } catch (err) {
-          logError('workspaces.refocus', err);
-        }
-      }
-    }
+    // ONE focus decision, and it is the LAST thing the switch does.
+    await this.settleFocus({ auto, trigger, wasActive, restored, parked: parkIds });
 
     // One coalesced flush: every parked/unparked record lands together, so the
     // store emits one change and the sidebar rebuilds once.
@@ -1022,6 +1022,19 @@ export class WorkspaceManager {
     // an editor tab and permanently defeat the setting. Such a window's
     // snapshots are file-only, which is what a panel layout IS.
     if (this.terminalLocationPref() === 'panel') return facts;
+
+    // WHICH session was in front, for the layout to be restored onto. The tab
+    // API cannot say which Terminal a terminal tab hosts, so it is triangulated
+    // from the two halves that are knowable: the tab holding the keyboard is a
+    // terminal tab, and the workbench's active terminal is one of ours. Both
+    // halves are required — `window.activeTerminal` keeps naming the last
+    // terminal long after focus moved to an editor, and recording a session as
+    // active while a FILE tab is the active one would put two active tabs in
+    // one snapshot.
+    const activeSession = facts.some((t) => t.active && t.terminal === true)
+      ? this.safeActiveSession()
+      : null;
+
     for (const binding of this.safeBindings()) {
       facts.push({
         kind: 'session',
@@ -1038,7 +1051,7 @@ export class WorkspaceManager {
         // The tab API cannot say which editor group a terminal sits in, so a
         // restored session lands in group 1 — a knowingly lossy default.
         viewColumn: 1,
-        active: false,
+        active: activeSession === binding.sessionId,
         pinned: false,
         dirty: false,
         label: binding.terminalName,
@@ -1347,6 +1360,9 @@ export class WorkspaceManager {
       out.activeUri = plan.activeUri;
       out.activeColumn = plan.activeColumn;
     }
+    if (plan.activeSessionId !== undefined) {
+      out.activeSessionId = plan.activeSessionId;
+    }
     return out;
   }
 
@@ -1448,6 +1464,31 @@ export class WorkspaceManager {
 
         if (!this.deps.resumeSessions() || !canLaunch) return false;
       }
+
+      // A terminal in THIS window already hosts it, so there is nothing to
+      // bring home — and both tiers below would put a SECOND one on the same
+      // conversation: the attach tier a second tmux client, the resume tier a
+      // second claude appending to one transcript. The binding is replaced
+      // either way, which strands the first tab with no owner.
+      //
+      // The ordinary way into this state is the click that caused the switch:
+      // `focusSession` on a session of another project resumes it, and
+      // `resumeFlow` clears `parked` only once the launch resolves, so the read
+      // above can still say "parked" about a tab that is already on screen.
+      // Also covers a park whose dispose failed. The flag is cleared either
+      // way — the record must stop claiming a visible tab is hidden.
+      //
+      // Below the legacy unstow deliberately: that tier NEEDS its terminal
+      // bound, because it moves the tab home instead of making one.
+      if (this.boundHere(tip) || this.boundHere(sessionId)) {
+        log(
+          `workspaces: ${shortId(sessionId)} already has a terminal here — ` +
+            'nothing to restore',
+        );
+        clearParked();
+        return false;
+      }
+
       if (!this.deps.hasTranscript(tip)) return false;
       this.deps.repairResumeLeaf?.(tip);
       const account = this.accountLaunch(tip);
@@ -1541,6 +1582,14 @@ export class WorkspaceManager {
       logError('workspaces.bindings', err);
       return [];
     }
+  }
+
+  /** Does a terminal in THIS window already host this session? Parking
+   *  disposes the terminal, so for a parked record the answer is normally no —
+   *  a yes means something brought the tab back while the switch was in
+   *  flight. */
+  private boundHere(sessionId: string): boolean {
+    return this.safeBindings().some((b) => b.sessionId === sessionId);
   }
 
   private safeCloseSession(sessionId: string): boolean {
@@ -1639,8 +1688,84 @@ export class WorkspaceManager {
     }
   }
 
-  /** Put the keyboard on the layout's active file. The switch's ONE focus
-   *  decision, and it runs last: `moveToEditor` is declared with
+  /**
+   * Where the keyboard ends up, decided once and applied last.
+   *
+   * Nothing above steals focus on purpose — closes preserve it, parks dispose
+   * background tabs, restores launch with `preserveFocus` — but "preserve
+   * focus" is not "stay behind": revealing a terminal makes its tab the visible
+   * one in its group whatever that argument says (see the note on
+   * `runOnFocusedTerminal` in terminals.ts), and the workbench promotes some
+   * neighbour when the ACTIVE tab is among the closed. So a switch that brings
+   * back three sessions ends on whichever finished last, which is a race, not a
+   * decision. This settles it, in order:
+   *
+   *   * The session that TRIGGERED an auto switch. The user clicked its row (or
+   *     typed into its terminal) and the switch is a side effect of that, so
+   *     ending anywhere else is the switch overruling the very act that caused
+   *     it — the bug where clicking a session in another project took you to a
+   *     sibling tab and only a second click landed.
+   *   * The layout's active FILE. A manual switch is a request to LOOK at the
+   *     project, and this is the tab it was left on.
+   *   * The layout's active SESSION, when a session tab had the keyboard when
+   *     the layout was saved.
+   *   * The session that had the keyboard on the way in, when it belongs to the
+   *     target too and survived — two projects sharing a directory, say.
+   *
+   * A session this switch PARKED is never focused: its terminal is disposed, so
+   * the reveal would land on whatever the workbench promoted in its place.
+   */
+  private async settleFocus(opts: {
+    auto: boolean;
+    trigger: string | null;
+    wasActive: string | null;
+    restored: RestoreResult;
+    parked: readonly string[];
+  }): Promise<void> {
+    const goneIds = new Set<string>();
+    for (const id of opts.parked) {
+      goneIds.add(id);
+      goneIds.add(this.safeTip(id));
+    }
+    const survivor = (id: string | undefined | null): string | null =>
+      typeof id === 'string' &&
+      id !== '' &&
+      !goneIds.has(id) &&
+      !goneIds.has(this.safeTip(id))
+        ? id
+        : null;
+
+    if (opts.auto) {
+      // An auto switch never opens a file to interrupt with, so this is its
+      // whole decision — and skipping it is what left the trigger session
+      // behind a restored sibling.
+      const trigger = survivor(opts.trigger);
+      if (trigger !== null) this.safeFocusSession(trigger);
+      return;
+    }
+    if (opts.restored.activeUri !== undefined) {
+      await this.focusFile(opts.restored.activeUri, opts.restored.activeColumn);
+      return;
+    }
+    const layoutSession = survivor(opts.restored.activeSessionId);
+    if (layoutSession !== null) {
+      this.safeFocusSession(layoutSession);
+      return;
+    }
+    const kept = survivor(opts.wasActive);
+    if (kept !== null) this.safeFocusSession(kept);
+  }
+
+  private safeFocusSession(sessionId: string): void {
+    try {
+      this.deps.focusSession(sessionId);
+    } catch (err) {
+      logError('workspaces.focusSession', err);
+    }
+  }
+
+  /** Put the keyboard on the layout's active file. Part of the ONE focus
+   *  decision above, and it runs last: `moveToEditor` is declared with
    *  `runAfter: i => i.at(-1)?.focus()`, so a session coming home focuses
    *  itself and would silently win over anything decided earlier. */
   private async focusFile(
