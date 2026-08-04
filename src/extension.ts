@@ -117,6 +117,12 @@ import {
 } from './daemon';
 import { WorktreeCache } from './git';
 import { BranchStatusCache } from './gitBranches';
+import {
+  DEFAULT_WORKTREE_PATH_PATTERN,
+  readLocalBranches,
+  runWorktreeAdd,
+  runWorktreeRemove,
+} from './worktrees';
 import type { GenerationFacts } from './generations';
 import { TranscriptStatsCache, readFirstPrompt } from './usage';
 import type { TranscriptStats } from './usage';
@@ -2517,11 +2523,19 @@ export async function activate(
     // window where the answer differs from the row that was clicked. [] when
     // that view has not rendered — which refuses the click, correctly.
     //
-    // Only the inline view is consulted because only it draws chips: the native
-    // tree has no control to click, and the verb is hidden from the palette, so
-    // there is no way to reach this with the other view style on screen. A
-    // fallback to the native tree's grouping would be a branch nothing can take.
-    getBranches: (projectId) => webtreeController?.branchesOf(projectId) ?? [],
+    // The INLINE view first, because it is the one that draws chips and
+    // therefore the one a click came from. The native tree is asked only when the
+    // inline view has nothing to say — which used to be unreachable and no longer
+    // is: the worktree verbs are in the command palette, and the native tree's
+    // branch rows carry the same context menu, so a verb can now be invoked with
+    // the other view style on screen. Falling through on an EMPTY answer rather
+    // than on a missing controller, because a view that has not rendered returns
+    // [] and not undefined.
+    getBranches: (projectId) => {
+      const inline = webtreeController?.branchesOf(projectId) ?? [];
+      if (inline.length > 0) return inline;
+      return treeController?.branchesOf(projectId) ?? [];
+    },
     // Writes ONE list and clears the other, which is the whole of the
     // three-state contract on ProjectRecord: "shown" and "hidden" are decisions,
     // and a branch can only carry one of them. Removing it from both would drop
@@ -2542,6 +2556,31 @@ export async function activate(
     },
     setBranchesCollapsed: async (projectId, collapsed) => {
       await store.upsertProject(projectId, { branchesCollapsed: collapsed });
+    },
+
+    // THE WORKTREE VERBS. The only wiring in this file behind which the user's
+    // repository gets written to, and the reason each of these is a separate
+    // member rather than one generic `git()`: a single entry point would make
+    // "which git commands can Flock run" a question you answer by reading
+    // commands.ts, where four named ones make it a question you answer by reading
+    // this block.
+    branchStatusOf: (dir) => branchStatus.get(dir),
+    worktreePathPattern: () =>
+      cfg().get<string>(CONFIG_KEYS.gitWorktreePath, DEFAULT_WORKTREE_PATH_PATTERN) ??
+      DEFAULT_WORKTREE_PATH_PATTERN,
+    localBranches: (dir) => readLocalBranches(dir),
+    addWorktree: (opts) => runWorktreeAdd(opts),
+    removeWorktree: (opts) => runWorktreeRemove(opts),
+    // Both caches, both wholesale. A worktree that appeared or disappeared
+    // changes the LIST for every directory of the repository (any checkout
+    // reports the same set), and the per-worktree statuses keyed under it are
+    // about a directory that may not exist any more — so waiting out either TTL
+    // would leave the tree showing the state before the verb ran.
+    worktreesChanged: (dir) => {
+      worktrees.invalidate();
+      branchStatus.invalidate();
+      log('worktree: caches invalidated after a change at', dir);
+      refreshViews();
     },
     upsertProject: (id, patch) => store.upsertProject(id, patch),
     // Its own store method rather than an upsert with a `parentId` in it:

@@ -672,6 +672,23 @@ export const COMMANDS = {
   revealBranch: 'lineage.revealBranch',
   copyBranchName: 'lineage.copyBranchName',
   copyBranchPath: 'lineage.copyBranchPath',
+  /** THE TWO VERBS THAT WRITE. Everything else in this table reads, renders or
+   *  launches; these two create and delete a checkout of the user's repository,
+   *  which is why they are the only pair here that always confirms first and
+   *  always shows the exact command it is about to run.
+   *
+   *  Both are offered in the palette as well as on a row, unlike the branch
+   *  verbs above: `newSessionInBranch` needs a worktree the tree already drew,
+   *  where the whole point of `newWorktree` is that there is not one yet — a
+   *  single-checkout repository has no branch rows at all (see
+   *  BRANCH_CHIPS_MIN), so a row-only verb would be unreachable in exactly the
+   *  case it is for. They open a picker when they arrive with no argument. */
+  newWorktree: 'lineage.newWorktree',
+  removeWorktree: 'lineage.removeWorktree',
+  /** A worktree in its own VS Code window. The other way to work in a second
+   *  checkout — an editor there rather than an agent — and the reason it is a
+   *  verb of its own rather than something `revealBranch` could cover. */
+  openWorktreeWindow: 'lineage.openWorktreeWindow',
   /** A scratch conversation ABOUT a project: opened at the project's rootDir
    *  with every extra directory added, and deliberately absent from the tree
    *  (see EditorialRecord.chat).
@@ -795,6 +812,12 @@ export const CONFIG_KEYS = {
    *  flat list is right for the common case of one checkout with a handful of
    *  forks in it. See viewmodel.buildViewModel. */
   groupSessionsByBranch: 'groupSessionsByBranch',
+  /** Where New Worktree… puts a new checkout. A PATTERN over `${repo}` and
+   *  `${branch}`, resolved against the repository's main worktree, because the
+   *  answer is a convention rather than a path: somebody who keeps every
+   *  checkout in `~/worktrees` wants that for every repository, not a dialog per
+   *  worktree. See worktreePathFor. */
+  gitWorktreePath: 'git.worktreePath',
   staleAfterHours: 'staleAfterHours',
   busyStaleMinutes: 'busyStaleMinutes',
   // Notifications
@@ -1058,6 +1081,22 @@ export interface BranchStatus {
    *  two answer different questions — a row shows them as the same mark, and
    *  Remove Worktree has to name which one it is about to delete. */
   untracked: boolean;
+}
+
+/**
+ * The outcome of a git command Flock ran on the user's behalf.
+ *
+ * Only the two WORKTREE verbs produce one: everything else this extension asks
+ * git is a read whose failure means "render the row plainly" and needs no
+ * report. A verb the user confirmed is different — it either happened or it did
+ * not, and if it did not, the reason is git's and belongs on screen verbatim
+ * rather than paraphrased into "something went wrong".
+ */
+export interface GitCommandResult {
+  ok: boolean;
+  /** git's own output, both streams, trimmed and length-capped. Shown to the
+   *  user on failure and logged either way. */
+  output: string;
 }
 
 /**
@@ -1944,6 +1983,47 @@ export interface CommandDeps {
   ): Promise<void>;
   /** Fold or unfold a project's whole branch block. */
   setBranchesCollapsed(projectId: string, collapsed: boolean): Promise<void>;
+  // ---- the worktree verbs ---------------------------------------------
+  // Every one of these is OPTIONAL and every one of them is absent from the unit
+  // doubles, which is the shape the refusal takes: a wiring without them has the
+  // verbs registered and refusing, never half-performing. They are also the only
+  // members of this interface behind which a repository gets WRITTEN to, which is
+  // why the write pair is spelled out rather than folded into one `git()`.
+  /** Where the checkout stands, from the same cache the rows render from
+   *  (src/gitBranches.ts). Remove Worktree reads it to decide how many
+   *  confirmations to ask for; undefined means it asks for one and lets git
+   *  refuse on its own, which is the safe direction. */
+  branchStatusOf?(dir: string): BranchStatus | undefined;
+  /** `lineage.git.worktreePath` — the pattern a new worktree's path is built
+   *  from. Absent falls back to the shipped default. */
+  worktreePathPattern?(): string;
+  /** The repository's local branches, most recently committed first. Read once,
+   *  when the user opens the New Worktree picker; [] leaves the picker as a
+   *  free-text field, which is the half of it that needs no git. */
+  localBranches?(dir: string): Promise<readonly string[]>;
+  /** `git worktree add`. Runs ONLY after a confirmation that showed the exact
+   *  command. `create` says which half of the picker was used — a new branch
+   *  (`-b`) or an existing one — and is not a preference. */
+  addWorktree?(opts: {
+    /** The repository's main worktree: the command's cwd, and therefore the
+     *  only repository it can possibly affect. */
+    repoDir: string;
+    path: string;
+    branch: string;
+    create: boolean;
+  }): Promise<GitCommandResult>;
+  /** `git worktree remove`. `force` may come from exactly one place — the user's
+   *  SECOND confirmation over a dirty checkout (see planWorktreeRemoval) — and
+   *  never from a default or a setting. */
+  removeWorktree?(opts: {
+    repoDir: string;
+    path: string;
+    force: boolean;
+  }): Promise<GitCommandResult>;
+  /** Drop every cached git answer for the repository at `dir` and repaint. For
+   *  the two verbs that KNOW the answer changed, so the new row appears at once
+   *  instead of at the end of a TTL. */
+  worktreesChanged?(dir: string): void;
   upsertProject(id: string, patch: Partial<ProjectRecord>): Promise<void>;
   /** Re-file a project under another one, or at the top level (null).
    *  Refuses a cycle (a project cannot be filed under its own descendant) and

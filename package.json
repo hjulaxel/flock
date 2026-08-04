@@ -451,6 +451,22 @@
         "command": "lineage.copyBranchPath",
         "title": "Copy Worktree Path",
         "category": "Flock"
+      },
+      {
+        "command": "lineage.newWorktree",
+        "title": "New Worktree...",
+        "category": "Flock",
+        "icon": "$(git-branch)"
+      },
+      {
+        "command": "lineage.removeWorktree",
+        "title": "Remove Worktree",
+        "category": "Flock"
+      },
+      {
+        "command": "lineage.openWorktreeWindow",
+        "title": "Open Worktree in New Window",
+        "category": "Flock"
       }
     ],
     "menus": {
@@ -743,6 +759,26 @@
           "group": "2_curate@2"
         },
         {
+          "command": "lineage.openWorktreeWindow",
+          "when": "view == lineageSessions && viewItem =~ /;branch;/",
+          "group": "0_open@3"
+        },
+        {
+          "command": "lineage.newWorktree",
+          "when": "view == lineageSessions && viewItem =~ /;branch;/",
+          "group": "3_worktree@1"
+        },
+        {
+          "command": "lineage.removeWorktree",
+          "when": "view == lineageSessions && viewItem =~ /;branch;/ && !(viewItem =~ /;primary;/)",
+          "group": "3_worktree@2"
+        },
+        {
+          "command": "lineage.newWorktree",
+          "when": "view == lineageSessions && viewItem =~ /;project;/",
+          "group": "1_actions@8"
+        },
+        {
           "command": "lineage.projectFromFolder",
           "when": "view == lineageSessions && viewItem =~ /;group;/",
           "group": "inline@1"
@@ -939,15 +975,7 @@
           "when": "false"
         },
         {
-          "command": "lineage.revealBranch",
-          "when": "false"
-        },
-        {
           "command": "lineage.copyBranchName",
-          "when": "false"
-        },
-        {
-          "command": "lineage.copyBranchPath",
           "when": "false"
         }
       ],
@@ -1146,6 +1174,26 @@
           "command": "lineage.showBranches",
           "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/",
           "group": "2_curate@2"
+        },
+        {
+          "command": "lineage.openWorktreeWindow",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/",
+          "group": "0_open@3"
+        },
+        {
+          "command": "lineage.newWorktree",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/",
+          "group": "3_worktree@1"
+        },
+        {
+          "command": "lineage.removeWorktree",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/ && !(viewItem =~ /;primary;/)",
+          "group": "3_worktree@2"
+        },
+        {
+          "command": "lineage.newWorktree",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
+          "group": "1_actions@6"
         },
         {
           "command": "lineage.showBranches",
@@ -1367,6 +1415,11 @@
           },
           "default": [],
           "markdownDescription": "Colours for the branch chips, in order — index 0 is the first branch under a project (usually `main`). Each entry is either a hex colour (`#7aa2f7`) or a VS Code theme colour id (`charts.blue`, `terminal.ansiCyan`). A short list fills the rest from the built-in muted palette; anything that is not one of those two shapes is ignored. Empty = the built-in palette, which softens the theme's own `charts.*` colours toward the editor foreground."
+        },
+        "lineage.git.worktreePath": {
+          "type": "string",
+          "default": "../${repo}-${branch}",
+          "markdownDescription": "Where **New Worktree…** puts a new checkout. `${repo}` is the repository directory's name and `${branch}` the branch name with anything a path cannot carry replaced by `-`. A relative pattern is resolved against the repository's main worktree, so the default puts `feat/x` of `~/code/app` at `~/code/app-feat-x`. An absolute path is used as written, and a leading `~/` expands. Must contain `${branch}`, or every branch would resolve to the same directory. Flock always shows the exact `git worktree add` command before running it."
         }
       }
     },

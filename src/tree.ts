@@ -343,6 +343,34 @@ export class LineageTreeProvider
    * a permanent count with no row anywhere to open or dismiss — and hiding a
    * noisy folder is exactly when a user reaches for that setting.
    */
+  /**
+   * The branches this view currently accounts for, under one project — the same
+   * answer webtree.ts's `branchesOf` gives, from this view's own grouping.
+   *
+   * It exists because the worktree verbs are in the COMMAND PALETTE. The chip
+   * verbs before them were not, so "only the inline view can reach this" was a
+   * true statement and the native tree needed no way to answer; a verb reachable
+   * from the palette can be run with either view style on screen — or with the
+   * native one, whose branch rows carry the same context menu — so the answer has
+   * to come from whichever view drew the rows.
+   *
+   * Not filtered by `groupSessionsByBranch`. That setting decides whether this
+   * view draws branch rows, not which worktrees a project HAS, and a verb that
+   * refused to work because of a layout preference would be refusing for a reason
+   * the user cannot see.
+   */
+  branchesOf(projectId: string): readonly BranchInfo[] {
+    try {
+      const grouping = this.groupingFor(this.forest());
+      return (
+        grouping.projects.find((p) => p.projectId === projectId)?.branches ?? []
+      );
+    } catch (err) {
+      logError('tree.branchesOf', err);
+      return [];
+    }
+  }
+
   attentionCount(): number {
     try {
       const forest = this.forest();
@@ -1231,6 +1259,10 @@ function isDescendantOf(
 export interface TreeController extends DisposableLike {
   refresh(): void;
   revealSession(sessionId: string): Promise<void>;
+  /** The worktrees this view accounts for under one project — what a worktree
+   *  verb re-resolves its target against when the native tree is the one on
+   *  screen. See LineageTreeProvider.branchesOf. */
+  branchesOf(projectId: string): readonly BranchInfo[];
 }
 
 /** createTreeView(VIEW_ID, {...}) + attention-badge wiring + expansion
@@ -1307,6 +1339,10 @@ export function registerTree(deps: TreeDeps): TreeController {
     refresh(): void {
       provider.refresh();
       updateBadge();
+    },
+
+    branchesOf(projectId: string): readonly BranchInfo[] {
+      return provider.branchesOf(projectId);
     },
 
     async revealSession(sessionId: string): Promise<void> {

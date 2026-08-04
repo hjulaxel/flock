@@ -50,6 +50,7 @@ import {
 import type {
   AccountProfile,
   BackgroundJob,
+  BranchInfo,
   CommandDeps,
   DisposableLike,
   EditorialRecord,
@@ -91,6 +92,20 @@ import {
 // Pure, like projects/accounts/routing above — node builtins only, no vscode.
 // Just the name composer: every tmux CALL still goes through CommandDeps.
 import { tmuxSessionName } from './tmux';
+// Same arrangement, and for the same reason: the DECISIONS a worktree verb makes
+// — where the checkout goes, whether a removal may be offered at all — are pure
+// and imported here, where the modals are. The two `git worktree` calls
+// themselves go through CommandDeps like every other side effect in this file.
+import {
+  describeGitCommand,
+  isCheckedOut,
+  isExistingWorktree,
+  planWorktreeRemoval,
+  slugifyBranch,
+  worktreeAddArgv,
+  worktreePathFor,
+  worktreeRemoveArgv,
+} from './worktrees';
 import { accountIdOf, usageSummaryOf } from './accountsView';
 import type { AccountDeps } from './accountsView';
 
@@ -1357,6 +1372,505 @@ async function newSessionInProjectFlow(
   deps.refresh();
   void deps.revealSession(sessionId);
   await nameJustCreatedSession(deps, sessionId);
+}
+
+/**
+ * A session in one specific WORKTREE of a project.
+ *
+ * Extracted from `newSessionInBranch`'s handler because New Worktree… ends here
+ * too, and the two must not drift: a worktree Flock just created has to open the
+ * same way a worktree it merely found does — same naming, same routing, same
+ * pin, same reveal — or the last step of the create flow is a second, subtly
+ * different launch path.
+ *
+ * `dir` is always a directory a caller has already established is a checkout of
+ * this project's repository. This function does not re-validate it, and must not
+ * be reached from anywhere that has not: `newSessionInBranch` resolves it against
+ * the branch list the view rendered, and the create flow has just watched git
+ * make it.
+ */
+async function startSessionInWorktree(
+  deps: CommandDeps,
+  project: ProjectRecord,
+  dir: string,
+  branch: string,
+): Promise<void> {
+  // Named for the BRANCH, not the project: on a project whose chips are
+  // showing, "app 3" tells you nothing and "feat/x 2" tells you everything.
+  // The counter is scoped to the whole project so two branches never
+  // produce the same name.
+  const title = nextFreeName(
+    branch,
+    namesUnder(deps, [...projectDirs(project), dir]),
+  );
+
+  // A worktree belongs to the project whose chip row it came from, so
+  // the routing question is already answered — no directory lookup.
+  const routed = routeNewSession(deps, project.id);
+
+  const sessionId = randomUUID();
+  await deps.recordLaunch(sessionId, null, dir);
+  await deps.upsertRecord(sessionId, { title });
+  log('new:', shortId(sessionId), 'on branch', branch, dir);
+  const binding = await deps.launchSession({
+    sessionId,
+    cwd: dir,
+    title,
+    ...launchAccountOptions(routed),
+  });
+  if (!binding) {
+    log('new: launch failed for', shortId(sessionId));
+    return;
+  }
+  await pinLaunch(deps, sessionId, routed);
+  routed.announce?.();
+  deps.refresh();
+  void deps.revealSession(sessionId);
+  await nameJustCreatedSession(deps, sessionId);
+}
+
+// ------------------------------------------------------------ worktree verbs
+//
+// The only two verbs in this file that CHANGE a repository, and everything about
+// how they are shaped follows from that. Both re-resolve their target against the
+// branch list the view rendered (the rule every branch verb here follows), both
+// show the exact `git` command before running anything, and neither has a path
+// that reaches git without a Yes in front of it. The commands themselves live in
+// src/worktrees.ts and arrive through CommandDeps; what is here is the asking.
+
+/** A project's checkouts as this window currently shows them, with the main one
+ *  first — the order buildBranches guarantees, and the anchor every worktree verb
+ *  needs: the main worktree is the `git -C` directory for both commands. */
+function branchesOfProject(
+  deps: CommandDeps,
+  projectId: string,
+): { branches: readonly BranchInfo[]; repoDir: string } {
+  const branches = deps.getBranches(projectId);
+  const main = branches.find((b) => b.primary) ?? branches[0];
+  return { branches, repoDir: main?.dir ?? '' };
+}
+
+/**
+ * Which checkout a worktree verb acts on, when it did not arrive with one.
+ *
+ * The palette and a keybinding both invoke with no argument, and these verbs have
+ * to work from there: a repository with ONE checkout draws no branch rows at all
+ * (see BRANCH_CHIPS_MIN), which is precisely the state somebody reaches for New
+ * Worktree… in. So the row is a shortcut, not the only door.
+ *
+ * Resolved through `getBranches` like every other branch verb, so a picker cannot
+ * name a directory the tree is not currently showing either.
+ */
+async function pickWorktree(
+  deps: CommandDeps,
+  projectId: string,
+  placeHolder: string,
+  opts?: { excludePrimary?: boolean },
+): Promise<BranchInfo | undefined> {
+  const { branches } = branchesOfProject(deps, projectId);
+  const offered = branches.filter(
+    (b) => !(opts?.excludePrimary === true && b.primary),
+  );
+  if (offered.length === 0) {
+    void vscode.window.showInformationMessage(
+      opts?.excludePrimary === true
+        ? 'Flock: this repository has no worktree besides its main one.'
+        : 'Flock: no git worktrees here yet.',
+    );
+    return undefined;
+  }
+  if (offered.length === 1) return offered[0];
+  const chosen = await vscode.window.showQuickPick(
+    offered.map((b) => ({
+      label: `$(git-branch) ${b.name}`,
+      description: b.primary ? 'main worktree' : '',
+      detail: b.dir,
+      branch: b,
+    })),
+    { placeHolder, matchOnDetail: true, ignoreFocusOut: true },
+  );
+  return chosen?.branch;
+}
+
+/** The branch row a verb was invoked on, re-resolved against what the view is
+ *  showing, or a picker when it arrived with nothing. One helper because all five
+ *  worktree-adjacent verbs need exactly this and differ only in the wording. */
+async function resolveWorktree(
+  deps: CommandDeps,
+  arg: unknown,
+  placeHolder: string,
+  opts?: { excludePrimary?: boolean },
+): Promise<{ project: ProjectRecord; branch: BranchInfo } | undefined> {
+  const parsed = branchArgOf(arg);
+  const projectId =
+    parsed?.projectId ?? projectIdFromArg(arg) ?? (await pickProject(deps, placeHolder));
+  if (!projectId) return undefined;
+  const project = deps.getProject(projectId);
+  if (!project) return undefined;
+
+  if (parsed) {
+    const known = deps
+      .getBranches(projectId)
+      .find((b) => pathKey(b.dir) === pathKey(parsed.dir));
+    if (!known) {
+      void vscode.window.showWarningMessage(
+        `Flock: ${parsed.branch || 'that branch'} is no longer a worktree of ${project.name}.`,
+      );
+      return undefined;
+    }
+    return { project, branch: known };
+  }
+
+  const branch = await pickWorktree(deps, projectId, placeHolder, opts);
+  return branch ? { project, branch } : undefined;
+}
+
+/** The working directories of the sessions this window shows as RUNNING. What
+ *  Remove Worktree warns over: a closed row's cwd is a fact about the past and
+ *  removing the directory under it costs nothing. */
+function liveSessionCwds(deps: CommandDeps): string[] {
+  const out: string[] = [];
+  try {
+    for (const node of deps.getForest().nodes.values()) {
+      if (node.deleted || node.ghost || node.archived) continue;
+      if (node.status === 'exited') continue;
+      const cwd = normalizeDir(node.cwd);
+      if (cwd !== '') out.push(cwd);
+    }
+  } catch (err) {
+    logError('commands.liveSessionCwds', err);
+  }
+  return out;
+}
+
+/**
+ * New Worktree… — pick or name a branch, confirm the command, then start a
+ * session in the checkout git just made.
+ *
+ * The picker has two halves and the difference between them is `-b`: an existing
+ * local branch is CHECKED OUT at the new path, a name that does not exist yet is
+ * CREATED there from the main worktree's HEAD. Branches that already have a
+ * checkout are left out of the list, because `git worktree add` refuses those and
+ * offering one would be offering a failure.
+ *
+ * The path is not asked for. It comes from `lineage.git.worktreePath`, which
+ * defaults to a sibling of the main worktree (`../<repo>-<branch-slug>`) — the
+ * layout `git worktree add`'s own documentation suggests, and the one that keeps a
+ * repository's checkouts next to each other. It IS shown, inside the exact command
+ * the confirmation quotes, which is the form somebody can actually check: a path
+ * on its own says where, where the command says what.
+ */
+async function newWorktreeFlow(
+  deps: CommandDeps,
+  projectId: string,
+): Promise<void> {
+  const project = deps.getProject(projectId);
+  if (!project) return;
+  if (!deps.addWorktree) {
+    void vscode.window.showWarningMessage(
+      'Flock: creating worktrees is not available in this window.',
+    );
+    return;
+  }
+
+  const { branches, repoDir } = branchesOfProject(deps, projectId);
+  if (repoDir === '') {
+    // No branches at all means git said nothing about any of this project's
+    // directories: not a repository, git missing, or the first probe has not
+    // landed. All three are "come back in a moment or point this project at a
+    // repository", and none of them is something to guess a path from.
+    void vscode.window.showWarningMessage(
+      `Flock: ${project.name} has no git repository Flock can read.`,
+    );
+    return;
+  }
+
+  const chosen = await pickBranchForNewWorktree(deps, project, branches, repoDir);
+  if (!chosen) return;
+
+  const dir = worktreePathFor({
+    pattern: safeCall('worktreePathPattern', () => deps.worktreePathPattern?.()),
+    repoDir,
+    branch: chosen.branch,
+  });
+  if (dir === '') {
+    void vscode.window.showWarningMessage(
+      'Flock: lineage.git.worktreePath does not produce a usable path for ' +
+        `"${chosen.branch}". It must contain \${branch}.`,
+    );
+    return;
+  }
+  if (isExistingWorktree(dir, branches)) {
+    void vscode.window.showWarningMessage(
+      `Flock: ${dir} is already a worktree of this repository.`,
+    );
+    return;
+  }
+
+  const argv = worktreeAddArgv({
+    path: dir,
+    branch: chosen.branch,
+    create: chosen.create,
+  });
+  const command = describeGitCommand(repoDir, argv);
+  // THE COMMAND, verbatim, in the detail. Not a paraphrase of it: this is the
+  // one verb in Flock that creates something in the user's repository, and the
+  // only confirmation worth asking is one that says exactly what will run.
+  const go = await vscode.window.showWarningMessage(
+    chosen.create
+      ? `Create the branch "${chosen.branch}" in a new worktree?`
+      : `Add a worktree for "${chosen.branch}"?`,
+    {
+      modal: true,
+      detail: [
+        command,
+        chosen.create
+          ? 'The branch is created from the main worktree’s HEAD.'
+          : 'The branch already exists; this checks it out at that path.',
+        'Flock then starts a session there.',
+      ].join('\n\n'),
+    },
+    'Add Worktree',
+  );
+  if (go !== 'Add Worktree') return;
+
+  log('worktree: add', chosen.branch, '->', dir);
+  const result = await deps.addWorktree({
+    repoDir,
+    path: dir,
+    branch: chosen.branch,
+    create: chosen.create,
+  });
+  if (!result.ok) {
+    // git's own words. A worktree add fails for reasons only git can state — the
+    // path exists, the branch is checked out elsewhere, the ref is invalid — and
+    // every one of them is more useful than "could not add worktree".
+    log('worktree: add failed:', result.output);
+    void vscode.window.showErrorMessage(
+      `Flock could not add that worktree.\n\n${result.output}`,
+      { modal: true },
+    );
+    return;
+  }
+  log('worktree: added', dir);
+  deps.worktreesChanged?.(repoDir);
+  deps.refresh();
+  await startSessionInWorktree(deps, project, dir, chosen.branch);
+}
+
+/** The two halves of the New Worktree picker: an existing local branch, or a
+ *  name typed in. Returned together with which half it was, because that is what
+ *  decides whether the command carries `-b` (see worktreeAddArgv). */
+async function pickBranchForNewWorktree(
+  deps: CommandDeps,
+  project: ProjectRecord,
+  branches: readonly BranchInfo[],
+  repoDir: string,
+): Promise<{ branch: string; create: boolean } | undefined> {
+  const locals = await safeAsync(
+    'localBranches',
+    () => deps.localBranches?.(repoDir) ?? Promise.resolve([]),
+    [] as readonly string[],
+  );
+  const available = locals.filter((name) => !isCheckedOut(name, branches));
+
+  // The two halves are told apart by a FIELD, not by a sentinel value in
+  // `branch`: a branch may legally be called anything a ref can, so any string
+  // reserved to mean "the other option" is a string somebody's branch can be
+  // called.
+  interface BranchPick {
+    label: string;
+    description?: string;
+    branch?: string;
+  }
+  // The new-branch entry is FIRST and always present. A repository whose every
+  // branch is already checked out would otherwise offer an empty list, and the
+  // common reason to open this at all is a branch that does not exist yet.
+  const items: BranchPick[] = [
+    {
+      label: '$(add) New branch…',
+      description: 'create a branch and a worktree for it',
+    },
+    ...available.map((name) => ({
+      label: `$(git-branch) ${name}`,
+      branch: name,
+    })),
+  ];
+  const chosen = await vscode.window.showQuickPick(items, {
+    placeHolder: `New worktree in ${project.name}`,
+    title: 'Pick a branch, or create one',
+    ignoreFocusOut: true,
+  });
+  if (!chosen) return undefined;
+  if (chosen.branch !== undefined) {
+    return { branch: chosen.branch, create: false };
+  }
+
+  const typed = await vscode.window.showInputBox({
+    title: 'New branch',
+    prompt: 'Branch name for the new worktree',
+    ignoreFocusOut: true,
+    validateInput: (value) => branchNameProblem(value, locals, branches),
+  });
+  const name = typeof typed === 'string' ? typed.trim() : '';
+  if (name === '') return undefined;
+  // Typing the name of a branch that already exists is a legitimate thing to do
+  // — it means "check that one out here" — so the flag follows what exists
+  // rather than which box the name was typed into. Without this, a name that
+  // completed to an existing branch would go out with `-b` and git would refuse
+  // it for a reason the user cannot see from the dialog they used.
+  return { branch: name, create: !locals.includes(name) };
+}
+
+/**
+ * What is wrong with a typed branch name, for the input box's live validation.
+ *
+ * Deliberately NOT a reimplementation of `git check-ref-format`. The rules here
+ * are the ones whose failure would be confusing rather than obvious: a name
+ * already checked out somewhere (git refuses, and the reason is elsewhere on
+ * disk), and a name that slugs to nothing (the path would be built from an empty
+ * string). Everything else — a trailing dot, a `..`, a control character — git
+ * rejects with a message that names the rule, which is a better error than
+ * anything paraphrased here.
+ */
+function branchNameProblem(
+  value: string,
+  locals: readonly string[],
+  branches: readonly BranchInfo[],
+): string | undefined {
+  const name = typeof value === 'string' ? value.trim() : '';
+  if (name === '') return undefined; // an empty box is not yet an error
+  if (isCheckedOut(name, branches)) {
+    const at = branches.find((b) => b.name === name)?.dir;
+    return `${name} is already checked out${at ? ` at ${at}` : ''}.`;
+  }
+  if (slugifyBranch(name) === '') {
+    return 'Flock cannot build a directory name from that.';
+  }
+  if (locals.includes(name)) {
+    // Not an error: it means "check out the existing branch here", and the flow
+    // above sets `create: false` for exactly this. Said out loud so the user is
+    // not surprised by which of the two happened.
+    return undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Remove Worktree — never the main one, and a second Yes when there is work in
+ * there that no commit holds.
+ *
+ * The refusal rules are pure and live in src/worktrees.ts
+ * (planWorktreeRemoval); this is the asking. Two confirmations at most, and the
+ * second one exists for exactly one reason: `git worktree remove` refuses a dirty
+ * checkout on its own, so getting past it needs `--force`, and `--force` deletes
+ * the uncommitted work. A single dialog that quietly carried `--force` would be a
+ * delete verb wearing a remove verb's wording.
+ *
+ * The BRANCH survives either way — `git worktree remove` takes the checkout, not
+ * the ref — which is what keeps this a two-dialog verb rather than a four-dialog
+ * one, and is said out loud in the first dialog.
+ */
+async function removeWorktreeFlow(
+  deps: CommandDeps,
+  project: ProjectRecord,
+  branch: BranchInfo,
+): Promise<void> {
+  if (!deps.removeWorktree) {
+    void vscode.window.showWarningMessage(
+      'Flock: removing worktrees is not available in this window.',
+    );
+    return;
+  }
+  const { repoDir } = branchesOfProject(deps, project.id);
+  if (repoDir === '') return;
+
+  const plan = planWorktreeRemoval({
+    branch: branch.name,
+    dir: branch.dir,
+    primary: branch.primary,
+    status: safeCall('branchStatusOf', () => deps.branchStatusOf?.(branch.dir)),
+    liveCwds: liveSessionCwds(deps),
+  });
+  if (plan.refusal !== '') {
+    void vscode.window.showInformationMessage(`Flock: ${plan.refusal}`);
+    return;
+  }
+
+  const argv = worktreeRemoveArgv({ path: branch.dir, force: plan.force });
+  const first = await vscode.window.showWarningMessage(
+    `Remove the worktree for "${branch.name}"?`,
+    {
+      modal: true,
+      detail: [
+        describeGitCommand(repoDir, argv),
+        ...plan.warnings,
+        `The branch "${branch.name}" itself is kept — only the checkout at ` +
+          `${branch.dir} goes away.`,
+      ].join('\n\n'),
+    },
+    'Remove Worktree',
+  );
+  if (first !== 'Remove Worktree') return;
+
+  if (plan.force) {
+    // The second Yes, and the only thing it is about: --force is what deletes
+    // the uncommitted work, so this dialog says that and nothing else.
+    const second = await vscode.window.showWarningMessage(
+      `Delete the uncommitted work in ${branch.dir}?`,
+      {
+        modal: true,
+        detail:
+          'git refuses to remove a worktree with changes in it. Removing it ' +
+          'anyway needs --force, which deletes them. This cannot be undone.',
+      },
+      'Delete and Remove',
+    );
+    if (second !== 'Delete and Remove') return;
+  }
+
+  log('worktree: remove', branch.name, branch.dir, plan.force ? '(forced)' : '');
+  const result = await deps.removeWorktree({
+    repoDir,
+    path: branch.dir,
+    force: plan.force,
+  });
+  if (!result.ok) {
+    log('worktree: remove failed:', result.output);
+    void vscode.window.showErrorMessage(
+      `Flock could not remove that worktree.\n\n${result.output}`,
+      { modal: true },
+    );
+    return;
+  }
+  log('worktree: removed', branch.dir);
+  deps.worktreesChanged?.(repoDir);
+  deps.refresh();
+}
+
+/** A CommandDeps read that must not be able to take a verb down with it. The
+ *  optional members it reads are wired by extension.ts and absent from every unit
+ *  double, so "threw" and "was not there" have to land in the same place. */
+function safeCall<T>(what: string, read: () => T | undefined): T | undefined {
+  try {
+    return read();
+  } catch (err) {
+    logError(`commands.${what}`, err);
+    return undefined;
+  }
+}
+
+async function safeAsync<T>(
+  what: string,
+  read: () => Promise<T>,
+  dflt: T,
+): Promise<T> {
+  try {
+    return await read();
+  } catch (err) {
+    logError(`commands.${what}`, err);
+    return dflt;
+  }
 }
 
 /**
@@ -3953,38 +4467,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         return;
       }
 
-      // Named for the BRANCH, not the project: on a project whose chips are
-      // showing, "app 3" tells you nothing and "feat/x 2" tells you everything.
-      // The counter is scoped to the whole project so two branches never
-      // produce the same name.
-      const title = nextFreeName(
-        known.name,
-        namesUnder(deps, [...projectDirs(project), known.dir]),
-      );
-
-      // A worktree belongs to the project whose chip row it came from, so
-      // the routing question is already answered — no directory lookup.
-      const routed = routeNewSession(deps, project.id);
-
-      const sessionId = randomUUID();
-      await deps.recordLaunch(sessionId, null, known.dir);
-      await deps.upsertRecord(sessionId, { title });
-      log('new:', shortId(sessionId), 'on branch', known.name, known.dir);
-      const binding = await deps.launchSession({
-        sessionId,
-        cwd: known.dir,
-        title,
-        ...launchAccountOptions(routed),
-      });
-      if (!binding) {
-        log('new: launch failed for', shortId(sessionId));
-        return;
-      }
-      await pinLaunch(deps, sessionId, routed);
-      routed.announce?.();
-      deps.refresh();
-      void deps.revealSession(sessionId);
-      await nameJustCreatedSession(deps, sessionId);
+      await startSessionInWorktree(deps, project, known.dir, known.name);
     },
   );
 
@@ -4074,17 +4557,57 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     deps.refresh();
   });
 
+  // THE WORKTREE VERBS. Every one of them resolves its target through
+  // `resolveWorktree`, which either re-checks the clicked row against the branch
+  // list the view rendered or opens a picker when there was no row — because all
+  // four are in the palette, and a single-checkout repository has no branch rows
+  // to click. The asking lives in the flows above; these are the entry points.
+  register(COMMANDS.newWorktree, 'new worktree', async (arg?: unknown) => {
+    const id =
+      branchArgOf(arg)?.projectId ??
+      projectIdFromArg(arg) ??
+      (await pickProject(deps, 'Add a worktree to which project?'));
+    if (!id) return;
+    await newWorktreeFlow(deps, id);
+  });
+
+  register(COMMANDS.removeWorktree, 'remove worktree', async (arg?: unknown) => {
+    const target = await resolveWorktree(
+      deps,
+      arg,
+      'Remove which worktree?',
+      // The main worktree is refused anyway (planWorktreeRemoval), so leaving it
+      // out of the picker is not a second rule — it is the same one, stated
+      // early enough that the user is never offered something that cannot work.
+      { excludePrimary: true },
+    );
+    if (!target) return;
+    await removeWorktreeFlow(deps, target.project, target.branch);
+  });
+
+  register(
+    COMMANDS.openWorktreeWindow,
+    'open worktree in new window',
+    async (arg?: unknown) => {
+      const target = await resolveWorktree(deps, arg, 'Open which worktree?');
+      if (!target) return;
+      try {
+        await deps.openProject(target.branch.dir, true);
+      } catch (err) {
+        logError('commands.openWorktreeWindow', err);
+      }
+    },
+  );
+
   register(COMMANDS.revealBranch, 'reveal branch', async (arg?: unknown) => {
-    const parsed = branchArgOf(arg);
-    if (!parsed) return;
-    const known = deps
-      .getBranches(parsed.projectId)
-      .find((b) => pathKey(b.dir) === pathKey(parsed.dir));
-    if (!known) return;
+    // Palette-reachable now that its neighbours are, so it falls back to the
+    // same picker instead of doing nothing when it arrives without a row.
+    const target = await resolveWorktree(deps, arg, 'Reveal which worktree?');
+    if (!target) return;
     try {
       await vscode.commands.executeCommand(
         'revealFileInOS',
-        vscode.Uri.file(known.dir),
+        vscode.Uri.file(target.branch.dir),
       );
     } catch (err) {
       logError('commands.revealBranch', err);
@@ -4102,8 +4625,18 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
 
   register(COMMANDS.copyBranchPath, 'copy branch path', async (arg?: unknown) => {
     const parsed = branchArgOf(arg);
-    if (!parsed) return;
-    await copyToClipboard(parsed.dir, 'Copied worktree path');
+    if (parsed) {
+      await copyToClipboard(parsed.dir, 'Copied worktree path');
+      return;
+    }
+    // From the palette there is no row and therefore no path to copy, so it
+    // asks — the same fallback the three verbs above it take. Off the ARGUMENT
+    // when there is one, because copying a string touches nothing and
+    // re-resolving would only make the verb fail on a worktree that had just
+    // been removed.
+    const target = await resolveWorktree(deps, arg, 'Copy which worktree path?');
+    if (!target) return;
+    await copyToClipboard(target.branch.dir, 'Copied worktree path');
   });
 
   // The chat. Deliberately NOT a session verb: a chat has no row, no name to
