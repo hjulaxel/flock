@@ -1480,7 +1480,6 @@ export async function activate(
       live: (id) => prevLiveIds.has(id),
       boundHere: (id) => registry.isBoundHere(id),
       record: (id) => store.get(id),
-      windowId: focusIntegration.windowId,
     });
 
   const viewDeps: TreeDeps & DecorationDeps = {

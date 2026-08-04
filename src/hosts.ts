@@ -29,7 +29,7 @@
 //
 //   boundHere      this window holds a terminal bound to the session. The one
 //                  fact that needs no record at all.
-//   boundWindowId  the window whose terminal hosted it last (state.ts). Set on
+//   boundWindowId  that SOME window's terminal hosted it (state.ts). Set on
 //                  every bind, nulled on exit and by window pruning.
 //   tmuxName       a workspace switch parked it into the private tmux server,
 //                  so the conversation is running detached and is ours.
@@ -80,13 +80,15 @@ export interface HostFacts {
   live: boolean;
   /** A terminal in THIS window is bound to it (TerminalRegistry.isBoundHere). */
   boundHere: boolean;
-  /** `EditorialRecord.boundWindowId`, over the whole generation chain. */
+  /** `EditorialRecord.boundWindowId`, over the whole generation chain.
+   *
+   *  Its PRESENCE is the fact, never which window it names — deliberately. A
+   *  record naming this window with no live binding is an ordinary state (a
+   *  reload drops bindings, and `reassociate()` restores them a moment later),
+   *  and calling that foreign for one tick would flicker the row's marker and
+   *  withhold its Close. So "some window had this" is the whole question, and
+   *  every answer to it is 'flock'. */
   boundWindowId?: string | null;
-  /** This window's own published id, or null when window focus is not wired.
-   *  Compared against `boundWindowId` so a record naming THIS window (written
-   *  before a reload dropped the binding) reads as ours rather than as another
-   *  window's. */
-  windowId?: string | null;
   /** `EditorialRecord.tmux` — the private-server session a park detached it
    *  into. A kill-tier park writes `null` deliberately, which is why an empty
    *  string and null both count as absent. */
@@ -138,14 +140,12 @@ export function hostOfChain(
     live(id: string): boolean;
     boundHere(id: string): boolean;
     record(id: string): EditorialRecord | undefined;
-    windowId?: string | null;
   },
 ): SessionHost {
   const chain = (ids ?? []).filter((id) => typeof id === 'string' && id !== '');
   if (chain.length === 0) return 'none';
 
   const facts: HostFacts = { live: false, boundHere: false };
-  if (io.windowId !== undefined) facts.windowId = io.windowId;
   for (const id of chain) {
     try {
       if (io.boundHere(id)) facts.boundHere = true;
