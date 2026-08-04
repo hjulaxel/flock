@@ -473,6 +473,11 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
       collapsed: this.collapsed,
       providerFor: (id) => this.deps.providerFor(id),
       isBoundHere: (id) => this.deps.isBoundHere(id),
+      // Optional all the way down: an unwired dep leaves every row 'hosted',
+      // which is the sidebar as it looked before ownership existed.
+      ...(this.deps.hostOf === undefined
+        ? {}
+        : { hostOf: (id: string) => this.deps.hostOf?.(id) ?? 'none' }),
       viewId: INLINE_VIEW_ID,
       now: Date.now(),
       // Read per post, like every other setting here, so flipping it takes

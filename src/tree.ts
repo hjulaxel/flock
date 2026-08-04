@@ -82,6 +82,9 @@ export {
   statusDescriptor,
 } from './viewmodel';
 
+import { hostMarker, hostTooltipLine } from './hosts';
+import type { SessionHost } from './hosts';
+
 /** Escape the markdown that matters inside a trusted MarkdownString. Labels
  *  come from roster names and user renames — never trust them verbatim.
  *
@@ -234,6 +237,18 @@ export class LineageTreeProvider
       logError(`tree.${what}`, err);
       return dflt;
     }
+  }
+
+  /** Who is running a session (src/hosts.ts), or undefined when the wiring has
+   *  no opinion — an older host, or a throwing dep. Undefined is deliberately
+   *  NOT 'foreign': every reader treats it as 'hosted', so a tree that cannot
+   *  tell renders exactly the row and exactly the menu it always did. */
+  private hostOf(sessionId: string): SessionHost | undefined {
+    return this.safe<SessionHost | undefined>(
+      'hostOf',
+      () => this.deps.hostOf?.(sessionId),
+      undefined,
+    );
   }
 
   private groupingFor(forest: SessionForest): GroupingResult {
@@ -744,7 +759,17 @@ export class LineageTreeProvider
     // What the native tree has instead of the inline sidebar's dimming is the
     // hollow-ring badge and the grey label the decoration's colour brings with
     // it — which is why 'closed' is a colour here and a word nowhere.
-    item.description = [tokens, age, status, node.hidden ? 'hidden' : '']
+    const host = this.hostOf(node.id);
+    // 'elsewhere' — see the same marker in viewmodel.pushSession. Both surfaces
+    // read a row through one function, so neither is allowed its own opinion
+    // about where the word goes or when it appears.
+    item.description = [
+      tokens,
+      age,
+      status,
+      hostMarker(host ?? 'none') ?? '',
+      node.hidden ? 'hidden' : '',
+    ]
       .filter((p) => p !== '')
       .join(' · ');
 
@@ -756,7 +781,7 @@ export class LineageTreeProvider
     } catch (err) {
       logError('tree.isBoundHere', err);
     }
-    item.contextValue = sessionContextValue(node, boundHere);
+    item.contextValue = sessionContextValue(node, boundHere, host);
 
     // The leading glyph names WHO is running, not what state it is in: a
     // session row shows its LLM provider's logo. State is not lost — it is in
@@ -978,6 +1003,10 @@ export class LineageTreeProvider
     if (node.hidden) {
       lines.push('hidden: sorted last, not counted in the badge');
     }
+    // The sentence behind the row's 'elsewhere'. Same line, same wording as the
+    // inline sidebar's hover — hosts.ts owns it, so the two cannot drift.
+    const ownership = hostTooltipLine(this.hostOf(node.id) ?? 'none');
+    if (ownership !== undefined) lines.push(mdEscape(ownership));
 
     const chain = this.parentChain(forest, node);
     if (chain.length > 0) {

@@ -242,10 +242,10 @@ describe('sessionContextValue', () => {
         node(A, { status: 'waiting', attention: 'waiting', parentId: B }),
         false,
       ),
-    ).toBe(';session;shown;notified;live;waiting;forked;');
+    ).toBe(';session;shown;notified;live;waiting;hosted;forked;');
 
     expect(sessionContextValue(node(A, { status: 'idle' }), true)).toBe(
-      ';session;shown;notified;live;idle;bound;root;',
+      ';session;shown;notified;live;idle;hosted;bound;root;',
     );
 
     expect(
@@ -254,7 +254,7 @@ describe('sessionContextValue', () => {
 
     expect(
       sessionContextValue(node(A, { status: 'busy', source: 'minted' }), false),
-    ).toBe(';session;shown;notified;live;busy;ours;root;');
+    ).toBe(';session;shown;notified;live;busy;hosted;ours;root;');
 
     // Archived rows must NOT carry ;live;, or every live-gated verb
     // (fork inline, close, ask) would light up on a closed session.
@@ -264,6 +264,37 @@ describe('sessionContextValue', () => {
         false,
       ),
     ).toBe(';session;shown;notified;archived;exited;root;');
+  });
+
+  // The ownership pair the Close verbs are gated on. Exactly one of the two on
+  // every live row, and neither on a closed one — a session that is over has no
+  // host, and Close is not offered on it anyway.
+  it('names who is running a live session, and nobody for a closed one', () => {
+    for (const host of ['here', 'flock', 'none'] as const) {
+      const v = sessionContextValue(node(A, { status: 'idle' }), false, host);
+      expect(v).toContain(';hosted;');
+      expect(v).not.toContain(';foreign;');
+    }
+    const foreign = sessionContextValue(
+      node(A, { status: 'idle' }),
+      false,
+      'foreign',
+    );
+    expect(foreign).toContain(';foreign;');
+    expect(foreign).not.toContain(';hosted;');
+
+    // An ABSENT host is the pre-ownership wiring, and must keep every verb.
+    expect(sessionContextValue(node(A, { status: 'idle' }), false)).toContain(
+      ';hosted;',
+    );
+
+    const closed = sessionContextValue(
+      node(A, { archived: true, status: 'exited' }),
+      false,
+      'foreign',
+    );
+    expect(closed).not.toContain(';hosted;');
+    expect(closed).not.toContain(';foreign;');
   });
 
   // Exactly one of the pair, always — the two mute menu entries are

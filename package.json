@@ -764,12 +764,12 @@
         },
         {
           "command": "lineage.closeSession",
-          "when": "view == lineageSessions && viewItem =~ /;live;/",
+          "when": "view == lineageSessions && viewItem =~ /;hosted;/",
           "group": "2_close@1"
         },
         {
           "command": "lineage.closeWithSummary",
-          "when": "view == lineageSessions && viewItem =~ /;live;/",
+          "when": "view == lineageSessions && viewItem =~ /;hosted;/",
           "group": "2_close@2"
         },
         {
@@ -1069,12 +1069,12 @@
         },
         {
           "command": "lineage.closeSession",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;live;/",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;hosted;/",
           "group": "2_close@1"
         },
         {
           "command": "lineage.closeWithSummary",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;live;/",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;hosted;/",
           "group": "2_close@2"
         },
         {

@@ -2325,3 +2325,161 @@ describe('moveProjectFlow', () => {
     expect(warned[0]).toContain('could not move');
   });
 });
+
+// ------------------------------------------- verbs on a session we do not own
+//
+// The roster is machine-wide, so most rows in a busy tree belong to a process
+// this window never started. Close used to act and then apologise: dispose
+// nothing, write `closed: <iso>` onto the record, and warn in a toast that the
+// session was still running. The record was the only thing that changed, and it
+// was the one thing that was wrong — `buildForest` treats the roster as the
+// liveness truth, so the row carried on rendering as live while its record
+// claimed otherwise.
+//
+// These assert the refusal happens BEFORE the write, and that it applies only
+// to a POSITIVELY foreign session — every other host keeps the behaviour it had.
+
+describe('close refuses a session running outside Flock', () => {
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockWindow as { showWarningMessage?: unknown }).showWarningMessage;
+    delete (mockWindow as { setStatusBarMessage?: unknown }).setStatusBarMessage;
+  });
+
+  const SESSION = uuid(1);
+
+  interface CloseHarness {
+    patches: Array<{ id: string; patch: Partial<EditorialRecord> }>;
+    closed: string[];
+    warnings: string[];
+    run: (command: string, arg: string) => Promise<void>;
+  }
+
+  function closeHarness(
+    host: 'here' | 'flock' | 'foreign' | 'none' | undefined,
+    answer?: string,
+  ): CloseHarness {
+    const patches: Array<{ id: string; patch: Partial<EditorialRecord> }> = [];
+    const closed: string[] = [];
+    const warnings: string[] = [];
+    (
+      mockWindow as {
+        showWarningMessage?: (m: unknown, ...rest: unknown[]) => Promise<unknown>;
+      }
+    ).showWarningMessage = async (message) => {
+      warnings.push(String(message));
+      return answer;
+    };
+    // The close verb ends with a status-bar line, and the mock ships no window
+    // members at all — without this the handler throws and the "wrote nothing"
+    // assertions below would pass for the wrong reason.
+    (
+      mockWindow as { setStatusBarMessage?: (m: string, ms?: number) => void }
+    ).setStatusBarMessage = () => {};
+
+    const { deps } = chatDeps(undefined);
+    const withHost: AccountCommandDeps = {
+      ...deps,
+      getForest: () =>
+        forestOf([node(SESSION, { roster: { sessionId: SESSION, pid: 4242 } })]),
+      upsertRecord: async (id, patch) => {
+        patches.push({ id, patch });
+      },
+      closeTerminal: (id) => {
+        closed.push(id);
+        return true;
+      },
+      ...(host === undefined ? {} : { hostOf: () => host }),
+    };
+    const harness = withRegisteredCommands(withHost);
+    return {
+      patches,
+      closed,
+      warnings,
+      run: (command, arg) => harness.run(command, arg),
+    };
+  }
+
+  it('writes nothing, disposes nothing, and names the host', async () => {
+    const h = closeHarness('foreign');
+    await h.run(COMMANDS.closeSession, SESSION);
+    expect(h.patches).toEqual([]);
+    expect(h.closed).toEqual([]);
+    expect(h.warnings[0]).toContain('outside Flock');
+    // The pid is what turns "somewhere else" into something the user can go and
+    // find.
+    expect(h.warnings[0]).toContain('pid 4242');
+  });
+
+  it('refuses close WITH SUMMARY on the same terms', async () => {
+    // The summary box IS that verb's confirmation, so without this gate the
+    // user types a summary of work they have not stopped and it lands on a
+    // record whose session is still running.
+    const h = closeHarness('foreign');
+    await h.run(COMMANDS.closeWithSummary, SESSION);
+    expect(h.patches).toEqual([]);
+    expect(h.closed).toEqual([]);
+    expect(h.warnings[0]).toContain('outside Flock');
+  });
+
+  it('hands off to the fork, which is the one honest open such a session has', async () => {
+    const h = closeHarness('foreign', 'Fork Here');
+    await h.run(COMMANDS.closeSession, SESSION);
+    // forkFlow refuses on its own in this harness (no transcript). The point is
+    // that the refusal handed OFF instead of dead-ending, and still wrote
+    // nothing onto the session it was asked to close.
+    expect(h.patches).toEqual([]);
+  });
+
+  it('closes normally for every host that is not foreign', async () => {
+    for (const host of ['here', 'flock', 'none', undefined] as const) {
+      const h = closeHarness(host);
+      await h.run(COMMANDS.closeSession, SESSION);
+      expect(h.closed).toEqual([SESSION]);
+      expect(h.patches.map((p) => p.id)).toEqual([SESSION]);
+      expect(h.patches[0]?.patch.closed).toBeTruthy();
+    }
+  });
+});
+
+describe('wrap names the host when there is no terminal to type into', () => {
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockWindow as { showWarningMessage?: unknown }).showWarningMessage;
+  });
+
+  const SESSION = uuid(2);
+
+  function wrapHarness(host: 'foreign' | 'flock'): {
+    warnings: string[];
+    run: (command: string, arg: string) => Promise<void>;
+  } {
+    const warnings: string[] = [];
+    (
+      mockWindow as { showWarningMessage?: (m: unknown) => Promise<unknown> }
+    ).showWarningMessage = async (message) => {
+      warnings.push(String(message));
+      return undefined;
+    };
+    const { deps } = chatDeps(undefined);
+    const harness = withRegisteredCommands({
+      ...deps,
+      getForest: () => forestOf([node(SESSION)]),
+      sendTextToSession: () => false,
+      hostOf: () => host,
+    });
+    return { warnings, run: (command, arg) => harness.run(command, arg) };
+  }
+
+  it('explains WHY there is no terminal, for a foreign session', async () => {
+    const h = wrapHarness('foreign');
+    await h.run(COMMANDS.wrapSession, SESSION);
+    expect(h.warnings[0]).toContain('outside Flock');
+  });
+
+  it('keeps the plain message for a session of ours in another window', async () => {
+    const h = wrapHarness('flock');
+    await h.run(COMMANDS.wrapSession, SESSION);
+    expect(h.warnings[0]).toContain('this window');
+  });
+});

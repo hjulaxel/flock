@@ -27,6 +27,8 @@ import type {
 } from './types';
 import { branchIndexForCwd, unbranchedRoots } from './projects';
 import type { GroupingResult } from './projects';
+import { hostMarker, hostTooltipLine } from './hosts';
+import type { SessionHost } from './hosts';
 
 // ------------------------------------------------------------ pure helpers
 
@@ -175,6 +177,7 @@ export function badgeGlyph(tone: StatusTone | undefined): string | undefined {
 export function sessionContextValue(
   node: SessionNode,
   boundHere: boolean,
+  host?: SessionHost,
 ): string {
   const tokens: ContextToken[] = ['session'];
   const live = !node.ghost && !node.archived && node.status !== 'exited';
@@ -199,6 +202,18 @@ export function sessionContextValue(
     if (node.status === 'waiting') tokens.push('waiting');
     else if (node.status === 'busy') tokens.push('busy');
     else if (node.status === 'idle') tokens.push('idle');
+    // OWNERSHIP, as a complementary pair on live rows only — the same shape as
+    // hidden/shown and silenced/notified, and for the same reason: the manifest
+    // needs a positive clause to match on, and the verbs that end a session must
+    // key off "Flock can actually end this" rather than off "this is running".
+    //
+    // A closed row gets neither, because it has no host (see hosts.SessionHost)
+    // and Close is not offered on one anyway.
+    //
+    // An ABSENT host means the wiring predates ownership — every unit double,
+    // and any caller that builds a context value without a registry — so it
+    // reads as 'hosted' and the menus are byte-identical to what they were.
+    tokens.push(host === 'foreign' ? 'foreign' : 'hosted');
   }
 
   if (node.source === 'minted') tokens.push('ours');
@@ -452,6 +467,11 @@ export interface ViewModelInput {
    *  row for the worktree they run in. Absent = off, which is the setting's
    *  default and the layout every existing test describes. */
   groupByBranch?: boolean;
+  /** Who is running each session (src/hosts.ts). Drives the ownership token
+   *  pair, the `elsewhere` marker and one hover line. Optional so an older
+   *  wiring (and every unit double) renders exactly the rows it did before
+   *  ownership existed: absent reads as 'hosted' everywhere. */
+  hostOf?(sessionId: string): SessionHost;
 }
 
 export const sessionRowKey = (id: string): string => `session:${id}`;
@@ -641,6 +661,19 @@ function safeBound(input: ViewModelInput, sessionId: string): boolean {
   }
 }
 
+/** Undefined for an unwired or throwing dep, which every reader below treats as
+ *  "no opinion" — the row then renders as it did before ownership existed. */
+function safeHost(
+  input: ViewModelInput,
+  sessionId: string,
+): SessionHost | undefined {
+  try {
+    return input.hostOf?.(sessionId);
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * The rendered tree, flattened depth-first in display order.
  *
@@ -711,7 +744,18 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
     // Tokens sit LEFT of the age: the age is the thing you scan a column of,
     // so it keeps the position it has always had, hard against the dot.
     const tokens = input.showTokens === true ? formatTokens(node.tokens) : '';
-    const description = [tokens, age, status, node.hidden ? 'hidden' : '']
+    const host = safeHost(input, id);
+    // 'elsewhere' — one quiet word, and only on a row Flock does not own. It
+    // goes LAST, after the age and after whatever a waiting session is waiting
+    // for, because it is a standing fact about the row rather than news: what
+    // you scan the column for is still the age.
+    const description = [
+      tokens,
+      age,
+      status,
+      hostMarker(host ?? 'none') ?? '',
+      node.hidden ? 'hidden' : '',
+    ]
       .filter((p) => p !== '')
       .join(' · ');
 
@@ -731,7 +775,7 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
           : { type: 'provider', provider };
     }
 
-    const contextValue = sessionContextValue(node, safeBound(input, id));
+    const contextValue = sessionContextValue(node, safeBound(input, id), host);
 
     // One dot, at the right edge. statusTone() withholds a tone from a row that
     // has been put away or has nothing to report; badgeGlyph() then withholds
@@ -771,7 +815,7 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
         lineageMuted: node.hidden,
         preventDefaultContextMenuItems: true,
       },
-      tooltip: sessionTooltip(node, description, closed),
+      tooltip: sessionTooltip(node, description, closed, host),
       sessionId: id,
     };
     // Resolved against the session's OWN cwd, not its parent's: a fork made in
@@ -1149,6 +1193,7 @@ function sessionTooltip(
   node: SessionNode,
   description: string,
   closed: boolean,
+  host?: SessionHost,
 ): string {
   const lines: string[] = [node.label, node.id];
   const tone = statusTone(node);
@@ -1181,6 +1226,11 @@ function sessionTooltip(
   if (node.notifyMuted === true) {
     lines.push('notifications: hidden for this session');
   }
+  // The row's marker is one word; this is the sentence behind it. Worth the
+  // hover on both surfaces because 'elsewhere' answers "why does this row have
+  // fewer verbs than the one above it" only once you know what it means.
+  const ownership = hostTooltipLine(host ?? 'none');
+  if (ownership !== undefined) lines.push(ownership);
   if (node.cwd) lines.push(node.cwd);
   if (node.summary) lines.push(`summary: ${node.summary}`);
   if (node.hidden) lines.push('hidden: sorted last, not counted in the badge');

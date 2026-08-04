@@ -140,6 +140,8 @@ import {
   seedDefaultProfiles,
 } from './accounts';
 import { pinnedLaunchProfile } from './routing';
+import { hostOfChain } from './hosts';
+import type { SessionHost } from './hosts';
 import { ensureProfileConfig } from './profileConfig';
 import type { ProfileConfigSources } from './profileConfig';
 import { AccountUsageCache, registerAccountsView } from './accountsView';
@@ -1362,11 +1364,32 @@ export async function activate(
     return match ? providerOfProject(match.project) : DEFAULT_PROVIDER;
   };
 
+  /**
+   * WHO is running a session (src/hosts.ts), the one answer every surface uses:
+   * the row's ownership token pair (which decides whether the Close verbs are in
+   * the menu at all), the row's `elsewhere` marker and hover, and the verbs'
+   * refusals.
+   *
+   * Asked over the generation CHAIN. Ownership evidence — `launchedByUs`,
+   * `boundWindowId`, the parked wrap's name — is deliberately not carried
+   * forward when a conversation re-mints its id (see generations.ts), so a
+   * re-keyed session of ours has its liveness on the new id and its ownership on
+   * an older one. Asking the tip alone would call it foreign.
+   */
+  const sessionHostOf = (sessionId: string): SessionHost =>
+    hostOfChain(chainAliases(sessionId), {
+      live: (id) => lastEntries.some((e) => e.sessionId === id),
+      boundHere: (id) => registry.isBoundHere(id),
+      record: (id) => store.get(id),
+      windowId: focusIntegration.windowId,
+    });
+
   const viewDeps: TreeDeps & DecorationDeps = {
     getForest: () => forest,
     onDidChangeData: (listener) => onForestChanged.event(listener),
     projectsWithUnseen,
     isBoundHere: (id) => registry.isBoundHere(id),
+    hostOf: sessionHostOf,
     reparent: async (childId, newParentId) => {
       await store.upsert(childId, {
         parentId: newParentId,
@@ -2266,6 +2289,9 @@ export async function activate(
     // where it is read from inside the rebuild, not about how stale it is —
     // and it is the only live-id set that outlives one.
     isLive: (sessionId) => prevLiveIds.has(sessionId),
+    // The same ownership answer the rows are drawn from, so a verb's refusal
+    // and the marker on the row it refused can never disagree.
+    hostOf: sessionHostOf,
     tipOf: (sessionId) => chainIndex.tipOf(sessionId),
     // The background job holding this id, if one does — the shape a
     // native `/fork` dispatches. Stat-cached inside the reader, so asking on

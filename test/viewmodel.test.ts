@@ -809,13 +809,58 @@ describe('buildViewModel: the row context (native menus + command args)', () => 
       ),
     );
     const ctx = rows[0].context;
-    expect(ctx.viewItem).toBe(';session;shown;notified;live;idle;ours;root;');
+    expect(ctx.viewItem).toBe(
+      ';session;shown;notified;live;idle;hosted;ours;root;',
+    );
     expect(ctx.webviewSection).toBe('session');
     expect(ctx.webviewId).toBe(VIEW);
     // sessionIdFromArg() reads `id`, so every per-session verb takes this
     // object unchanged — that is what keeps all 14 handlers working.
     expect(ctx.id).toBe(A);
     expect(ctx.preventDefaultContextMenuItems).toBe(true);
+  });
+
+  // A session Flock did not launch has to READ as one — otherwise the only
+  // clue is that its menu is one entry shorter than its neighbour's.
+  it('marks a foreign row "elsewhere" and says why in the hover', () => {
+    const rows = buildViewModel(
+      input(forestOf([node(A, { status: 'idle' })]), { loose: [A] }, {
+        hostOf: () => 'foreign',
+      }),
+    );
+    expect(rows[0].description).toContain('elsewhere');
+    expect(rows[0].tooltip).toContain('outside Flock');
+    expect(rows[0].context.viewItem).toContain(';foreign;');
+  });
+
+  it('marks nothing when Flock owns the session, or when nothing knows', () => {
+    for (const hostOf of [
+      () => 'here' as const,
+      () => 'flock' as const,
+      undefined,
+    ]) {
+      const rows = buildViewModel(
+        input(forestOf([node(A, { status: 'idle' })]), { loose: [A] }, {
+          ...(hostOf === undefined ? {} : { hostOf }),
+        }),
+      );
+      expect(rows[0].description).not.toContain('elsewhere');
+      expect(rows[0].tooltip).not.toContain('outside Flock');
+      expect(rows[0].context.viewItem).toContain(';hosted;');
+    }
+  });
+
+  it('survives a throwing hostOf by claiming nothing about ownership', () => {
+    const rows = buildViewModel(
+      input(forestOf([node(A, { status: 'idle' })]), { loose: [A] }, {
+        hostOf: () => {
+          throw new Error('no roster');
+        },
+      }),
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].description).not.toContain('elsewhere');
+    expect(rows[0].context.viewItem).toContain(';hosted;');
   });
 
   it('marks a hidden row so the menu offers Unhide instead of Hide', () => {

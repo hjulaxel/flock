@@ -1145,6 +1145,15 @@ export type ContextToken =
    *  another in the renderer is a trap. */
   | 'silenced'
   | 'notified'
+  /** OWNERSHIP pair, always exactly one of the two on a LIVE session row, for
+   *  the same reason as the two pairs above. `hosted` means Flock can honestly
+   *  end this session — its tab is here, another Flock window has it, or a
+   *  workspace switch parked it — and is what the Close verbs match on.
+   *  `foreign` means the process belongs to something else (a terminal, the
+   *  Claude Code extension, another app), where a close could only write a
+   *  timestamp onto a conversation that carries on running. See src/hosts.ts. */
+  | 'hosted'
+  | 'foreign'
   /** One branch row under a project. Its own token rather than reusing
    *  'project': the two rows carry the same projectId and would otherwise match
    *  each other's `when` clauses, putting the project's whole context menu —
@@ -1523,6 +1532,13 @@ export interface TreeDeps {
   onDidChangeData(listener: () => void): DisposableLike;
   /** true when a terminal for this session is bound in THIS window. */
   isBoundHere(sessionId: string): boolean;
+  /** WHO is running this session — see src/hosts.ts. Feeds the ownership token
+   *  pair the Close verbs match on, the row's `elsewhere` marker and one hover
+   *  line. Optional so an older wiring (and every unit double) keeps working:
+   *  absent reads as 'hosted', which is exactly the tree before ownership. The
+   *  return type is left loose here because types.ts may not import a module
+   *  that imports it back. */
+  hostOf?(sessionId: string): 'here' | 'flock' | 'foreign' | 'none';
   /** Persist a drag-reparent (parentSource 'reparent'); null = detach. */
   reparent(childId: string, newParentId: string | null): Promise<void>;
   groupByFolder(): boolean;
@@ -1829,6 +1845,24 @@ export interface CommandDeps {
    *  marks nothing as open, which costs a dot and no correctness (the reopen
    *  path checks for a bound terminal either way). */
   isLive?(sessionId: string): boolean;
+  /** WHO is running this session — see src/hosts.ts. Consulted by the verbs
+   *  that would otherwise LIE about a session Flock does not own: Close writes
+   *  a `closed` timestamp onto a conversation it cannot stop, and Wrap needs a
+   *  terminal to type into.
+   *
+   *  Optional, and every unit double omits it: absent means those verbs behave
+   *  exactly as they did before ownership existed, which is "act, then warn".
+   *  The return type is loose for the same reason as TreeDeps.hostOf — types.ts
+   *  may not import a module that imports it back. */
+  hostOf?(sessionId: string): 'here' | 'flock' | 'foreign' | 'none';
+  /** Reveal an integrated terminal that is PLAUSIBLY already running this
+   *  session, without touching it — see src/terminalMatch.ts for how a terminal
+   *  Flock never created is identified, and why the match declines whenever it
+   *  is not certain. True when a terminal was revealed.
+   *
+   *  Optional: absent means the focus verb falls straight through to the
+   *  fork-a-copy dialog, which is what it did before. */
+  revealHostTerminal?(sessionId: string): Promise<boolean>;
   /** The CURRENT generation of the conversation this id belongs to —
    *  identity when the id is not part of a chain. Every verb that resumes or
    *  forks routes its target through this, so a click on a row that has been

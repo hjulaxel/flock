@@ -91,6 +91,10 @@ import {
 // Pure, like projects/accounts/routing above — node builtins only, no vscode.
 // Just the name composer: every tmux CALL still goes through CommandDeps.
 import { tmuxSessionName } from './tmux';
+// Pure as well. The single answer to "who is running this", so a verb's refusal
+// and the row's marker cannot disagree about it.
+import { canEndSession, hostSentence } from './hosts';
+import type { SessionHost } from './hosts';
 import { accountIdOf, usageSummaryOf } from './accountsView';
 import type { AccountDeps } from './accountsView';
 
@@ -2514,11 +2518,74 @@ function firstLine(text: string | undefined): string | undefined {
  * A session that is still running (hidden from a window that never hosted it)
  * has no tab here to restore, so that case is a plain ungrey.
  */
+/** Who is running a session, asked of the wiring and defaulted the safe way
+ *  round: an absent dep answers 'none', which unlocks every verb — i.e. exactly
+ *  the behaviour before ownership existed. Only a POSITIVE 'foreign' ever
+ *  withholds anything. */
+function hostOf(deps: CommandDeps, sessionId: string): SessionHost {
+  try {
+    return deps.hostOf?.(sessionId) ?? 'none';
+  } catch (err) {
+    logError('commands.hostOf', err);
+    return 'none';
+  }
+}
+
+/**
+ * The close verbs' ownership gate: true when the session belongs to a host Flock
+ * cannot end, in which case this has already said so and offered the verbs that
+ * do apply.
+ *
+ * WHAT IT REPLACES. Close used to act and then apologise: dispose nothing, write
+ * `closed: <iso>` onto the record, and warn in a toast that the session was
+ * still running. The record was the only thing that changed, and it was the one
+ * thing that was wrong — `buildForest` treats the roster as the liveness truth,
+ * so the row carried on rendering as live while its own record claimed
+ * otherwise, and a later click took the not-running branch of `focusSession` and
+ * offered to resume a conversation with a live writer on its transcript.
+ *
+ * Only a POSITIVE 'foreign' refuses. A session another Flock window hosts, or
+ * one parked in the private tmux server, keeps exactly the behaviour it had:
+ * those are ours, the record is about our own conversation, and narrowing this
+ * further would be a second change wearing this one's clothes.
+ *
+ * Called from two places on purpose. `closeFlow` is the choke point every close
+ * path funnels through, and the close-with-summary verb calls it FIRST, before
+ * its input box: asking somebody to write up work they have not stopped and then
+ * refusing is worse than either half.
+ */
+async function refusedForeignClose(
+  deps: CommandDeps,
+  sessionId: string,
+): Promise<boolean> {
+  const host = hostOf(deps, sessionId);
+  if (canEndSession(host)) return false;
+
+  const label = labelFor(deps, sessionId);
+  const pid = deps.getForest().nodes.get(sessionId)?.roster?.pid;
+  const FORK = 'Fork Here';
+  const choice = await vscode.window.showWarningMessage(
+    `${hostSentence(host, {
+      label,
+      ...(typeof pid === 'number' ? { pid } : {}),
+    })} Close it where it is running, or fork a copy you own here.`,
+    FORK,
+    'Copy Session ID',
+  );
+  if (choice === FORK) await forkFlow(deps, sessionId);
+  else if (choice === 'Copy Session ID') {
+    await vscode.env.clipboard.writeText(sessionId);
+  }
+  return true;
+}
+
 async function closeFlow(
   deps: CommandDeps,
   sessionId: string,
   extra?: Partial<EditorialRecord>,
 ): Promise<void> {
+  if (await refusedForeignClose(deps, sessionId)) return;
+
   const closedTerminal = deps.closeTerminal(sessionId);
   await deps.upsertRecord(sessionId, {
     closed: nowIso(),
@@ -3307,17 +3374,29 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     const job = deps.backgroundJob?.(id);
     if (job && (await adoptBackgroundJob(deps, id, job))) return;
 
+    // A terminal in THIS window that Flock did not create but that is
+    // plausibly running the session — `claude` typed into the bottom panel is
+    // the whole point of this tier. Revealing it is read-only: no process is
+    // signalled, no transcript is opened, nothing is typed. When the match is
+    // anything short of certain it declines and we fall through, which is why
+    // this sits below every tier that knows its answer exactly.
+    if ((await deps.revealHostTerminal?.(id)) === true) return;
+
     // The last resort, and it must stay rare: every session of OURS is
     // reachable above (bound tab, detached-in-tmux, another Flock window, or
-    // an unowned background job). What remains is a process some other host
-    // owns — a plain terminal, another tool — whose live state no editor can
-    // adopt. Forking a copy is the one genuine "open" such a session has.
+    // an unowned background job), and a terminal here running one we did not
+    // start is revealed by the tier above. What remains is a process some other
+    // host owns — the Claude Code extension's own subprocess, a terminal in
+    // another window, another tool — whose live state no editor can adopt.
+    // Forking a copy is the one genuine "open" such a session has.
     const FORK = 'Fork Here';
     const choice = await vscode.window.showInformationMessage(
-      `"${label}" is running in another app or terminal` +
-        (node?.roster?.pid ? ` (pid ${node.roster.pid})` : '') +
-        ' that Flock cannot adopt a tab from. Fork it to branch off a ' +
-        'copy you own here.',
+      `${hostSentence('foreign', {
+        label,
+        ...(typeof node?.roster?.pid === 'number'
+          ? { pid: node.roster.pid }
+          : {}),
+      })} Fork it to branch off a copy you own here.`,
       FORK,
       'Copy Session ID',
     );
@@ -3541,6 +3620,8 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         liveOnly: false,
       });
       if (!id) return;
+      // Ahead of the box, not after it: see refusedForeignClose.
+      if (await refusedForeignClose(deps, id)) return;
       const label = labelFor(deps, id);
       // The summary box IS the confirmation — no second modal.
       const raw = await vscode.window.showInputBox({
@@ -3565,8 +3646,15 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     if (!id) return;
     // The ONE remaining sendText in the whole extension.
     if (!deps.sendTextToSession(id, WRAP_PROMPT)) {
+      // Naming the host rather than the missing terminal: "Wrap needs the
+      // session terminal in this window" is true and leaves the user with
+      // nothing to do about it, where "this is running outside Flock" says why
+      // there is no terminal to type into.
+      const host = hostOf(deps, id);
       void vscode.window.showWarningMessage(
-        'Wrap needs the session terminal in this window.',
+        host === 'foreign'
+          ? `${hostSentence(host, { label: labelFor(deps, id) })} Ask it to wrap up where it is running.`
+          : 'Wrap needs the session terminal in this window.',
       );
       return;
     }
