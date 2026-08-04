@@ -780,6 +780,10 @@ export const CONFIG_KEYS = {
   onlyActiveSessions: 'onlyActiveSessions',
   hooksEnabled: 'hooks.enabled',
   terminalLocation: 'terminalLocation',
+  /** Who OPENS a new conversation: Flock's own tmux-backed terminal, or another
+   *  extension's command (see src/hosts.ts's delegate table). Only ever consulted
+   *  for a NEW conversation — a fork has nothing to hand over. */
+  launchMode: 'launch.mode',
   onlyProjectSessions: 'onlyProjectSessions',
   // Staleness
   showPhantomRows: 'showPhantomRows',
@@ -1896,6 +1900,23 @@ export interface CommandDeps {
   ): Promise<void>;
   // terminals (D)
   launchSession(opts: LaunchOptions): Promise<TerminalBinding | null>;
+  /** `lineage.launch.mode`: hand a NEW conversation to another extension instead
+   *  of opening a terminal here, and adopt whatever session id turns up on the
+   *  roster afterwards. Resolves to the delegate's label when it ran, or null
+   *  when the mode is `flock`, the named extension is not installed, or its
+   *  command failed — in each case the caller launches its own terminal exactly
+   *  as it always did.
+   *
+   *  Only ever consulted for a NEW conversation. Nothing a delegate contributes
+   *  takes a session id, so a fork has nothing to hand over and keeps Flock's
+   *  own launch in every mode. See src/hosts.ts for the delegate table.
+   *
+   *  Optional: absent means the setting does not exist for this wiring, which is
+   *  every unit double. */
+  delegateLaunch?(opts: {
+    cwd?: string;
+    title?: string;
+  }): Promise<{ label: string } | null>;
   focusSession(sessionId: string): boolean;         // bound-terminal show
   renameTerminal(sessionId: string, name: string): Promise<boolean>;
   sendTextToSession(sessionId: string, text: string): boolean;

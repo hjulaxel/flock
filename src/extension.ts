@@ -74,6 +74,7 @@ import {
 } from './tmux';
 import {
   matchProject,
+  normalizeDir,
   pathKey,
   projectDirs,
   providerOfProject,
@@ -140,7 +141,7 @@ import {
   seedDefaultProfiles,
 } from './accounts';
 import { pinnedLaunchProfile } from './routing';
-import { hostOfChain } from './hosts';
+import { hostOfChain, resolveLaunchMode } from './hosts';
 import type { SessionHost } from './hosts';
 import { ensureProfileConfig } from './profileConfig';
 import type { ProfileConfigSources } from './profileConfig';
@@ -484,6 +485,85 @@ export async function activate(
       out.push(held.entry);
     }
     return out;
+  };
+
+  // -------------------------------------------------- delegated launches
+  //
+  // `lineage.launch.mode`. When the user has asked for it, the `+` runs another
+  // extension's "new conversation" command instead of opening a terminal here —
+  // and then has to find the session again, because a delegate mints its own
+  // session id and tells nobody.
+  //
+  // THE BIND-BACK. Flock's own launches pre-mint the id, which is what makes
+  // their lineage exact by construction; there is no such handle here, so the
+  // only way back to a tree row is the roster. One claim is held, and the FIRST
+  // new row that matches it is adopted. The safety is all in "matches":
+  //
+  //   * the id was not on the roster when the delegate was asked;
+  //   * it has no editorial record, so a session another Flock window launched
+  //     (records are shared through state.json) can never be claimed;
+  //   * its cwd is the one we asked the delegate to open, when we know it;
+  //   * and there is EXACTLY ONE such row. Two sessions appearing together
+  //     drops the claim rather than picking one — a wrong claim would put
+  //     somebody else's conversation under the name and project this click
+  //     meant, and the cost of dropping it is a row that is merely unnamed.
+  //
+  // The adopted record deliberately does NOT carry `launchedByUs`. Flock did not
+  // launch that process and cannot end it, so claiming ownership would put Close
+  // back on a row where it can only write a timestamp — the exact lie hosts.ts
+  // exists to remove. What the record does carry is the cwd and the name, which
+  // is what files the row under its project and labels it.
+
+  /** How long a claim waits for its session to appear. Generous: the delegate
+   *  may show a sign-in prompt, download a CLI update, or sit on an empty input
+   *  until the user types. Bounded so a conversation the user opened an hour
+   *  later is never mistaken for this one. */
+  const DELEGATED_CLAIM_TTL_MS = 120_000;
+
+  interface DelegatedClaim {
+    at: number;
+    cwd?: string;
+    title?: string;
+    /** Session ids already on the roster when the delegate was asked. */
+    before: ReadonlySet<string>;
+  }
+  let delegatedClaim: DelegatedClaim | null = null;
+  /** The "your delegate is not installed" note is said once per window, not once
+   *  per click: a `+` that toasts every time is a `+` nobody presses twice. */
+  let delegateFallbackTold = false;
+
+  const settleDelegatedClaim = (entries: readonly RosterEntry[]): void => {
+    const claim = delegatedClaim;
+    if (claim === null) return;
+    if (Date.now() - claim.at > DELEGATED_CLAIM_TTL_MS) {
+      delegatedClaim = null;
+      log('launch: delegated session never appeared on the roster — claim dropped');
+      return;
+    }
+    const wantCwd =
+      claim.cwd === undefined ? undefined : normalizeDir(claim.cwd);
+    const candidates = entries.filter((e) => {
+      if (claim.before.has(e.sessionId)) return false;
+      if (store.get(e.sessionId) !== undefined) return false;
+      if (wantCwd === undefined) return true;
+      return e.cwd !== undefined && normalizeDir(e.cwd) === wantCwd;
+    });
+    if (candidates.length === 0) return; // keep waiting
+    delegatedClaim = null;
+    if (candidates.length > 1) {
+      log(
+        'launch: several new sessions appeared at once — delegated claim dropped',
+        'rather than guessing which one the click made',
+      );
+      return;
+    }
+    const adopted = candidates[0] as RosterEntry;
+    void store.upsert(adopted.sessionId, {
+      ...(claim.cwd === undefined ? {} : { cwd: claim.cwd }),
+      ...(claim.title === undefined ? {} : { title: claim.title }),
+    });
+    log('launch: adopted delegated session', shortId(adopted.sessionId));
+    void revealSession(adopted.sessionId);
   };
 
   // Label-fallback headers only, memoised: readTranscriptHeader is a bounded
@@ -2473,6 +2553,55 @@ export async function activate(
       }
       return binding;
     },
+
+    /**
+     * `lineage.launch.mode`: run another extension's new-conversation command
+     * instead of opening a terminal here, and arm the claim that binds whatever
+     * session id turns up back onto a tree row (see settleDelegatedClaim).
+     *
+     * Every failure returns null, which sends the caller straight back to its own
+     * launch: the mode is `flock`, the named extension is not installed, or the
+     * command threw. A `+` that opens nothing is not an acceptable outcome of a
+     * setting, so the only thing a bad mode costs is one note.
+     */
+    delegateLaunch: async ({ cwd, title }) => {
+      const resolved = resolveLaunchMode(
+        cfg().get<string>(CONFIG_KEYS.launchMode),
+        (id) => vscode.extensions?.getExtension(id) !== undefined,
+      );
+      if (resolved.fellBack) {
+        if (!delegateFallbackTold) {
+          delegateFallbackTold = true;
+          void vscode.window.showWarningMessage(
+            'Flock: `lineage.launch.mode` names an extension that is not ' +
+              'installed, so this session opened here instead.',
+          );
+        }
+        return null;
+      }
+      const delegate = resolved.delegate;
+      if (delegate === undefined) return null;
+
+      // Captured BEFORE the command runs, so the claim's "was it already there"
+      // test cannot include the session the command is about to start.
+      const before = new Set(lastEntries.map((e) => e.sessionId));
+      try {
+        await vscode.commands.executeCommand(delegate.newCommand);
+      } catch (err) {
+        logError('extension.delegateLaunch', err);
+        return null;
+      }
+      delegatedClaim = {
+        at: Date.now(),
+        before,
+        ...(cwd === undefined ? {} : { cwd }),
+        ...(title === undefined ? {} : { title }),
+      };
+      // The delegate's session will not be on the roster for up to a poll
+      // interval, and the user is looking at the panel it just opened.
+      pokeNow();
+      return { label: delegate.label };
+    },
     focusSession: (sessionId) => {
       const bound = chainAliases(sessionId).find(
         (id) => registry.binding(id) !== undefined,
@@ -2809,6 +2938,10 @@ export async function activate(
     }
 
     detectPidRekeys(r.entries);
+    // Before `lastEntries` moves: the claim's baseline is the roster as it was
+    // when the delegate was asked, and this is the pass that can see a row the
+    // previous one could not.
+    settleDelegatedClaim(r.entries);
 
     const changed =
       !haveRoster || editorialDirty || !sameRoster(lastEntries, r.entries);

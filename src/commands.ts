@@ -1277,6 +1277,12 @@ async function newSessionFlow(
     cwd === undefined ? [] : namesUnder(deps, [cwd]),
   );
 
+  // `lineage.launch.mode`. An account picked BY HAND overrides it: that gesture
+  // is a statement about which subscription to bill, and a delegate carries its
+  // own environment, so honouring both at once is impossible and silently
+  // dropping the account would be the expensive half to get wrong.
+  if (account === undefined && (await delegated(deps, cwd, title))) return;
+
   // Routed by the project this directory belongs to, if any — a folder
   // that is part of a project inherits that project's account even when the
   // launch came from the folder rather than from the project's row.
@@ -1306,6 +1312,53 @@ async function newSessionFlow(
   // inline view's model, which already has the row.
   void deps.revealSession(sessionId);
   await nameJustCreatedSession(deps, sessionId);
+}
+
+/**
+ * Hand this new conversation to another extension, if the user asked for that.
+ * True when it was handed over and this flow is finished.
+ *
+ * THE WHOLE OF THE VERB LAYER'S PART IN IT, deliberately. Which extension,
+ * whether it is installed, running its command and adopting the session id that
+ * turns up on the roster afterwards are all the wiring's job (see
+ * `CommandDeps.delegateLaunch`), because every one of them needs
+ * `vscode.extensions`, the roster or the store — none of which this module is
+ * allowed to touch. What is left here is the decision that the launch is not
+ * ours to make, which is the part that belongs beside the verb.
+ *
+ * Fork does NOT go through this. No command the delegate contributes accepts a
+ * session id or a resume target, so there is nothing to hand a fork to — see
+ * hosts.LaunchDelegate.canFork. A fork therefore opens Flock's own terminal in
+ * every mode, which is also the only way it can inherit the parent's history.
+ */
+async function delegated(
+  deps: AccountCommandDeps,
+  cwd: string | undefined,
+  title: string,
+): Promise<boolean> {
+  let handled: { label: string } | null = null;
+  try {
+    handled =
+      (await deps.delegateLaunch?.({
+        ...(cwd === undefined ? {} : { cwd }),
+        title,
+      })) ?? null;
+  } catch (err) {
+    // A delegate that throws must not swallow the click: fall through and open
+    // Flock's own terminal, which is what the user wanted a session for.
+    logError('commands.delegateLaunch', err);
+    return false;
+  }
+  if (handled === null) return false;
+  log('new: handed to', handled.label, cwd ?? '(no cwd)');
+  // No inline rename and no reveal: there is no row yet, and there may never be
+  // one — the delegate mints its own session id and Flock only learns it if and
+  // when the roster reports it. The status line is what says the click landed.
+  vscode.window.setStatusBarMessage(
+    `Flock: new conversation opened in the ${handled.label}`,
+    4000,
+  );
+  return true;
 }
 
 /**
@@ -1340,6 +1393,10 @@ async function newSessionInProjectFlow(
     project.name,
     namesUnder(deps, projectDirs(project)),
   );
+
+  // Same gate, same override rule as newSessionFlow — see the note there.
+  if (account === undefined && (await delegated(deps, cwd, title))) return;
+
   const routed = routeNewSession(deps, project.id, account);
 
   const sessionId = randomUUID();

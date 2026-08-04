@@ -1255,6 +1255,19 @@
           ],
           "description": "Where a Claude session's terminal opens."
         },
+        "lineage.launch.mode": {
+          "type": "string",
+          "default": "flock",
+          "enum": [
+            "flock",
+            "claudeExtension"
+          ],
+          "enumDescriptions": [
+            "Flock opens the session itself, in a tmux-backed terminal it owns. Every verb applies.",
+            "Hand new conversations to the official Claude Code extension (claude-vscode.newConversation). Requires that extension; without it Flock falls back to opening the session itself."
+          ],
+          "markdownDescription": "Who opens a **new** conversation.\n\n`flock` opens it here, in a terminal Flock owns. `claudeExtension` runs the official Claude Code extension's **New Conversation** command instead, and adopts the session onto a tree row once `claude agents --json` reports it.\n\nIn `claudeExtension` mode Flock does not own the process, so these stop working for sessions started that way: **tmux parking** (a workspace switch closes the session instead of hiding it), **Close** and **Close with Summary**, **account pinning and per-account routing**, the **wrap prompt**, and **Flock-named tabs**. The tree row, the fork edge, the age, the status dot, the bell, project membership, branch colours, **Fork** and **Copy Session ID** all keep working.\n\n**Fork is never delegated.** No command the extension contributes accepts a session id, so a fork has nothing to hand over and always opens Flock's own terminal. Picking an account by hand (**New Session From…**) also overrides the mode, because a delegated launch carries the delegate's own environment and cannot be pinned."
+        },
         "lineage.groupByFolder": {
           "type": "boolean",
           "default": true,

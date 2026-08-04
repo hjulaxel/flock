@@ -2442,6 +2442,122 @@ describe('close refuses a session running outside Flock', () => {
   });
 });
 
+// --------------------------------------------------- lineage.launch.mode
+//
+// The verb layer's whole part in delegation: decide the launch is not ours to
+// make. Which extension, whether it is installed and adopting the session id
+// that turns up afterwards all live in the wiring — see
+// hosts.resolveLaunchMode (unit-tested in test/hosts.test.ts) and
+// extension.settleDelegatedClaim.
+//
+// What matters here is the fallback: a `+` must never open nothing.
+
+describe('a new session can be handed to another extension', () => {
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockWindow as { setStatusBarMessage?: unknown }).setStatusBarMessage;
+  });
+
+  // Driven through the PROJECT `+` rather than the folder one: that handler
+  // takes its directory from the project record, so the flow needs no folder
+  // picker and therefore no `vscode.workspace` the mock does not ship.
+  const PROJECT: ProjectRecord = {
+    id: 'api',
+    name: 'Storefront',
+    rootDir: '/code/api',
+    dirs: [],
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+  };
+
+  interface DelegateHarness {
+    launches: LaunchOptions[];
+    asked: Array<{ cwd?: string; title?: string }>;
+    said: string[];
+    run: (command: string, arg?: unknown) => Promise<void>;
+  }
+
+  function delegateHarness(
+    delegate: null | { label: string } | 'throws' | 'unwired',
+  ): DelegateHarness {
+    const launches: LaunchOptions[] = [];
+    const asked: Array<{ cwd?: string; title?: string }> = [];
+    const said: string[] = [];
+    (
+      mockWindow as { setStatusBarMessage?: (m: string, ms?: number) => void }
+    ).setStatusBarMessage = (m) => {
+      said.push(m);
+    };
+
+    const { deps } = chatDeps(PROJECT, { beginInlineRename: () => true });
+    const harness = withRegisteredCommands({
+      ...deps,
+      getForest: () => forestOf([]),
+      launchSession: async (opts) => {
+        launches.push(opts);
+        return {
+          nodeId: opts.sessionId,
+          sessionId: opts.sessionId,
+          terminalName: 'claude',
+          createdAt: 0,
+        };
+      },
+      ...(delegate === 'unwired'
+        ? {}
+        : {
+            delegateLaunch: async (opts: { cwd?: string; title?: string }) => {
+              asked.push(opts);
+              if (delegate === 'throws') throw new Error('command not found');
+              return delegate;
+            },
+          }),
+    });
+    return {
+      launches,
+      asked,
+      said,
+      run: (command, arg) => harness.run(command, arg),
+    };
+  }
+
+  it('opens no terminal of its own when the delegate took the launch', async () => {
+    const h = delegateHarness({ label: 'Claude Code extension' });
+    await h.run(COMMANDS.newSessionInProject, { type: 'project', projectId: 'api' });
+    expect(h.asked).toHaveLength(1);
+    expect(h.launches).toEqual([]);
+    // No row exists yet — and may never — so the status line is what says the
+    // click landed.
+    expect(h.said[0]).toContain('Claude Code extension');
+  });
+
+  it('carries the folder and the name it would have used', async () => {
+    const h = delegateHarness({ label: 'Claude Code extension' });
+    await h.run(COMMANDS.newSessionInProject, { type: 'project', projectId: 'api' });
+    expect(h.asked[0]?.cwd).toBe('/code/api');
+    expect(h.asked[0]?.title).toBe('Storefront');
+  });
+
+  it('launches here when the mode is flock, or the delegate declines', async () => {
+    const h = delegateHarness(null);
+    await h.run(COMMANDS.newSessionInProject, { type: 'project', projectId: 'api' });
+    expect(h.launches).toHaveLength(1);
+    expect(h.said).toEqual([]);
+  });
+
+  it('launches here when the delegate THROWS — a + must never open nothing', async () => {
+    const h = delegateHarness('throws');
+    await h.run(COMMANDS.newSessionInProject, { type: 'project', projectId: 'api' });
+    expect(h.launches).toHaveLength(1);
+  });
+
+  it('is not consulted at all by a wiring without the setting', async () => {
+    const h = delegateHarness('unwired');
+    await h.run(COMMANDS.newSessionInProject, { type: 'project', projectId: 'api' });
+    expect(h.asked).toEqual([]);
+    expect(h.launches).toHaveLength(1);
+  });
+});
+
 // ------------------------------- clicking a row whose terminal is not ours
 //
 // `claude` typed into the bottom panel is in the tree like anything else, and
