@@ -75,7 +75,7 @@
           "name": "Accounts",
           "icon": "media/flock.svg",
           "contextualTitle": "AI Accounts",
-          "when": "config.lineage.accounts.enabled",
+          "when": "config.lineage.accounts.enabled && config.lineage.accounts.section",
           "visibility": "collapsed"
         }
       ],
@@ -350,6 +350,16 @@
         "icon": "$(filter-filled)"
       },
       {
+        "command": "lineage.showAccountsSection",
+        "title": "Show Accounts Section",
+        "category": "Flock"
+      },
+      {
+        "command": "lineage.hideAccountsSection",
+        "title": "Hide Accounts Section",
+        "category": "Flock"
+      },
+      {
         "command": "lineage.switchWorkspace",
         "title": "Switch Workspace...",
         "category": "Flock",
@@ -562,6 +572,16 @@
           "group": "2_manage@2"
         },
         {
+          "command": "lineage.showAccountsSection",
+          "when": "view == lineageSessions && !config.lineage.accounts.section",
+          "group": "3_accounts@0"
+        },
+        {
+          "command": "lineage.hideAccountsSection",
+          "when": "view == lineageSessions && config.lineage.accounts.section",
+          "group": "3_accounts@0"
+        },
+        {
           "command": "lineage.newSession",
           "when": "view == lineageSessionsInline",
           "group": "navigation@1"
@@ -620,6 +640,16 @@
           "command": "lineage.restoreSession",
           "when": "view == lineageSessionsInline",
           "group": "2_manage@2"
+        },
+        {
+          "command": "lineage.showAccountsSection",
+          "when": "view == lineageSessionsInline && !config.lineage.accounts.section",
+          "group": "3_accounts@0"
+        },
+        {
+          "command": "lineage.hideAccountsSection",
+          "when": "view == lineageSessionsInline && config.lineage.accounts.section",
+          "group": "3_accounts@0"
         },
         {
           "command": "lineage.addAccount",
@@ -1364,7 +1394,12 @@
         "lineage.accounts.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Show the Accounts view, where each AI subscription you can launch sessions on gets a row: which plan it is, how much of its five-hour and weekly windows is gone, and which one new sessions use by default. Each account keeps its own config directory, so signing in to one never signs you out of another, and a session stays on the account it started on for life — resuming or forking it re-uses that account whatever the routing says today. Turn off if you only ever use one account; nothing about how sessions launch changes, the view just stops taking up sidebar space."
+          "description": "Show the Accounts view, where each AI subscription you can launch sessions on gets a row: which plan it is, how much of its five-hour and weekly windows is gone, and which one new sessions use by default. Each account keeps its own config directory, so signing in to one never signs you out of another, and a session stays on the account it started on for life — resuming or forking it re-uses that account whatever the routing says today. Turn off if you only ever use one account; nothing about how sessions launch changes, the view just stops taking up sidebar space. The section is also gated on lineage.accounts.section, which is off by default."
+        },
+        "lineage.accounts.section": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Draw **Accounts** as a second section of the Flock sidebar. Off by default, and the trade is a deliberate one: VS Code merges a view's buttons into the container header — the row that reads **FLOCK** — only while that container shows exactly one section, so with Accounts drawn every Flock button sat a row lower behind an overflow `...`. Off puts the bell, `+`, fork and the rest up on the FLOCK row. Turning it on costs you that row again.\n\nNothing about accounts stops working while it is off. Usage is still read, new sessions are still routed, a session is still pinned to its account for life, and every account verb — **Add Account…**, **Sign In**, **Set Default Account**, **Set Project Account…** — is in the Command Palette under **Flock**. The switch is also in the gear menu at the top of the sidebar, as **Show Accounts Section**."
         },
         "lineage.viewStyle": {
           "type": "string",

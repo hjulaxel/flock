@@ -5054,6 +5054,37 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     vscode.window.setStatusBarMessage('Flock: showing closed sessions too', 4000);
   });
 
+  // --------------------------------------------------- the Accounts section
+  //
+  // The same two-command switch as the filter above, on
+  // `lineage.accounts.section`, and it exists for a layout reason rather than a
+  // feature one: VS Code merges a view's title buttons into the CONTAINER header
+  // — the row that reads FLOCK — only while the container has exactly one
+  // visible view. With Accounts drawn as a second section every Flock button sat
+  // a row below the name behind an overflow `...`, so the section is off by
+  // default and the bell is up where it belongs.
+  //
+  // Both halves live in the gear menu, which is the point: this hides a list, and
+  // it has to be as easy to find as it was to lose. Nothing about accounts stops
+  // working — the ten verbs stay registered, routing and pinning are untouched —
+  // so the wording says "section", never "accounts".
+
+  register(COMMANDS.showAccountsSection, 'show the accounts section', async () => {
+    await deps.setAccountsSection(true);
+    vscode.window.setStatusBarMessage(
+      'Flock: Accounts is back in the sidebar — the buttons move to their own row',
+      5000,
+    );
+  });
+
+  register(COMMANDS.hideAccountsSection, 'hide the accounts section', async () => {
+    await deps.setAccountsSection(false);
+    vscode.window.setStatusBarMessage(
+      'Flock: Accounts hidden — every account verb is still in the palette',
+      5000,
+    );
+  });
+
   // ------------------------------------------------------------ workspaces
 
   register(COMMANDS.switchWorkspace, 'switch workspace', async (arg?: unknown) => {

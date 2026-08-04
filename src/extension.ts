@@ -2807,6 +2807,28 @@ export async function activate(
       await syncOnlyActiveContext();
     },
 
+    // The Accounts section. No context key to follow: the view's `when` clause
+    // and the gear menu's two halves all read `config.lineage.accounts.section`
+    // directly, and the workbench re-evaluates a `config.` clause itself.
+    setAccountsSection: async (on) => {
+      try {
+        await cfg().update(
+          CONFIG_KEYS.accountsSection,
+          on,
+          vscode.ConfigurationTarget.Global,
+        );
+      } catch (err) {
+        // Same failure mode as the filter above, and the same reason to say so
+        // out loud: silently leaving the section where it was would read as a
+        // menu entry that does nothing.
+        logError('extension.setAccountsSection', err);
+        void vscode.window.showWarningMessage(
+          'Flock: could not save the Accounts section setting — check that ' +
+            'settings are writable.',
+        );
+      }
+    },
+
     // Project workspaces
     switchWorkspace: (projectId) => workspaceManager.switchTo(projectId),
     activeWorkspace: () => workspaceManager.activeProjectId(),

@@ -754,6 +754,22 @@ export const COMMANDS = {
   // a switch needs one command per position.
   showOnlyActiveSessions: 'lineage.showOnlyActiveSessions',
   showAllSessions: 'lineage.showAllSessions',
+  /** The Accounts SECTION's switch, split in two for the same reason as the pair
+   *  above: one setting, two ids, complementary `when` clauses, because a
+   *  contributed entry cannot say which way it is about to go.
+   *
+   *  Why the section has a switch at all. VS Code merges a view's title-bar
+   *  buttons into the CONTAINER header — the row that reads FLOCK — only while
+   *  that container has exactly one visible view. Accounts was the second one, so
+   *  every Flock button sat a row below the name with its own `...` beside it.
+   *  Folding Accounts away is what puts the bell up on the FLOCK row.
+   *
+   *  It hides a SECTION, never a feature: the ten account verbs stay registered,
+   *  routing and pinning are untouched, and this pair lives in the gear menu so
+   *  the way back is one click from where the section used to be. Reads and
+   *  writes `lineage.accounts.section`. */
+  showAccountsSection: 'lineage.showAccountsSection',
+  hideAccountsSection: 'lineage.hideAccountsSection',
   // ACCOUNTS. Ten verbs, and they live here rather than in a table of their own
   // next to the view for the reason every other id does: a test cross-checks
   // THIS object against the manifest in both directions, so a second table is a
@@ -842,6 +858,13 @@ export const CONFIG_KEYS = {
    *  manifest's view contribution matches on `config.lineage.accounts.enabled`,
    *  which is this key spelled the way a when-clause spells it. */
   accountsEnabled: 'accounts.enabled',
+  /** Draw Accounts as a SECTION of the Flock container. OFF by default, and
+   *  that default is the reason the bell sits on the FLOCK row: a container
+   *  showing two views gives each of them a header of its own, so every button
+   *  landed a row lower behind an overflow `...`. AND-ed with `accountsEnabled`
+   *  in the view's when-clause — `accountsEnabled` stays the feature's off
+   *  switch, this only decides whether the list is drawn in the sidebar. */
+  accountsSection: 'accounts.section',
 } as const;
 
 /** Age past which `lineage.deleteStale` pre-selects a session. Not a filter —
@@ -2014,6 +2037,13 @@ export interface CommandDeps {
    *  two commands that call it each know the value they mean, and the state the
    *  user reads is the view-title icon, which the context key drives. */
   setOnlyActiveSessions(on: boolean): Promise<void>;
+  // ---- the Accounts section -----------------------------------------------
+  /** Write `lineage.accounts.section` — whether Accounts is drawn as a second
+   *  section of the Flock container. A setter and no getter, exactly like the
+   *  filter above: the two commands that call it each know the value they mean,
+   *  and the state the user reads is which of the two the gear menu is
+   *  offering, which the view's own `when` clause decides. */
+  setAccountsSection(on: boolean): Promise<void>;
   // ---- multi-select -------------------------------------------------------
   /** The session ids selected in whichever view is on screen, top to bottom, or
    *  [] when nothing is or no view has reported one.

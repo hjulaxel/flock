@@ -83,7 +83,7 @@ describe('scaffold: the shared types contract', () => {
     //
     // Bump it in the same commit as the verb, and check the new id reaches a
     // menu: a command nobody can invoke is not a feature.
-    expect(ids).toHaveLength(65);
+    expect(ids).toHaveLength(67);
     // Duplicate values would make one of them unreachable — the later key wins
     // at registration and the earlier verb's menu entry fires the wrong flow.
     expect(new Set(ids).size).toBe(ids.length);
