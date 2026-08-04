@@ -469,6 +469,13 @@
         "category": "Flock"
       }
     ],
+    "submenus": [
+      {
+        "id": "lineage.settings",
+        "label": "Flock Settings",
+        "icon": "$(gear)"
+      }
+    ],
     "menus": {
       "view/title": [
         {
@@ -492,11 +499,6 @@
           "group": "navigation@0"
         },
         {
-          "command": "lineage.markAllNotificationsRead",
-          "when": "view == lineageSessions",
-          "group": "2_manage@4"
-        },
-        {
           "command": "lineage.showNotifications",
           "when": "view == lineageSessionsInline && !lineage.hasUnseen",
           "group": "navigation@0"
@@ -505,11 +507,6 @@
           "command": "lineage.showNotificationsUnread",
           "when": "view == lineageSessionsInline && lineage.hasUnseen",
           "group": "navigation@0"
-        },
-        {
-          "command": "lineage.markAllNotificationsRead",
-          "when": "view == lineageSessionsInline",
-          "group": "2_manage@4"
         },
         {
           "command": "lineage.newSession",
@@ -542,44 +539,9 @@
           "group": "navigation@5"
         },
         {
-          "command": "lineage.refresh",
+          "submenu": "lineage.settings",
           "when": "view == lineageSessions",
-          "group": "2_manage@3"
-        },
-        {
-          "command": "lineage.showHidden",
-          "when": "view == lineageSessions",
-          "group": "2_manage@0"
-        },
-        {
-          "command": "lineage.installHooks",
-          "when": "view == lineageSessions && !lineage.hooksInstalled",
-          "group": "1_hooks@1"
-        },
-        {
-          "command": "lineage.removeHooks",
-          "when": "view == lineageSessions && lineage.hooksInstalled",
-          "group": "1_hooks@2"
-        },
-        {
-          "command": "lineage.deleteStale",
-          "when": "view == lineageSessions",
-          "group": "2_manage@1"
-        },
-        {
-          "command": "lineage.restoreSession",
-          "when": "view == lineageSessions",
-          "group": "2_manage@2"
-        },
-        {
-          "command": "lineage.showAccountsSection",
-          "when": "view == lineageSessions && !config.lineage.accounts.section",
-          "group": "3_accounts@0"
-        },
-        {
-          "command": "lineage.hideAccountsSection",
-          "when": "view == lineageSessions && config.lineage.accounts.section",
-          "group": "3_accounts@0"
+          "group": "navigation@9"
         },
         {
           "command": "lineage.newSession",
@@ -612,44 +574,9 @@
           "group": "navigation@5"
         },
         {
-          "command": "lineage.refresh",
+          "submenu": "lineage.settings",
           "when": "view == lineageSessionsInline",
-          "group": "2_manage@3"
-        },
-        {
-          "command": "lineage.showHidden",
-          "when": "view == lineageSessionsInline",
-          "group": "2_manage@0"
-        },
-        {
-          "command": "lineage.installHooks",
-          "when": "view == lineageSessionsInline && !lineage.hooksInstalled",
-          "group": "1_hooks@1"
-        },
-        {
-          "command": "lineage.removeHooks",
-          "when": "view == lineageSessionsInline && lineage.hooksInstalled",
-          "group": "1_hooks@2"
-        },
-        {
-          "command": "lineage.deleteStale",
-          "when": "view == lineageSessionsInline",
-          "group": "2_manage@1"
-        },
-        {
-          "command": "lineage.restoreSession",
-          "when": "view == lineageSessionsInline",
-          "group": "2_manage@2"
-        },
-        {
-          "command": "lineage.showAccountsSection",
-          "when": "view == lineageSessionsInline && !config.lineage.accounts.section",
-          "group": "3_accounts@0"
-        },
-        {
-          "command": "lineage.hideAccountsSection",
-          "when": "view == lineageSessionsInline && config.lineage.accounts.section",
-          "group": "3_accounts@0"
+          "group": "navigation@9"
         },
         {
           "command": "lineage.addAccount",
@@ -660,6 +587,48 @@
           "command": "lineage.refreshAccountUsage",
           "when": "view == lineageAccounts",
           "group": "navigation@2"
+        }
+      ],
+      "lineage.settings": [
+        {
+          "command": "lineage.installHooks",
+          "when": "!lineage.hooksInstalled",
+          "group": "1_hooks@1"
+        },
+        {
+          "command": "lineage.removeHooks",
+          "when": "lineage.hooksInstalled",
+          "group": "1_hooks@2"
+        },
+        {
+          "command": "lineage.showHidden",
+          "group": "2_manage@0"
+        },
+        {
+          "command": "lineage.deleteStale",
+          "group": "2_manage@1"
+        },
+        {
+          "command": "lineage.restoreSession",
+          "group": "2_manage@2"
+        },
+        {
+          "command": "lineage.refresh",
+          "group": "2_manage@3"
+        },
+        {
+          "command": "lineage.markAllNotificationsRead",
+          "group": "2_manage@4"
+        },
+        {
+          "command": "lineage.showAccountsSection",
+          "when": "!config.lineage.accounts.section",
+          "group": "3_accounts@0"
+        },
+        {
+          "command": "lineage.hideAccountsSection",
+          "when": "config.lineage.accounts.section",
+          "group": "3_accounts@0"
         }
       ],
       "view/item/context": [
