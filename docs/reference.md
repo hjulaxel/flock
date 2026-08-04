@@ -219,6 +219,18 @@ Flock owns the process.
 | Account routing and pinning | yes | no | no |
 | Flock-named tab | yes | no | no |
 
+**One caveat on the middle column, stated plainly.** Everything Flock knows about
+a session it did not start comes from `claude agents --json`, and that list is
+written by the Claude CLI itself — one entry per running CLI process, under
+`~/.claude/sessions/`. A conversation the extension runs **in a terminal**
+(`claudeCode.useTerminal`) is such a process and appears. The extension's native
+UI also runs the CLI, and the registry entry carries the entrypoint the extension
+sets, so it is expected to appear the same way — but Flock has no way to
+*guarantee* that, because whether a given CLI mode registers is the CLI's
+decision and an undocumented one. If a conversation does not turn up in the tree,
+that is why, and nothing in Flock can fix it. Everything below degrades to "no
+row", never to a wrong row.
+
 **Exact versus inferred lineage.** Flock's own launches pre-mint the session id,
 so a fork's parent is recorded rather than worked out. For everything else the
 edge is read back from the transcript, and from the launching process's command

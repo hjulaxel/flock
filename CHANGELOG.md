@@ -40,7 +40,8 @@ All notable changes to Flock are recorded here. The format follows
 
 - **A new section in the reference**, "Using Flock alongside the Claude Code
   extension", saying per setup — Flock-launched, official extension, hand-run
-  terminal — which benefits you get and which you do not.
+  terminal — which benefits you get and which you do not, and where the limit of
+  what Flock can promise actually sits.
 
 ### Fixed
 
