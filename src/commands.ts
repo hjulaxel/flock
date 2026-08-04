@@ -1493,8 +1493,9 @@ async function pickWorktree(
 }
 
 /** The branch row a verb was invoked on, re-resolved against what the view is
- *  showing, or a picker when it arrived with nothing. One helper because all five
- *  worktree-adjacent verbs need exactly this and differ only in the wording. */
+ *  showing, or a picker when it arrived with nothing. One helper because every
+ *  worktree-adjacent verb needs exactly this and they differ only in the
+ *  wording. */
 async function resolveWorktree(
   deps: CommandDeps,
   arg: unknown,
@@ -1710,7 +1711,7 @@ async function pickBranchForNewWorktree(
     title: 'New branch',
     prompt: 'Branch name for the new worktree',
     ignoreFocusOut: true,
-    validateInput: (value) => branchNameProblem(value, locals, branches),
+    validateInput: (value) => branchNameProblem(value, branches),
   });
   const name = typeof typed === 'string' ? typed.trim() : '';
   if (name === '') return undefined;
@@ -1725,17 +1726,17 @@ async function pickBranchForNewWorktree(
 /**
  * What is wrong with a typed branch name, for the input box's live validation.
  *
- * Deliberately NOT a reimplementation of `git check-ref-format`. The rules here
- * are the ones whose failure would be confusing rather than obvious: a name
- * already checked out somewhere (git refuses, and the reason is elsewhere on
- * disk), and a name that slugs to nothing (the path would be built from an empty
- * string). Everything else — a trailing dot, a `..`, a control character — git
- * rejects with a message that names the rule, which is a better error than
- * anything paraphrased here.
+ * TWO rules, deliberately, and it is NOT a reimplementation of `git
+ * check-ref-format`. These are the two whose failure would be confusing rather
+ * than obvious: a name already checked out somewhere (git refuses, and the reason
+ * is a directory elsewhere on disk that the dialog cannot show you), and a name
+ * that slugs to nothing (the path would be built from an empty string, so there is
+ * nowhere to put it). Everything else — a trailing dot, a `..`, a control
+ * character — git rejects with a message that names the rule it broke, which is a
+ * better error than anything paraphrased here.
  */
 function branchNameProblem(
   value: string,
-  locals: readonly string[],
   branches: readonly BranchInfo[],
 ): string | undefined {
   const name = typeof value === 'string' ? value.trim() : '';
@@ -1747,12 +1748,10 @@ function branchNameProblem(
   if (slugifyBranch(name) === '') {
     return 'Flock cannot build a directory name from that.';
   }
-  if (locals.includes(name)) {
-    // Not an error: it means "check out the existing branch here", and the flow
-    // above sets `create: false` for exactly this. Said out loud so the user is
-    // not surprised by which of the two happened.
-    return undefined;
-  }
+  // A name that matches an EXISTING branch is deliberately NOT a problem, which
+  // is why the local branch list is not consulted here at all: typing one means
+  // "check that one out here", and the flow above drops `-b` for exactly that
+  // case rather than sending git a command it would refuse.
   return undefined;
 }
 

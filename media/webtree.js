@@ -96,6 +96,12 @@
   const RING_RADIUS = 5;
   const DOT_RADIUS = 2;
 
+  /** The pull-request chip's two class vocabularies, and the allowlist for both.
+   *  Each has a rule in webtree.css; anything not in here falls back to the
+   *  neutral member rather than becoming a class nothing styles. */
+  const PR_STATES = ['draft', 'open', 'merged', 'closed'];
+  const PR_CHECKS = ['none', 'pending', 'pass', 'fail'];
+
   // ------------------------------------------------------- the device grid
   //
   // A 1px CSS line is only ONE pixel on screen when the page is scaled by a
@@ -527,9 +533,17 @@
     // for it.
     if (chip.pr && chip.pr.label) {
       const pr = document.createElement('span');
+      // Allowlisted, not interpolated. Both words come from the extension's own
+      // union types, so this cannot currently be anything else — but a class name
+      // built by concatenation is the sort of thing that stops being safe when
+      // somebody widens the field at the other end, and the fallbacks here are
+      // also the reason an unknown state renders as a plain chip rather than as an
+      // unstyled one.
       pr.className =
-        'branch-pr ' + String(chip.pr.state || 'open') +
-        ' checks-' + String(chip.pr.checks || 'none');
+        'branch-pr ' +
+        (PR_STATES.indexOf(chip.pr.state) >= 0 ? chip.pr.state : 'open') +
+        ' checks-' +
+        (PR_CHECKS.indexOf(chip.pr.checks) >= 0 ? chip.pr.checks : 'none');
       pr.textContent = chip.pr.label;
       el.appendChild(pr);
     }
