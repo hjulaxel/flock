@@ -87,6 +87,10 @@ function state(partial: Partial<LineageState> = {}): LineageState {
     records: {},
     windows: {},
     projects: {},
+    // v7. Materialised on every load like the maps below, so a state this helper
+    // builds has to carry it or every deep-equality against a migrated blob fails
+    // on an empty object.
+    subprojects: {},
     hiddenFolders: {},
     chains: {},
     workspaces: {},
@@ -1320,6 +1324,139 @@ describe('migrateState: v1 -> v2', () => {
   });
 });
 
+// ------------------------------------------------------------ v5 -> v6
+//
+// The first step in the ladder that REWRITES rather than adds: a subproject is a
+// directory of its parent now, not a project record with a parentId. The rules
+// are projects.flattenNestedProjects' and tested there; what is checked here is
+// the write — tombstones rather than dropped keys, the ancestor's own directory
+// list, and the fact that a file already at v6 is left alone.
+
+describe('migrateState: v5 -> v6, nested projects become directories', () => {
+  const proj = (
+    id: string,
+    name: string,
+    rootDir: string,
+    over: Record<string, unknown> = {},
+  ) => ({
+    id,
+    name,
+    rootDir,
+    dirs: [],
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    ...over,
+  });
+
+  it('folds the child in, tombstones it, and stamps v6', () => {
+    const migrated = migrateState({
+      version: 5,
+      projects: {
+        app: proj('app', 'app', '/code/app'),
+        api: proj('api', 'api', '/code/app/api', { parentId: 'app' }),
+      },
+    });
+    expect(migrated.version).toBe(STATE_SCHEMA_VERSION);
+    expect(migrated.projects.app.rootDir).toBe('/code/app');
+    expect(migrated.projects.app.dirs).toEqual(['/code/app/api']);
+    // A TOMBSTONE, never a dropped key: `state.json` is merged newest-wins per
+    // record across windows, and a missing key is indistinguishable from "the
+    // other window has not heard of this project yet" — so it would come back on
+    // that window's next write.
+    expect(migrated.projects.api.deleted).toBe(true);
+    expect(migrated.projects.api.rootDir).toBe('');
+  });
+
+  it('keeps the child’s createdAt on its tombstone', () => {
+    const migrated = migrateState({
+      version: 5,
+      projects: {
+        app: proj('app', 'app', '/code/app'),
+        api: proj('api', 'api', '/code/app/api', {
+          parentId: 'app',
+          createdAt: '2025-05-05T00:00:00.000Z',
+        }),
+      },
+    });
+    expect(migrated.projects.api.createdAt).toBe('2025-05-05T00:00:00.000Z');
+    // And a fresh `updatedAt`, or the tombstone would lose the merge to the live
+    // copy an older window is still holding.
+    expect(migrated.projects.api.updatedAt).not.toBe('2025-05-05T00:00:00.000Z');
+  });
+
+  it('leaves a flat v5 file completely alone', () => {
+    const migrated = migrateState({
+      version: 5,
+      projects: {
+        app: proj('app', 'app', '/code/app', { dirs: ['/code/app/extra'] }),
+      },
+    });
+    expect(migrated.projects.app.dirs).toEqual(['/code/app/extra']);
+    expect(migrated.projects.app.updatedAt).toBe('2026-01-01T00:00:00.000Z');
+  });
+
+  it('does not run again on a file already at v6', () => {
+    // A nested record that survives to a v6 file — hand-edited, or merged in from
+    // an older window after this one stamped the version — renders nested until
+    // the version drops below 6 again. The ladder is keyed on the version the FILE
+    // claims, which is what makes the step self-healing under a mixed install
+    // rather than a one-shot that can be missed.
+    const migrated = migrateState({
+      version: 6,
+      projects: {
+        app: proj('app', 'app', '/code/app'),
+        api: proj('api', 'api', '/code/app/api', { parentId: 'app' }),
+      },
+    });
+    expect(migrated.projects.app.dirs).toEqual([]);
+    expect(migrated.projects.api.deleted).toBeUndefined();
+    expect(migrated.projects.api.parentId).toBe('app');
+  });
+
+  it('re-migrates when an older window has written v5 back', () => {
+    const migrated = migrateState({
+      version: 5,
+      projects: {
+        app: proj('app', 'app', '/code/app'),
+        api: proj('api', 'api', '/code/app/api', { parentId: 'app' }),
+      },
+    });
+    const again = migrateState({ ...migrated, version: 5 });
+    expect(again.projects.app.dirs).toEqual(['/code/app/api']);
+    expect(again.projects.api.deleted).toBe(true);
+  });
+
+  it('collapses a whole chain and leaves one live project', () => {
+    const migrated = migrateState({
+      version: 5,
+      projects: {
+        a: proj('a', 'a', '/a'),
+        b: proj('b', 'b', '/a/b', { parentId: 'a' }),
+        c: proj('c', 'c', '/a/b/c', { parentId: 'b' }),
+      },
+    });
+    expect(migrated.projects.a.dirs).toEqual(['/a/b', '/a/b/c']);
+    expect(migrated.projects.b.deleted).toBe(true);
+    expect(migrated.projects.c.deleted).toBe(true);
+  });
+
+  it('does not touch records, so no session moves', () => {
+    // Membership has always been derived from the cwd, which is exactly why this
+    // migration can throw a project record away without losing a session.
+    const migrated = migrateState({
+      version: 5,
+      records: {
+        [S1]: { id: S1, cwd: '/code/app/api', createdAt: nowIso(), updatedAt: nowIso() },
+      },
+      projects: {
+        app: proj('app', 'app', '/code/app'),
+        api: proj('api', 'api', '/code/app/api', { parentId: 'app' }),
+      },
+    });
+    expect(migrated.records[S1].cwd).toBe('/code/app/api');
+  });
+});
+
 // --------------------------------------------------------- generation chains
 
 describe('state: generation chains', () => {
@@ -1892,5 +2029,203 @@ describe('state: accounts', () => {
     const merged = mergeStates(disk, mem);
     expect(merged.accounts!['a']?.label).toBe('New');
     expect(merged.accountSettings!.defaultRouting).toEqual({ kind: 'account', id: 'a' });
+  });
+});
+
+// ------------------------------------------------------- named subprojects (v7)
+//
+// A lane is a record of its own, keyed by id, and that is the whole design
+// decision worth testing here: `projects` merges newest-WINS per record, so a list
+// on ProjectRecord would have lost one of two windows' writes. One record per lane
+// means one writer per lane.
+
+describe('state: named subprojects', () => {
+  it('writes a lane and reads it back, in creation order', async () => {
+    const dir = tempDir();
+    const store = makeStore(dir);
+    await store.load();
+
+    await store.upsertProject('p1', { rootDir: '/code/app', name: 'app' });
+    await store.upsertSubproject('l1', {
+      projectId: 'p1',
+      name: 'Server rewrite',
+      dir: '/code/app',
+    });
+    await store.upsertSubproject('l2', {
+      projectId: 'p1',
+      name: 'CS tooling',
+      dir: '/code/app',
+    });
+
+    expect(store.getSubprojects().map((l) => l.name)).toEqual([
+      'Server rewrite',
+      'CS tooling',
+    ]);
+    // TWO LANES, ONE DIRECTORY — the arrangement the directory-only model could
+    // not express.
+    expect(new Set(store.getSubprojects().map((l) => l.dir)).size).toBe(1);
+    expect(store.getSubproject('l1')?.name).toBe('Server rewrite');
+    expect(store.getSubproject('nope')).toBeUndefined();
+
+    const onDisk = readFile(dir) as { subprojects: Record<string, unknown> };
+    expect(Object.keys(onDisk.subprojects).sort()).toEqual(['l1', 'l2']);
+  });
+
+  it('refuses a lane with no project or no directory', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.upsertSubproject('l1', { name: 'No project', dir: '/code/app' });
+    await store.upsertSubproject('l2', { projectId: 'p1', name: 'No dir' });
+    expect(store.getSubprojects()).toEqual([]);
+  });
+
+  it('merges a patch rather than replacing the record', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.upsertProject('p1', { rootDir: '/code/app', name: 'app' });
+    await store.upsertSubproject('l1', {
+      projectId: 'p1',
+      name: 'Server rewrite',
+      dir: '/code/app',
+    });
+    const created = store.getSubproject('l1')?.createdAt;
+    await store.upsertSubproject('l1', { name: 'CS tooling' });
+    const after = store.getSubproject('l1');
+    expect(after?.name).toBe('CS tooling');
+    // The directory and the parent survive a rename, and the store owns the stamps.
+    expect(after?.dir).toBe('/code/app');
+    expect(after?.projectId).toBe('p1');
+    expect(after?.createdAt).toBe(created);
+  });
+
+  it('tombstones a lane rather than dropping its key', async () => {
+    const dir = tempDir();
+    const store = makeStore(dir);
+    await store.load();
+    await store.upsertProject('p1', { rootDir: '/code/app', name: 'app' });
+    await store.upsertSubproject('l1', {
+      projectId: 'p1',
+      name: 'Gone',
+      dir: '/code/app',
+    });
+    await store.deleteSubproject('l1');
+    expect(store.getSubprojects()).toEqual([]);
+    // The key survives: a dropped key is indistinguishable from "the other window
+    // has not heard of it yet", and that window would re-add it.
+    const onDisk = readFile(dir) as {
+      subprojects: Record<string, { deleted?: boolean }>;
+    };
+    expect(onDisk.subprojects.l1.deleted).toBe(true);
+  });
+
+  it('takes a project’s lanes down with it', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.upsertProject('p1', { rootDir: '/code/app', name: 'app' });
+    await store.upsertProject('p2', { rootDir: '/code/web', name: 'web' });
+    await store.upsertSubproject('l1', {
+      projectId: 'p1',
+      name: 'A',
+      dir: '/code/app',
+    });
+    await store.upsertSubproject('l2', {
+      projectId: 'p2',
+      name: 'B',
+      dir: '/code/web',
+    });
+    await store.deleteProject('p1');
+    // A lane is meaningless without the project it names — unlike a nested
+    // project, which the tree could re-root at the top level.
+    expect(store.getSubprojects().map((l) => l.id)).toEqual(['l2']);
+  });
+
+  it('stamps a session once and never rewrites it', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.upsertProject('p1', { rootDir: '/code/app', name: 'app' });
+    await store.upsertSubproject('l1', {
+      projectId: 'p1',
+      name: 'A',
+      dir: '/code/app',
+    });
+    await store.upsertSubproject('l2', {
+      projectId: 'p1',
+      name: 'B',
+      dir: '/code/app',
+    });
+
+    await store.setSessionSubproject(S1, 'l1');
+    expect(store.getSessionSubproject(S1)).toBe('l1');
+    // A second, different stamp is a bug at the call site, not a correction — the
+    // same contract the account pin has.
+    await store.setSessionSubproject(S1, 'l2');
+    expect(store.getSessionSubproject(S1)).toBe('l1');
+  });
+
+  it('lets the MOVE verb re-file a session, and clear it', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.upsertProject('p1', { rootDir: '/code/app', name: 'app' });
+    await store.upsertSubproject('l1', {
+      projectId: 'p1',
+      name: 'A',
+      dir: '/code/app',
+    });
+    await store.upsertSubproject('l2', {
+      projectId: 'p1',
+      name: 'B',
+      dir: '/code/app',
+    });
+    await store.setSessionSubproject(S1, 'l1');
+
+    await store.moveSessionSubproject(S1, 'l2');
+    expect(store.getSessionSubproject(S1)).toBe('l2');
+    await store.moveSessionSubproject(S1, null);
+    expect(store.getSessionSubproject(S1)).toBeUndefined();
+  });
+
+  it('reads a stamp naming a deleted lane as no stamp at all', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.upsertProject('p1', { rootDir: '/code/app', name: 'app' });
+    await store.upsertSubproject('l1', {
+      projectId: 'p1',
+      name: 'A',
+      dir: '/code/app',
+    });
+    await store.setSessionSubproject(S1, 'l1');
+    await store.deleteSubproject('l1');
+    // The stamp is deliberately left on the record — see deleteSubproject — so the
+    // session falls back to being placed by directory.
+    expect(store.getSessionSubproject(S1)).toBeUndefined();
+  });
+
+  it('keeps both windows’ lanes when two are added at once', async () => {
+    // THE REASON A LANE IS A RECORD. Two windows each adding one, merged: an array
+    // on ProjectRecord would have kept whichever wrote last.
+    const dir = tempDir();
+    const a = makeStore(dir);
+    const b = makeStore(dir);
+    await a.load();
+    await b.load();
+    await a.upsertProject('p1', { rootDir: '/code/app', name: 'app' });
+    await b.load();
+
+    await a.upsertSubproject('l1', {
+      projectId: 'p1',
+      name: 'From A',
+      dir: '/code/app',
+    });
+    await b.upsertSubproject('l2', {
+      projectId: 'p1',
+      name: 'From B',
+      dir: '/code/app',
+    });
+    await a.load();
+
+    expect(a.getSubprojects().map((l) => l.name).sort()).toEqual([
+      'From A',
+      'From B',
+    ]);
   });
 });

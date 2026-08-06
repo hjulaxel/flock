@@ -170,7 +170,7 @@ describe('formatUsageSummary', () => {
     expect(formatUsageSummary(undefined, NOW)).toBe('');
   });
 
-  it('names the three "no numbers" reasons distinctly', () => {
+  it('names the "no numbers" reasons distinctly', () => {
     expect(formatUsageSummary(snapshot({ error: 'no-credentials' }), NOW)).toBe(
       'not signed in',
     );
@@ -183,6 +183,21 @@ describe('formatUsageSummary', () => {
     expect(formatUsageSummary(snapshot({ error: 'parse' }), NOW)).toBe(
       'usage unavailable',
     );
+  });
+
+  it('never calls an aged-out access token an expired sign-in', () => {
+    // The account is signed in and the CLI renews the token itself on its next
+    // run. Only the METER is missing, and that is all the row may say — the
+    // wording is what sent people to `/login` for nothing.
+    expect(formatUsageSummary(snapshot({ error: 'token-stale' }), NOW)).toBe(
+      'usage n/a',
+    );
+    expect(
+      formatUsageSummary(
+        snapshot({ error: 'token-stale', signedInAs: 'a@b.c' }),
+        NOW,
+      ),
+    ).toBe('a@b.c · usage n/a');
   });
 
   it('is percent-first and names the reset when there is one', () => {
@@ -752,7 +767,7 @@ interface PackageJson {
   contributes: {
     views: Record<string, Array<{ id: string; when?: string }>>;
     commands: Array<{ command: string }>;
-    menus: Record<string, Array<{ command?: string }>>;
+    menus: Record<string, Array<{ command?: string; when?: string }>>;
     configuration: {
       properties: Record<string, { type?: string; default?: unknown }>;
     };
@@ -786,18 +801,34 @@ describe('package.json — the Accounts surface is wired, not just declared', ()
     expect(prop?.default).toBe(true);
   });
 
-  it('every account command is declared AND has a menu or palette entry somewhere', () => {
+  it('every account command is declared AND reachable from somewhere', () => {
     const pkg = readPackageJson();
     const declared = new Set(pkg.contributes.commands.map((c) => c.command));
     const inAnyMenu = new Set<string>();
-    for (const entries of Object.values(pkg.contributes.menus)) {
+    for (const [where, entries] of Object.entries(pkg.contributes.menus)) {
       for (const entry of entries) {
+        // `commandPalette` is the one menu whose entries SUPPRESS rather than
+        // offer: an entry there exists to say `when: false`. Counting it as
+        // reachability is the loophole that let a verb lose its only real menu
+        // entry and still pass — which is exactly what happened when the project
+        // context menu was cut back to seven entries.
+        if (where === 'commandPalette') continue;
         if (entry.command) inAnyMenu.add(entry.command);
       }
     }
+    // A command with NO commandPalette entry is in the palette by default, which
+    // is a door like any other.
+    const suppressed = new Set(
+      (pkg.contributes.menus.commandPalette ?? [])
+        .filter((e) => e.when === 'false')
+        .map((e) => e.command),
+    );
     for (const id of ACCOUNT_COMMAND_IDS) {
       expect(declared.has(id), `${id} missing from contributes.commands`).toBe(true);
-      expect(inAnyMenu.has(id), `${id} has no menu or palette entry`).toBe(true);
+      expect(
+        inAnyMenu.has(id) || !suppressed.has(id),
+        `${id} is in no menu and suppressed from the palette — nothing can reach it`,
+      ).toBe(true);
     }
   });
 

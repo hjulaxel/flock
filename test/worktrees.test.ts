@@ -93,6 +93,20 @@ describe('slugifyBranch', () => {
     expect(slugifyBranch('feature/café')).toBe('feature-cafe');
   });
 
+  it('keeps letters that are not Latin at all', () => {
+    // A branch written in Chinese or Cyrillic used to slug to '', and an empty
+    // slug is a refusal — the branch could never get a worktree, and the modal
+    // blamed the worktreePath setting for it.
+    expect(slugifyBranch('功能-测试')).toBe('功能-测试');
+    expect(slugifyBranch('исправление-ошибки')).toBe('исправление-ошибки');
+    expect(slugifyBranch('feature/日本語')).toBe('feature-日本語');
+    // Two branches sharing an ASCII prefix must not slug to the same name, or
+    // they would be offered the same path.
+    expect(slugifyBranch('feature/中文')).toBe('feature-中文');
+    // The vowel marks NFKD splits off stay attached to their letter.
+    expect(slugifyBranch('feature/फ़ीचर')).toBe('feature-फ़ीचर');
+  });
+
   it('caps the length, and does not leave a separator at the cut', () => {
     const long = `feat/${'a'.repeat(200)}`;
     const out = slugifyBranch(long);

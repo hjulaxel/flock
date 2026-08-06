@@ -455,6 +455,11 @@
     const chip = row.chip || {};
     const el = document.createElement('div');
     el.className = 'row branch' + (chip.count ? '' : ' empty');
+    // A branch with NO CHECKOUT — a ref and nothing on disk, which is most of what
+    // the fold holds. Marked so the stylesheet can drop its swatch: a coloured
+    // block says "sessions here take this colour", and nothing can run in a
+    // directory that does not exist.
+    if (!chip.dir) el.classList.add('ref');
     if (row.expandable) el.classList.add('expandable');
     if (chip.attention) el.classList.add('attention');
     if (row.key === focusKey) el.classList.add('selected', 'focused');
@@ -590,6 +595,26 @@
     el.setAttribute('aria-level', String(row.depth + 1));
     el.setAttribute('title', row.tooltip || '');
     el.setAttribute('data-vscode-context', JSON.stringify(row.context));
+
+    // UNDER THE DIRECTORY MODEL THIS ROW OPENS, because the branches behind it
+    // genuinely exist as rows — where the project-level "Others" stood for a
+    // curation decision and could only open a picker. Same twisty as an openable
+    // branch row, for the same reason: an expandable row without one is a control
+    // with no affordance.
+    if (row.expandable) {
+      el.setAttribute('aria-expanded', row.expanded ? 'true' : 'false');
+      const twisty = document.createElement('span');
+      twisty.className = 'branch-twisty' + (row.expanded ? ' expanded' : '');
+      twisty.setAttribute('aria-hidden', 'true');
+      twisty.addEventListener('mousedown', (e) => {
+        // mousedown, and stopped, exactly as every other twisty here: the row's
+        // own click would otherwise toggle it a second time, straight back.
+        e.preventDefault();
+        e.stopPropagation();
+        post('toggle', { key: row.key });
+      });
+      el.appendChild(twisty);
+    }
 
     // No swatch: this row stands for several branches and has no colour of its
     // own. The empty box keeps the label in the same column as the branches
@@ -876,6 +901,16 @@
     return box;
   }
 
+  // The extension picks light/dark per the active theme class on <body>.
+  // High-contrast-light's <body> carries BOTH 'vscode-high-contrast' and
+  // 'vscode-high-contrast-light', so 'vscode-light' alone is not enough
+  // to name it — a check on that class only would hand a high-contrast
+  // LIGHT background the mark meant for a dark one.
+  function wantLightIcons() {
+    const cl = document.body.classList;
+    return cl.contains('vscode-light') || cl.contains('vscode-high-contrast-light');
+  }
+
   function renderIcon(row) {
     const box = document.createElement('span');
     box.className = 'icon';
@@ -884,14 +919,7 @@
       const uri = icons[icon.provider];
       if (uri) {
         const img = document.createElement('img');
-        // The extension picks light/dark per the active theme class on <body>.
-        // High-contrast-light's <body> carries BOTH 'vscode-high-contrast' and
-        // 'vscode-high-contrast-light', so 'vscode-light' alone is not enough
-        // to name it — a check on that class only would hand a high-contrast
-        // LIGHT background the mark meant for a dark one.
-        const cl = document.body.classList;
-        const wantLight = cl.contains('vscode-light') || cl.contains('vscode-high-contrast-light');
-        img.src = wantLight ? uri.light : uri.dark;
+        img.src = wantLightIcons() ? uri.light : uri.dark;
         img.alt = '';
         box.appendChild(img);
         return box;
@@ -1075,12 +1103,26 @@
       });
     }
 
-    // Every row is a drop target: onto a session re-parents, onto a project
-    // adopts the directory, onto a folder detaches to a root.
+    // A PROJECT is the only thing a session can be dropped onto — or one of its
+    // subproject DIRECTORY rows, which counts as the project. Dropping onto a
+    // session row used to re-parent and onto a folder row used to detach; both
+    // are gone, because lineage is not something a drag may state (see
+    // webtree.onDrop). The extension refuses them either way; not lighting them
+    // up is what stops the gesture from looking available in the first place.
+    const acceptsDrop = row.kind === 'project' || row.kind === 'subproject';
     el.addEventListener('dragover', (e) => {
       e.preventDefault();
       e.dataTransfer.dropEffect = 'move';
-      el.classList.add('drop-target');
+      // The glow IS the affordance in this tree, so it is withheld from rows
+      // that no longer take a drop — a session row lighting up is what made
+      // "drag this fork over there" look like something the tree supports.
+      // The drop is still delivered, and the extension answers it with the one
+      // sentence explaining why nothing moved; a highlight and then a refusal
+      // would be worse than either alone.
+      // Dropping onto the row being dragged is a no-op below (both the
+      // project-key and session-id shapes bail out), so don't light it up as
+      // if it were a valid target.
+      if (acceptsDrop && dragKey !== row.key) el.classList.add('drop-target');
     });
     el.addEventListener('dragleave', () => el.classList.remove('drop-target'));
     el.addEventListener('drop', (e) => {
@@ -1094,6 +1136,10 @@
       const source = dragKey;
       dragKey = null;
       // A project drag carries no session id, so the key is the whole of it.
+      // Unreachable now — a project row sets `canDrag: false`, so it never
+      // starts a drag — and kept as the guard it always was: the branch exists so
+      // that a `project:<uuid>` key can never fall through to the line below and
+      // be read as a session id. The extension declines the message.
       if (source && source.indexOf('project:') === 0) {
         if (source === row.key) return;
         post('drop', { sourceKey: source, targetKey: row.key });
@@ -1274,8 +1320,10 @@
   }
 
   /** Shift+Arrow: walk the cursor one row and take the range with it, from the
-   *  anchor. Falls back to a plain move when there is no session range to be
-   *  had — off the end of the list, or a cursor sitting on a header. */
+   *  anchor. A cursor that is on no row at all falls back to a plain move, and
+   *  a cursor on a header re-anchors onto the row it lands on. Running off
+   *  either end does NOTHING — a plain move there would collapse the selection
+   *  onto a header, which is the one thing a range extend must not do. */
   function extendFocus(delta) {
     const at = indexOfKey(focusKey);
     if (at < 0) {
@@ -1445,7 +1493,13 @@
         // Same split as the click: an openable branch row is a container.
         post(row.expandable ? 'toggle' : 'branch', { key: row.key });
       }
-      else if (row.kind === 'branchOthers') post('branchOthers', { key: row.key });
+      else if (row.kind === 'branchOthers') {
+        // Same split as the branch row above, and the same reason: under the
+        // directory model this fold opens onto the branches themselves, so Enter
+        // has to open it rather than send a message for a picker that would be
+        // answering a question the rows already answer.
+        post(row.expandable ? 'toggle' : 'branchOthers', { key: row.key });
+      }
       else post('toggle', { key: row.key });
     } else if (e.key === 'F2') {
       e.preventDefault();
@@ -1513,5 +1567,18 @@
   // device grid rather than snapping into place one tick later.
   syncHairline();
   watchDevicePixelRatio();
+  // A theme flip swaps classes on <body> in place, without reloading the
+  // webview, so renderIcon's light/dark pick otherwise goes stale until some
+  // unrelated model update happens to trigger the next render(). Only the
+  // light/dark ANSWER is worth a rebuild — any other class landing on <body>
+  // leaves every logo pointing at the file it already had.
+  if (typeof MutationObserver === 'function') {
+    let lightIcons = wantLightIcons();
+    new MutationObserver(() => {
+      if (wantLightIcons() === lightIcons) return;
+      lightIcons = !lightIcons;
+      render();
+    }).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+  }
   post('ready');
 })();

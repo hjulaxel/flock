@@ -70,7 +70,7 @@ describe('scaffold: the shared types contract', () => {
     // (src/state.ts); a bump on its own stamps an old-shaped file as the new
     // version without materialising the maps that version promises, and the
     // reader then finds them missing on a file it believes is current.
-    expect(STATE_SCHEMA_VERSION).toBe(5);
+    expect(STATE_SCHEMA_VERSION).toBe(7);
   });
 
   it('declares every contributed command id under the lineage. prefix', () => {
@@ -83,7 +83,7 @@ describe('scaffold: the shared types contract', () => {
     //
     // Bump it in the same commit as the verb, and check the new id reaches a
     // menu: a command nobody can invoke is not a feature.
-    expect(ids).toHaveLength(73);
+    expect(ids).toHaveLength(75);
     // Duplicate values would make one of them unreachable — the later key wins
     // at registration and the earlier verb's menu entry fires the wrong flow.
     expect(new Set(ids).size).toBe(ids.length);

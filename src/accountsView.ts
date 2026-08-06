@@ -312,7 +312,10 @@ export class AccountUsageCache implements DisposableLike {
 function pct(win: UsageWindow | undefined): number | undefined {
   const n = win?.utilization;
   if (typeof n !== 'number' || !Number.isFinite(n)) return undefined;
-  return Math.max(0, Math.min(100, Math.round(n)));
+  const clamped = Math.max(0, Math.min(100, n));
+  // Same rule as limits.ts percentLabel, so the tooltip never disagrees with the
+  // row: never round UP to 100 — a window at 99.6% is still open.
+  return clamped >= 100 ? 100 : Math.min(99, Math.round(clamped));
 }
 
 /** "in 2h 10m" / "in 3d" / '' — how long until a window rolls over. Relative
@@ -358,6 +361,13 @@ export function formatUsageSummary(
   }
   if (snapshot.error === 'expired') {
     return who === '' ? 'sign-in expired' : `${who} · sign-in expired`;
+  }
+  // An access token that aged out between CLI runs is NOT an expired sign-in —
+  // the CLI renews it from the refresh token beside it, unprompted. Saying
+  // otherwise is what sent people to `/login` to repair a working account. Same
+  // rule and same wording as limits.ts.
+  if (snapshot.error === 'token-stale') {
+    return who === '' ? 'usage n/a' : `${who} · usage n/a`;
   }
   if (snapshot.error !== undefined) return 'usage unavailable';
 

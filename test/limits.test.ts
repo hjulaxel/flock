@@ -84,6 +84,19 @@ function credBlob(token: string, expiresAt?: string | number): string {
   return JSON.stringify({ claudeAiOauth: inner });
 }
 
+/** The shape a real, working login has: an access token that lapses in hours
+ *  and the refresh token the CLI renews it from. `credBlob` deliberately omits
+ *  the second one — the two together are what tell "signed in, token aged out"
+ *  from "signed out". */
+function credBlobWithRefresh(token: string, expiresAt?: string | number): string {
+  const inner: Record<string, unknown> = {
+    accessToken: token,
+    refreshToken: 'REFRESH',
+  };
+  if (expiresAt !== undefined) inner['expiresAt'] = expiresAt;
+  return JSON.stringify({ claudeAiOauth: inner });
+}
+
 /** A 200 whose body carries one `five_hour` window, for tests that only care
  *  that a fetch happened and what it settled to. */
 function bodyWithFiveHour(utilization: number): string {
@@ -628,6 +641,112 @@ describe('LimitsService — expiresAt is honoured', () => {
     const out = await service.readUsage(profile('p'));
     expect(out?.fiveHour?.utilization).toBe(9);
     expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('LimitsService — a lapsed token on a live login is NOT an expired sign-in', () => {
+  // REGRESSION, and the loudest one in this file. An OAuth access token lasts
+  // hours and the CLI renews it from the refresh token beside it the next time
+  // it runs — so an expiry in the past is the ordinary state of an account
+  // nobody has used since lunch. Reporting it as "login expired" sent people to
+  // `/login` to repair an account that was never broken.
+
+  it('reads a lapsed token WITH a refresh token as token-stale, not expired', async () => {
+    const clock = BASE;
+    const filePath = credentialsPathFor(profile('p'), HOME);
+    const readFile = vi.fn(async (file: string): Promise<string | null> =>
+      file === filePath
+        ? credBlobWithRefresh('TOKEN-OLD', new Date(BASE - 1000).toISOString())
+        : null,
+    );
+    const fetchFn = vi.fn(async (): Promise<HttpResponseLike> => okResponse(bodyWithFiveHour(1)));
+    const service = new LimitsService({
+      readFile,
+      fetch: fetchFn,
+      now: () => clock,
+      homeDir: HOME,
+      platform: 'darwin',
+    });
+
+    const out = await service.readUsage(profile('p'));
+    expect(out?.error).toBe('token-stale');
+    // Still no round trip — a dead token buys a 401 whatever the reason.
+    expect(fetchFn).not.toHaveBeenCalled();
+    // And the row says the meter is missing, never that the sign-in is.
+    expect(formatUsageSummary(out)).toBe('usage n/a');
+  });
+
+  it('a 401 is token-stale too when a refresh token is on file', async () => {
+    const clock = BASE;
+    const filePath = credentialsPathFor(profile('p'), HOME);
+    const readFile = vi.fn(async (file: string): Promise<string | null> =>
+      file === filePath ? credBlobWithRefresh('TOKEN') : null,
+    );
+    const fetchFn = vi.fn(async (): Promise<HttpResponseLike> => ({
+      status: 401,
+      text: async () => '',
+    }));
+    const service = new LimitsService({
+      readFile,
+      fetch: fetchFn,
+      now: () => clock,
+      homeDir: HOME,
+      platform: 'darwin',
+    });
+
+    const out = await service.readUsage(profile('p'));
+    expect(out?.error).toBe('token-stale');
+  });
+
+  it('recovers on the next look, with no backoff to sit out', async () => {
+    // The whole point of settling this without a backoff: the CLI refreshes
+    // whenever it next runs, and the meter must come back on the next glance
+    // rather than fifteen minutes later.
+    let clock = BASE;
+    let text = credBlobWithRefresh('TOKEN-OLD', new Date(BASE - 1000).toISOString());
+    const filePath = credentialsPathFor(profile('p'), HOME);
+    const readFile = vi.fn(async (file: string): Promise<string | null> =>
+      file === filePath ? text : null,
+    );
+    const fetchFn = vi.fn(async (): Promise<HttpResponseLike> => okResponse(bodyWithFiveHour(7)));
+    const service = new LimitsService({
+      readFile,
+      fetch: fetchFn,
+      now: () => clock,
+      homeDir: HOME,
+      platform: 'darwin',
+    });
+    const p = profile('p');
+
+    expect((await service.readUsage(p))?.error).toBe('token-stale');
+
+    // The CLI ran and wrote a fresh token.
+    text = credBlobWithRefresh('TOKEN-NEW', BASE + 60 * 60 * 1000);
+    clock += MIN_FETCH_INTERVAL_MS + 1;
+
+    const out = await service.readUsage(p);
+    expect(out?.error).toBeUndefined();
+    expect(out?.fiveHour?.utilization).toBe(7);
+  });
+
+  it('still says "login expired" when there is no refresh token to renew from', async () => {
+    // The genuine case, and the only one the user can do anything about.
+    const clock = BASE;
+    const filePath = credentialsPathFor(profile('p'), HOME);
+    const readFile = vi.fn(async (file: string): Promise<string | null> =>
+      file === filePath ? credBlob('TOKEN-DEAD', new Date(BASE - 1000).toISOString()) : null,
+    );
+    const service = new LimitsService({
+      readFile,
+      fetch: vi.fn(async (): Promise<HttpResponseLike> => okResponse('{}')),
+      now: () => clock,
+      homeDir: HOME,
+      platform: 'darwin',
+    });
+
+    const out = await service.readUsage(profile('p'));
+    expect(out?.error).toBe('expired');
+    expect(formatUsageSummary(out)).toBe('login expired');
   });
 });
 

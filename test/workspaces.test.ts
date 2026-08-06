@@ -24,6 +24,7 @@ import {
 } from '../src/workspaces';
 import type {
   EditorialRecord,
+  LaunchOptions,
   ProjectRecord,
   WorkspaceSnapshot,
   WorkspaceTabRecord,
@@ -1102,6 +1103,105 @@ describe('workspaces: parking closes, never the panel', () => {
     expect(calls.launched).toEqual([S1]);
     expect(calls.unstowed).toEqual([]);
     expect(records[S1]?.parked).toBe(false);
+  });
+});
+
+describe('workspaces: a session that never took a turn still comes home', () => {
+  const binding = (sessionId: string, terminalName: string) => ({
+    nodeId: sessionId,
+    sessionId,
+    terminalName,
+    createdAt: 0,
+  });
+
+  /** Park S1 on the way out of 'pa', switch back, and report how it relaunched.
+   *  `parentId` is the recorded edge — set it to make S1 an unstarted FORK. */
+  async function roundTrip(over: { parentId?: string } = {}): Promise<{
+    launched: LaunchOptions[];
+    records: Record<string, EditorialRecord>;
+  }> {
+    const records: Record<string, EditorialRecord> = {
+      [S1]: {
+        ...record(S1),
+        ...(over.parentId === undefined ? {} : { parentId: over.parentId }),
+      },
+    };
+    const snapshot: WorkspaceSnapshot = {
+      projectId: 'pa',
+      tabs: [{ kind: 'session', sessionId: S1, viewColumn: 1 }],
+      savedAt: ISO,
+      updatedAt: ISO,
+    };
+    const groups: FakeGroup[] = [
+      { viewColumn: 1, isActive: true, tabs: [fakeTerminalTab('claude')] },
+    ];
+    stubTabModel(groups, []);
+
+    let active: string | null = 'pa';
+    const launched: LaunchOptions[] = [];
+    const bound = new Set([S1]);
+    const { deps, calls } = harness({
+      getProject: twoProjects,
+      getWorkspace: (id) => (id === 'pa' ? snapshot : undefined),
+      getActive: () => active,
+      setActive: async (id) => {
+        active = id;
+      },
+      getRecord: (id) => records[id],
+      upsertRecord: async (id, patch) => {
+        records[id] = { ...(records[id] ?? record(id)), ...patch };
+        calls.written.push({ id, patch });
+      },
+      bindings: () => [...bound].map((id) => binding(id, 'claude')),
+      sessionCwd: () => '/code/api',
+      isLive: () => false,
+      // The whole point: claude never wrote one.
+      hasTranscript: () => false,
+      closeSessionTab: (id) => {
+        calls.killed.push(id);
+        bound.delete(id);
+        closeOneTerminalTab(groups);
+        return true;
+      },
+      unstowSessionTab: async () => false,
+      launchSession: async (opts) => {
+        launched.push(opts);
+        bound.add(opts.sessionId);
+        return {
+          nodeId: opts.sessionId,
+          sessionId: opts.sessionId,
+          terminalName: 'claude',
+          createdAt: 0,
+        };
+      },
+    });
+
+    const manager = new WorkspaceManager(deps);
+    await manager.switchTo('pw');
+    await manager.switchTo('pa');
+    return { launched, records };
+  }
+
+  it('starts it fresh instead of skipping it', async () => {
+    // REGRESSION. A session created and not yet written in was parked on the
+    // way out and silently dropped on the way back — no tab, and a record
+    // still claiming `parked`, which is a row the switch could never restore
+    // again.
+    const { launched, records } = await roundTrip();
+    expect(launched.map((l) => l.sessionId)).toEqual([S1]);
+    // `--session-id <id>`, no `--resume`: there is no transcript to name.
+    expect(launched[0]?.resumeId).toBeUndefined();
+    expect(records[S1]?.parked).toBe(false);
+  });
+
+  it('leaves an unstarted FORK for its own click', async () => {
+    // A branch that never took a turn is displaying its ancestor's history,
+    // and only a replay brings that back. Starting it blank here would spend
+    // the id on an empty conversation and lose the branch — so the bulk
+    // restore declines and `resumeFlow`, which knows how to walk to the
+    // ancestor, does it properly when the row is clicked.
+    const { launched } = await roundTrip({ parentId: S2 });
+    expect(launched).toEqual([]);
   });
 });
 

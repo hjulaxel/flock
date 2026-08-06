@@ -794,17 +794,37 @@ export function buildForest(input: BuildForestInput): SessionForest {
   // its project row into "(no directory)", or disappears altogether under
   // `lineage.onlyProjectSessions`. Forks inherit the parent's directory, so
   // the child's cwd is the right answer rather than a guess.
-  const inheritedCwd = new Map<string, string>();
-  const noteInherited = (parentId: string, cwd: string | undefined): void => {
-    if (cwd === undefined || inheritedCwd.has(parentId)) return;
-    inheritedCwd.set(parentId, cwd);
+  //
+  // Two children can disagree — one was forked after a cd, or resumed in
+  // another checkout — and then which project the ghost subtree files under
+  // must not depend on roster response order. Earliest child wins, falling
+  // back to the smaller cwd, so the answer is the same on every tick.
+  const inheritedCwd = new Map<string, { cwd: string; startedAt?: number }>();
+  const noteInherited = (
+    parentId: string,
+    cwd: string | undefined,
+    startedAt?: number,
+  ): void => {
+    if (cwd === undefined) return;
+    const cur = inheritedCwd.get(parentId);
+    if (cur === undefined) {
+      inheritedCwd.set(parentId, { cwd, startedAt });
+      return;
+    }
+    if (cur.cwd === cwd) return;
+    const earlier =
+      startedAt !== undefined &&
+      (cur.startedAt === undefined || startedAt < cur.startedAt);
+    if (earlier || (startedAt === cur.startedAt && cwd < cur.cwd)) {
+      inheritedCwd.set(parentId, { cwd, startedAt });
+    }
   };
 
   let frontier: string[] = [];
   for (const n of nodes.values()) {
     if (n.parentId && !nodes.has(n.parentId)) {
       frontier.push(n.parentId);
-      noteInherited(n.parentId, n.cwd);
+      noteInherited(n.parentId, n.cwd, n.startedAt);
     }
   }
   for (let depth = 0; depth < MAX_GHOST_DEPTH && frontier.length > 0; depth++) {
@@ -833,7 +853,7 @@ export function buildForest(input: BuildForestInput): SessionForest {
         children: [],
         visibleChildren: [],
       };
-      const cwd = nonEmpty(record?.cwd) ?? inheritedCwd.get(gid);
+      const cwd = nonEmpty(record?.cwd) ?? inheritedCwd.get(gid)?.cwd;
       if (cwd !== undefined) ghost.cwd = cwd;
       const summary = nonEmpty(record?.summary);
       if (summary !== undefined) ghost.summary = summary;

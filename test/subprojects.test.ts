@@ -1,14 +1,21 @@
-// test/subprojects.test.ts — two view features that share a mechanism.
+// test/subprojects.test.ts — three view features that share a mechanism.
 //
-//   1. SUBPROJECTS: a project may be filed under another project, to any depth
-//      and any breadth.
-//   2. BRANCH GROUPING: `lineage.groupSessionsByBranch` hangs a project's
-//      sessions off the branch row for the worktree they run in.
+//   1. SUBPROJECTS: a project's DIRECTORIES, one row each, with the sessions
+//      running in each of them. What the word means as of v0.1.2.
+//   2. RECORD NESTING: a project filed under another project. RETIRED — v6 of
+//      the state schema folds every one of them into its ancestor's directory
+//      list (see projects.flattenNestedProjects). The tree builder is still
+//      tested here, and still drawn, because `state.json` is merged across
+//      windows and hand-editable: a `parentId` an older build wrote has to
+//      render as something until the next activation migrates it.
+//   3. BRANCH GROUPING: `lineage.groupSessionsByBranch` hangs a project's
+//      sessions off the branch row for the worktree they run in. Parked behind
+//      `lineage.git.branches`, which is off by default.
 //
-// Both are pure decisions — the project tree, the grouping pass, the view model
-// — so this is where they are tested, without a workbench anywhere near them.
-// The two features share a file because they share the thing they change: how
-// deep a row sits and what it hangs off.
+// All three are pure decisions — the project tree, the grouping pass, the view
+// model — so this is where they are tested, without a workbench anywhere near
+// them. They share a file because they share the thing they change: how deep a
+// row sits and what it hangs off.
 
 import { describe, expect, it } from 'vitest';
 
@@ -18,11 +25,14 @@ import {
   projectContextValue,
   projectRowKey,
   sessionRowKey,
+  subprojectRowKey,
 } from '../src/viewmodel';
 import type { ViewModelInput } from '../src/viewmodel';
 import {
   buildProjectTree,
+  buildSubprojects,
   canReparentProject,
+  canonicalCheckoutPath,
   computeGrouping,
   matchProject,
   projectSubtree,
@@ -515,7 +525,11 @@ describe('buildViewModel: subproject rows', () => {
     expect(out[0].badgeKind).toBe('done');
   });
 
-  it('marks the row so a menu can single out a nested project', () => {
+  it('never puts the subproject token on a PROJECT row', () => {
+    // It belongs to a DIRECTORY row now (see the directory-subproject block
+    // below). The two rows carry the same projectId, so a project row that also
+    // matched `;subproject;` would put both menus on both rows — Delete Project
+    // on a directory, Remove Subproject on a project.
     const value = projectContextValue({
       type: 'project',
       projectId: 'api',
@@ -527,8 +541,7 @@ describe('buildViewModel: subproject rows', () => {
       parentProjectId: 'app',
       childProjectIds: [],
     });
-    expect(value).toContain(';subproject;');
-    expect(value).not.toContain(';parentProject;');
+    expect(value).toBe(';project;empty;');
 
     const parentValue = projectContextValue({
       type: 'project',
@@ -540,8 +553,7 @@ describe('buildViewModel: subproject rows', () => {
       rootIds: [],
       childProjectIds: ['api'],
     });
-    expect(parentValue).toContain(';parentProject;');
-    expect(parentValue).not.toContain(';subproject;');
+    expect(parentValue).toBe(';project;empty;');
   });
 
   it('cannot be made to recurse by a grouping that names a cycle', () => {
@@ -581,8 +593,247 @@ describe('buildViewModel: subproject rows', () => {
     expect(keys(out)).toEqual([projectRowKey('a'), projectRowKey('b')]);
   });
 
-  it('lets a project row be dragged', () => {
-    expect(rows()[0].canDrag).toBe(true);
+  it('does NOT let a project row be dragged', () => {
+    // It used to, onto another project row, to be filed there as a subproject.
+    // There is nothing left for the gesture to mean — a subproject is a
+    // directory, and a project is not a directory you can hand to a project —
+    // and a draggable row with no legal target is a control that does nothing.
+    expect(rows()[0].canDrag).toBe(false);
+  });
+});
+
+// -------------------------------------------- directory subprojects, rendered
+
+describe('buildViewModel: directory subproject rows', () => {
+  /** One project, two directories, one session in each. */
+  const split = (over: Record<string, unknown> = {}) => ({
+    type: 'project' as const,
+    projectId: 'app',
+    label: 'app',
+    rootDir: '/code/app',
+    dirs: ['/code/app', '/code/app/api'],
+    provider: 'claude' as ProviderId,
+    rootIds: [A, B],
+    subprojects: [
+      {
+        type: 'subproject' as const,
+        projectId: 'app',
+        // Implicit rows: a directory nobody has named a lane in, which is every
+        // project that has not used v7's named subprojects.
+        id: 'dir:/code/app',
+        name: '',
+        implicit: true,
+        dir: '/code/app',
+        dirKey: '/code/app',
+        label: 'app',
+        main: true,
+        rootIds: [A],
+      },
+      {
+        type: 'subproject' as const,
+        projectId: 'app',
+        id: 'dir:/code/app/api',
+        name: '',
+        implicit: true,
+        dir: '/code/app/api',
+        dirKey: '/code/app/api',
+        label: 'api',
+        main: false,
+        rootIds: [B],
+      },
+    ],
+    depth: 0,
+    parentProjectId: null,
+    childProjectIds: [],
+    ...over,
+  });
+
+  const rows = (over?: Partial<ViewModelInput>) =>
+    buildViewModel(
+      input(forestOf([node(A), node(B)]), { projects: [split()] }, over),
+    );
+
+  it('puts each directory between the project and its own sessions', () => {
+    expect(keys(rows())).toEqual([
+      projectRowKey('app'),
+      subprojectRowKey('app', 'dir:/code/app'),
+      sessionRowKey(A),
+      subprojectRowKey('app', 'dir:/code/app/api'),
+      sessionRowKey(B),
+    ]);
+  });
+
+  it('draws no session directly under the project', () => {
+    // The split is exclusive: every session the project claimed is inside one of
+    // these rows, so listing them under the project as well would draw each twice.
+    const out = rows();
+    const sessions = out.filter((r) => r.kind === 'session');
+    expect(sessions).toHaveLength(2);
+    expect(sessions.map((r) => r.indent)).toEqual([1, 1]);
+  });
+
+  it('indents the directory one level in from the project', () => {
+    const out = rows();
+    expect(out[0].indent ?? 0).toBe(0);
+    expect(out[1].indent).toBe(1);
+    expect(out[1].depth).toBe(1);
+    expect(out[2].depth).toBe(2);
+  });
+
+  it('withdraws the project row’s + and keeps its chat button', () => {
+    // A `+` on the project would have to pick a directory, and the rows that ARE
+    // the directories each carry one that says where it starts.
+    const ids = (rows()[0].actions ?? []).map((a) => a.id);
+    expect(ids).toEqual(['chat']);
+    expect(rows()[1].actions?.map((a) => a.id)).toEqual([
+      'newSessionInSubproject',
+    ]);
+  });
+
+  it('keeps the + on a single-directory project', () => {
+    const out = buildViewModel(
+      input(forestOf([node(A)]), {
+        projects: [
+          {
+            type: 'project',
+            projectId: 'app',
+            label: 'app',
+            rootDir: '/code/app',
+            dirs: ['/code/app'],
+            provider: 'claude',
+            rootIds: [A],
+            subprojects: [],
+            depth: 0,
+            parentProjectId: null,
+            childProjectIds: [],
+          },
+        ],
+      }),
+    );
+    expect((out[0].actions ?? []).map((a) => a.id)).toEqual(['chat', 'newSession']);
+    expect(keys(out)).toEqual([projectRowKey('app'), sessionRowKey(A)]);
+  });
+
+  it('collapses one directory without touching the other', () => {
+    const out = rows({
+      collapsed: new Set([subprojectRowKey('app', 'dir:/code/app')]),
+    });
+    expect(keys(out)).toEqual([
+      projectRowKey('app'),
+      subprojectRowKey('app', 'dir:/code/app'),
+      subprojectRowKey('app', 'dir:/code/app/api'),
+      sessionRowKey(B),
+    ]);
+    // Shut, the count is the only thing the row says about what is inside it.
+    expect(out[1].description).toBe('1');
+    expect(out[1].expanded).toBe(false);
+    // Open, the sessions are on screen and the number would restate them.
+    expect(out[2].description).toBe('');
+  });
+
+  it('a collapsed project hides its directories too', () => {
+    const out = rows({ collapsed: new Set([projectRowKey('app')]) });
+    expect(keys(out)).toEqual([projectRowKey('app')]);
+  });
+
+  it('stays expandable with nothing in it', () => {
+    // The directory exists whether or not anything is running in it, and a row
+    // that lost its toggle when its last session ended would move everything
+    // below it for a reason the user did not cause.
+    const empty = split({
+      rootIds: [],
+      subprojects: [
+        {
+          type: 'subproject' as const,
+          projectId: 'app',
+          dir: '/code/app',
+          dirKey: '/code/app',
+          label: 'app',
+          main: true,
+          rootIds: [],
+        },
+        {
+          type: 'subproject' as const,
+          projectId: 'app',
+          dir: '/code/app/api',
+          dirKey: '/code/app/api',
+          label: 'api',
+          main: false,
+          rootIds: [],
+        },
+      ],
+    });
+    const out = buildViewModel(input(forestOf([]), { projects: [empty] }));
+    expect(out[1].expandable).toBe(true);
+    expect(out[1].description).toBe('');
+  });
+
+  it('carries the subproject token, and `primary` on the main directory', () => {
+    const out = rows();
+    expect(out[1].context.viewItem).toBe(';subproject;primary;');
+    expect(out[3].context.viewItem).toBe(';subproject;');
+    // `type: 'subproject'`, never 'project': projectIdFromArg would accept the
+    // latter and every project verb would take a directory row as its target.
+    expect(out[1].context.type).toBe('subproject');
+    expect(out[1].context.dir).toBe('/code/app');
+  });
+
+  it('neither renames nor drags', () => {
+    const out = rows();
+    expect(out[1].canRename).toBe(false);
+    expect(out[1].canDrag).toBe(false);
+  });
+
+  it('carries no status dot — the project row rolls that up', () => {
+    const out = buildViewModel(
+      input(
+        forestOf([
+          node(A, { archived: true, unseen: true }),
+          node(B),
+        ]),
+        { projects: [split()] },
+      ),
+    );
+    expect(out[0].badgeKind).toBe('done');
+    expect(out[1].badge).toBeUndefined();
+    expect(out[1].badgeKind).toBeUndefined();
+  });
+
+  it('the directory split beats branch grouping', () => {
+    // Two answers to "what are these sessions filed under", and a row cannot be
+    // under both. The directory wins: it is structure the user typed in, where
+    // grouping by branch is a view preference.
+    const withBranches = split({
+      branches: [
+        {
+          name: 'main',
+          dir: '/code/app',
+          colorIndex: 0,
+          rootIds: [A, B],
+          primary: true,
+          shown: true,
+        },
+        {
+          name: 'feat/x',
+          dir: '/code/app-feat',
+          colorIndex: 1,
+          rootIds: [],
+          primary: false,
+          shown: true,
+        },
+      ],
+    });
+    const out = buildViewModel(
+      input(forestOf([node(A), node(B)]), { projects: [withBranches] }, {
+        groupByBranch: true,
+      }),
+    );
+    // The branch rows are still drawn (they are the flat annotation block), but
+    // the sessions hang off the DIRECTORIES, and every one of them is drawn once.
+    expect(out.filter((r) => r.kind === 'session')).toHaveLength(2);
+    expect(out.filter((r) => r.kind === 'subproject')).toHaveLength(2);
+    const order = out.map((r) => r.kind);
+    expect(order.slice(0, 3)).toEqual(['project', 'branch', 'branch']);
   });
 });
 
@@ -812,6 +1063,294 @@ describe('buildViewModel: branch grouping', () => {
       sessionRowKey(B),
     ]);
     expect(out.map((r) => r.indent ?? 0)).toEqual([0, 1, 1, 2, 1, 2]);
+  });
+});
+
+// ------------------------------------------------- no project-wide root row
+//
+// THE INVARIANT: once a project has directories, every session it claims belongs
+// to exactly one of them. The main directory is directory number one, not a
+// bucket for the sessions that fit nowhere else.
+//
+// The way a session used to fit nowhere was the common way — a linked git
+// worktree, which `matchProject` gives to the project through a path no directory
+// lists — so these tests are mostly about worktrees. They go through
+// `computeGrouping` rather than calling `buildSubprojects` directly, because the
+// point is that the grouping pass wires the same worktree knowledge into both
+// decisions and therefore cannot make them disagree.
+
+describe('subproject membership: no catch-all row', () => {
+  const split = project('app', 'app', '/code/app', { dirs: ['/code/app/api'] });
+  /** A monorepo at /code/app with one linked worktree beside it. Main FIRST,
+   *  which is the order git reports and the order the translation relies on. */
+  const worktrees: Worktree[] = [
+    { dir: '/code/app', branch: 'main', head: 'a', detached: false },
+    { dir: '/code/app-feat', branch: 'feat', head: 'b', detached: false },
+  ];
+
+  const subprojectsOf = (
+    cwds: Record<string, string>,
+    over: { worktreesOf?: () => readonly Worktree[]; projects?: ProjectRecord[] } = {},
+  ): { label: string; dir: string; rootIds: string[] }[] => {
+    const result = computeGrouping({
+      visibleRootIds: Object.keys(cwds),
+      cwdOf: (id) => cwds[id],
+      projects: over.projects ?? [split],
+      hiddenFolders: [],
+      groupByFolder: true,
+      onlyProjectSessions: false,
+      ...(over.worktreesOf ? { worktreesOf: over.worktreesOf } : {}),
+    });
+    return (result.projects[0]?.subprojects ?? []).map((s) => ({
+      label: s.label,
+      dir: s.dir,
+      rootIds: s.rootIds,
+    }));
+  };
+
+  it('files a session in a linked worktree under the directory owning the repo', () => {
+    // BEFORE: /code/app-feat is inside neither /code/app nor /code/app/api, so
+    // it fell through to the main row as a guess. Now the main row genuinely
+    // contains it — it is the directory the repository is at.
+    const rows = subprojectsOf(
+      { [A]: '/code/app', [B]: '/code/app-feat' },
+      { worktreesOf: () => worktrees },
+    );
+    expect(rows.map((r) => r.label)).toEqual(['app', 'api']);
+    expect(rows[0].rootIds).toEqual([A, B]);
+    expect(rows[1].rootIds).toEqual([]);
+  });
+
+  it('files a worktree session by what it is WORKING ON, not by who owns the repo', () => {
+    // THE CASE THE OLD RULE GOT WRONG, and the reason the translation exists: an
+    // agent in the api directory of a linked checkout is working on api. Sending
+    // it to the main row because that row happens to own the repository is
+    // exactly the project-wide bucket this design refuses.
+    const rows = subprojectsOf(
+      { [A]: '/code/app-feat/api', [B]: '/code/app-feat/api/handlers' },
+      { worktreesOf: () => worktrees },
+    );
+    expect(rows[0].rootIds).toEqual([]);
+    expect(rows[1].label).toBe('api');
+    expect(rows[1].rootIds).toEqual([A, B]);
+  });
+
+  it('prefers a directory that CONTAINS the session over one that owns its repo', () => {
+    // /code/app/api contains it outright; no translation is needed or wanted.
+    // Same tie-break matchProject makes one level up: a statement beats an
+    // inference.
+    const rows = subprojectsOf(
+      { [A]: '/code/app/api/handlers' },
+      { worktreesOf: () => worktrees },
+    );
+    expect(rows[1].rootIds).toEqual([A]);
+  });
+
+  it('does not translate a path already in the main checkout', () => {
+    // /code/app/lib is inside the main worktree, so the canonical spelling is the
+    // one it already has and the main row takes it directly.
+    const rows = subprojectsOf(
+      { [A]: '/code/app/lib' },
+      { worktreesOf: () => worktrees },
+    );
+    expect(rows[0].rootIds).toEqual([A]);
+    expect(rows[1].rootIds).toEqual([]);
+  });
+
+  it('keeps the deeper checkout when one worktree sits inside another', () => {
+    // `git worktree add` will happily nest one checkout in another, and the
+    // deeper prefix is the one the path is actually in.
+    const nested: Worktree[] = [
+      { dir: '/code/app', branch: 'main', head: 'a', detached: false },
+      { dir: '/code/app-feat', branch: 'feat', head: 'b', detached: false },
+      { dir: '/code/app-feat/nested', branch: 'deep', head: 'c', detached: false },
+    ];
+    const rows = subprojectsOf(
+      { [A]: '/code/app-feat/nested/api' },
+      { worktreesOf: () => nested },
+    );
+    // Translated against /code/app-feat/nested, not /code/app-feat, so the tail
+    // is `/api` rather than `/nested/api`.
+    expect(rows[1].label).toBe('api');
+    expect(rows[1].rootIds).toEqual([A]);
+  });
+
+  it('sends a session to the directory whose OWN repo holds it, not the other one', () => {
+    // Two directories, two unrelated repositories. Only web's repo has the
+    // checkout, so the session is web's — the main row must not take it just for
+    // being first.
+    const twoRepos = project('app', 'app', '/code/notes', {
+      dirs: ['/code/web'],
+    });
+    const rows = subprojectsOf(
+      { [A]: '/code/web-feat/src' },
+      {
+        projects: [twoRepos],
+        worktreesOf: (dir?: string) =>
+          dir === '/code/web'
+            ? [
+                { dir: '/code/web', branch: 'main', head: 'a', detached: false },
+                { dir: '/code/web-feat', branch: 'feat', head: 'b', detached: false },
+              ]
+            : [],
+      },
+    );
+    expect(rows[0].label).toBe('notes');
+    expect(rows[0].rootIds).toEqual([]);
+    expect(rows[1].label).toBe('web');
+    expect(rows[1].rootIds).toEqual([A]);
+  });
+
+  it('files by the repo owner when the translated path lands outside the project', () => {
+    // The repository's root is /code/app but the project only lists a directory
+    // BESIDE it, so a worktree session translates to a path the project does not
+    // cover. The directory that owns the repository is the honest answer — the
+    // session is in that repo, and the tree already said it was this project's.
+    const outside = project('app', 'app', '/code/notes', {
+      dirs: ['/code/app/api'],
+    });
+    const rows = subprojectsOf(
+      { [A]: '/code/app-feat/web' },
+      {
+        projects: [outside],
+        worktreesOf: (dir?: string) => (dir === '/code/app/api' ? worktrees : []),
+      },
+    );
+    expect(rows[1].label).toBe('api');
+    expect(rows[1].rootIds).toEqual([A]);
+  });
+
+  it('never even offers the grouping pass a session no directory contains', () => {
+    // Why the catch-all has nothing left to catch: project membership and
+    // directory membership ask the same question of the same directories, so a
+    // session outside all of them was never this project's in the first place —
+    // it is a folder row, exactly as it was before the project existed.
+    const result = computeGrouping({
+      visibleRootIds: [A],
+      cwdOf: () => '/somewhere/else',
+      projects: [split],
+      hiddenFolders: [],
+      groupByFolder: true,
+      onlyProjectSessions: false,
+    });
+    expect(result.projects[0].rootIds).toEqual([]);
+    expect((result.projects[0].subprojects ?? []).flatMap((s) => s.rootIds)).toEqual([]);
+    expect(result.folders.flatMap((f) => f.rootIds)).toEqual([A]);
+  });
+
+  it('files an impossible session in the main row rather than dropping it', () => {
+    // Reached only by handing buildSubprojects a session the project's own
+    // directories do not account for — which the grouping pass cannot do (see
+    // above), and which a worktree probe landing mid-tick could. A stale cache
+    // must never be a way to lose a running agent, so the row survives.
+    const nodes = buildSubprojects({
+      project: split,
+      rootIds: [A],
+      cwdOf: () => '/somewhere/else',
+    });
+    expect(nodes[0].main).toBe(true);
+    expect(nodes[0].rootIds).toEqual([A]);
+    expect(nodes[1].rootIds).toEqual([]);
+  });
+
+  it('files a session whose cwd cannot be read in the main row', () => {
+    const nodes = buildSubprojects({
+      project: split,
+      rootIds: [A],
+      cwdOf: () => {
+        throw new Error('no cwd');
+      },
+    });
+    expect(nodes[0].rootIds).toEqual([A]);
+  });
+
+  it('loses no session across the split, whatever the worktree answer is', () => {
+    // The property that matters more than any individual placement: the union of
+    // the directory rows is exactly the project's session list.
+    const cwds = {
+      [A]: '/code/app',
+      [B]: '/code/app-feat/api',
+      [C]: '/code/app/api/deep',
+    };
+    const result = computeGrouping({
+      visibleRootIds: [A, B, C],
+      cwdOf: (id) => cwds[id as keyof typeof cwds],
+      projects: [split],
+      hiddenFolders: [],
+      groupByFolder: true,
+      onlyProjectSessions: false,
+      worktreesOf: () => worktrees,
+    });
+    const p = result.projects[0];
+    const filed = (p.subprojects ?? []).flatMap((s) => s.rootIds);
+    expect(filed.slice().sort()).toEqual(p.rootIds.slice().sort());
+    expect(filed).toHaveLength(3);
+  });
+
+  it('survives a worktree probe that throws', () => {
+    const rows = subprojectsOf(
+      { [A]: '/code/app/api' },
+      {
+        worktreesOf: () => {
+          throw new Error('git exploded');
+        },
+      },
+    );
+    // The listed directories still do their job; only the translation is lost.
+    expect(rows[1].rootIds).toEqual([A]);
+  });
+});
+
+describe('canonicalCheckoutPath', () => {
+  const worktrees: Worktree[] = [
+    { dir: '/code/app', branch: 'main', head: 'a', detached: false },
+    { dir: '/code/app-feat', branch: 'feat', head: 'b', detached: false },
+  ];
+
+  it('rewrites a linked-worktree path as the main checkout spells it', () => {
+    expect(canonicalCheckoutPath(worktrees, '/code/app-feat/api/handlers')).toBe(
+      '/code/app/api/handlers',
+    );
+  });
+
+  it('maps the root of a linked worktree to the root of the main one', () => {
+    expect(canonicalCheckoutPath(worktrees, '/code/app-feat')).toBe('/code/app');
+  });
+
+  it.each([
+    ['a path already in the main checkout', '/code/app/api'],
+    ['the main checkout itself', '/code/app'],
+    ['a path in no checkout at all', '/elsewhere/x'],
+    ['an empty path', ''],
+    ['an undefined path', undefined],
+  ])('says nothing about %s', (_what, cwd) => {
+    // '' is "there is no second spelling", which the caller reads as "nothing
+    // extra to consider" rather than as a path.
+    expect(canonicalCheckoutPath(worktrees, cwd)).toBe('');
+  });
+
+  it('says nothing when there are no checkouts, or the main one has no path', () => {
+    expect(canonicalCheckoutPath([], '/code/app-feat/api')).toBe('');
+    expect(
+      canonicalCheckoutPath(
+        [{ dir: '', branch: '', head: '', detached: false }],
+        '/code/app-feat/api',
+      ),
+    ).toBe('');
+  });
+
+  it('matches a checkout case-insensitively, the way every other path rule does', () => {
+    // macOS and Windows both have case-insensitive filesystems by default, so
+    // /Code/App-Feat and /code/app-feat are one directory — see pathKey.
+    expect(canonicalCheckoutPath(worktrees, '/Code/App-Feat/api')).toBe(
+      '/code/app/api',
+    );
+  });
+
+  it('is boundary-aware: a sibling with a longer name is not inside', () => {
+    // /code/app-feature is not in /code/app-feat, and a prefix comparison that
+    // missed that would rewrite a path in an unrelated directory.
+    expect(canonicalCheckoutPath(worktrees, '/code/app-feature/api')).toBe('');
   });
 });
 

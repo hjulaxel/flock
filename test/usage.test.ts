@@ -235,6 +235,19 @@ describe('TranscriptStatsCache', () => {
     expect(cache.get(A, file, 1, 1).lastPromptAt).toBe(Date.parse(T3));
   });
 
+  it('forgets a stale id even when keep is the same size or bigger', () => {
+    // Regression: prune() used to skip the membership sweep whenever
+    // `keep.size >= cache.size`, which only holds if cache is a subset of
+    // keep. Here `keep` names an id that was never actually cached, so the
+    // sizes line up (1 vs 1) while the cached id (A) is not in keep at all.
+    const file = write('i.jsonl', [prompt(T1)]);
+    const cache = new TranscriptStatsCache();
+    cache.get(A, file, 1, 1);
+    cache.prune(new Set(['0f00000b-0000-4000-8000-00000000000b']));
+    fs.writeFileSync(file, JSON.stringify(prompt(T3)) + '\n');
+    expect(cache.get(A, file, 1, 1).lastPromptAt).toBe(Date.parse(T3));
+  });
+
   it('never throws on an unreadable transcript', () => {
     const cache = new TranscriptStatsCache();
     expect(cache.get(A, path.join(root, 'gone.jsonl'), 1, 1)).toEqual({});

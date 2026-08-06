@@ -3,6 +3,9 @@
 Press **+** on any project row. The session appears immediately — before the CLI
 has registered it anywhere — with its name selected and ready to type over.
 
+A project that spans more than one directory has a row per directory instead, each
+with its own **+**, so the button never has to guess which one you meant.
+
 Press <kbd>Enter</kbd> to accept the suggested name, or just start typing to
 replace it. There is no dialog anywhere in this flow.
 

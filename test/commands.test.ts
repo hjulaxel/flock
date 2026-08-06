@@ -22,7 +22,6 @@ import {
   registerCommands,
   chatHistoryFlow,
   closeProjectFlow,
-  moveProjectFlow,
   reopenProject,
   resumeFlow,
   selectedSessionIds,
@@ -51,6 +50,7 @@ import type {
   RoutingChoice,
   SessionForest,
   SessionNode,
+  SubprojectRecord,
 } from '../src/types';
 
 const VALID = 'ff2c0a73-26c4-46f1-bb6e-fe331fcb0ecf';
@@ -1138,7 +1138,601 @@ type WarningHost = {
   ) => Promise<string | undefined>;
 };
 
-describe('configureProjectFlow: the Rename… branch', () => {
+/** The folder dialog, scripted. Both subproject verbs and the create flow reach
+ *  it, and it is the only host member `showOpenDialog` uses. */
+type DialogHost = {
+  showOpenDialog?: (opts?: unknown) => Promise<unknown>;
+};
+
+/** The name box behind Add Subproject and Rename Subproject. `validateInput` is
+ *  the part worth scripting: the per-project name-collision rule lives in it. */
+type InputHost = {
+  showInputBox?: (opts?: {
+    validateInput?: (value: string) => string | undefined | null;
+  }) => Promise<string | undefined>;
+};
+
+// ------------------------------------------------------- subprojects, the verbs
+//
+// A subproject is a DIRECTORY of a project. Add Subproject either MAKES one or
+// takes one that already exists; Remove Subproject takes one back off. Everything
+// interesting is
+// in the refusals — the main directory cannot be removed, and a directory another
+// project already covers cannot be added.
+
+describe('the subproject verbs', () => {
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockWindow as DialogHost).showOpenDialog;
+    delete (mockWindow as InputHost).showInputBox;
+    delete (mockWindow as QuickPickHost).showQuickPick;
+    delete (mockWindow as QuickPickHost).showInformationMessage;
+    delete (mockWindow as WarningHost).showWarningMessage;
+  });
+
+  /**
+   * Answers each quick pick in turn by label, or cancels when the entry is
+   * undefined. Add Subproject asks which directory the lane works in before it
+   * asks anything else, so a test that only scripts the folder dialog never
+   * reaches it.
+   */
+  function scriptPicks(...labels: (string | undefined)[]): {
+    titles: string[];
+    placeholders: string[];
+    offered: string[][];
+  } {
+    const state = {
+      titles: [] as string[],
+      placeholders: [] as string[],
+      offered: [] as string[][],
+    };
+    let at = 0;
+    (mockWindow as QuickPickHost).showQuickPick = async (
+      items: unknown,
+      opts?: unknown,
+    ) => {
+      const options = (opts ?? {}) as { title?: string; placeHolder?: string };
+      state.titles.push(options.title ?? '');
+      state.placeholders.push(options.placeHolder ?? '');
+      const list = (Array.isArray(items) ? items : []) as { label?: string }[];
+      state.offered.push(list.map((i) => i?.label ?? ''));
+      const want = labels[at];
+      at += 1;
+      if (want === undefined) return undefined;
+      return list.find((i) => i?.label === want);
+    };
+    return state;
+  }
+
+  /** Answers the name box, running every candidate past the real validator on the
+   *  way — the collision rule is the point of that step. */
+  function scriptName(
+    name: string | undefined,
+    probe: string[] = [],
+  ): { rejected: Record<string, string> } {
+    const state = { rejected: {} as Record<string, string> };
+    (mockWindow as InputHost).showInputBox = async (options?: {
+      validateInput?: (value: string) => string | undefined | null;
+    }) => {
+      for (const candidate of ['', '   ', ...probe]) {
+        const said = options?.validateInput?.(candidate);
+        if (typeof said === 'string' && said !== '') {
+          state.rejected[candidate] = said;
+        }
+      }
+      return name;
+    };
+    return state;
+  }
+
+  /** Answers the folder dialog with `dir`, or cancels when it is undefined. */
+  function scriptDialog(dir: string | undefined): { opened: number } {
+    const state = { opened: 0 };
+    (mockWindow as DialogHost).showOpenDialog = async () => {
+      state.opened += 1;
+      return dir === undefined ? undefined : [{ fsPath: dir }];
+    };
+    return state;
+  }
+
+
+  function scriptConfirm(answer: string | undefined): { asked: string[] } {
+    const state = { asked: [] as string[] };
+    (mockWindow as WarningHost).showWarningMessage = async (message) => {
+      state.asked.push(message);
+      return answer;
+    };
+    return state;
+  }
+
+  function told(): { messages: string[] } {
+    const state = { messages: [] as string[] };
+    (mockWindow as QuickPickHost).showInformationMessage = async (message) => {
+      state.messages.push(message);
+      return undefined;
+    };
+    return state;
+  }
+
+  const app = (over: Partial<ProjectRecord> = {}): ProjectRecord =>
+    projectOf({ id: 'p1', name: 'app', rootDir: '/code/app', dirs: [], ...over });
+
+  const ELSEWHERE = 'Another directory…';
+
+  /** Collects what the verb wrote to the subproject store. */
+  function laneStore(existing: SubprojectRecord[] = []): {
+    deps: Record<string, unknown>;
+    written: { id: string; patch: Partial<SubprojectRecord> }[];
+    removed: string[];
+  } {
+    const written: { id: string; patch: Partial<SubprojectRecord> }[] = [];
+    const removed: string[] = [];
+    return {
+      deps: {
+        allSubprojects: () => existing,
+        getSubproject: (id: string) => existing.find((l) => l.id === id),
+        upsertSubproject: async (id: string, patch: Partial<SubprojectRecord>) => {
+          written.push({ id, patch });
+        },
+        deleteSubproject: async (id: string) => {
+          removed.push(id);
+        },
+      },
+      written,
+      removed,
+    };
+  }
+
+  const lane = (over: Partial<SubprojectRecord> = {}): SubprojectRecord => ({
+    id: 'lane-1',
+    projectId: 'p1',
+    name: 'Server rewrite',
+    dir: '/code/app',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    ...over,
+  });
+
+  it('makes a NAMED lane in a directory the project already covers', async () => {
+    // THE CASE v7 EXISTS FOR: two subprojects in one folder. Nothing on disk tells
+    // them apart, so the name is the whole of what is created — no directory is
+    // added and nothing is touched on disk.
+    scriptPicks('app');
+    scriptName('Server rewrite');
+    const store = laneStore();
+    const { deps, calls } = chatDeps(app(), { projects: [app()] });
+    Object.assign(deps as object, store.deps);
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.newSubproject, { type: 'project', projectId: 'p1' });
+
+    expect(store.written).toEqual([
+      { id: expect.any(String), patch: { projectId: 'p1', name: 'Server rewrite', dir: '/code/app' } },
+    ]);
+    // The project's directory list is untouched: the lane names a directory it
+    // already covers.
+    expect(calls.projectPatches).toEqual([]);
+  });
+
+  it('offers every directory plus the door to a new one, even at one directory', async () => {
+    // Uniform at ONE directory for the reason that matters most: a flow that
+    // skipped the pick there would leave no way to reach a second directory ever.
+    const picks = scriptPicks(undefined);
+    const { deps } = chatDeps(app(), { projects: [app()] });
+    Object.assign(deps as object, laneStore().deps);
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.newSubproject, { type: 'project', projectId: 'p1' });
+
+    expect(picks.offered[0]).toEqual(['app', ELSEWHERE]);
+    expect(picks.placeholders[0]).toContain('Which directory');
+  });
+
+  it('adds the picked directory to the project, and a lane in it', async () => {
+    // The old add-a-directory behaviour, now reached through "Another directory…".
+    // The directory has to join the project or membership would not claim the
+    // sessions the lane's own + starts there.
+    scriptPicks(ELSEWHERE);
+    const dialog = scriptDialog('/code/app/api');
+    scriptName('API');
+    const store = laneStore();
+    const { deps, calls } = chatDeps(app(), { projects: [app()] });
+    Object.assign(deps as object, store.deps);
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.newSubproject, { type: 'project', projectId: 'p1' });
+
+    expect(dialog.opened).toBe(1);
+    expect(calls.projectPatches).toEqual([
+      { id: 'p1', patch: { dirs: ['/code/app/api'] } },
+    ]);
+    expect(store.written[0].patch).toEqual({
+      projectId: 'p1',
+      name: 'API',
+      dir: '/code/app/api',
+    });
+  });
+
+  it('does nothing at all when the directory pick is cancelled', async () => {
+    scriptPicks(undefined);
+    const dialog = scriptDialog('/code/app/api');
+    const store = laneStore();
+    const { deps, calls } = chatDeps(app(), { projects: [app()] });
+    Object.assign(deps as object, store.deps);
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.newSubproject, { type: 'project', projectId: 'p1' });
+
+    expect(dialog.opened).toBe(0);
+    expect(store.written).toEqual([]);
+    expect(calls.projectPatches).toEqual([]);
+  });
+
+  it('does nothing at all when the folder dialog is cancelled', async () => {
+    scriptPicks(ELSEWHERE);
+    scriptDialog(undefined);
+    const store = laneStore();
+    const { deps, calls } = chatDeps(app(), { projects: [app()] });
+    Object.assign(deps as object, store.deps);
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.newSubproject, { type: 'project', projectId: 'p1' });
+
+    expect(store.written).toEqual([]);
+    expect(calls.projectPatches).toEqual([]);
+  });
+
+  it('creates nothing when the name is cancelled', async () => {
+    scriptPicks('app');
+    scriptName(undefined);
+    const store = laneStore();
+    const { deps, calls } = chatDeps(app(), { projects: [app()] });
+    Object.assign(deps as object, store.deps);
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.newSubproject, { type: 'project', projectId: 'p1' });
+
+    expect(store.written).toEqual([]);
+    expect(calls.projectPatches).toEqual([]);
+  });
+
+  it('refuses a lane name the project already has', async () => {
+    // Two lanes in one project with one name would be two rows you cannot tell
+    // apart, which is the one thing the name exists to prevent.
+    scriptPicks('app');
+    const name = scriptName(undefined, ['Server rewrite', 'server REWRITE', 'CS tooling']);
+    const store = laneStore([lane()]);
+    const { deps } = chatDeps(app(), { projects: [app()] });
+    Object.assign(deps as object, store.deps);
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.newSubproject, { type: 'project', projectId: 'p1' });
+
+    expect(name.rejected['Server rewrite']).toContain('already has');
+    // Case-insensitively, the way project names collide.
+    expect(name.rejected['server REWRITE']).toContain('already has');
+    expect(name.rejected['']).toContain('empty');
+    expect(name.rejected['CS tooling']).toBeUndefined();
+  });
+
+  it('keeps the existing directories when adding a third', async () => {
+    // A `dirs` patch replaces the list wholesale, so this is the assertion that
+    // stops Add Subproject from being Replace Subprojects.
+    scriptPicks(ELSEWHERE);
+    scriptDialog('/code/app/web');
+    scriptName('Web');
+    const two = app({ dirs: ['/code/app/api'] });
+    const { deps, calls } = chatDeps(two, { projects: [two] });
+    Object.assign(deps as object, laneStore().deps);
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.newSubproject, { type: 'project', projectId: 'p1' });
+
+    expect(calls.projectPatches).toEqual([
+      { id: 'p1', patch: { dirs: ['/code/app/api', '/code/app/web'] } },
+    ]);
+  });
+
+  it('refuses a directory another project already covers', async () => {
+    // Two projects listing one directory have no defined owner for the sessions
+    // in it — see projects.projectClaiming.
+    scriptPicks(ELSEWHERE);
+    scriptDialog('/code/other');
+    scriptName('Other');
+    const warned = scriptConfirm(undefined);
+    const other = projectOf({
+      id: 'p2',
+      name: 'other',
+      rootDir: '/code/other',
+      dirs: [],
+    });
+    const store = laneStore();
+    const { deps, calls } = chatDeps(app(), { projects: [app(), other] });
+    Object.assign(deps as object, store.deps);
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.newSubproject, { type: 'project', projectId: 'p1' });
+
+    expect(calls.projectPatches).toEqual([]);
+    // And no lane either: a lane on a directory this project cannot claim would
+    // draw a row that holds nothing.
+    expect(store.written).toEqual([]);
+    expect(warned.asked.join(' ')).toContain('other');
+  });
+
+  // --------------------------------------------------- the two lane-only verbs
+
+  it('renames a lane, and only its name', async () => {
+    scriptName('CS tooling');
+    const store = laneStore([lane()]);
+    const { deps } = chatDeps(app(), { projects: [app()] });
+    Object.assign(deps as object, store.deps);
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.renameSubproject, {
+      type: 'subproject',
+      projectId: 'p1',
+      dir: '/code/app',
+      id: 'lane-1',
+    });
+
+    expect(store.written).toEqual([{ id: 'lane-1', patch: { name: 'CS tooling' } }]);
+  });
+
+  it('removes a lane once confirmed, and leaves the directory alone', async () => {
+    const confirm = scriptConfirm('Remove Subproject');
+    const store = laneStore([lane()]);
+    const { deps, calls } = chatDeps(app(), { projects: [app()] });
+    Object.assign(deps as object, store.deps);
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.removeSubproject, {
+      type: 'subproject',
+      projectId: 'p1',
+      dir: '/code/app',
+      id: 'lane-1',
+    });
+
+    expect(store.removed).toEqual(['lane-1']);
+    // The directory stays the project's — removing a lane removes a NAME.
+    expect(calls.projectPatches).toEqual([]);
+    const said = confirm.asked.join(' ');
+    expect(said).toContain('Server rewrite');
+  });
+
+  it('removes nothing when the confirmation is declined', async () => {
+    scriptConfirm(undefined);
+    const store = laneStore([lane()]);
+    const { deps } = chatDeps(app(), { projects: [app()] });
+    Object.assign(deps as object, store.deps);
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.removeSubproject, {
+      type: 'subproject',
+      projectId: 'p1',
+      dir: '/code/app',
+      id: 'lane-1',
+    });
+
+    expect(store.removed).toEqual([]);
+  });
+
+  it('takes a DIRECTORY row down the directory path, not the lane path', async () => {
+    // An implicit row's id is `dir:<key>` and names no record, so Remove Subproject
+    // has to fall through to taking the directory off the project.
+    const confirm = scriptConfirm('Remove Subproject');
+    const two = app({ dirs: ['/code/app/api'] });
+    const store = laneStore();
+    const { deps, calls } = chatDeps(two, { projects: [two] });
+    Object.assign(deps as object, store.deps);
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.removeSubproject, {
+      type: 'subproject',
+      projectId: 'p1',
+      dir: '/code/app/api',
+      id: 'dir:/code/app/api',
+    });
+
+    expect(store.removed).toEqual([]);
+    expect(calls.projectPatches).toEqual([{ id: 'p1', patch: { dirs: [] } }]);
+    expect(confirm.asked.join(' ')).toContain('api');
+  });
+
+
+  it('removes a directory once confirmed, keeping the rest', async () => {
+    const confirm = scriptConfirm('Remove Subproject');
+    const three = app({ dirs: ['/code/app/api', '/code/app/web'] });
+    const { deps, calls } = chatDeps(three, { projects: [three] });
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.removeSubproject, {
+      type: 'subproject',
+      projectId: 'p1',
+      dir: '/code/app/api',
+    });
+
+    expect(confirm.asked).toHaveLength(1);
+    expect(calls.projectPatches).toEqual([
+      { id: 'p1', patch: { dirs: ['/code/app/web'] } },
+    ]);
+  });
+
+  it('says what happens to the rows when the last one goes', async () => {
+    const confirm = scriptConfirm(undefined);
+    const two = app({ dirs: ['/code/app/api'] });
+    const { deps, calls } = chatDeps(two, { projects: [two] });
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.removeSubproject, {
+      type: 'subproject',
+      projectId: 'p1',
+      dir: '/code/app/api',
+    });
+
+    // Declined, so nothing was written — and the dialog named the consequence
+    // rather than leaving the user to discover it.
+    expect(calls.projectPatches).toEqual([]);
+    expect(confirm.asked[0]).toContain('api');
+  });
+
+  it('refuses to remove the MAIN directory', async () => {
+    // It is the project's own address; removing it is Delete Project wearing the
+    // wrong label, and the store would refuse the write anyway.
+    const warned = scriptConfirm(undefined);
+    const two = app({ dirs: ['/code/app/api'] });
+    const { deps, calls } = chatDeps(two, { projects: [two] });
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.removeSubproject, {
+      type: 'subproject',
+      projectId: 'p1',
+      dir: '/code/app',
+    });
+
+    expect(calls.projectPatches).toEqual([]);
+    expect(warned.asked[0]).toContain('main directory');
+  });
+
+  it('tells a single-directory project it has no subprojects', async () => {
+    const messages = told();
+    const { deps, calls } = chatDeps(app(), { projects: [app()] });
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.removeSubproject, { type: 'project', projectId: 'p1' });
+
+    expect(calls.projectPatches).toEqual([]);
+    expect(messages.messages.join(' ')).toContain('Add Subproject');
+  });
+
+  it('starts a session in the named directory, re-validated against the project', async () => {
+    const two = app({ dirs: ['/code/app/api'] });
+    const { deps, calls } = chatDeps(two, { projects: [two] });
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.newSessionInSubproject, {
+      type: 'subproject',
+      projectId: 'p1',
+      dir: '/code/app/api',
+    });
+
+    expect(calls.launches).toHaveLength(1);
+    expect(calls.launches[0].cwd).toBe('/code/app/api');
+    // Named for the DIRECTORY, not the project: under a project that has split
+    // into rows, "app 3" says nothing and "api" says which row it is in.
+    expect(calls.launches[0].title).toBe('api');
+  });
+
+  it('refuses a directory the project no longer covers', async () => {
+    const messages = told();
+    const { deps, calls } = chatDeps(app(), { projects: [app()] });
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.newSessionInSubproject, {
+      type: 'subproject',
+      projectId: 'p1',
+      dir: '/etc',
+    });
+
+    expect(calls.launches).toEqual([]);
+    expect(messages.messages.join(' ')).toContain('no longer covers');
+  });
+
+  it('refuses an argument of the wrong shape outright', async () => {
+    const { deps, calls } = chatDeps(app(), { projects: [app()] });
+    const { run } = withRegisteredCommands(deps as never);
+    // A project row's own argument shape. `type: 'project'` must not reach this
+    // verb, or a project row would silently start a session in its main
+    // directory through a verb that promises a named one.
+    await run(COMMANDS.newSessionInSubproject, {
+      type: 'project',
+      projectId: 'p1',
+      dir: '/code/app',
+    });
+    expect(calls.launches).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------- creating a project
+
+describe('newProject: one directory, no confirmation step', () => {
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockCommands as CommandHost).executeCommand;
+    delete (mockWindow as DialogHost).showOpenDialog;
+    delete (mockWindow as QuickPickHost).showQuickPick;
+    delete (mockWindow as WarningHost).showWarningMessage;
+  });
+
+  it('creates the project straight from the folder dialog', async () => {
+    // It used to open a quick pick — "Create Project" / "Add Another Directory…"
+    // — and loop until the user committed. The dialog's own OK button is the
+    // confirmation; the second directory is a thing you discover later, and it
+    // has its own verb on the project by then.
+    let picks = 0;
+    (mockWindow as QuickPickHost).showQuickPick = async () => {
+      picks += 1;
+      return undefined;
+    };
+    (mockWindow as DialogHost).showOpenDialog = async () => [
+      { fsPath: '/code/creemux' },
+    ];
+    // The create ends by revealing the row and opening an editor on its label,
+    // which delegates to `renameProject`. Scripted so the hand-off resolves
+    // instead of throwing out of the handler.
+    (mockCommands as CommandHost).executeCommand = async () => undefined;
+    const { deps, calls } = chatDeps(undefined, { projects: [] });
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.newProject);
+
+    expect(picks).toBe(0);
+    expect(calls.projectPatches).toHaveLength(1);
+    expect(calls.projectPatches[0].patch).toMatchObject({
+      name: 'creemux',
+      rootDir: '/code/creemux',
+      dirs: [],
+    });
+    // No parentId either: nesting records is retired.
+    expect(calls.projectPatches[0].patch.parentId).toBeUndefined();
+  });
+
+  it('writes nothing when the dialog is cancelled', async () => {
+    (mockWindow as DialogHost).showOpenDialog = async () => undefined;
+    const { deps, calls } = chatDeps(undefined, { projects: [] });
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.newProject);
+
+    expect(calls.projectPatches).toEqual([]);
+  });
+
+  it('refuses a directory an existing project already covers', async () => {
+    const warned: string[] = [];
+    (mockWindow as WarningHost).showWarningMessage = async (message) => {
+      warned.push(message);
+      return undefined;
+    };
+    (mockWindow as DialogHost).showOpenDialog = async () => [
+      { fsPath: '/code/app' },
+    ];
+    const existing = projectOf({
+      id: 'p1',
+      name: 'app',
+      rootDir: '/code/app',
+      dirs: [],
+    });
+    const { deps, calls } = chatDeps(existing, { projects: [existing] });
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.newProject);
+
+    expect(calls.projectPatches).toEqual([]);
+    expect(warned.join(' ')).toContain('subproject');
+  });
+});
+
+describe('configureProjectFlow: the project Settings menu', () => {
   afterEach(() => {
     delete (mockWindow as QuickPickHost).showQuickPick;
     delete (mockWindow as QuickPickHost).showInformationMessage;
@@ -1150,10 +1744,12 @@ describe('configureProjectFlow: the Rename… branch', () => {
   function scriptMenu(answers: Array<{ action: string } | undefined>): {
     opened: number;
     ran: Array<[string, unknown]>;
+    items: unknown[][];
   } {
-    const state = { opened: 0, ran: [] as Array<[string, unknown]> };
-    (mockWindow as QuickPickHost).showQuickPick = async () => {
+    const state = { opened: 0, ran: [] as Array<[string, unknown]>, items: [] as unknown[][] };
+    (mockWindow as QuickPickHost).showQuickPick = async (items: unknown) => {
       state.opened += 1;
+      state.items.push(Array.isArray(items) ? items : []);
       return answers.shift();
     };
     (mockCommands as CommandHost).executeCommand = async (id, arg) => {
@@ -1163,42 +1759,71 @@ describe('configureProjectFlow: the Rename… branch', () => {
     return state;
   }
 
-  // REGRESSION. The rename branch used to fire the verb and `continue`,
-  // and the verb resolves as soon as the `beginRename` message is DELIVERED —
-  // not when the user finishes typing. So the QuickPick reopened in the same
-  // tick, took the keyboard back, blurred the input, and the client's
-  // commit-on-blur posted the UNCHANGED name: the rename visibly did nothing.
-  it('hands over to the inline editor and does not reopen the menu', async () => {
-    const state = scriptMenu([{ action: 'rename' }]);
-    const { deps, calls } = chatDeps(projectOf(), {
-      beginInlineRenameProject: () => true,
+  // The split that defines this menu: the seven verbs anybody reaches for are on
+  // the row, and what a project IS lives in here. Rename, Close and Delete used
+  // to be in both places, which is how a right-click grew to fourteen entries.
+  it('offers none of the seven verbs that are on the row', () => {
+    const state = scriptMenu([undefined]);
+    const { deps } = chatDeps(projectOf());
+    return configureProjectFlow(deps, 'p1').then(() => {
+      const labels = (state.items[0] as Array<{ label: string }>).map(
+        (i) => i.label,
+      );
+      const joined = labels.join(' | ');
+      for (const gone of ['Rename', 'Close Project', 'Delete Project', 'New Chat']) {
+        expect(joined, gone).not.toContain(gone);
+      }
+      expect(joined).toContain('Set Provider');
+      expect(joined).toContain('Set AI Account');
+      expect(joined).toContain('Switch Workspace');
+      expect(joined).toContain('Open in New Window');
     });
-
-    await configureProjectFlow(deps, 'p1');
-
-    expect(calls.inlineRenameProjects).toEqual(['p1']);
-    expect(state.opened).toBe(1);
-    // Nothing may run on top of an open editor — least of all the quick-input
-    // rename, which would ask for the same name in a second place.
-    expect(state.ran).toEqual([]);
   });
 
-  it('still reopens the menu behind the quick-input fallback', async () => {
-    // The fallback is finished by the time it resolves, so the loop can come
-    // back with the project re-read — the native view style has no editable
-    // row and this is the only rename it will ever get.
-    const state = scriptMenu([{ action: 'rename' }, undefined]);
-    const { deps, calls } = chatDeps(projectOf(), {
-      beginInlineRenameProject: () => false,
-    });
+  // Four entries are DELEGATED to the commands that already own them, rather
+  // than reimplemented: each has a picker, a refusal and a message of its own
+  // that must not exist twice.
+  it.each([
+    ['account', COMMANDS.setProjectAccount],
+    ['sessionFrom', COMMANDS.newSessionFromPicker],
+    ['workspace', COMMANDS.switchWorkspace],
+    ['openWindow', COMMANDS.openProject],
+  ])('delegates %s and closes the menu', async (action, command) => {
+    const state = scriptMenu([{ action }]);
+    const { deps } = chatDeps(projectOf());
 
     await configureProjectFlow(deps, 'p1');
 
-    expect(calls.inlineRenameProjects).toEqual(['p1']);
-    expect(state.ran).toEqual([
-      [COMMANDS.renameProject, { type: 'project', projectId: 'p1' }],
-    ]);
-    expect(state.opened).toBe(2);
+    expect(state.ran).toEqual([[command, { type: 'project', projectId: 'p1' }]]);
+    // ONE QuickPick. Each of these opens a picker or a window of its own, and a
+    // menu reopening behind one takes the keyboard off it — the same rule the
+    // rename hand-off followed before it moved to the row.
+    expect(state.opened).toBe(1);
+  });
+
+  // Only offered on a project that HAS more than one directory: both verbs are
+  // about choosing between them, and a choice between one thing is a menu entry
+  // that has to explain itself when clicked.
+  it('withholds the directory verbs from a single-directory project', async () => {
+    const state = scriptMenu([undefined]);
+    const { deps } = chatDeps(projectOf({ dirs: [] }));
+
+    await configureProjectFlow(deps, 'p1');
+
+    const labels = (state.items[0] as Array<{ label: string }>).map((i) => i.label);
+    expect(labels.join(' | ')).not.toContain('Set Main Directory');
+    expect(labels.join(' | ')).not.toContain('Remove Subproject');
+  });
+
+  it('offers them once there are two', async () => {
+    const state = scriptMenu([undefined]);
+    const { deps } = chatDeps(projectOf());
+
+    await configureProjectFlow(deps, 'p1');
+
+    const labels = (state.items[0] as Array<{ label: string }>).map((i) => i.label);
+    expect(labels.join(' | ')).toContain('Set Main Directory');
+    expect(labels.join(' | ')).toContain('Remove Subproject');
   });
 });
 
@@ -2212,121 +2837,6 @@ describe('adoptBackgroundJob', () => {
 // call. Both halves are scripted here the same way every other QuickPick flow
 // in this file is.
 
-describe('moveProjectFlow', () => {
-  type Row = { label: string; action: string; payload?: string };
-
-  afterEach(() => {
-    delete (mockWindow as QuickPickHost).showQuickPick;
-    delete (mockWindow as QuickPickHost).showInformationMessage;
-    delete (mockWindow as WarningHost).showWarningMessage;
-  });
-
-  function scriptPicker(pick: (rows: Row[]) => Row | undefined): {
-    shown: Row[];
-    told: string[];
-  } {
-    const state = { shown: [] as Row[], told: [] as string[] };
-    (mockWindow as QuickPickHost).showQuickPick = async (items) => {
-      state.shown = items as Row[];
-      return pick(state.shown);
-    };
-    (mockWindow as QuickPickHost).showInformationMessage = async (message) => {
-      state.told.push(message);
-      return undefined;
-    };
-    return state;
-  }
-
-  const app = (over: Partial<ProjectRecord> = {}): ProjectRecord =>
-    projectOf({ id: 'app', name: 'app', rootDir: '/code/app', dirs: [], ...over });
-  const api = (over: Partial<ProjectRecord> = {}): ProjectRecord =>
-    projectOf({
-      id: 'api',
-      name: 'api',
-      rootDir: '/code/app/api',
-      dirs: [],
-      parentId: 'app',
-      ...over,
-    });
-  const solo = (over: Partial<ProjectRecord> = {}): ProjectRecord =>
-    projectOf({ id: 'solo', name: 'solo', rootDir: '/code/solo', dirs: [], ...over });
-
-  it('offers Top Level only to a project that is nested', async () => {
-    const nested = scriptPicker(() => undefined);
-    const { deps } = chatDeps(undefined, { projects: [app(), api()] });
-    await moveProjectFlow(deps, 'api');
-    expect(nested.shown[0].action).toBe('top');
-
-    const root = scriptPicker(() => undefined);
-    await moveProjectFlow(deps, 'app');
-    expect(root.shown.some((r) => r.action === 'top')).toBe(false);
-  });
-
-  it('leaves its own subtree out of the list', async () => {
-    const state = scriptPicker(() => undefined);
-    const { deps } = chatDeps(undefined, { projects: [app(), api(), solo()] });
-    await moveProjectFlow(deps, 'app');
-    // Not itself, not its child; the unrelated project is the only candidate.
-    expect(state.shown.map((r) => r.payload)).toEqual(['solo']);
-  });
-
-  it('leaves out the parent it is already filed under', async () => {
-    const state = scriptPicker(() => undefined);
-    const { deps } = chatDeps(undefined, { projects: [app(), api(), solo()] });
-    await moveProjectFlow(deps, 'api');
-    expect(state.shown.filter((r) => r.action === 'project').map((r) => r.payload)).toEqual([
-      'solo',
-    ]);
-  });
-
-  it('files the project under the chosen parent', async () => {
-    scriptPicker((rows) => rows.find((r) => r.payload === 'app'));
-    const { deps, calls } = chatDeps(undefined, { projects: [app(), solo()] });
-    expect(await moveProjectFlow(deps, 'solo')).toBe(true);
-    expect(calls.projectMoves).toEqual([['solo', 'app']]);
-    expect(calls.reveals).toContain('solo');
-  });
-
-  it('sends a nested project back to the top level', async () => {
-    scriptPicker((rows) => rows.find((r) => r.action === 'top'));
-    const { deps, calls } = chatDeps(undefined, { projects: [app(), api()] });
-    expect(await moveProjectFlow(deps, 'api')).toBe(true);
-    expect(calls.projectMoves).toEqual([['api', null]]);
-  });
-
-  it('writes nothing when the picker is dismissed', async () => {
-    scriptPicker(() => undefined);
-    const { deps, calls } = chatDeps(undefined, { projects: [app(), solo()] });
-    expect(await moveProjectFlow(deps, 'solo')).toBe(false);
-    expect(calls.projectMoves).toEqual([]);
-  });
-
-  it('says so when there is nowhere to move to', async () => {
-    const state = scriptPicker(() => undefined);
-    const { deps, calls } = chatDeps(undefined, { projects: [app(), api()] });
-    // `app` has one candidate (its own child) and it is refused, so the list
-    // is empty and the verb has to say why rather than open nothing.
-    await moveProjectFlow(deps, 'app');
-    expect(state.told[0]).toContain('nowhere to move');
-    expect(calls.projectMoves).toEqual([]);
-  });
-
-  it('reports a store refusal instead of pretending it moved', async () => {
-    scriptPicker((rows) => rows.find((r) => r.payload === 'app'));
-    const warned: string[] = [];
-    (mockWindow as WarningHost).showWarningMessage = async (message) => {
-      warned.push(message);
-      return undefined;
-    };
-    const { deps } = chatDeps(undefined, {
-      projects: [app(), solo()],
-      setProjectParent: () => false,
-    });
-    expect(await moveProjectFlow(deps, 'solo')).toBe(false);
-    expect(warned[0]).toContain('could not move');
-  });
-});
-
 // ------------------------------------------- verbs on a session we do not own
 //
 // The roster is machine-wide, so most rows in a busy tree belong to a process
@@ -2780,6 +3290,161 @@ describe('resume asks before starting a second writer', () => {
     const h = resumeHarness({});
     expect(await resumeFlow(h.deps, SESSION)).toBe(true);
     expect(h.warnings).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A row you created and never wrote in. Claude writes its transcript lazily, so
+// this session exists everywhere except on disk — and it used to be the one row
+// in the tree that could not be opened at all.
+
+describe('a session that never took a turn opens by starting', () => {
+  afterEach(() => {
+    delete (mockWindow as { showWarningMessage?: unknown }).showWarningMessage;
+  });
+
+  const SESSION = uuid(5);
+  const PARENT = uuid(6);
+
+  function coldHarness(
+    over: {
+      /** Ids the wiring can find a transcript for. Empty = nothing on disk. */
+      transcripts?: string[];
+      /** The recorded edge, as `recordLaunch` would have written it. */
+      parentId?: string;
+      node?: Partial<SessionNode>;
+    } = {},
+  ): {
+    launches: LaunchOptions[];
+    warnings: string[];
+    calls: ChatCalls;
+    deps: AccountCommandDeps;
+  } {
+    const launches: LaunchOptions[] = [];
+    const warnings: string[] = [];
+    (
+      mockWindow as {
+        showWarningMessage?: (m: unknown, ...rest: unknown[]) => Promise<unknown>;
+      }
+    ).showWarningMessage = async (message) => {
+      warnings.push(String(message));
+      return undefined;
+    };
+    const transcripts = new Set(over.transcripts ?? []);
+    const records: Record<string, EditorialRecord> = {
+      [SESSION]: {
+        id: SESSION,
+        title: 'shipping',
+        cwd: '/code/api',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        ...(over.parentId === undefined ? {} : { parentId: over.parentId }),
+      },
+      [PARENT]: {
+        id: PARENT,
+        cwd: '/code/api',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      },
+    };
+    const { deps, calls } = chatDeps(undefined, {
+      records,
+      hasTranscript: (id) => transcripts.has(id),
+    });
+    return {
+      launches,
+      warnings,
+      calls,
+      deps: {
+        ...deps,
+        // Closed, which is what a row whose tab was shut looks like — the live
+        // refusal above does not apply and the flow reaches the cold path.
+        getForest: () =>
+          forestOf([
+            node(SESSION, {
+              archived: true,
+              status: 'exited',
+              cwd: '/code/api',
+              ...over.node,
+            }),
+            node(PARENT, { archived: true, status: 'exited', cwd: '/code/api' }),
+          ]),
+        launchSession: async (opts) => {
+          launches.push(opts);
+          return {
+            nodeId: opts.sessionId,
+            sessionId: opts.sessionId,
+            terminalName: 'claude',
+            createdAt: 0,
+          };
+        },
+      },
+    };
+  }
+
+  it('starts a fresh conversation under the row’s own id', async () => {
+    const h = coldHarness();
+    expect(await resumeFlow(h.deps, SESSION)).toBe(true);
+    expect(h.warnings).toEqual([]);
+    expect(h.launches).toHaveLength(1);
+    const [launch] = h.launches;
+    expect(launch.sessionId).toBe(SESSION);
+    // Neither: `--session-id <id>` and nothing else. A resumeId would name a
+    // transcript that is not there, and a parentId would fork from nowhere.
+    expect(launch.resumeId).toBeUndefined();
+    expect(launch.parentId).toBeUndefined();
+    // Same directory and same name — this is the row reopening, not a new one.
+    expect(launch.cwd).toBe('/code/api');
+    expect(launch.title).toBe('shipping');
+  });
+
+  it('un-closes and un-parks the row it just started', async () => {
+    const h = coldHarness();
+    await resumeFlow(h.deps, SESSION);
+    // The same bookkeeping a resume does: a row with a tab must not read as
+    // closed, and must not be resumed a second time by the next switch.
+    const patch = h.calls.records.find((r) => r.id === SESSION)?.patch;
+    expect(patch).toMatchObject({ closed: null, parked: false, tmux: null });
+  });
+
+  it('replays the ancestor when the unstarted row is a FORK', async () => {
+    // What it was showing on screen before the tab closed is its parent's
+    // history, so it comes back as the fork it was — not as a blank session
+    // that happens to sit under the same parent.
+    const h = coldHarness({ parentId: PARENT, transcripts: [PARENT] });
+    expect(await resumeFlow(h.deps, SESSION)).toBe(true);
+    expect(h.launches).toHaveLength(1);
+    const [launch] = h.launches;
+    expect(launch.sessionId).toBe(SESSION);
+    expect(launch.parentId).toBe(PARENT);
+    expect(launch.resumeId).toBeUndefined();
+  });
+
+  it('starts fresh when the recorded ancestor has no transcript either', async () => {
+    // A fork of a fork, neither ever messaged: the walk finds nothing to
+    // replay and the row still has to open.
+    const h = coldHarness({ parentId: PARENT });
+    expect(await resumeFlow(h.deps, SESSION)).toBe(true);
+    const [launch] = h.launches;
+    expect(launch.parentId).toBeUndefined();
+    expect(launch.resumeId).toBeUndefined();
+  });
+
+  it('still resumes normally once there IS a transcript', async () => {
+    const h = coldHarness({ transcripts: [SESSION] });
+    expect(await resumeFlow(h.deps, SESSION)).toBe(true);
+    const [launch] = h.launches;
+    expect(launch.resumeId).toBe(SESSION);
+    expect(launch.parentId).toBeUndefined();
+  });
+
+  it('refuses a GHOST, which is inferred rather than created', async () => {
+    // A ghost id was never a row anything here minted — starting a
+    // conversation under it would invent the history the tree is guessing at.
+    const h = coldHarness({ node: { ghost: true } });
+    expect(await resumeFlow(h.deps, SESSION)).toBe(false);
+    expect(h.launches).toEqual([]);
+    expect(h.warnings[0]).toContain('No transcript on disk');
   });
 });
 

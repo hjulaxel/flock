@@ -153,6 +153,82 @@ describe('explorer: desiredFolders', () => {
   });
 });
 
+// ------------------------------------------------------- 'directory' scope
+//
+// The narrowing is a property of what is DESIRED, not of how it is applied:
+// every splice below this point is identical either way. So the whole of the
+// setting's behaviour is decided here, in one pure function.
+
+describe('explorer: desiredFolders under directory scope', () => {
+  const web = project({ dirs: ['/Users/x/deploy', '/Users/x/sandbox'] });
+
+  it('shows ONE root — the directory being worked in', () => {
+    expect(
+      desiredFolders(web, ANCHOR, {
+        scope: 'directory',
+        currentDir: '/Users/x/deploy',
+      }),
+    ).toEqual([{ path: '/Users/x/deploy', name: 'deploy' }]);
+  });
+
+  it('falls back to the main directory when nothing says where we are', () => {
+    for (const currentDir of [undefined, '']) {
+      expect(
+        desiredFolders(web, ANCHOR, { scope: 'directory', currentDir }),
+      ).toEqual([{ path: '/Users/x/code/web', name: 'web' }]);
+    }
+  });
+
+  it('matches the current directory the way every other path compare does', () => {
+    // pathKey, not string equality: on the two platforms this ships on the
+    // Explorer would otherwise re-root itself over a difference in case.
+    expect(
+      desiredFolders(web, ANCHOR, {
+        scope: 'directory',
+        currentDir: '/Users/X/DEPLOY/',
+      }),
+    ).toEqual([{ path: '/Users/x/deploy', name: 'deploy' }]);
+  });
+
+  it('honours a directory the project does not list — a linked worktree is the point', () => {
+    // matchProject hands a project every checkout of every repository its
+    // directories sit in, so this is the ordinary way to be somewhere real that
+    // is not in `dirs`. Rooting at the main directory instead would show a tree
+    // the user is not editing.
+    expect(
+      desiredFolders(web, ANCHOR, {
+        scope: 'directory',
+        currentDir: '/Users/x/web-feat-x',
+      }),
+    ).toEqual([{ path: '/Users/x/web-feat-x', name: 'web-feat-x' }]);
+  });
+
+  it('refuses the anchor, which would collide with folder[0]', () => {
+    expect(
+      desiredFolders(web, ANCHOR, { scope: 'directory', currentDir: ANCHOR }),
+    ).toEqual([{ path: '/Users/x/code/web', name: 'web' }]);
+  });
+
+  it('is empty for a project with no directories, exactly as project scope is', () => {
+    const bare = project({ rootDir: '', dirs: [] });
+    expect(desiredFolders(bare, ANCHOR, { scope: 'directory' })).toEqual(
+      desiredFolders(bare, ANCHOR),
+    );
+  });
+
+  it('is unchanged from before when the scope is project, or absent', () => {
+    const all = desiredFolders(web, ANCHOR);
+    expect(desiredFolders(web, ANCHOR, {})).toEqual(all);
+    expect(
+      desiredFolders(web, ANCHOR, {
+        scope: 'project',
+        currentDir: '/Users/x/deploy',
+      }),
+    ).toEqual(all);
+    expect(all).toHaveLength(3);
+  });
+});
+
 // --------------------------------------------------------------- planSplice
 
 describe('explorer: planSplice', () => {
@@ -304,6 +380,61 @@ describe('explorer: ExplorerSync', () => {
     await sync.sync(project());
     expect(await sync.sync(project())).toBe('unchanged');
     expect(h.calls).toHaveLength(1);
+  });
+
+  it('splices in ONE root under directory scope', async () => {
+    const h = host([anchorFolder], { scope: () => 'directory' });
+    const sync = new ExplorerSync(h, ANCHOR);
+    expect(
+      await sync.sync(
+        project({ dirs: ['/Users/x/sandbox'] }),
+        '/Users/x/sandbox',
+      ),
+    ).toBe('spliced');
+    expect(h.current).toEqual([
+      anchorFolder,
+      { path: '/Users/x/sandbox', name: 'sandbox' },
+    ]);
+  });
+
+  it('re-roots in place when attention moves to another directory', async () => {
+    const h = host([anchorFolder], { scope: () => 'directory' });
+    const sync = new ExplorerSync(h, ANCHOR);
+    const p = project({ dirs: ['/Users/x/sandbox'] });
+    await sync.sync(p, '/Users/x/code/web');
+    expect(await sync.sync(p, '/Users/x/sandbox')).toBe('spliced');
+    // The splice still starts at 1 — the anchor invariant is not something
+    // narrowing is allowed to weaken.
+    expect(h.calls.every((c) => c.start >= 1)).toBe(true);
+    expect(h.current).toEqual([
+      anchorFolder,
+      { path: '/Users/x/sandbox', name: 'sandbox' },
+    ]);
+  });
+
+  it('re-reads the scope on every sync, so the setting needs no reload', async () => {
+    let scope: 'directory' | 'project' = 'directory';
+    const h = host([anchorFolder], { scope: () => scope });
+    const sync = new ExplorerSync(h, ANCHOR);
+    const p = project({ dirs: ['/Users/x/sandbox'] });
+    await sync.sync(p, '/Users/x/code/web');
+    expect(h.current).toHaveLength(2);
+    scope = 'project';
+    expect(await sync.sync(p, '/Users/x/code/web')).toBe('spliced');
+    expect(h.current).toHaveLength(3);
+  });
+
+  it('treats a scope reader that throws as project scope, not as a broken sync', async () => {
+    const h = host([anchorFolder], {
+      scope: () => {
+        throw new Error('configuration is mid-reload');
+      },
+    });
+    const sync = new ExplorerSync(h, ANCHOR);
+    expect(
+      await sync.sync(project({ dirs: ['/Users/x/sandbox'] }), '/Users/x/sandbox'),
+    ).toBe('spliced');
+    expect(h.current).toHaveLength(3);
   });
 
   it('clears the tail back to the anchor for a null project', async () => {

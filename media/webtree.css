@@ -187,6 +187,27 @@ body {
     var(--vscode-sideBarSectionHeader-border, var(--root-rule));
 }
 
+/* A SUBPROJECT row — one directory of a project, heading the sessions running in
+ * it. It shares the project's band, so header + directories + sessions read as
+ * ONE box, and has no top RULE for the same reason a branch row has none: that
+ * line separates one top-level block from the last, and drawing it inside a block
+ * would cut the project away from the directories it contains. The indent says
+ * "this is inside"; a rule would say "this is next".
+ *
+ * ORDER-DEPENDENT with the same contract as the band above: this must stay BEFORE
+ * .row:hover / .row.selected, which share background-color with it. */
+.row.subproject {
+  background-color: var(--vscode-sideBarSectionHeader-background, transparent);
+  background-image: linear-gradient(var(--root-band), var(--root-band));
+  cursor: pointer;
+  /* Same guard as .row.branch: a fixed-height row in a plain block flow, so a
+   * label that escaped would paint over its neighbours unstyled and
+   * unclickable. Safe here and not on `.row` at large because the inline rename's
+   * validation box deliberately hangs outside its row — and a subproject row
+   * never renames. */
+  overflow: hidden;
+}
+
 /* No rule above the very first row: it has nothing to separate itself from. */
 #tree > .row.project:first-child,
 #tree > .row.folder:first-child {
@@ -211,7 +232,8 @@ body {
  * a column of six equally bold headings has no hierarchy in it, which is the
  * one thing nesting is for. Two steps only — past that the indent carries it,
  * and a third weight would just be smaller text. */
-.row.project.nested .name {
+.row.project.nested .name,
+.row.subproject .name {
   font-weight: 500;
 }
 
@@ -497,7 +519,13 @@ body {
  * own 4px: a section heading, hard against the edge, with everything filed
  * under it indented by its own spine. */
 .row.project .icon,
-.row.folder .icon {
+.row.folder .icon,
+/* A subproject's glyph column goes too, and for exactly the same reason: the row
+ * is a heading, its label is the directory's own name, and a folder icon in front
+ * of it would be a picture of the word next to it. Dropping the column is also
+ * what lets the label line up with the project title above rather than sitting a
+ * glyph's width to its right. */
+.row.subproject .icon {
   display: none;
 }
 
@@ -688,7 +716,12 @@ body {
  * Specificity (0,3,0) on purpose: it has to beat .badge.idle/.badge.none (0,2,0)
  * above on weight rather than on where it happens to sit in the file. */
 .row.project .badge.idle,
-.row.project .badge.none {
+.row.project .badge.none,
+/* A subproject row carries no dot of its own (see viewmodel.subprojectRow), so
+ * its badge box is always the empty one — held open to the same width as the
+ * project's above it, or the two headings' right edges would not line up. */
+.row.subproject .badge.idle,
+.row.subproject .badge.none {
   flex-basis: 8px;
   width: 8px;
   margin-left: 8px;
@@ -845,6 +878,37 @@ body {
 
 .row.branch.others .branch-count {
   color: var(--vscode-descriptionForeground);
+}
+
+/* The fold's own twisty is grey like its label. The row stands for branches
+ * rather than being one, so it has no colour of its own to point with. */
+.row.branch.others .branch-twisty::before {
+  border-left-color: var(--vscode-descriptionForeground);
+}
+
+/* A BRANCH WITH NO CHECKOUT: a ref, and nothing on disk. Most of what the fold
+ * holds under `lineage.preview.directoryModel`.
+ *
+ * The swatch goes hollow rather than coloured, and that is the whole point of the
+ * treatment: a solid block of colour is this tree's promise that sessions
+ * somewhere take that colour, and nothing can run in a directory that does not
+ * exist. The outline keeps the label in its column — the rows above it are the
+ * same list — while saying there is nothing behind this one yet. */
+.row.branch.ref .branch-swatch {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--vscode-descriptionForeground);
+  opacity: 0.5;
+}
+
+.row.branch.ref .branch-name {
+  color: var(--vscode-descriptionForeground);
+}
+
+/* The age, where a checkout would put its session count. Grey for the same
+ * reason the name is: it is a fact about the repository, not about your work. */
+.row.branch.ref .branch-count {
+  color: var(--vscode-descriptionForeground);
+  font-style: normal;
 }
 
 /* Ahead / behind / dirty, as one small token left of the count.

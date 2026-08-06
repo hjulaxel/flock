@@ -3,9 +3,13 @@
 // THE FEATURE: switching projects in the Flock sidebar swaps what the
 // built-in Explorer shows. Not a Flock-flavoured file tree in our own
 // container — THE Explorer, with its real folder tree, its Outline and its
-// Timeline. A project with several connected directories renders the way
-// VS Code already renders several directories: one collapsible root each, the
-// main one on top, the extras below it, from wherever they live on disk.
+// Timeline.
+//
+// HOW MUCH it shows is `ExplorerScope`. By default ONE root: the directory
+// being worked in, so the file tree reads like a plain folder window that
+// happens to follow you. `'project'` scope is the older shape — every connected
+// directory as its own collapsible root, the main one on top — and the two
+// differ only in what `desiredFolders` returns; every splice below is identical.
 //
 // HOW, AND WHY THIS SHAPE:
 //
@@ -73,6 +77,36 @@ export interface FolderSpec {
   name?: string;
 }
 
+/**
+ * How much of the active project the Explorer shows.
+ *
+ * `'directory'` — ONE root: the directory being worked in. A project with three
+ * connected directories is still three directories, but the file tree is the one
+ * you are in, the way a plain folder window is the folder you opened. Which one
+ * that is comes from the active session's cwd (see `matchProject`), so the tree
+ * follows attention rather than needing a verb.
+ *
+ * `'project'` — every connected directory as its own collapsible root, which is
+ * what this module did before the setting existed and what the `.code-workspace`
+ * shape has always been able to express.
+ *
+ * The DEFAULT HERE IS `'project'` — absent host support means "behave as
+ * before". The product's default is `'directory'`, set in package.json; the two
+ * differ on purpose, so a host wiring that predates the setting (and every unit
+ * double) is unaffected by it.
+ */
+export type ExplorerScope = 'directory' | 'project';
+
+/** Narrowing input for {@link desiredFolders}. */
+export interface DesiredFoldersOptions {
+  /** Defaults to `'project'` — see {@link ExplorerScope}. */
+  scope?: ExplorerScope;
+  /** The directory being worked in, under `'directory'` scope. Ignored under
+   *  `'project'` scope, and an unknown or empty value falls back to the
+   *  project's main directory. */
+  currentDir?: string;
+}
+
 /** A splice, in `updateWorkspaceFolders(start, deleteCount, ...add)` terms.
  *  `start` is ALWAYS >= 1: see the anchor note at the top of the file. */
 export interface FolderSplice {
@@ -114,6 +148,10 @@ export interface ExplorerHost {
    *  extension host. Optional: absent means the anchor keeps whatever label it
    *  was created with, and the header view carries the project name instead. */
   renameAnchor?(name: string): Promise<void>;
+  /** How much of the project to show, read FRESH on every sync so the setting
+   *  takes effect without a reload. Optional: absent means `'project'`, which is
+   *  what this module did before the setting existed. */
+  scope?(): ExplorerScope;
 }
 
 /** How long a splice waits for the host's folder-change event before giving up
@@ -166,10 +204,11 @@ export function isAnchored(
 export function desiredFolders(
   project: ProjectRecord | undefined | null,
   anchorPath: string,
+  opts: DesiredFoldersOptions = {},
 ): FolderSpec[] {
   if (!project) return [];
   const anchorKey = pathKey(normalizeDir(anchorPath));
-  const out: FolderSpec[] = [];
+  const all: FolderSpec[] = [];
   const seen = new Set<string>();
   for (const dir of projectDirs(project)) {
     const key = pathKey(dir);
@@ -177,9 +216,44 @@ export function desiredFolders(
     seen.add(key);
     // `baseName` is empty for a filesystem root, which would render an
     // unlabelled row; the path itself is the honest fallback.
-    out.push({ path: dir, name: baseName(dir) || dir });
+    all.push({ path: dir, name: baseName(dir) || dir });
   }
-  return out;
+  if ((opts.scope ?? 'project') === 'project') return all;
+  return narrowToCurrent(all, opts.currentDir, anchorKey);
+}
+
+/**
+ * The single root `'directory'` scope shows: the one being worked in, or the
+ * project's main directory when nothing better is known.
+ *
+ * A `currentDir` the project does not LIST is still honoured, because the
+ * common way to get one is the case worth honouring — a linked git worktree of
+ * a repository the project sits in. `matchProject` hands a project every
+ * checkout of every repository its directories are in, so a session in
+ * `~/app-feat-x` belongs to the project at `~/app` without anybody registering
+ * that path; rooting the Explorer at `~/app` while the user works in
+ * `~/app-feat-x` would show them a tree they are not editing.
+ *
+ * The anchor is refused for the same reason `desiredFolders` excludes it: a
+ * duplicate URI makes the workbench reject the entire splice.
+ */
+function narrowToCurrent(
+  all: readonly FolderSpec[],
+  currentDir: string | undefined,
+  anchorKey: string,
+): FolderSpec[] {
+  const wanted = normalizeDir(currentDir ?? '');
+  if (wanted !== '' && pathKey(wanted) !== anchorKey) {
+    const listed = all.find(
+      (f) => pathKey(normalizeDir(f.path)) === pathKey(wanted),
+    );
+    if (listed) return [listed];
+    return [{ path: wanted, name: baseName(wanted) || wanted }];
+  }
+  // Directory number one, which is the honest answer to "which directory am I
+  // in" before anything has told us otherwise. Empty for a project with no
+  // directories at all, exactly as `'project'` scope would be.
+  return all.length > 0 ? [all[0]!] : [];
 }
 
 /** The anchor's label for a given project: its name, or the product name when
@@ -331,15 +405,34 @@ export class ExplorerSync {
     }
   }
 
+  /** The scope the HOST reports right now. Read per sync rather than cached so
+   *  flipping the setting takes effect on the next switch, and defaulting to
+   *  `'project'` so a host that does not implement it behaves as before. */
+  private scope(): ExplorerScope {
+    try {
+      return this.host.scope?.() ?? 'project';
+    } catch (err) {
+      logError('explorer.scope', err);
+      return 'project';
+    }
+  }
+
   /**
    * Point the Explorer at `project` (null clears the tail back to the anchor
    * alone). Never throws, never rejects: a switch must not fail because the
    * file tree would not move.
+   *
+   * `currentDir` is the directory being worked in. It decides the single root
+   * under `'directory'` scope and is ignored under `'project'` scope, so every
+   * caller may pass it without knowing which is configured.
    */
-  async sync(project: ProjectRecord | null): Promise<SyncOutcome> {
+  async sync(
+    project: ProjectRecord | null,
+    currentDir?: string,
+  ): Promise<SyncOutcome> {
     const run = async (): Promise<SyncOutcome> => {
       try {
-        return await this.syncOnce(project);
+        return await this.syncOnce(project, currentDir);
       } catch (err) {
         logError('explorer.sync', err);
         return 'rejected';
@@ -353,7 +446,10 @@ export class ExplorerSync {
     return next;
   }
 
-  private async syncOnce(project: ProjectRecord | null): Promise<SyncOutcome> {
+  private async syncOnce(
+    project: ProjectRecord | null,
+    currentDir?: string,
+  ): Promise<SyncOutcome> {
     const current = this.host.folders();
     if (!isAnchored(current, this.anchorPath)) {
       if (!this.warnedNotAnchored) {
@@ -370,7 +466,10 @@ export class ExplorerSync {
     this.warnedNotAnchored = false;
 
     const desired = await this.filterMissing(
-      desiredFolders(project, this.anchorPath),
+      desiredFolders(project, this.anchorPath, {
+        scope: this.scope(),
+        currentDir,
+      }),
     );
     const plan = planSplice(current, desired);
     if (plan === null) {

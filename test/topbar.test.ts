@@ -629,8 +629,12 @@ describe('manifest: the view title contributions', () => {
 
   // The row is narrow, and the workbench overflows a toolbar it cannot fit into
   // an ellipsis — which would swallow the gear, since the gear is last. Five
-  // buttons is what fits: the bell, `+`, fork, the filter and the gear, with the
-  // two project verbs moved into the gear menu.
+  // buttons is what fits: the bell, New Project, `+`, fork and the gear.
+  //
+  // New Project came back onto the row and the active-only FILTER left to make
+  // room for it. The filter is already in the gear menu, labelled with the
+  // direction it goes, where New Project had no home but the menu — and starting
+  // a project is a thing you do before you can do anything else.
   it('keeps the row down to five buttons', () => {
     for (const viewId of [SESSIONS, INLINE]) {
       // Count SLOTS, not entries: the bell and the filter each contribute two
@@ -681,14 +685,22 @@ describe('manifest: the view title contributions', () => {
     }
   });
 
-  // Moved off the row into the gear menu. On the row they were the two buttons
-  // most likely to be the ones VS Code overflowed away, and they are the two you
-  // reach for least — you make a project rarely and reopen one rarer still.
-  it('keeps the two project verbs off the row', () => {
+  // New Project is ON the row, second from the left, and the active-only filter
+  // is not — see the five-button note above for the trade. Open a Closed
+  // Project… stays in the gear menu: it is the rarer of the two by a long way,
+  // and the row has no sixth slot.
+  it('puts New Project on the row and keeps the filter in the menu', () => {
     for (const viewId of [SESSIONS, INLINE]) {
-      const ids = titleEntriesFor(viewId).map((e) => e.command);
-      expect(ids, viewId).not.toContain('lineage.newProject');
+      const entries = titleEntriesFor(viewId);
+      const ids = entries.map((e) => e.command);
+      expect(ids, viewId).toContain('lineage.newProject');
       expect(ids, viewId).not.toContain('lineage.reopenProject');
+      expect(ids, viewId).not.toContain('lineage.showOnlyActiveSessions');
+      expect(ids, viewId).not.toContain('lineage.showAllSessions');
+      // Second from the left: after the bell, before the `+`. Starting a project
+      // comes before starting a session in one.
+      const placed = entries.find((e) => e.command === 'lineage.newProject');
+      expect(placed?.group, viewId).toBe('navigation@1');
     }
   });
 

@@ -639,6 +639,12 @@ export function formatUsageSummary(snapshot: UsageSnapshot | null | undefined): 
         return who === '' ? 'not logged in' : `${who} · usage unavailable`;
       case 'expired':
         return who === '' ? 'login expired' : `${who} · login expired`;
+      case 'token-stale':
+        // NOT "login expired". The account is signed in; its access token has
+        // simply aged out between CLI runs, and the next `claude` on this
+        // profile renews it without asking. The meter is what is missing, and
+        // that is all this says.
+        return who === '' ? 'usage n/a' : `${who} · usage n/a`;
       case 'http':
       case 'parse':
         return 'usage unavailable';
@@ -657,11 +663,24 @@ export function formatUsageSummary(snapshot: UsageSnapshot | null | undefined): 
 
 // ------------------------------------------------------------- credentials
 
-/** What a credential lookup produced. The token never leaves this module. */
+/**
+ * What a credential lookup produced. The token never leaves this module.
+ *
+ * `refreshable` is carried on every kind that has an opinion, and it is the
+ * whole of the "login expired" fix: an access token lapses in HOURS, and the
+ * CLI silently mints a new one from the refresh token sitting beside it the
+ * next time it runs. So an expiry in the past says nothing about whether the
+ * user is signed in — only whether THIS cached token can be spent — and the
+ * refresh token is what tells the two apart.
+ */
 type CredentialResult =
-  | { kind: 'ok'; token: string }
+  | { kind: 'ok'; token: string; refreshable: boolean }
   | { kind: 'missing' }
-  | { kind: 'expired' };
+  /** Lapsed access token, no refresh token: the sign-in really is over. */
+  | { kind: 'expired' }
+  /** Lapsed access token WITH a refresh token: signed in, nothing to fix, and
+   *  no point spending a round trip on a header that will 401. */
+  | { kind: 'stale' };
 
 /** Pull the access token out of the OAuth blob, honouring its expiry. Kept
  *  private: nothing outside this file has a reason to hold a token. */
@@ -682,12 +701,22 @@ function readCredentialBlob(text: string | null, now: number): CredentialResult 
   const token = typeof raw === 'string' ? raw.trim() : '';
   if (token === '') return { kind: 'missing' };
 
-  // An expiry in the past means the CLI has not refreshed yet. Sending it would
-  // buy a 401 and a wasted round trip; say so from here instead.
-  const expiresAt = parseResetAt(blob['expiresAt'] ?? blob['expires_at']);
-  if (expiresAt !== undefined && expiresAt <= now) return { kind: 'expired' };
+  // Presence only — never the value, which is a credential this file has no
+  // reason to hold beyond the one it is about to spend.
+  const refresh = blob['refreshToken'] ?? blob['refresh_token'];
+  const refreshable = typeof refresh === 'string' && refresh.trim() !== '';
 
-  return { kind: 'ok', token };
+  // An expiry in the past means the CLI has not refreshed yet. Sending it would
+  // buy a 401 and a wasted round trip; say so from here instead. WHICH thing it
+  // says depends on the refresh token: with one, this is an ordinary lapsed
+  // token on a live login and the CLI renews it unprompted; without one, the
+  // sign-in is genuinely over and only the user can fix it.
+  const expiresAt = parseResetAt(blob['expiresAt'] ?? blob['expires_at']);
+  if (expiresAt !== undefined && expiresAt <= now) {
+    return refreshable ? { kind: 'stale' } : { kind: 'expired' };
+  }
+
+  return { kind: 'ok', token, refreshable };
 }
 
 /**
@@ -952,12 +981,29 @@ export class LimitsService implements LimitsReader, DisposableLike {
       const cred = await this.resolveCredential(profile);
       if (cred.kind !== 'ok') {
         // No network was touched, so no backoff: a user who has just logged in
-        // should see it on their next look, not in fifteen minutes.
-        result = this.settleFailure(entry, cred.kind === 'expired' ? 'expired' : 'no-credentials', false);
+        // — or whose CLI has just refreshed a lapsed token — should see it on
+        // their next look, not in fifteen minutes.
+        result = this.settleFailure(
+          entry,
+          cred.kind === 'expired'
+            ? 'expired'
+            : cred.kind === 'stale'
+              ? 'token-stale'
+              : 'no-credentials',
+          false,
+        );
       } else {
         const res = await this.request(cred.token);
         if (res.kind !== 'ok') {
-          result = this.settleFailure(entry, res.kind, res.kind === 'http');
+          // A 401 on a token the file said was still good is the same fact the
+          // expiry check reads, arriving from the other side: the token is dead.
+          // It is only a SIGN-IN problem when there is no refresh token to mint
+          // another one from — otherwise the CLI fixes it on its next run and
+          // telling the user their login expired would send them to `/login`
+          // for nothing.
+          const error =
+            res.kind === 'expired' && cred.refreshable ? 'token-stale' : res.kind;
+          result = this.settleFailure(entry, error, res.kind === 'http');
         } else {
           const parsed = parseUsageBody(res.text, this.clock());
           if (parsed === null) {

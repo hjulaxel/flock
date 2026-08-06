@@ -545,6 +545,36 @@ describe('buildForest', () => {
     expect(f.nodes.get(OTHER)?.cwd).toBe('/work/api');
   });
 
+  // Two children of the same dead parent can disagree about cwd (forked after
+  // a cd, or resumed in another checkout). Whichever one the CLI happens to
+  // list first must not decide which project the ghost subtree files under.
+  it('picks the earliest child when children disagree about the inherited cwd', () => {
+    const edges = {
+      [CHILD]: { parentId: PARENT, source: 'forkedFrom' as const },
+      [OTHER]: { parentId: PARENT, source: 'forkedFrom' as const },
+    };
+    const early = live(CHILD, { cwd: '/work/api', startedAt: 1000 });
+    const late = live(OTHER, { cwd: '/work/web', startedAt: 2000 });
+    expect(forestOf([early, late], edges).nodes.get(PARENT)?.cwd).toBe(
+      '/work/api',
+    );
+    // Same roster, other order — same answer.
+    expect(forestOf([late, early], edges).nodes.get(PARENT)?.cwd).toBe(
+      '/work/api',
+    );
+  });
+
+  it('falls back to the smaller cwd when the children started at the same time', () => {
+    const edges = {
+      [CHILD]: { parentId: PARENT, source: 'forkedFrom' as const },
+      [OTHER]: { parentId: PARENT, source: 'forkedFrom' as const },
+    };
+    const a = live(CHILD, { cwd: '/work/web', startedAt: 1000 });
+    const b = live(OTHER, { cwd: '/work/api', startedAt: 1000 });
+    expect(forestOf([a, b], edges).nodes.get(PARENT)?.cwd).toBe('/work/api');
+    expect(forestOf([b, a], edges).nodes.get(PARENT)?.cwd).toBe('/work/api');
+  });
+
   it('leaves a ghost without a cwd when no descendant has one', () => {
     const f = forestOf([live(CHILD, { cwd: undefined })], {
       [CHILD]: { parentId: PARENT, source: 'forkedFrom' },

@@ -26,7 +26,12 @@ import {
   sessionIdsFromKeys,
 } from '../src/webtree';
 import type { WebtreeDeps } from '../src/webtree';
-import { folderRowKey, projectRowKey, sessionRowKey } from '../src/viewmodel';
+import {
+  folderRowKey,
+  projectRowKey,
+  sessionRowKey,
+  subprojectRowKey,
+} from '../src/viewmodel';
 import type {
   ProjectRecord,
   ProviderId,
@@ -112,8 +117,6 @@ function project(
 }
 
 interface DepsCalls {
-  reparent: Array<[string, string | null]>;
-  reparentProject: Array<[string, string | null]>;
   assignToProject: Array<[string, string]>;
   renameSession: Array<[string, string]>;
   renameProject: Array<[string, string]>;
@@ -132,12 +135,11 @@ function makeDeps(
     isBoundHere: (id: string) => boolean;
     providerFor: (id: string) => ProviderId;
     worktreesOf: (dir: string) => readonly Worktree[];
+    branchRows: () => boolean;
     groupSessionsByBranch: () => boolean;
   }> = {},
 ): { deps: WebtreeDeps; calls: DepsCalls } {
   const calls: DepsCalls = {
-    reparent: [],
-    reparentProject: [],
     assignToProject: [],
     renameSession: [],
     renameProject: [],
@@ -149,13 +151,8 @@ function makeDeps(
     getForest: () => forest,
     onDidChangeData: () => ({ dispose: () => undefined }),
     isBoundHere: over.isBoundHere ?? (() => false),
-    reparent: async (childId, newParentId) => {
-      calls.reparent.push([childId, newParentId]);
-    },
-    reparentProject: async (projectId, newParentId) => {
-      calls.reparentProject.push([projectId, newParentId]);
-    },
     worktreesOf: over.worktreesOf ?? (() => []),
+    branchRows: over.branchRows ?? (() => false),
     groupSessionsByBranch: over.groupSessionsByBranch ?? (() => false),
     groupByFolder: over.groupByFolder ?? (() => false),
     projects: over.projects ?? (() => []),
@@ -705,21 +702,40 @@ describe('LineageWebtreeProvider onDrop (via the "drop" message)', () => {
     ]);
   }
 
-  it('refuses a cycle', async () => {
+  it('refuses every drop onto a session — lineage is not draggable', async () => {
+    // The gesture that could pull a fork out of the tree it branched from, or
+    // file an unrelated conversation inside one. Both directions are gone: the
+    // only thing a drag states now is which project a top-level session is
+    // filed under.
     const { deps, calls } = makeDeps(forestWithChild());
     const provider = new LineageWebtreeProvider(deps, EXT_URI);
     const priv = internals(provider);
     priv.view = fakeView();
 
-    // Dragging ROOT onto its own child CHILD would re-parent ROOT under a
-    // node that is already ROOT's descendant — refused before deps.reparent
-    // is ever consulted.
+    for (const [dragged, targetKey] of [
+      [ROOT, `session:${CHILD}`], // into a tree (and, here, a cycle)
+      [CHILD, `session:${ROOT}`], // deeper into its own tree
+      [ROOT, `session:${ROOT}`], // onto itself
+    ] as const) {
+      await priv.onMessage({ type: 'drop', sessionId: dragged, targetKey });
+    }
+    expect(calls.assignToProject).toEqual([]);
+  });
+
+  it('refuses a drop onto a folder row — that was the detach gesture', async () => {
+    const { deps, calls } = makeDeps(forestWithChild(), {
+      groupByFolder: () => true,
+    });
+    const provider = new LineageWebtreeProvider(deps, EXT_URI);
+    const priv = internals(provider);
+    priv.view = fakeView();
+
     await priv.onMessage({
       type: 'drop',
-      sessionId: ROOT,
-      targetKey: `session:${CHILD}`,
+      sessionId: CHILD,
+      targetKey: folderRowKey('/proj'),
     });
-    expect(calls.reparent).toHaveLength(0);
+    expect(calls.assignToProject).toEqual([]);
   });
 
   it('refuses a non-root drop onto a project', async () => {
@@ -757,9 +773,12 @@ describe('LineageWebtreeProvider onDrop (via the "drop" message)', () => {
     expect(calls.assignToProject).toEqual([[ROOT, 'p1']]);
   });
 
-  // ------------------------------------------ filing a project under another
+  // ------------------------------------------ a project row no longer drags
 
-  it('files a dragged project under the project it was dropped on', async () => {
+  it('declines a dragged project instead of resolving it', async () => {
+    // Dropping one project onto another filed it there as a subproject. Retired:
+    // a subproject is a DIRECTORY now, and the row no longer offers the drag
+    // (`canDrag` is false on it). A page that sends one anyway gets nothing.
     const { deps, calls } = makeDeps(forestWithChild(), {
       projects: () => [
         project('p1', 'P1', '/proj'),
@@ -769,60 +788,22 @@ describe('LineageWebtreeProvider onDrop (via the "drop" message)', () => {
     const provider = new LineageWebtreeProvider(deps, EXT_URI);
     internals(provider).view = fakeView();
 
-    await internals(provider).onMessage({
-      type: 'drop',
-      sourceKey: projectRowKey('p2'),
-      targetKey: projectRowKey('p1'),
-    });
-    expect(calls.reparentProject).toEqual([['p2', 'p1']]);
-    // Never the session path: a project id is a bare uuid too.
-    expect(calls.reparent).toEqual([]);
+    for (const targetKey of [
+      projectRowKey('p1'),
+      'background',
+      `session:${ROOT}`,
+      projectRowKey('p2'),
+    ]) {
+      await internals(provider).onMessage({
+        type: 'drop',
+        sourceKey: projectRowKey('p2'),
+        targetKey,
+      });
+    }
+    // And in particular NEVER the session path: a project id is a bare uuid
+    // too, so falling through would have filed a conversation that does not
+    // exist under a project.
     expect(calls.assignToProject).toEqual([]);
-  });
-
-  it('takes a project back to the top level when dropped on the background', async () => {
-    const { deps, calls } = makeDeps(forestWithChild(), {
-      projects: () => [project('p1', 'P1', '/proj')],
-    });
-    const provider = new LineageWebtreeProvider(deps, EXT_URI);
-    internals(provider).view = fakeView();
-
-    await internals(provider).onMessage({
-      type: 'drop',
-      sourceKey: projectRowKey('p1'),
-      targetKey: 'background',
-    });
-    expect(calls.reparentProject).toEqual([['p1', null]]);
-  });
-
-  it('ignores a project dropped onto a session row', async () => {
-    const { deps, calls } = makeDeps(forestWithChild(), {
-      projects: () => [project('p1', 'P1', '/proj')],
-    });
-    const provider = new LineageWebtreeProvider(deps, EXT_URI);
-    internals(provider).view = fakeView();
-
-    await internals(provider).onMessage({
-      type: 'drop',
-      sourceKey: projectRowKey('p1'),
-      targetKey: `session:${ROOT}`,
-    });
-    expect(calls.reparentProject).toEqual([]);
-  });
-
-  it('ignores a project dropped on itself', async () => {
-    const { deps, calls } = makeDeps(forestWithChild(), {
-      projects: () => [project('p1', 'P1', '/proj')],
-    });
-    const provider = new LineageWebtreeProvider(deps, EXT_URI);
-    internals(provider).view = fakeView();
-
-    await internals(provider).onMessage({
-      type: 'drop',
-      sourceKey: projectRowKey('p1'),
-      targetKey: projectRowKey('p1'),
-    });
-    expect(calls.reparentProject).toEqual([]);
   });
 });
 
@@ -839,6 +820,9 @@ describe('LineageWebtreeProvider: grouped branch rows', () => {
     const { deps, calls } = makeDeps(forest, {
       projects: () => [project('p1', 'P1', '/proj')],
       worktreesOf: () => WORKTREES,
+      // The block's master switch — off by default, so a branch test has to ask
+      // for it. See CONFIG_KEYS.gitBranches.
+      branchRows: () => true,
       groupSessionsByBranch: () => true,
     });
     const provider = new LineageWebtreeProvider(deps, EXT_URI);
@@ -874,6 +858,65 @@ describe('LineageWebtreeProvider: grouped branch rows', () => {
       key: branchRowKey('p1', 'no-such-branch'),
     });
     expect(calls.runCommand).toEqual([]);
+  });
+});
+
+// ------------------------------------------------------- subproject rows
+
+describe('LineageWebtreeProvider: subproject rows', () => {
+  function setup() {
+    const forest = forestOf([
+      node(ROOT, { cwd: '/proj' }),
+      node(CHILD, { cwd: '/proj/api' }),
+    ]);
+    const { deps, calls } = makeDeps(forest, {
+      projects: () => [project('p1', 'P1', '/proj', { dirs: ['/proj/api'] })],
+    });
+    const provider = new LineageWebtreeProvider(deps, EXT_URI);
+    internals(provider).view = fakeView();
+    return { provider, calls };
+  }
+
+  it('resolves the + through the model it rendered, never the message', async () => {
+    // The page names a ROW; this side reads the directory out of the grouping it
+    // posted. A path taken from the message would be the webview naming a
+    // directory for the extension to spawn a shell in.
+    const { provider, calls } = setup();
+    await internals(provider).onMessage({
+      type: 'action',
+      action: 'newSessionInSubproject',
+      key: subprojectRowKey('p1', 'dir:/proj/api'),
+    });
+    expect(calls.runCommand).toEqual([
+      [
+        'newSessionInSubproject',
+        { type: 'subproject', projectId: 'p1', dir: '/proj/api' },
+      ],
+    ]);
+  });
+
+  it('refuses a directory the current model does not show', async () => {
+    const { provider, calls } = setup();
+    await internals(provider).onMessage({
+      type: 'action',
+      action: 'newSessionInSubproject',
+      key: subprojectRowKey('p1', 'dir:/etc'),
+    });
+    expect(calls.runCommand).toEqual([]);
+  });
+
+  it('takes a session dropped on a directory into that project', async () => {
+    // The gesture means "this work belongs over there", and the row aimed at is
+    // one of the project's directories — a subproject row counts as its
+    // project, which is the whole of what a drag can say.
+    const { provider, calls } = setup();
+    await internals(provider).onMessage({
+      type: 'drop',
+      sessionId: ROOT,
+      sourceKey: sessionRowKey(ROOT),
+      targetKey: subprojectRowKey('p1', 'dir:/proj/api'),
+    });
+    expect(calls.assignToProject).toEqual([[ROOT, 'p1']]);
   });
 });
 

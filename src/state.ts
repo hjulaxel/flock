@@ -51,12 +51,19 @@ import {
   type HookInstallState,
   type LineageState,
   type ProjectRecord,
+  type SubprojectRecord,
   type RoutingChoice,
   type WindowRecord,
   type WorkspaceSnapshot,
   type WorkspaceTabRecord,
 } from './types';
-import { canReparentProject, normalizeDir, pathKey } from './projects';
+import {
+  canReparentProject,
+  flattenNestedProjects,
+  normalizeDir,
+  pathKey,
+  projectDirs,
+} from './projects';
 import { isAccountId, isEnvVarName, nextOrder, sortProfiles } from './accounts';
 
 // ------------------------------------------------------------------ constants
@@ -142,6 +149,7 @@ function emptyState(): LineageState {
     records: {},
     windows: {},
     projects: {},
+    subprojects: {},
     hiddenFolders: {},
     chains: {},
     workspaces: {},
@@ -276,6 +284,17 @@ function sanitizeRecord(key: string, value: unknown): EditorialRecord | null {
   // profile-directory helper and state.json is hand-editable.
   if (rec.profileId !== undefined && !isAccountId(rec.profileId)) {
     delete rec.profileId;
+  }
+  // The lane stamp. Only shape is checked here, deliberately: whether the lane
+  // still EXISTS is a question about another map, it changes under this record
+  // without the record being rewritten, and `getSessionSubproject` already treats a
+  // dangling stamp as absent. Dropping it here instead would make deleting a lane
+  // and then merging in an older window's copy of it lose the filing for good.
+  {
+    const raw = rec.subprojectId;
+    const id = typeof raw === 'string' ? raw.trim() : '';
+    if (id === '') delete rec.subprojectId;
+    else rec.subprojectId = id;
   }
   return rec as unknown as EditorialRecord;
 }
@@ -455,6 +474,62 @@ function sanitizeProject(key: string, value: unknown): ProjectRecord | null {
   return proj as unknown as ProjectRecord;
 }
 
+/**
+ * A NAMED SUBPROJECT — a lane. v7.
+ *
+ * The same three-part shape sanitizeProject has, for the same reasons: a tombstone
+ * survives a round trip reduced to its merge fields, a record missing the one thing
+ * that makes it meaningful is dropped, and everything else is normalised rather
+ * than trusted.
+ *
+ * What is required is `projectId` and `dir`. A lane with no project is a lane
+ * nothing can draw — unlike a project with a dangling `parentId`, which renders at
+ * the top level, there is no fallback position for a lane whose project is gone.
+ * A lane with no directory has nowhere to start a session and no repository to list
+ * branches from, which is the whole of what its row does.
+ *
+ * The NAME is allowed to be empty here and is defaulted at render time, not
+ * refused: a hand-edited file with a blank name should still draw a row the user
+ * can rename, rather than silently losing the lane and every session stamped with
+ * it.
+ */
+function sanitizeSubproject(key: string, value: unknown): SubprojectRecord | null {
+  if (!isNonEmptyString(key)) return null;
+  if (!isPlainObject(value)) return null;
+
+  if (value.deleted === true) {
+    const stamp = isNonEmptyString(value.updatedAt) ? value.updatedAt : nowIso();
+    return {
+      id: key,
+      // Reduced to the merge-relevant fields, exactly as a project tombstone is:
+      // nothing reads a tombstone's name or directory.
+      projectId: '',
+      name: '',
+      dir: '',
+      deleted: true,
+      createdAt: isNonEmptyString(value.createdAt) ? value.createdAt : stamp,
+      updatedAt: stamp,
+    };
+  }
+
+  const projectId =
+    typeof value.projectId === 'string' ? value.projectId.trim() : '';
+  if (projectId === '' || projectId === key) return null;
+  const dir = normalizeDir(value.dir);
+  if (dir === '') return null;
+
+  const rawName = typeof value.name === 'string' ? value.name.trim() : '';
+  const stamp = isNonEmptyString(value.createdAt) ? value.createdAt : nowIso();
+  return {
+    id: key,
+    projectId,
+    name: rawName.slice(0, MAX_PROJECT_NAME_LEN),
+    dir,
+    createdAt: stamp,
+    updatedAt: isNonEmptyString(value.updatedAt) ? value.updatedAt : stamp,
+  };
+}
+
 /** The map key is the normalized path; the record just mirrors it. */
 function sanitizeHiddenFolder(key: string, value: unknown): HiddenFolder | null {
   const path = normalizeDir(key);
@@ -614,6 +689,97 @@ function migrateV0ToV1(src: Record<string, unknown>): Record<string, unknown> {
 }
 
 /**
+ * v5 → v6. Every project filed UNDER another project is folded into its
+ * top-level ancestor: the ancestor gains the child's directories, the child
+ * becomes a tombstone.
+ *
+ * THE FIRST STEP IN THIS LADDER THAT DESTROYS ANYTHING, and the reason is a model
+ * change rather than a bug: a subproject is a DIRECTORY of a project now, not a
+ * project record with a parent pointer (see COMMANDS.newSubproject). The rules
+ * live in projects.flattenNestedProjects, pure and tested; what is here is the
+ * write.
+ *
+ * What survives is what the user sees: the directories, and therefore the
+ * sessions, which have always derived their membership from their cwd and so
+ * reappear under the same directory's row. What does NOT survive is everything a
+ * subproject had only because it was a whole project — its name, its provider, its
+ * account override, its saved workspace layout, and its closed-ness. A closed
+ * subproject's directory joins an open parent and its sessions come back into the
+ * tree; that is logged, per project, because it is the one outcome somebody might
+ * come looking for an explanation of.
+ *
+ * TOMBSTONES, not deletions, exactly as `deleteProject` writes them: `state.json`
+ * is merged newest-clock-wins per record across windows, so a dropped key is
+ * indistinguishable from "the other window has not heard of this project yet" and
+ * would be re-added on its next write. A tombstone is a value the merge can
+ * compare.
+ *
+ * Self-healing under a mixed install. An older window writes version 5 and its own
+ * copies of the child records; this step runs again on the next load, because the
+ * ladder is keyed on the version the FILE claims rather than on a flag of ours.
+ */
+function migrateV5ToV6(src: Record<string, unknown>): Record<string, unknown> {
+  if (!isPlainObject(src.projects)) return src;
+
+  const live: ProjectRecord[] = [];
+  for (const [id, value] of Object.entries(src.projects)) {
+    const proj = sanitizeProject(id, value);
+    if (proj && proj.deleted !== true) live.push(proj);
+  }
+  if (live.length === 0) return src;
+
+  const { merged, removed } = flattenNestedProjects(live);
+  if (merged.length === 0 && removed.length === 0) return src;
+
+  const stamp = nowIso();
+  const projects: Record<string, unknown> = { ...src.projects };
+  const nameOf = (id: string): string =>
+    live.find((p) => p.id === id)?.name ?? id;
+
+  for (const patch of merged) {
+    const prev = projects[patch.id];
+    if (!isPlainObject(prev)) continue;
+    projects[patch.id] = {
+      ...prev,
+      rootDir: patch.rootDir,
+      dirs: patch.dirs,
+      updatedAt: stamp,
+    };
+  }
+  for (const id of removed) {
+    const gone = live.find((p) => p.id === id);
+    log(
+      'state: folded subproject',
+      nameOf(id),
+      'into its parent as',
+      projectDirs(gone ?? ({} as ProjectRecord)).join(', ') || '(no directory)',
+      gone?.hidden === true
+        ? '— it was CLOSED, and its directories are now part of an open project'
+        : '',
+    );
+    projects[id] = {
+      id,
+      name: '',
+      rootDir: '',
+      dirs: [],
+      deleted: true,
+      createdAt: isPlainObject(projects[id])
+        ? ((projects[id] as { createdAt?: unknown }).createdAt ?? stamp)
+        : stamp,
+      updatedAt: stamp,
+    };
+  }
+  log(
+    'state: v5 -> v6 flattened',
+    removed.length,
+    'nested project(s) into',
+    merged.length,
+    'parent(s) — a subproject is a directory now',
+  );
+  return { ...src, projects };
+}
+
+/**
  * Sanitize + version-stamp an arbitrary parsed blob.
  *
  * Forward compatibility is the point of the odd-looking rules: unknown
@@ -647,7 +813,10 @@ export function migrateState(raw: unknown): LineageState {
   if (version < 1) working = migrateV0ToV1(working);
   // v1 -> v2 is purely additive: the two new maps are created empty by the
   // sanitizer below, so there is no step to run. Recorded here so the ladder
-  // still reads as a complete history.
+  // still reads as a complete history. v2 -> v5 likewise.
+  if (version < 6) working = migrateV5ToV6(working);
+  // v6 -> v7 is purely additive: named subprojects arrive as an empty map, so
+  // every project keeps drawing exactly the directory rows it drew before.
 
   const out: Record<string, unknown> = { ...working }; // keeps unknown keys
 
@@ -693,6 +862,49 @@ export function migrateState(raw: unknown): LineageState {
     }
   }
   out.projects = projects;
+
+  // v7 added the NAMED SUBPROJECTS. Purely additive like v2, v3 and v4 — an older
+  // file yields the empty map, and a project with no lanes draws exactly the
+  // directory rows it drew before, so nothing about an existing tree moves.
+  //
+  // Two sweeps rather than one, and the second is the reason this is not a
+  // copy-paste of the projects loop: a lane whose PROJECT is gone has nowhere to
+  // draw. A dangling `parentId` renders at the top level, which is why
+  // buildProjectTree tolerates one; a lane is meaningless without the project it
+  // names, and leaving it would keep every session stamped with it filed under a
+  // row nobody draws.
+  const subprojects: Record<string, SubprojectRecord> = {};
+  if (isPlainObject(working.subprojects)) {
+    for (const [key, value] of Object.entries(working.subprojects)) {
+      const lane = sanitizeSubproject(key, value);
+      if (!lane) {
+        log('state: dropped unusable subproject record', key);
+        continue;
+      }
+      if (lane.deleted === true) {
+        const at = Date.parse(lane.updatedAt);
+        if (Number.isFinite(at) && at < tombstoneCutoff) {
+          log('state: swept an expired subproject tombstone', key);
+          continue;
+        }
+        subprojects[key] = lane;
+        continue;
+      }
+      // A live lane whose project is missing OR tombstoned. Not swept outright —
+      // the project may simply not have merged in from another window yet, and
+      // dropping the lane would lose a name the user typed. Kept, and the render
+      // path ignores a lane whose project it cannot find.
+      const owner = projects[lane.projectId];
+      if (owner === undefined) {
+        log('state: kept a subproject whose project is not here yet', key);
+      } else if (owner.deleted === true) {
+        log('state: dropped a subproject whose project is deleted', key);
+        continue;
+      }
+      subprojects[key] = lane;
+    }
+  }
+  out.subprojects = subprojects;
 
   const hiddenFolders: Record<string, HiddenFolder> = {};
   if (isPlainObject(working.hiddenFolders)) {
@@ -857,6 +1069,16 @@ export function mergeStates(
     disk.projects,
     mem.projects,
     (p) => p.updatedAt ?? '',
+  );
+  // Named subprojects are ordinary records with their own clocks — one per lane,
+  // which is the whole reason a lane is a record rather than an entry in an array
+  // on the project. Newest-wins per lane means two windows each adding one keeps
+  // both; a list on ProjectRecord would have kept whichever wrote last. See
+  // SubprojectRecord.
+  out.subprojects = newerWins(
+    disk.subprojects,
+    mem.subprojects,
+    (s) => s.updatedAt ?? '',
   );
   // A hidden folder is a tombstone, not a value: there is nothing to merge
   // field-wise, so the union of both sides is the whole answer. Un-hiding
@@ -1423,6 +1645,110 @@ export class StateStore implements DisposableLike {
         createdAt: state.projects[id]?.createdAt ?? stamp,
         updatedAt: stamp,
       };
+      // ITS LANES GO WITH IT. A lane is meaningless without the project it names —
+      // unlike a nested project, which the tree could re-root at the top level —
+      // so leaving them would keep every session stamped with one filed under a row
+      // nobody draws. Tombstoned rather than dropped, for the same reason the
+      // project itself is: a dropped key is indistinguishable from "not merged in
+      // yet" and another window would re-add it.
+      if (!isPlainObject(state.subprojects)) state.subprojects = {};
+      for (const [laneId, lane] of Object.entries(state.subprojects)) {
+        if (lane?.projectId !== id || lane.deleted === true) continue;
+        state.subprojects[laneId] = {
+          id: laneId,
+          projectId: '',
+          name: '',
+          dir: '',
+          deleted: true,
+          createdAt: lane.createdAt ?? stamp,
+          updatedAt: stamp,
+        };
+      }
+    });
+  }
+
+  // ----------------------------------------------------- named subprojects
+
+  /** Every live lane, project-then-creation ordered — which is the order the rows
+   *  draw in, so a lane added today lands at the bottom of its project's list and
+   *  nothing above it moves. Copies, like every other record this store hands
+   *  out. */
+  getSubprojects(): SubprojectRecord[] {
+    return Object.values(this.memory.subprojects ?? {})
+      .filter((s) => s.deleted !== true)
+      .map((s) => ({ ...s }))
+      .sort((a, b) => {
+        if (a.projectId !== b.projectId) {
+          return a.projectId < b.projectId ? -1 : 1;
+        }
+        if (a.createdAt !== b.createdAt) {
+          return a.createdAt < b.createdAt ? -1 : 1;
+        }
+        return a.id < b.id ? -1 : 1;
+      });
+  }
+
+  getSubproject(id: string): SubprojectRecord | undefined {
+    const lane = this.memory.subprojects?.[id];
+    if (!lane || lane.deleted === true) return undefined;
+    return { ...lane };
+  }
+
+  /** Merge a patch into one lane. Same rules as `upsertProject`: `undefined` never
+   *  clobbers, the store owns id/createdAt/updatedAt, and the whole record goes
+   *  back through `sanitizeSubproject` — so a patch cannot install a lane with no
+   *  project or no directory. */
+  upsertSubproject(id: string, patch: Partial<SubprojectRecord>): Promise<void> {
+    if (!isNonEmptyString(id)) {
+      log('state: refusing to upsert a subproject with no id');
+      return Promise.resolve();
+    }
+    const copy: Record<string, unknown> = { ...patch };
+    for (const key of RESERVED_RECORD_KEYS) delete copy[key];
+
+    return this.enqueue((state, stamp) => {
+      if (!isPlainObject(state.subprojects)) state.subprojects = {};
+      const prev = state.subprojects[id];
+      const next: Record<string, unknown> = prev ? { ...prev } : {};
+      for (const [key, value] of Object.entries(copy)) {
+        if (value === undefined) continue;
+        next[key] = value;
+      }
+      next.id = id;
+      next.createdAt = isNonEmptyString(next.createdAt) ? next.createdAt : stamp;
+      const clean = sanitizeSubproject(id, next);
+      if (!clean) {
+        log('state: refusing to write a subproject with no project or directory', id);
+        return;
+      }
+      clean.updatedAt = stamp;
+      state.subprojects[id] = clean;
+    });
+  }
+
+  /**
+   * Tombstone one lane.
+   *
+   * The sessions STAMPED with it are deliberately left alone. Their stamp becomes
+   * dangling, which every reader treats as absent — so they fall back to being
+   * placed by directory, exactly as a session started by hand in a terminal always
+   * has been. Rewriting the stamps here would be the destructive reading of
+   * "remove a row", and it would also be a write over every session in the lane
+   * from one window while another may still hold the record.
+   */
+  deleteSubproject(id: string): Promise<void> {
+    if (!isNonEmptyString(id)) return Promise.resolve();
+    return this.enqueue((state, stamp) => {
+      if (!isPlainObject(state.subprojects)) state.subprojects = {};
+      state.subprojects[id] = {
+        id,
+        projectId: '',
+        name: '',
+        dir: '',
+        deleted: true,
+        createdAt: state.subprojects[id]?.createdAt ?? stamp,
+        updatedAt: stamp,
+      };
     });
   }
 
@@ -1556,6 +1882,39 @@ export class StateStore implements DisposableLike {
       for (const member of chain.members) {
         const pin = this.memory.records[member]?.profileId;
         if (isAccountId(pin)) return pin;
+      }
+      break; // a session belongs to at most one chain
+    }
+    return undefined;
+  }
+
+  /**
+   * The LANE a session was started in — EditorialRecord.subprojectId.
+   *
+   * The same shape as `getSessionProfile` above, and deliberately: the two fields
+   * have the same contract (written once at launch, never re-decided) and
+   * therefore the same inheritance. A `/clear` starts a fresh transcript under a
+   * new id and it is still the same piece of work, so a new generation reads the
+   * chain's stamp rather than losing the row it was filed under.
+   *
+   * A stamp naming a lane that no longer exists resolves to `undefined`, which
+   * every reader treats as "not started in a lane" — the session is then placed by
+   * directory, which is the answer that cannot be wrong. That is what makes
+   * deleteSubproject safe to leave every stamp alone.
+   */
+  getSessionSubproject(sessionId: string): string | undefined {
+    const live = (id: unknown): string | undefined => {
+      if (typeof id !== 'string' || id === '') return undefined;
+      const lane = this.memory.subprojects?.[id];
+      return lane && lane.deleted !== true ? id : undefined;
+    };
+    const own = live(this.memory.records[sessionId]?.subprojectId);
+    if (own !== undefined) return own;
+    for (const chain of Object.values(this.memory.chains ?? {})) {
+      if (!chain.members.includes(sessionId)) continue;
+      for (const member of chain.members) {
+        const stamp = live(this.memory.records[member]?.subprojectId);
+        if (stamp !== undefined) return stamp;
       }
       break; // a session belongs to at most one chain
     }
@@ -1736,6 +2095,80 @@ export class StateStore implements DisposableLike {
       const next: Record<string, unknown> = prev ? { ...prev } : {};
       next.id = sessionId;
       next.profileId = profileId;
+      next.createdAt = isNonEmptyString(next.createdAt) ? next.createdAt : stamp;
+      next.updatedAt = stamp;
+      state.records[sessionId] = next as unknown as EditorialRecord;
+    });
+  }
+
+  /**
+   * Stamp a session with the LANE it was started in. Once, and never again.
+   *
+   * The same write-once discipline as `setSessionProfile` above, for a related but
+   * weaker reason. A second account pin would make a conversation's billing history
+   * ambiguous; a second lane stamp is merely a lie about where the work was
+   * started, which is what the row is for. Either way a re-stamp is a bug at the
+   * call site rather than a correction, and the store keeps the first answer.
+   *
+   * MOVING a session between lanes is a separate verb with a separate method
+   * (`moveSessionSubproject`), so that "the launch path must not overwrite" and
+   * "the user may re-file" do not have to be the same rule.
+   */
+  setSessionSubproject(sessionId: string, subprojectId: string): Promise<void> {
+    if (!isSessionId(sessionId)) return Promise.resolve();
+    if (!isNonEmptyString(subprojectId)) {
+      log('state: refusing to stamp a session with an unusable subproject id');
+      return Promise.resolve();
+    }
+    return this.enqueue((state, stamp) => {
+      const prev = state.records[sessionId];
+      const existing = prev?.subprojectId;
+      if (isNonEmptyString(existing)) {
+        if (existing !== subprojectId) {
+          log(
+            'state: session',
+            sessionId,
+            'was already started in subproject',
+            existing,
+            '— keeping it',
+          );
+        }
+        return; // no write, no change event
+      }
+      const next: Record<string, unknown> = prev ? { ...prev } : {};
+      next.id = sessionId;
+      next.subprojectId = subprojectId;
+      next.createdAt = isNonEmptyString(next.createdAt) ? next.createdAt : stamp;
+      next.updatedAt = stamp;
+      state.records[sessionId] = next as unknown as EditorialRecord;
+    });
+  }
+
+  /**
+   * RE-FILE a session into another lane — or out of every lane (`null`).
+   *
+   * The one write that is allowed to replace a stamp, because the user is the one
+   * asking: they dragged the row. Deliberately a different method from the launch
+   * stamp so that neither rule has to know about the other.
+   *
+   * `null` clears it, and the session goes back to being placed by DIRECTORY —
+   * which is the same state every session that Flock did not start is already in,
+   * so there is nothing special about the result.
+   */
+  moveSessionSubproject(
+    sessionId: string,
+    subprojectId: string | null,
+  ): Promise<void> {
+    if (!isSessionId(sessionId)) return Promise.resolve();
+    return this.enqueue((state, stamp) => {
+      const prev = state.records[sessionId];
+      const before = prev?.subprojectId;
+      const after = isNonEmptyString(subprojectId) ? subprojectId : undefined;
+      if (before === after) return; // no write, no change event
+      const next: Record<string, unknown> = prev ? { ...prev } : {};
+      next.id = sessionId;
+      if (after === undefined) delete next.subprojectId;
+      else next.subprojectId = after;
       next.createdAt = isNonEmptyString(next.createdAt) ? next.createdAt : stamp;
       next.updatedAt = stamp;
       state.records[sessionId] = next as unknown as EditorialRecord;

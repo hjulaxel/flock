@@ -747,6 +747,62 @@ describe('buildViewModel: row content', () => {
     expect(rows[0].canRename).toBe(true);
   });
 
+  it('offers the drag to top-level rows only — a fork is frozen where it is', () => {
+    // What a drag can change is which project a session is filed under, and a
+    // row drawn inside a tree has no filing of its own: it is wherever the
+    // session it branched from is. So the rows that move are exactly the ones
+    // at the top of their group, which is also the only rule that can be read
+    // off the screen. Renaming is unaffected — a fork has a name of its own.
+    const rows = buildViewModel(
+      input(
+        forestOf([
+          node(A, { visibleChildren: [B] }),
+          node(B, { parentId: A, visibleChildren: [C] }),
+          node(C, { parentId: B }),
+        ]),
+        { loose: [A] },
+      ),
+    );
+    expect(rows.map((r) => [r.depth, r.canDrag])).toEqual([
+      [0, true],
+      [1, false],
+      [2, false],
+    ]);
+    expect(rows.every((r) => r.canRename)).toBe(true);
+  });
+
+  it('still offers it to a root drawn UNDER a project, where depth is not 0', () => {
+    // The trap this rule has to avoid: a project row and its directory rows are
+    // above every session in the outline, so `depth` is 1 or 2 for sessions
+    // that are perfectly ordinary roots — and keying the drag on depth would
+    // have frozen the exact gesture that survives (file this session under that
+    // project). What separates them is being drawn inside a TREE, which is what
+    // the spine (`rails`) records.
+    const rows = buildViewModel(
+      input(
+        forestOf([node(A, { visibleChildren: [B] }), node(B, { parentId: A })]),
+        {
+          projects: [
+            {
+              type: 'project',
+              projectId: 'p1',
+              label: 'API',
+              rootDir: '/code/api',
+              dirs: ['/code/api'],
+              provider: 'claude',
+              rootIds: [A],
+            },
+          ],
+        },
+      ),
+    );
+    const sessions = rows.filter((r) => r.kind === 'session');
+    expect(sessions.map((r) => [r.depth, r.rails.length, r.canDrag])).toEqual([
+      [1, 0, true], // the root: nested by the PROJECT, not by a tree
+      [2, 1, false], // its fork
+    ]);
+  });
+
   it('spells out both timestamps in the tooltip when both are known', () => {
     const rows = buildViewModel(
       input(
@@ -1146,8 +1202,12 @@ describe('buildViewModel: branch rows', () => {
     const [mainRow, featRow] = rows.filter((r) => r.kind === 'branch');
     // Both rows carry the same projectId as the header; distinct tokens are what
     // stop the project's whole menu appearing on them.
-    expect(mainRow.context.viewItem).toBe(';branch;primary;');
-    expect(featRow.context.viewItem).toBe(';branch;');
+    //
+    // `checkout` is on both because both came from a worktree, which is the only
+    // way a branch row exists at all with the directory preview off. It is the
+    // token the verbs needing a directory match on — see the ContextToken note.
+    expect(mainRow.context.viewItem).toBe(';branch;primary;checkout;');
+    expect(featRow.context.viewItem).toBe(';branch;checkout;');
     expect(rows[0].context.viewItem).toContain(';project;');
     // The shape branchArgOf() reads, so a context-menu verb takes it verbatim.
     expect(featRow.context.type).toBe('branch');

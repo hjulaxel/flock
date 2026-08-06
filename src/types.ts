@@ -150,10 +150,17 @@ export const CONTEXT_EXPLORER_FOLLOW = 'lineage.explorerFollow';
 /** Version of the persisted globalStorage state.json blob.
  *  v2 adds `projects` and `hiddenFolders`. v3 adds `chains` (generation
  *  chains). v4 adds `workspaces` (project workspaces). v5 adds `accounts` and
- *  `accountSettings`. Every step is additive — the migration just adds the
- *  empty map, and an older build reading a newer file preserves it verbatim
- *  via the unknown-key rule. */
-export const STATE_SCHEMA_VERSION = 5;
+ *  `accountSettings`.
+ *
+ *  v6 is the FIRST step that rewrites rather than adds: a subproject is a
+ *  DIRECTORY of its parent now, not a project record filed under one, so the
+ *  ladder folds every nested project's directories into its top-level ancestor
+ *  and tombstones the record. See projects.flattenNestedProjects for the rules
+ *  and state.migrateV5ToV6 for the write. Sessions are not touched and do not
+ *  need to be: membership has always been derived from the cwd, so a session
+ *  that was under the child's row is under the child's DIRECTORY row afterwards.
+ */
+export const STATE_SCHEMA_VERSION = 7;
 
 // ------------------------------------------------------------------ lineage
 
@@ -524,10 +531,19 @@ export interface UsageWindow {
  * Every window is optional because every one of them is genuinely absent
  * sometimes: an account that has not been used today has no open five-hour
  * window, and a plan without an Opus-specific weekly cap has no
- * `sevenDayOpus`. `error` distinguishes the three ways "no numbers" happens —
- * we were never logged in (`no-credentials`), the token has expired
- * (`expired`), or the request/parse fell over — because the first two are
- * things the user can fix and the last two are things they should ignore.
+ * `sevenDayOpus`. `error` distinguishes the ways "no numbers" happens, and the
+ * split that matters is whether the USER has anything to do about it: they were
+ * never logged in (`no-credentials`) or the sign-in is genuinely over
+ * (`expired`) — versus the ones to ignore, a request or parse that fell over
+ * (`http`/`parse`) and an access token that has merely aged out
+ * (`token-stale`).
+ *
+ * `token-stale` is the common one and the reason it is not `expired`. An OAuth
+ * access token lasts hours; the CLI renews it from the refresh token beside it
+ * whenever it next runs, without asking anyone. So a config directory holding a
+ * lapsed access token AND a refresh token is a perfectly good login that simply
+ * has not been used lately — and reporting it as "login expired" sent people to
+ * `/login` to fix an account that was never broken.
  *
  * `stale` marks a snapshot served from cache past its freshness window: still
  * the best answer available, and much better than showing nothing while a
@@ -540,7 +556,7 @@ export interface UsageSnapshot {
   /** Epoch ms when these numbers were read. */
   fetchedAt: number;
   stale?: boolean;
-  error?: 'no-credentials' | 'expired' | 'http' | 'parse';
+  error?: 'no-credentials' | 'expired' | 'token-stale' | 'http' | 'parse';
   /** Who the profile's config dir says is signed in
    *  (`oauthAccount.emailAddress` from its `.claude.json`). Identity, not
    *  credential — shown in the view on purpose, so a row whose usage cannot be
@@ -671,17 +687,44 @@ export const COMMANDS = {
    *  entirely different verb (open a project's DIRECTORY in a new VS Code
    *  window) and which a closed project cannot be reached from either. */
   reopenProject: 'lineage.reopenProject',
-  /** A project filed UNDER this one. The same create flow as `newProject`,
-   *  with the parent pre-answered — which is the whole difference between
-   *  "make a project and then go and find where it belongs" and the gesture
-   *  people actually make, which is "this repo has an api and a web and I want
-   *  them under it". */
+  /**
+   * ADD A SUBPROJECT: one more directory on this project.
+   *
+   * A subproject is not a record any more. It is a DIRECTORY the project lists,
+   * and the row exists because the project has more than one — so the whole of
+   * this verb is a folder dialog, and the second directory is what splits the
+   * project's sessions into two rows. See projects.buildSubprojects.
+   *
+   * What it replaced was a second `newProject` with the parent pre-answered,
+   * which made a subproject a full project in every respect: its own name, its
+   * own provider, its own account, its own workspace, its own settings menu. All
+   * of that had to be decided for something whose entire job was sorting rows,
+   * and it was the reason a project's context menu had fourteen entries.
+   *
+   * It also merged `lineage.addProjectDirectory`, which did exactly this and was
+   * a separate entry in the same menu. Nothing may re-use that string.
+   */
   newSubproject: 'lineage.newSubproject',
-  /** Re-file a project: pick a new parent, or Top Level. The keyboard (and
-   *  palette) half of dragging a project row onto another one — and the only
-   *  half a closed project or a collapsed parent can be reached through. */
-  moveProject: 'lineage.moveProject',
+  /** Take a directory back OFF a project. The other half of Add Subproject, and
+   *  the reason it is safe: it removes a row, never a directory on disk. Drops
+   *  to no subproject rows at all once one directory is left, which is the
+   *  layout a single-directory project has always had. */
+  removeSubproject: 'lineage.removeSubproject',
+  /** Rename a NAMED subproject. Only on a lane — an implicit directory row has
+   *  no name of its own to change (its label is the directory's). */
+  renameSubproject: 'lineage.renameSubproject',
+  /** REMOVED — `lineage.moveProject`, "Move Project…". Re-filed a project under
+   *  another one. Nesting projects inside projects is retired: a subproject is a
+   *  directory now (see `newSubproject`), so there is no parent to pick. The id
+   *  is recorded here, not resurrected: nothing may re-use the string. */
   newSessionInProject: 'lineage.newSessionInProject',
+  /** A session in one specific DIRECTORY of a project — what a subproject row's
+   *  `+` and its first menu entry run. Its own verb rather than
+   *  `newSessionInProject` with an extra argument because that one ASKS which
+   *  directory when a project has several, and the whole point of a subproject
+   *  row is that the answer is already on screen. Not in the palette: the
+   *  argument is a directory only the rendered row knows. */
+  newSessionInSubproject: 'lineage.newSessionInSubproject',
   /** A session in one specific git WORKTREE of a project. What the branch
    *  chips run. Not offered in the palette: its argument is a directory that
    *  only the rendered chip row knows, and a palette entry would have to open a
@@ -742,7 +785,10 @@ export const COMMANDS = {
    *  a session has a row to click and a chat does not, so without this list a
    *  chat you closed is a conversation you can only find by id. */
   chatHistory: 'lineage.chatHistory',
-  addProjectDirectory: 'lineage.addProjectDirectory',
+  /** REMOVED — `lineage.addProjectDirectory`, "Add Directory to Project…".
+   *  Adding a directory IS adding a subproject now, and two menu entries doing
+   *  one thing was half the reason the project menu needed trimming. Folded into
+   *  `newSubproject`; nothing may re-use the string. */
   projectFromFolder: 'lineage.projectFromFolder',
   hideFolder: 'lineage.hideFolder',
   showHidden: 'lineage.showHidden',
@@ -773,6 +819,11 @@ export const COMMANDS = {
    *  never again — which is exactly why it is a verb the user runs rather than
    *  something the extension does to their window on activation. */
   followInExplorer: 'lineage.followInExplorer',
+  /** Root the Explorer at ONE of the active project's directories, under
+   *  `directory` scope. The click target on the Project view's directory rows:
+   *  the tree normally follows the session you are working in, and this is how
+   *  you send it somewhere else without starting a session there first. */
+  showDirectoryInExplorer: 'lineage.showDirectoryInExplorer',
   /** Leave workspace mode: reopen the active project's main directory as a
    *  plain folder. Also one reload, and the door back out. */
   stopFollowingInExplorer: 'lineage.stopFollowingInExplorer',
@@ -877,6 +928,27 @@ export const CONFIG_KEYS = {
   /** Show a session's token count left of its age. Off by default: it is a
    *  second number on every row, and the row already carries an age and a dot. */
   showTokens: 'showTokens',
+  /**
+   * THE BRANCH BLOCK'S MASTER SWITCH, and it is OFF.
+   *
+   * Everything worktree-shaped hangs off this one boolean: the branch rows under
+   * a project, the per-branch colours on session names, the "Others" fold, the
+   * worktree verbs, the pull-request chip. Off, the sidebar is projects and
+   * sessions and nothing else — which is the tree Flock is published on.
+   *
+   * A SETTING rather than a deletion because the feature works: it reads real
+   * worktrees, it starts sessions in them, and its rules are covered by tests
+   * that still run. What it does not have is a place in a sidebar that has to
+   * stay readable at 250px, so it is parked at the one gate every surface
+   * already asks — `GroupingInput.branchRows` — and comes back by flipping this.
+   *
+   * Note what it does NOT gate: which project a session in a linked worktree
+   * belongs to. That is `matchProject`'s worktree-derived membership, and it is
+   * the reason a session started in `app-feat-x` files under `app` instead of
+   * falling out to a folder row. Turning the branch ROWS off must not move
+   * anybody's sessions.
+   */
+  gitBranches: 'git.branches',
   /** Override the branch-chip palette. Empty = the built-in muted one. */
   branchColors: 'branchColors',
   /** Nest a project's sessions UNDER the branch they are running on, instead
@@ -896,6 +968,47 @@ export const CONFIG_KEYS = {
    *  files and local processes; turning this on has the extension run `gh pr
    *  list`, which talks to GitHub as the user. See src/pullRequests.ts. */
   gitPullRequests: 'git.pullRequests',
+  /**
+   * PREVIEW: branches belong to a DIRECTORY, and the fold lists the whole
+   * repository.
+   *
+   * Two changes at once, because they are one idea. A project's directories are
+   * its subprojects, so a directory that happens to be a git repository is the row
+   * a branch belongs under — not the project, which may span three repositories
+   * and cannot say which `main` is which. And once a branch row is anchored on a
+   * repository rather than on a union, listing every `refs/heads/` entry becomes
+   * affordable: the fold is shut by default, so a repository with a hundred and
+   * eighty branches costs ONE row until asked for.
+   *
+   * A preview rather than a default because it changes where every branch row in
+   * the tree sits, and because the fold's promotion policy — the directory's own
+   * checkout and anything with a session on it, everything else folded — is the
+   * kind of judgement worth using for a week before it becomes the only option.
+   * Off, the tree is byte-identical to the one that shipped.
+   *
+   * Draws in the INLINE sidebar (`lineage.viewStyle: inline`, the default). The
+   * native tree keeps the rows it has today — a split project's directories and
+   * their sessions, with no branch block — which is what it already drew, so
+   * nothing there regresses and nothing is half-rendered.
+   */
+  previewDirectoryModel: 'preview.directoryModel',
+  /**
+   * PREVIEW: a fabricated project, to look at the shape without a repository.
+   *
+   * Its own switch rather than a mode of the one above, because the two answer
+   * different questions. `previewDirectoryModel` asks "is this right for MY
+   * monorepo", which needs real directories and real branches; this asks "is this
+   * layout right at all", which is easier to judge on a project engineered to have
+   * three directories, two repositories and a branch in every state the rows can
+   * draw. Neither implies the other and both can be on.
+   *
+   * Nothing it shows is real: every id is prefixed and refuses every verb, no
+   * directory on it exists, and it is built from a constant rather than from the
+   * store — so it cannot be renamed into a real project, cannot be written to
+   * `state.json`, and disappears completely when the switch goes off. See
+   * src/demoProject.ts.
+   */
+  previewDemoProject: 'preview.demoProject',
   staleAfterHours: 'staleAfterHours',
   busyStaleMinutes: 'busyStaleMinutes',
   // Notifications
@@ -907,6 +1020,11 @@ export const CONFIG_KEYS = {
   workspacesAutoSwitch: 'workspaces.autoSwitch',
   // The Explorer follows the project
   explorerFollowProject: 'explorer.followProject',
+  /** How much of the project the Explorer shows: `directory` (the one you are
+   *  working in, the default) or `project` (every connected directory as its own
+   *  root). Read fresh on every sync — see ExplorerHost.scope — so flipping it
+   *  takes effect on the next switch rather than on the next reload. */
+  explorerScope: 'explorer.scope',
   /** Show the Accounts view. The VERBS stay registered when this is off —
    *  turning it off means "I do not want a second list in my sidebar", not
    *  "unregister ten commands so the palette reports them missing". The
@@ -1134,6 +1252,30 @@ export interface Worktree {
 }
 
 /**
+ * One LOCAL BRANCH of a repository — a `refs/heads/` entry, checked out or not.
+ *
+ * The other half of {@link Worktree}, and a separate type because it answers a
+ * different question. `git worktree list` says which branches have a DIRECTORY;
+ * this says which branches EXIST. A repository with two checkouts and a hundred
+ * and eighty branches produces two Worktrees and a hundred and eighty of these,
+ * and the difference between the two lists is exactly what the branch fold holds.
+ *
+ * `committedAt` rather than a formatted age: the extension formats in one place
+ * (see formatBranchAge) and a row that carried git's own relative date would be
+ * a second opinion about what "2 days ago" means. 0 means the field could not be
+ * read, which sorts last rather than sorting as 1970.
+ */
+export interface LocalBranch {
+  /** Short name — `refs/heads/` stripped, so `feat/x` rather than the full ref. */
+  name: string;
+  /** Unix seconds of the branch tip's commit date, or 0 when unreadable. The
+   *  recency sort, and the one fact that makes a long list navigable. */
+  committedAt: number;
+  /** The commit the branch points at. Carried for the hover. */
+  head: string;
+}
+
+/**
  * What one checkout can say about itself beyond its name: how far it has
  * diverged from its upstream, and whether there is work in it that no commit
  * holds yet.
@@ -1227,8 +1369,19 @@ export interface PullRequest {
 export interface BranchInfo {
   /** Short branch name, or '(detached)' for a checkout with no branch. */
   name: string;
-  /** The worktree directory this branch is checked out in — where a session
-   *  started from this chip will run. */
+  /**
+   * The worktree directory this branch is checked out in — where a session
+   * started from this chip will run.
+   *
+   * '' MEANS THERE IS NO CHECKOUT: a branch that exists as a ref and nowhere on
+   * disk (see LocalBranch), which is most of a real repository's branches. The
+   * empty path is the flag rather than a `checkedOut` boolean beside it, because
+   * every verb on a branch row already keys off this field — you cannot start a
+   * session in a directory that does not exist, and `isCheckedOut` /
+   * `isExistingWorktree` in src/worktrees.ts both compare it — so a second field
+   * would be a fact two places could disagree about. A row with no dir offers
+   * **New Worktree…** instead of a `+`.
+   */
   dir: string;
   /** Index into the shared branch palette. */
   colorIndex: number;
@@ -1240,6 +1393,17 @@ export interface BranchInfo {
    *  the project's curation lists and the default policy — never stored on the
    *  branch, which is a fact about git, not about the user. */
   shown: boolean;
+  /**
+   * Unix seconds of the branch tip's commit, from LocalBranch.committedAt, or
+   * absent when it was never read.
+   *
+   * Only the fold has any use for it, and it is the reason the fold is navigable:
+   * a hundred and eighty branches in alphabetical order is a wall, and the same
+   * list newest-first is a history. Absent rather than 0 so a row built by a
+   * caller that predates branch enumeration reserves no width for an age it
+   * cannot state — the same rule `sync` follows.
+   */
+  lastCommitAt?: number;
 }
 
 /** A project row: the top level of the tree once any project exists. */
@@ -1264,22 +1428,173 @@ export interface ProjectGroupNode {
   /** The user has folded this project's branch block shut. */
   branchesCollapsed?: boolean;
   /**
-   * SUBPROJECTS. Where this row sits in the project tree.
+   * SUBPROJECTS: this project's directories, one row each, WITH the sessions
+   * running in each of them.
    *
-   * All three are OPTIONAL so that a node built by a caller that predates
-   * nesting is still a valid node: every reader treats absent as "top level, no
-   * children", which is exactly the tree before nesting existed.
+   * Empty for a project with one directory, which is the ordinary case and the
+   * layout the tree has always had — see projects.buildSubprojects for why the
+   * threshold is two. Non-empty means `rootIds` has been split across these
+   * entries and the project row draws no sessions of its own.
    *
-   * `depth` is the RESOLVED depth (cycles broken, unknown parents re-rooted, cap
-   * applied), not a count of `parentId` hops through the raw records: the
-   * renderers indent by it and must never be handed a number a broken record
-   * could make up.
+   * OPTIONAL so a node built by a caller that predates this is still a valid
+   * node: absent reads as "no subprojects", i.e. sessions directly under the
+   * project.
+   */
+  subprojects?: SubprojectNode[];
+  /**
+   * Where this row sits in the project tree — RETIRED but still read.
+   *
+   * Nesting a project record under another one is gone: v6 folds every such
+   * child into its ancestor's directory list (see STATE_SCHEMA_VERSION). These
+   * three fields stay because the tree builder stays, and the tree builder stays
+   * because `state.json` is merged across windows and hand-editable: a record
+   * carrying a `parentId` an older build wrote has to render as SOMETHING, and
+   * "indented under its parent until the next activation migrates it" is a
+   * better answer than a row nobody draws.
+   *
+   * Nothing creates them any more, so on a migrated store every project is
+   * `depth: 0` with no children — which is exactly the flat list the renderers
+   * treat as the default.
    */
   parentProjectId?: string | null;
   depth?: number;
   /** Child project ids, in display order (name-sorted). */
   childProjectIds?: string[];
 }
+/**
+ * One DIRECTORY of a project, as a row.
+ *
+ * The whole of what a subproject is, after v0.1.1: a project is scoped to one
+ * directory, adding a second splits it into two of these, and each one takes the
+ * sessions running under its own directory. There is no record behind it, no
+ * name to invent, no provider, no account, no workspace and no settings menu —
+ * which is the point. It sorts rows and nothing else.
+ *
+ * `dirKey` rather than `dir` as the identity: the row key, the collapse state and
+ * every verb round-trip through it, and two spellings of one directory
+ * (`/Code/api` and `/code/api` on a case-insensitive filesystem) must not become
+ * two rows. `dir` is what gets shown and what a session is started in.
+ */
+export interface SubprojectNode {
+  type: 'subproject';
+  projectId: string;
+  /**
+   * IDENTITY. The SubprojectRecord.id for a named lane, or `dir:<dirKey>` for an
+   * implicit one.
+   *
+   * The row key, the collapse key and every verb's target round-trip through this
+   * rather than through `dirKey`, because two lanes may name the SAME directory
+   * and a shared key would make one row's click land on the other. The implicit
+   * form is prefixed so that it can never collide with a uuid, and so a reader can
+   * tell the two kinds apart without consulting the store.
+   */
+  id: string;
+  /** A user-chosen name, or '' for an implicit row — which takes the directory's
+   *  basename as its label instead. What `implicit` is really asking. */
+  name: string;
+  /** No record behind it: this row IS a directory of the project, drawn because
+   *  the project has more than one and nobody has named a lane in it. Every
+   *  project before v7 draws only these, which is why the tree is unchanged. */
+  implicit: boolean;
+  /** The directory, in its canonical display spelling. */
+  dir: string;
+  /** pathKey(dir). NO LONGER IDENTITY — see `id`. Still carried because the
+   *  branch block is the branches of the repository at this path, and because
+   *  membership for an unstamped session is decided by it. */
+  dirKey: string;
+  /** What the row draws: the lane's `name`, or for an implicit row the
+   *  directory's basename — disambiguated when two of the project's directories
+   *  share one (`api/src` and `web/src` both being "src" is ordinary in a
+   *  monorepo). */
+  label: string;
+  /** True for the row standing for the project's MAIN directory — its `rootDir`,
+   *  the one a project-level verb defaults to. Only ever set on an IMPLICIT row:
+   *  a named lane is removable whatever directory it names, because removing it
+   *  removes a name rather than the project's address. */
+  main: boolean;
+  /** Visible root sessions whose cwd sits under this directory and no deeper
+   *  directory of the same project — including the ones running in a checkout of
+   *  the repository at it, which is what leaves no session for a project-wide
+   *  row to hold. See projects.buildSubprojects. */
+  rootIds: string[];
+  /**
+   * The branches of the repository AT this directory, promoted ones first, in
+   * display order — the whole list, not only the checkouts.
+   *
+   * THE DIRECTORY IS WHERE BRANCHES BELONG. A project spanning three directories
+   * can span three repositories, so "the project's branches" was a union that
+   * could not say which repository a row came from, and a `main` from two of them
+   * was two rows with one name. A directory is exactly one repository (or none),
+   * which makes this list unambiguous and the row it hangs under the answer to
+   * "of what?".
+   *
+   * Empty for a directory that is not in a repository, for one whose probe has
+   * not landed, and for every project while `lineage.preview.directoryModel` is
+   * off — all three render as a directory row with no branches under it, which is
+   * the layout that shipped before this existed.
+   *
+   * OPTIONAL so a node built by a caller that predates it is still a valid node.
+   */
+  branches?: BranchInfo[];
+}
+/**
+ * A NAMED SUBPROJECT — a lane of work inside one directory.
+ *
+ * v7, and the one thing the directory-only model could not express: two pieces of
+ * work in the SAME folder. A monorepo at `~/magma-cs-mcp` is one directory, and
+ * "the server rewrite" and "the CS tooling" are two bodies of work in it — so
+ * subprojects cannot be a function of the directory set, because there is only one
+ * directory and there are two of them.
+ *
+ * A RECORD OF ITS OWN, keyed by id, rather than an array on ProjectRecord. That is
+ * not a preference: `projects` merges newest-WINS per record, so a list written by
+ * two windows a second apart loses one of the entries for good — the argument
+ * ProjectRecord.parentId already makes at length about why children are never
+ * stored as an array. One record per lane means one writer per lane and a merge
+ * that cannot drop anybody's.
+ *
+ * DELIBERATELY SMALL, and worth saying because the v6 migration removed something
+ * that looked like this. What it removed was a subproject that was a whole
+ * PROJECT — its own provider, its own AI account, its own saved workspace, its own
+ * routing, nested to any depth. This is a name, a directory and a parent. It cannot
+ * nest, it has no provider, it has no account, and there is nothing to configure on
+ * it. The name exists because nothing else can tell two lanes in one folder apart;
+ * everything else stayed gone.
+ */
+export interface SubprojectRecord {
+  /** uuid, minted at creation. The row key, the collapse key and the stamp on
+   *  every session started here — see EditorialRecord.subprojectId. */
+  id: string;
+  /** The project this lane belongs to. A pointer UP, for the same reason
+   *  ProjectRecord.parentId is one. A lane whose project no longer exists is
+   *  swept, not re-rooted: a lane means nothing without the project it names. */
+  projectId: string;
+  /** User-chosen, and the whole reason this record exists. */
+  name: string;
+  /**
+   * The one directory this lane runs in.
+   *
+   * Not optional and not a list. A lane is where work happens, so it has an
+   * address — the `+` on its row has to start a session somewhere, and its branch
+   * block is the branches of the repository at exactly this path. Several lanes
+   * may name the SAME directory, which is the entire point.
+   *
+   * It does not have to be one of the project's own `dirs`, and is not checked
+   * against them here: the project's directory list decides which sessions the
+   * project CLAIMS, and re-pointing a project would otherwise silently invalidate
+   * its lanes. A lane on a directory the project no longer covers still draws, and
+   * still starts sessions where it says.
+   */
+  dir: string;
+  /** TOMBSTONE, exactly as ProjectRecord.deleted is and for the same reason: a
+   *  dropped key is indistinguishable from "the other window has not heard of it
+   *  yet", and any window still holding the lane re-adds it on its next write. */
+  deleted?: boolean;
+  createdAt: string;
+  /** ISO; record-level merge key (newest wins). */
+  updatedAt: string;
+}
+
 export interface SessionRef {
   type: 'session';
   id: string;
@@ -1320,6 +1635,7 @@ export interface BranchTreeNode {
 export type TreeNode =
   | GroupNode
   | ProjectGroupNode
+  | SubprojectNode
   | BranchTreeNode
   | SessionRef;
 
@@ -1373,16 +1689,48 @@ export type ContextToken =
    *  menu entry that should not have been drawn. Absent for everybody with
    *  `lineage.git.pullRequests` off, which is everybody by default. */
   | 'pullRequest'
-  /** A project row that is filed under another project. A SECOND token on the
-   *  row, never alone, so `viewItem =~ /;project;/` keeps matching every
-   *  project row while a verb that only makes sense on a nested one (Move to
-   *  Top Level) can single it out positively — the manifest never negates a
-   *  viewItem regex; see the visibility-pair note above. */
+  /**
+   * This branch row HAS A CHECKOUT — a directory on disk that a session could
+   * run in.
+   *
+   * A fourth token on a branch row, never alone, and the one that makes the
+   * branch fold safe to open. Under `lineage.preview.directoryModel` the fold
+   * lists every local branch of the repository, and most of them have no worktree
+   * at all: there is nowhere to start a session, nothing to reveal in Finder, no
+   * path to copy and nothing for `git worktree remove` to take away. Every verb
+   * that needs a directory matches on this token, so those entries are simply
+   * absent on a branch that is only a ref — rather than drawn and then failing
+   * with git's error about a path the user never typed.
+   *
+   * Present on every branch row when the preview is off, because a branch row
+   * could only come from a worktree then.
+   */
+  | 'checkout'
+  /** A NAMED subproject — a lane the user made and can rename, as opposed to an
+   *  implicit row standing for one of the project's directories. A second token on
+   *  a subproject row, never alone, and positive rather than negative for the
+   *  reason branchTokens gives: Rename Subproject and Remove Subproject apply to a
+   *  lane, and a directory row is governed by the project's directory verbs
+   *  instead. */
+  | 'named'
+  /**
+   * ONE DIRECTORY of a multi-directory project, on its own row.
+   *
+   * Distinct from 'project' for exactly the reason 'branch' is: the two rows
+   * carry the same projectId, so a shared token would put the project's whole
+   * menu — rename, close, delete, settings — on a row where none of it applies.
+   * A subproject has two verbs and both are about the directory.
+   *
+   * REPURPOSED. Until v0.1.1 this was a second token on a project row that was
+   * filed under another project. Nesting records is retired (see
+   * COMMANDS.newSubproject), so the token now names the thing the word means to
+   * a user: a directory inside a project.
+   */
   | 'subproject'
-  /** A project row with children under it. Its own token because the two
-   *  facts are independent: a middle project is both, a leaf under a root is
-   *  only `subproject`, and a root with children is only this. */
-  | 'parentProject'
+  /** RETIRED with record nesting: 'parentProject', a project row with children
+   *  under it. No row emits it and no `when` clause reads it. Left out of the
+   *  union deliberately rather than kept as a dead member — an unused token is
+   *  a `when` clause somebody will write against nothing. */
   /** A row in the Accounts view, and — as a SECOND token on the same row — the
    *  one of them the default routing names. Two tokens rather than two values
    *  of one, so that `viewItem =~ /;account;/` keeps matching every row while a
@@ -1445,6 +1793,35 @@ export interface EditorialRecord {
    *  existed, or launched on the default login" — both of which resolve to an
    *  empty env, which is exactly what those sessions already ran with. */
   profileId?: string;
+  /**
+   * THE LANE STAMP: the SubprojectRecord.id this conversation was started in,
+   * written once at launch and never rewritten.
+   *
+   * Every other kind of membership in Flock is DERIVED from the session's working
+   * directory, and that is still true of which project a session belongs to. It
+   * cannot be true of which named subproject: two lanes may name the same
+   * directory, so the cwd of a session in one is byte-identical to the cwd of a
+   * session in the other. Something has to record the answer, and the only honest
+   * moment to record it is when the user chose — the `+` they clicked.
+   *
+   * Modelled on `profileId` above, deliberately, down to the inheritance:
+   *
+   *   - written by the launch path, from the row the launch came from;
+   *   - a FORK carries its parent's stamp (a fork of the server rewrite is the
+   *     server rewrite);
+   *   - a new GENERATION of a chain carries the chain's, because a `/clear` is the
+   *     same conversation under a new id;
+   *   - never re-decided by anything else. Re-pointing a lane's directory, or
+   *     adding a lane, does not move an existing session.
+   *
+   * Absent means "not started from a lane" — every session that predates this
+   * field, and every one started by hand in a terminal. Those are placed the way
+   * they always were: by directory, into that directory's default lane. A stamp
+   * naming a lane that no longer exists is treated as absent for the same reason
+   * a dangling `profileId` is: the row has to draw somewhere, and derived is the
+   * answer that cannot be wrong.
+   */
+  subprojectId?: string;
   // ---- notifications ------------------------------------------------------
   /** ISO. When the session last FINISHED a turn (busy → waiting/idle observed
    *  on the roster, or a Stop hook event). The "there is something new here"
@@ -1592,6 +1969,13 @@ export interface LineageState {
   windows: Record<string, WindowRecord>;
   /** v2. Keyed by project id. */
   projects: Record<string, ProjectRecord>;
+  /** v7. Keyed by subproject id — the NAMED lanes. See SubprojectRecord.
+   *
+   *  Optional for the reason `accounts` is: every literal that builds a
+   *  LineageState by hand predates it and would stop compiling otherwise.
+   *  `migrateState` materialises the map on every load, so nothing at runtime sees
+   *  it missing. */
+  subprojects?: Record<string, SubprojectRecord>;
   /** v2. Keyed by normalized directory path. */
   hiddenFolders: Record<string, HiddenFolder>;
   /** v3. Keyed by chain root id. */
@@ -1700,6 +2084,20 @@ export interface LaunchOptions {
    *  from it: an account whose env is `{}` is still a specific account, and
    *  the pin has to survive that. */
   profileId?: string;
+  /**
+   * The SubprojectRecord.id this launch is starting in, recorded on the session's
+   * editorial record so it stays in that lane (see
+   * EditorialRecord.subprojectId).
+   *
+   * Set only by a launch that came FROM a lane's row — its `+`, or a fork of a
+   * session already in one. Everything else leaves it absent, and those sessions
+   * are placed by directory exactly as they always have been.
+   *
+   * Carried alongside `cwd` rather than derived from it, because it cannot be
+   * derived from it: two lanes may name the same directory, which is the whole
+   * reason the stamp exists.
+   */
+  subprojectId?: string;
   /** Detach tier (src/tmux.ts). Wrap this launch in the private tmux server
    *  under THIS session name instead of the one derived from `sessionId`.
    *  The restore/resume paths pass the name recorded at park time, so the
@@ -1745,8 +2143,15 @@ export interface TreeDeps {
    *  return type is left loose here because types.ts may not import a module
    *  that imports it back. */
   hostOf?(sessionId: string): 'here' | 'flock' | 'foreign' | 'none';
-  /** Persist a drag-reparent (parentSource 'reparent'); null = detach. */
-  reparent(childId: string, newParentId: string | null): Promise<void>;
+  /** RETIRED: `reparent`. Dropping a session onto another re-parented it, and
+   *  dropping one onto a folder row detached it to a root — so a fork could be
+   *  dragged out of the tree it branched from and an unrelated conversation
+   *  dragged into one. A tree that states ancestry must not have an edge in it
+   *  that no transcript backs, and nothing on screen told the two apart. Drag
+   *  now means one thing (file this top-level session under that project) and
+   *  neither view resolves the other drops. `ParentSource` keeps its 'reparent'
+   *  member: state files written before this still carry those edges, and they
+   *  go on resolving exactly as they did. */
   groupByFolder(): boolean;
   // ---- projects, visibility and selection -----------------------------
   /** EVERY project, hidden ones included, name-sorted. `computeGrouping` does
@@ -1823,18 +2228,50 @@ export interface TreeDeps {
    *  page (see sanitizeBranchColor — the value lands in an inline style block).
    *  Absent or empty means the built-in muted palette. */
   branchColors?(): readonly string[];
-  // ---- branch grouping and project nesting ----------------------------
+  // ---- branch grouping ------------------------------------------------
+  /** `lineage.git.branches` — the branch block's master switch, and the ONE
+   *  gate every branch-shaped row passes through. Absent reads as OFF, which is
+   *  the setting's default and the tree Flock ships: no branch rows, no per-branch
+   *  colours, no fold, no "Others". See CONFIG_KEYS.gitBranches. */
+  branchRows?(): boolean;
   /** `lineage.groupSessionsByBranch`: nest a project's sessions under the
    *  branch row for the worktree they run in, instead of listing branches and
-   *  sessions as two flat blocks. Optional for the same reason as the three
+   *  sessions as two flat blocks. Moot while `branchRows` is off — there are no
+   *  branch rows to nest under. Optional for the same reason as the three
    *  above — absent means off, which is also the setting's default. */
   groupSessionsByBranch?(): boolean;
-  /** Persist a project's new parent (null = move to top level). The drop
-   *  half of dragging one project row onto another; `reparent` above is the
-   *  SESSION verb and the two must never be confused, because a project id and
-   *  a session id are both bare uuids. Optional so an older wiring (and the
-   *  unit doubles) simply refuses the gesture rather than throwing. */
-  reparentProject?(projectId: string, newParentId: string | null): Promise<void>;
+  // ---- the directory model (preview) ----------------------------------
+  /** Every LOCAL branch of the repository at `dir` — the ones with no checkout
+   *  included, which is most of them. From the cache in src/branchList.ts and
+   *  synchronous from it, exactly like `worktreesOf`: a render must never wait on
+   *  a subprocess. Absent, or an empty answer, means a directory row draws no
+   *  branch fold, which is how every non-git directory already draws. */
+  localBranchesOf?(dir: string): readonly LocalBranch[];
+  /** Every NAMED subproject, from the store. v7 — see SubprojectRecord. Absent or
+   *  empty means no project has lanes, which is every store before v7 and every
+   *  project that has not used them: the rows are then the directory rows this
+   *  tree has always drawn. */
+  subprojects?(): readonly SubprojectRecord[];
+  /** The lane a session was started in — EditorialRecord.subprojectId. A GROUPING
+   *  input rather than a rendering one: which row a session belongs to has to be
+   *  the same answer in both view styles. Absent means every session is placed by
+   *  directory, exactly as before lanes existed. */
+  stampOf?(sessionId: string): string | undefined;
+  /** `lineage.preview.directoryModel` — hang the branch block off DIRECTORY rows
+   *  rather than off the project, and list the whole repository rather than its
+   *  checkouts. Absent reads as OFF, which is the setting's default and the tree
+   *  Flock ships. Moot while `branchRows` is off: there are no branch rows to
+   *  move. */
+  directoryModel?(): boolean;
+  /** `lineage.preview.demoProject` — append the fabricated project (see
+   *  src/demoProject.ts) to the grouping. Absent reads as OFF. Independent of
+   *  `directoryModel`: the demo carries its own directory rows and branch lists,
+   *  so it draws the new layout whether or not real projects do. */
+  demoProject?(): boolean;
+  /** RETIRED: `reparentProject`. Dragging one project row onto another filed it
+   *  as a subproject. Nesting records is gone (see COMMANDS.newSubproject), so a
+   *  project row no longer drags at all and the drop handlers refuse the
+   *  gesture outright rather than resolving it to nothing. */
 }
 
 export interface DecorationDeps {
@@ -2228,6 +2665,27 @@ export interface CommandDeps {
    *  the two verbs that KNOW the answer changed, so the new row appears at once
    *  instead of at the end of a TTL. */
   worktreesChanged?(dir: string): void;
+  // ---- named subprojects (v7) ------------------------------------------
+  /** Every lane, live, from the store. For the name-collision check and for the
+   *  "is this the last one" line in the removal dialog. */
+  allSubprojects?(): readonly SubprojectRecord[];
+  /** One lane by id, re-resolved from the store rather than trusted from a row —
+   *  the same discipline every other row-scoped verb here follows. */
+  getSubproject?(id: string): SubprojectRecord | undefined;
+  /** Create or patch a lane. `name` is the only field a verb ever changes after
+   *  creation. */
+  upsertSubproject?(
+    id: string,
+    patch: Partial<SubprojectRecord>,
+  ): Promise<void>;
+  /** Tombstone a lane. Leaves every session's stamp alone — see
+   *  StateStore.deleteSubproject. */
+  deleteSubproject?(id: string): Promise<void>;
+  /** Re-file one session into a lane, or out of every lane (`null`). */
+  moveSessionSubproject?(
+    sessionId: string,
+    subprojectId: string | null,
+  ): Promise<void>;
   /** The pull request on `branch`, from the same cache the rows render from.
    *  undefined whenever `lineage.git.pullRequests` is off — so the verb refuses,
    *  which is correct: with the setting off there is no request to know about. */
@@ -2312,4 +2770,8 @@ export interface CommandDeps {
   /** Leave workspace mode: reopen the active project's main directory as a
    *  plain folder. Also one reload. */
   stopFollowingInExplorer?(): Promise<void>;
+  /** Root the Explorer at `dir` and hold it there until the user's attention
+   *  moves to a session in a different directory. No reload — it is the same
+   *  in-place splice a project switch does. */
+  showDirectoryInExplorer?(dir: string): Promise<void>;
 }

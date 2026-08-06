@@ -117,6 +117,27 @@ describe('forkParentFromTranscript: bounds and guards', () => {
     );
   });
 
+  it('skips the deep scan on an oversized transcript; the head scan still runs', () => {
+    const dir = tempDir('lineage-huge-');
+    const file = path.join(dir, 'huge.jsonl');
+    fs.writeFileSync(
+      file,
+      `${JSON.stringify({
+        type: 'attachment',
+        sessionId: '0f00000a-0000-4000-8000-00000000000a',
+        forkedFrom: { sessionId: NF_PARENT, messageUuid: 'm1' },
+      })}\n`,
+    );
+    // Past the deep scan's 16 MB cap. truncate extends with zeros, so this stays
+    // a sparse file — no 17 MB of real IO in the test.
+    fs.truncateSync(file, 17 * 1024 * 1024);
+
+    expect(forkParentFromTranscript('child', { hint: file })).toBe(NF_PARENT);
+    expect(
+      forkParentFromTranscript('child', { hint: file, deep: true }),
+    ).toBeNull();
+  });
+
   it('never returns the session itself as its own parent', () => {
     const dir = tempDir('lineage-self-');
     const file = path.join(dir, 'self.jsonl');

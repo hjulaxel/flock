@@ -10,7 +10,8 @@
 // Reads are BOUNDED: a transcript is an append-only JSONL that can reach tens
 // of megabytes, and this runs on every poll tick. The head scan reads at most
 // HEAD_SCAN_MAX_BYTES from the front; only the deep scan (rare, double-gated
-// by the resolver) reads the whole file. Every line is parsed inside its own
+// by the resolver) reads the whole file, and only up to DEEP_SCAN_MAX_BYTES —
+// past that it skips rather than read. Every line is parsed inside its own
 // try/catch because the last line of a live transcript is routinely a partial
 // write, and fixtures like malformed.jsonl prove garbage lines occur.
 
@@ -18,12 +19,19 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { logError } from './log';
+import { log, logError } from './log';
 import {
   FORK_HEAD_LINES,
   HEAD_SCAN_MAX_BYTES,
   type TranscriptHeaderMeta,
 } from './types';
+
+/** The deep scan reads the whole file, and a deep scan that yields null repeats
+ *  on the resolver's negative TTL for as long as the forking process lives, so
+ *  the file it re-reads keeps growing. Above this cap we skip the scan rather
+ *  than truncate the read: rule (3) needs the LAST snake/camel mismatch, so a
+ *  truncated read could name an ancestor instead of the parent. */
+const DEEP_SCAN_MAX_BYTES = 16 * 1024 * 1024;
 
 export interface TranscriptLocateOptions {
   hint?: string;        // e.g. a hook payload's transcript_path
@@ -197,6 +205,20 @@ export function forkParentFromTranscript(
   const deep = opts?.deep === true;
   const tp = transcriptFile(sessionId, opts);
   if (tp === null) return null;
+
+  if (deep) {
+    let size: number;
+    try {
+      size = fs.statSync(tp).size;
+    } catch (err) {
+      logError(`transcript: unreadable (${tp})`, err);
+      return null;
+    }
+    if (size > DEEP_SCAN_MAX_BYTES) {
+      log('transcript: deep scan skipped, too large', tp, size);
+      return null; // a lost edge, which this module already treats as acceptable
+    }
+  }
 
   let text: string;
   try {

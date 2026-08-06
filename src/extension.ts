@@ -117,6 +117,7 @@ import {
   defaultDaemonRosterPath,
   describeForkEdge,
 } from './daemon';
+import { BranchListCache } from './branchList';
 import { WorktreeCache } from './git';
 import { BranchStatusCache } from './gitBranches';
 import { PullRequestCache, openPullRequestCreatePage } from './pullRequests';
@@ -139,6 +140,7 @@ import {
   withAnchorName,
   workspaceFileJson,
 } from './explorer';
+import type { ExplorerScope } from './explorer';
 import { registerProjectView } from './projectview';
 import type { ProjectViewController } from './projectview';
 // Accounts. The pure halves (accounts.ts / routing.ts) are imported here
@@ -245,6 +247,15 @@ export async function activate(
   const terminalLocation = (): TerminalLocationPref => {
     const v = cfg().get<string>(CONFIG_KEYS.terminalLocation);
     return isTerminalLocationPref(v) ? v : 'editor';
+  };
+
+  /** How much of the project the Explorer shows. Defaults to `'directory'` —
+   *  ONE root, the one being worked in — which is the product default; the
+   *  explorer module itself defaults to `'project'` so a wiring without this
+   *  reader behaves as it did before the setting existed. */
+  const explorerScope = (): ExplorerScope => {
+    const v = cfg().get<string>(CONFIG_KEYS.explorerScope);
+    return v === 'project' || v === 'directory' ? v : 'directory';
   };
 
   // Detach tier (src/tmux.ts): wrap Flock-launched sessions in the private
@@ -1035,6 +1046,17 @@ export async function activate(
   context.subscriptions.push(branchStatus);
   context.subscriptions.push(branchStatus.onDidChange(() => refreshViews()));
 
+  // And which branches EXIST, checked out or not — the fold's contents under
+  // `lineage.preview.directoryModel`. A third cache for the reason there is a
+  // second: one spawn per repository, on the same 30s schedule as the worktree
+  // list it is read beside, so a directory's two answers land together and cost
+  // one repaint. Deliberately NOT gated on the preview setting: the probe is one
+  // `for-each-ref` per project directory and the alternative is a first paint
+  // with an empty fold every time somebody turns the switch on.
+  const branchList = new BranchListCache();
+  context.subscriptions.push(branchList);
+  context.subscriptions.push(branchList.onDidChange(() => refreshViews()));
+
   // PULL REQUESTS — the one thing in this extension that reaches the network, and
   // the only cache here with a gate in front of its refresh. Two conditions, ANDed,
   // and both are needed:
@@ -1566,16 +1588,10 @@ export async function activate(
     projectsWithUnseen,
     isBoundHere: (id) => registry.isBoundHere(id),
     hostOf: sessionHostOf,
-    reparent: async (childId, newParentId) => {
-      await store.upsert(childId, {
-        parentId: newParentId,
-        parentSource: 'reparent',
-      });
-      // Required when a record is later cleared; a live recorded edge already
-      // bypasses the resolution cache.
-      resolver.invalidate(childId);
-      if (haveRoster) await scheduleRebuild(lastEntries);
-    },
+    // `reparent` was here: a drag onto a session row wrote a hand-made parent
+    // edge, and a drag onto a folder row erased one. Retired — lineage is not
+    // something a gesture may state, see WebtreeDeps and webtree.onDrop. The
+    // store still READS the 'reparent' edges it wrote; nothing writes new ones.
     groupByFolder: () => boolCfg(CONFIG_KEYS.groupByFolder, true),
     projects: allProjects,
     hiddenFolders: () => store.getHiddenFolders().map((f) => f.path),
@@ -1593,29 +1609,35 @@ export async function activate(
     // that writes the CSS (sanitizeBranchColor).
     branchColors: () =>
       cfg().get<unknown[]>(CONFIG_KEYS.branchColors, [])?.map(String) ?? [],
+    // `lineage.git.branches` — the whole branch block, off by default. Read per
+    // render like every other setting here, so the rows appear and disappear on
+    // the next tick rather than on a window reload.
+    //
+    // Note that this does NOT gate `worktreesOf` above: the probe still runs, so
+    // a session in a linked checkout stays under the project that owns the
+    // repository. Hiding the rows must not move anybody's sessions.
+    branchRows: () => boolCfg(CONFIG_KEYS.gitBranches, false),
     // Read per render like every other setting here, so the layout flips
     // on the next tick rather than on a window reload.
     groupSessionsByBranch: () =>
       boolCfg(CONFIG_KEYS.groupSessionsByBranch, false),
-    // Dropping a project row onto another project row files it there;
-    // onto the background (or a folder row) it goes back to the top level. The
-    // store owns the cycle refusal — see StateStore.setProjectParent — and a
-    // refused move is silent here on purpose: the gesture is cheap, repeatable
-    // and its own feedback (the row does not move), where a modal for a drag
-    // that landed somewhere illegal is a dialog nobody asked for.
-    reparentProject: async (projectId, newParentId) => {
-      const moved = await store.setProjectParent(projectId, newParentId);
-      if (!moved) return;
-      log(
-        'project:',
-        store.getProject(projectId)?.name ?? projectId,
-        'filed under',
-        newParentId === null
-          ? '(top level)'
-          : (store.getProject(newParentId)?.name ?? newParentId),
-      );
-      refreshNow();
-    },
+    // THE DIRECTORY MODEL (preview). Two reads, both per render for the same
+    // reason as everything above: the whole value of shipping this as a switch is
+    // being able to flip it and look.
+    localBranchesOf: (dir) => branchList.get(dir),
+    directoryModel: () => boolCfg(CONFIG_KEYS.previewDirectoryModel, false),
+    demoProject: () => boolCfg(CONFIG_KEYS.previewDemoProject, false),
+    // NAMED SUBPROJECTS (v7) and the stamp that files a session into one. Not
+    // behind a setting: a lane is stored state the user created on purpose, and a
+    // switch that hid it would hide the rows their sessions are filed under. A
+    // store with no lanes — every store until somebody makes one — yields the
+    // directory rows this tree has always drawn.
+    subprojects: () => store.getSubprojects(),
+    stampOf: (id) => store.getSessionSubproject(id),
+    // `reparentProject` was here: dropping a project row onto another filed it
+    // there as a subproject. Retired with record nesting — a subproject is a
+    // directory now, so a project row no longer drags and neither view resolves
+    // the drop.
     providerFor,
     mediaPath,
     // Dropping a session onto a project row teaches the project the directory
@@ -1987,9 +2009,57 @@ export async function activate(
           new TextEncoder().encode(next),
         );
       },
+      scope: () => explorerScope(),
     },
     explorerAnchorPath,
   );
+
+  // WHICH DIRECTORY THE EXPLORER IS ROOTED AT, under `'directory'` scope.
+  //
+  // Normally nobody decides this: it is wherever the user's attention is. The
+  // active session has a cwd, `matchProject` says which of the project's
+  // directories claims that cwd (the same question the sidebar's subproject rows
+  // ask, so the two always agree), and that is the answer.
+  //
+  // The OVERRIDE is the exception, and it exists because attention is not the
+  // only way to mean a directory: clicking a row in the Project view means it
+  // too, and there may be no session in that directory to focus. It is held
+  // per window and in memory only — a reload lands back on the active session's
+  // directory, which is the honest default rather than a stale click.
+  let explorerDirOverride: string | null = null;
+
+  /** The cwd of a session, by the same cascade the auto-switch uses: the tip of
+   *  its chain first, since that is the row the user is actually looking at. */
+  const cwdOfSession = (sessionId: string): string | undefined => {
+    const tip = chainIndex.tipOf(sessionId);
+    return (
+      forest.nodes.get(tip)?.cwd ??
+      forest.nodes.get(sessionId)?.cwd ??
+      store.get(tip)?.cwd ??
+      store.get(sessionId)?.cwd
+    );
+  };
+
+  /** The project directory the active session sits in, or undefined when there
+   *  is no active session or it belongs to some other project. */
+  const activeSessionDir = (project: ProjectRecord | null): string | undefined => {
+    if (!project) return undefined;
+    try {
+      const sessionId = registry.activeSessionId();
+      if (!sessionId) return undefined;
+      const match = matchProject(allProjects(), cwdOfSession(sessionId));
+      if (!match || match.project.id !== project.id) return undefined;
+      return match.dir;
+    } catch (err) {
+      logError('extension.activeSessionDir', err);
+      return undefined;
+    }
+  };
+
+  /** What `ExplorerSync` should root the tree at. Undefined means "you decide",
+   *  which `desiredFolders` resolves to the project's main directory. */
+  const explorerDirFor = (project: ProjectRecord | null): string | undefined =>
+    explorerDirOverride ?? activeSessionDir(project);
 
   // ---------------------------------------------------------- 6b. accounts
   //
@@ -2284,7 +2354,11 @@ export async function activate(
     // care either way (see WorkspaceManagerDeps.syncExplorer).
     syncExplorer: async (project) => {
       if (!boolCfg(CONFIG_KEYS.explorerFollowProject, true)) return;
-      await explorerSync.sync(project);
+      // A switch is a new project, so a click made inside the old one no longer
+      // means anything — the tree lands on whatever the target's own attention
+      // says, which for a restore is the session it is about to focus.
+      explorerDirOverride = null;
+      await explorerSync.sync(project, explorerDirFor(project));
     },
     refresh: () => refreshNow(),
     suspendViews,
@@ -2435,6 +2509,15 @@ export async function activate(
       }
       return n;
     },
+    scope: () => explorerScope(),
+    // The header names the directories; this is what marks the one the folder
+    // tree below is actually rooted at. Same resolver the sync uses, so the
+    // `showing` mark cannot drift from what is on screen.
+    currentDir: () => {
+      const id = workspaceManager.activeProjectId();
+      const active = id ? store.getProject(id) : undefined;
+      return explorerDirFor(active ?? null);
+    },
     onDidChangeData: (listener) => onForestChanged.event(listener),
   });
   context.subscriptions.push(projectViewController);
@@ -2453,9 +2536,51 @@ export async function activate(
     const activeId = workspaceManager.activeProjectId();
     const active = activeId ? store.getProject(activeId) : undefined;
     if (active && boolCfg(CONFIG_KEYS.explorerFollowProject, true)) {
-      void explorerSync.sync(active);
+      void explorerSync.sync(active, explorerDirFor(active));
     }
   }
+
+  // THE TREE FOLLOWS ATTENTION, under `'directory'` scope. Focus a session in
+  // another of the project's directories and the Explorer re-roots there, which
+  // is the whole feature: no verb, no click, the file tree is wherever you are.
+  //
+  // Deliberately AFTER the auto-switch subscription above, so a focus change
+  // that crosses PROJECTS is handled by the switch (which syncs the Explorer
+  // itself, and clears the override) rather than raced by this. The
+  // `isSwitching` guard is what keeps the two from both firing: a switch
+  // focuses terminals as a side effect, and each of those echoes back here.
+  context.subscriptions.push(
+    registry.onDidChangeActive((sessionId) => {
+      try {
+        if (!sessionId || workspaceManager.isSwitching()) return;
+        if (!boolCfg(CONFIG_KEYS.explorerFollowProject, true)) return;
+        if (explorerScope() !== 'directory') return;
+        if (!explorerSync.anchored()) return;
+        const activeId = workspaceManager.activeProjectId();
+        const active = activeId ? store.getProject(activeId) : undefined;
+        if (!active) return;
+        const dir = activeSessionDir(active);
+        if (dir === undefined) return;
+        // Moving into a different directory RETIRES the override: the click
+        // meant "show me this one", and the user has since said where they are
+        // by going there. Moving back into the overridden directory leaves it
+        // set, which costs nothing — the two agree.
+        if (
+          explorerDirOverride !== null &&
+          pathKey(normalizeDir(explorerDirOverride)) !== pathKey(dir)
+        ) {
+          explorerDirOverride = null;
+        }
+        void explorerSync
+          .sync(active, explorerDirFor(active))
+          .then((outcome) => {
+            if (outcome === 'spliced') refreshExplorerHeader();
+          });
+      } catch (err) {
+        logError('extension.explorerFollowsFocus', err);
+      }
+    }),
+  );
 
   const commandDeps: AccountCommandDeps = {
     // The whole accounts surface, as ONE optional member: the verbs guard
@@ -2634,6 +2759,22 @@ export async function activate(
           }
         }
       }
+      // THE LANE STAMP, inherited when the launch did not name one. A FORK is a
+      // new session id with a parent rather than a member of the parent's chain
+      // (which `getSessionSubproject` already walks), so the inheritance has to
+      // happen here — and a fork of the server rewrite is the server rewrite. Same
+      // shape and same reason as the account backfill above: the one place every
+      // launch passes through, so no verb has to remember.
+      if (
+        launchOpts.subprojectId === undefined &&
+        typeof launchOpts.parentId === 'string' &&
+        launchOpts.parentId !== ''
+      ) {
+        const parentLane = store.getSessionSubproject(launchOpts.parentId);
+        if (parentLane !== undefined) {
+          launchOpts = { ...launchOpts, subprojectId: parentLane };
+        }
+      }
       const binding = await registry.launch(launchOpts);
       // A launch that never started must not leave an optimistic row standing
       // for the whole TTL: the terminal failed loudly, and a row for a session
@@ -2644,6 +2785,13 @@ export async function activate(
         // The record claimed "hidden, maybe running"; the tab now exists, so
         // the claim is settled — the same clear the workspace restore writes.
         void store.upsert(parkedAlias, { parked: false, tmux: null });
+      }
+      // Persisted only for a launch that actually STARTED, and only forward: the
+      // store keeps the first stamp a session ever gets (see
+      // setSessionSubproject), so a resume of a session already in a lane is a
+      // no-op rather than a re-file.
+      if (binding && launchOpts.subprojectId !== undefined) {
+        void store.setSessionSubproject(opts.sessionId, launchOpts.subprojectId);
       }
       return binding;
     },
@@ -2851,17 +2999,28 @@ export async function activate(
             output:
               'lineage.git.pullRequests is off, so Flock does not run gh.',
           }),
-    // Both caches, both wholesale. A worktree that appeared or disappeared
+    // All three caches, all wholesale. A worktree that appeared or disappeared
     // changes the LIST for every directory of the repository (any checkout
-    // reports the same set), and the per-worktree statuses keyed under it are
-    // about a directory that may not exist any more — so waiting out either TTL
-    // would leave the tree showing the state before the verb ran.
+    // reports the same set), the per-worktree statuses keyed under it are about a
+    // directory that may not exist any more, and `git worktree add -b` CREATES A
+    // REF — so the branch enumeration is stale too, and a new branch that took
+    // thirty seconds to appear in the fold it was just made from would read as the
+    // verb having failed.
     worktreesChanged: (dir) => {
       worktrees.invalidate();
       branchStatus.invalidate();
+      branchList.invalidate();
       log('worktree: caches invalidated after a change at', dir);
       refreshViews();
     },
+    // NAMED SUBPROJECTS (v7). The lane verbs' writes; the two READS the renderers
+    // need are wired onto the tree deps above.
+    allSubprojects: () => store.getSubprojects(),
+    getSubproject: (id) => store.getSubproject(id),
+    upsertSubproject: (id, patch) => store.upsertSubproject(id, patch),
+    deleteSubproject: (id) => store.deleteSubproject(id),
+    moveSessionSubproject: (sessionId, subprojectId) =>
+      store.moveSessionSubproject(sessionId, subprojectId),
     upsertProject: (id, patch) => store.upsertProject(id, patch),
     // Its own store method rather than an upsert with a `parentId` in it:
     // the cycle check has to run against the whole project set at write time.
@@ -2952,7 +3111,10 @@ export async function activate(
       const activeId = workspaceManager.activeProjectId();
       const project = activeId ? store.getProject(activeId) : undefined;
       const tail = project
-        ? desiredFolders(project, explorerAnchorPath)
+        ? desiredFolders(project, explorerAnchorPath, {
+            scope: explorerScope(),
+            currentDir: explorerDirFor(project),
+          })
         : (vscode.workspace.workspaceFolders ?? []).map((f) => ({
             path: f.uri.fsPath,
             name: f.name,
@@ -2975,6 +3137,29 @@ export async function activate(
         vscode.Uri.file(explorerWorkspaceFile),
         { forceNewWindow: false },
       );
+    },
+    // Re-root the tree at one directory, and HOLD it there. No reload, no
+    // confirmation: it is the same in-place splice a switch does, and the way
+    // out is to click another row or focus a session somewhere else.
+    showDirectoryInExplorer: async (dir) => {
+      const activeId = workspaceManager.activeProjectId();
+      const active = activeId ? store.getProject(activeId) : undefined;
+      if (!active) return;
+      if (!explorerSync.anchored()) {
+        void vscode.window.showInformationMessage(
+          'Flock: this window is not a Flock workspace, so the Explorer ' +
+            'cannot be repointed. Run "Flock: Follow the Active Project in ' +
+            'the Explorer" once to set it up.',
+        );
+        return;
+      }
+      explorerDirOverride = normalizeDir(dir);
+      const outcome = await explorerSync.sync(active, explorerDirOverride);
+      if (outcome === 'not-anchored' || outcome === 'rejected') {
+        // Nothing moved, so the mark must not claim it did.
+        explorerDirOverride = null;
+      }
+      refreshExplorerHeader();
     },
     stopFollowingInExplorer: async () => {
       const activeId = workspaceManager.activeProjectId();

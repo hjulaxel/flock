@@ -117,24 +117,19 @@
       },
       {
         "command": "lineage.newSubproject",
-        "title": "New Subproject...",
+        "title": "Add Subproject",
         "category": "Flock",
         "icon": "$(new-folder)"
       },
       {
-        "command": "lineage.moveProject",
-        "title": "Move Project...",
-        "category": "Flock"
-      },
-      {
         "command": "lineage.configureProject",
-        "title": "Configure Project...",
+        "title": "Settings",
         "category": "Flock",
         "icon": "$(gear)"
       },
       {
         "command": "lineage.renameProjectInline",
-        "title": "Rename Project in Place",
+        "title": "Rename Project",
         "category": "Flock"
       },
       {
@@ -144,7 +139,7 @@
       },
       {
         "command": "lineage.closeProject",
-        "title": "Close Project...",
+        "title": "Close Project",
         "category": "Flock",
         "icon": "$(archive)"
       },
@@ -160,15 +155,26 @@
         "category": "Flock"
       },
       {
-        "command": "lineage.addProjectDirectory",
-        "title": "Add Directory to Project...",
+        "command": "lineage.newSessionInProject",
+        "title": "New Session",
+        "category": "Flock",
+        "icon": "$(add)"
+      },
+      {
+        "command": "lineage.newSessionInSubproject",
+        "title": "New Session",
+        "category": "Flock",
+        "icon": "$(add)"
+      },
+      {
+        "command": "lineage.renameSubproject",
+        "title": "Rename Subproject...",
         "category": "Flock"
       },
       {
-        "command": "lineage.newSessionInProject",
-        "title": "New Session in Project",
-        "category": "Flock",
-        "icon": "$(add)"
+        "command": "lineage.removeSubproject",
+        "title": "Remove Subproject",
+        "category": "Flock"
       },
       {
         "command": "lineage.newSessionInBranch",
@@ -178,13 +184,13 @@
       },
       {
         "command": "lineage.chatInProject",
-        "title": "New Chat in Project",
+        "title": "New Chat",
         "category": "Flock",
         "icon": "$(comment-discussion)"
       },
       {
         "command": "lineage.chatHistory",
-        "title": "View Chat History...",
+        "title": "Old Chats...",
         "category": "Flock",
         "icon": "$(history)"
       },
@@ -378,6 +384,12 @@
         "icon": "$(gear)"
       },
       {
+        "command": "lineage.showDirectoryInExplorer",
+        "title": "Show This Directory in the Explorer",
+        "category": "Flock",
+        "icon": "$(folder-active)"
+      },
+      {
         "command": "lineage.stopFollowingInExplorer",
         "title": "Stop Following the Active Project in the Explorer",
         "category": "Flock"
@@ -537,21 +549,11 @@
         {
           "command": "lineage.newSession",
           "when": "view == lineageSessions",
-          "group": "navigation@1"
+          "group": "navigation@2"
         },
         {
           "command": "lineage.forkActiveSession",
           "when": "view == lineageSessions && lineage.hasForkable",
-          "group": "navigation@2"
-        },
-        {
-          "command": "lineage.showOnlyActiveSessions",
-          "when": "view == lineageSessions && !lineage.onlyActive",
-          "group": "navigation@3"
-        },
-        {
-          "command": "lineage.showAllSessions",
-          "when": "view == lineageSessions && lineage.onlyActive",
           "group": "navigation@3"
         },
         {
@@ -562,21 +564,11 @@
         {
           "command": "lineage.newSession",
           "when": "view == lineageSessionsInline",
-          "group": "navigation@1"
+          "group": "navigation@2"
         },
         {
           "command": "lineage.forkActiveSession",
           "when": "view == lineageSessionsInline && lineage.hasForkable",
-          "group": "navigation@2"
-        },
-        {
-          "command": "lineage.showOnlyActiveSessions",
-          "when": "view == lineageSessionsInline && !lineage.onlyActive",
-          "group": "navigation@3"
-        },
-        {
-          "command": "lineage.showAllSessions",
-          "when": "view == lineageSessionsInline && lineage.onlyActive",
           "group": "navigation@3"
         },
         {
@@ -593,6 +585,16 @@
           "command": "lineage.refreshAccountUsage",
           "when": "view == lineageAccounts",
           "group": "navigation@2"
+        },
+        {
+          "command": "lineage.newProject",
+          "group": "navigation@1",
+          "when": "view == lineageSessions"
+        },
+        {
+          "command": "lineage.newProject",
+          "group": "navigation@1",
+          "when": "view == lineageSessionsInline"
         }
       ],
       "view/item/context": [
@@ -632,123 +634,63 @@
           "group": "0_open@2"
         },
         {
-          "command": "lineage.newSessionInProject",
-          "when": "view == lineageSessions && viewItem =~ /;project;/",
-          "group": "inline@1"
-        },
-        {
-          "command": "lineage.chatInProject",
-          "when": "view == lineageSessions && viewItem =~ /;project;/",
-          "group": "inline@2"
-        },
-        {
-          "command": "lineage.chatInProject",
-          "when": "view == lineageSessions && viewItem =~ /;project;/",
-          "group": "1_actions@0"
-        },
-        {
-          "command": "lineage.chatHistory",
-          "when": "view == lineageSessions && viewItem =~ /;project;/",
-          "group": "1_actions@1"
-        },
-        {
-          "command": "lineage.newSubproject",
-          "when": "view == lineageSessions && viewItem =~ /;project;/",
-          "group": "1_actions@2"
-        },
-        {
-          "command": "lineage.moveProject",
-          "when": "view == lineageSessions && viewItem =~ /;project;/",
-          "group": "1_actions@3"
-        },
-        {
-          "command": "lineage.configureProject",
-          "when": "view == lineageSessions && viewItem =~ /;project;/",
-          "group": "1_actions@4"
-        },
-        {
-          "command": "lineage.addProjectDirectory",
-          "when": "view == lineageSessions && viewItem =~ /;project;/",
-          "group": "1_actions@3"
-        },
-        {
-          "command": "lineage.openProject",
-          "when": "view == lineageSessions && viewItem =~ /;project;/",
-          "group": "1_actions@4"
-        },
-        {
-          "command": "lineage.closeProject",
-          "when": "view == lineageSessions && viewItem =~ /;project;/",
-          "group": "2_close@0"
-        },
-        {
-          "command": "lineage.deleteProject",
-          "when": "view == lineageSessions && viewItem =~ /;project;/",
-          "group": "2_close@1"
-        },
-        {
           "command": "lineage.newSessionInBranch",
-          "when": "view == lineageSessions && viewItem =~ /;branch;/",
+          "when": "config.lineage.git.branches && view == lineageSessions && viewItem =~ /;branch;/ && viewItem =~ /;checkout;/",
           "group": "inline@1"
         },
         {
           "command": "lineage.newSessionInBranch",
-          "when": "view == lineageSessions && viewItem =~ /;branch;/",
+          "when": "config.lineage.git.branches && view == lineageSessions && viewItem =~ /;branch;/ && viewItem =~ /;checkout;/",
           "group": "0_open@1"
         },
         {
           "command": "lineage.revealBranch",
-          "when": "view == lineageSessions && viewItem =~ /;branch;/",
+          "when": "config.lineage.git.branches && view == lineageSessions && viewItem =~ /;branch;/ && viewItem =~ /;checkout;/",
           "group": "0_open@2"
         },
         {
           "command": "lineage.copyBranchName",
-          "when": "view == lineageSessions && viewItem =~ /;branch;/",
+          "when": "config.lineage.git.branches && view == lineageSessions && viewItem =~ /;branch;/",
           "group": "1_copy@1"
         },
         {
           "command": "lineage.copyBranchPath",
-          "when": "view == lineageSessions && viewItem =~ /;branch;/",
+          "when": "config.lineage.git.branches && view == lineageSessions && viewItem =~ /;branch;/ && viewItem =~ /;checkout;/",
           "group": "1_copy@2"
         },
         {
           "command": "lineage.hideBranch",
-          "when": "view == lineageSessions && viewItem =~ /;branch;/ && !(viewItem =~ /;primary;/)",
+          "when": "config.lineage.git.branches && view == lineageSessions && viewItem =~ /;branch;/ && !(viewItem =~ /;primary;/)",
           "group": "2_curate@1"
         },
         {
           "command": "lineage.showBranches",
-          "when": "view == lineageSessions && viewItem =~ /;branch;/",
+          "when": "config.lineage.git.branches && view == lineageSessions && viewItem =~ /;branch;/",
           "group": "2_curate@2"
         },
         {
           "command": "lineage.openWorktreeWindow",
-          "when": "view == lineageSessions && viewItem =~ /;branch;/",
+          "when": "config.lineage.git.branches && view == lineageSessions && viewItem =~ /;branch;/ && viewItem =~ /;checkout;/",
           "group": "0_open@3"
         },
         {
           "command": "lineage.newWorktree",
-          "when": "view == lineageSessions && viewItem =~ /;branch;/",
+          "when": "config.lineage.git.branches && view == lineageSessions && viewItem =~ /;branch;/",
           "group": "3_worktree@1"
         },
         {
           "command": "lineage.removeWorktree",
-          "when": "view == lineageSessions && viewItem =~ /;branch;/ && !(viewItem =~ /;primary;/)",
+          "when": "config.lineage.git.branches && view == lineageSessions && viewItem =~ /;branch;/ && viewItem =~ /;checkout;/ && !(viewItem =~ /;primary;/)",
           "group": "3_worktree@2"
         },
         {
-          "command": "lineage.newWorktree",
-          "when": "view == lineageSessions && viewItem =~ /;project;/",
-          "group": "1_actions@8"
-        },
-        {
           "command": "lineage.openPullRequest",
-          "when": "view == lineageSessions && viewItem =~ /;pullRequest;/",
+          "when": "config.lineage.git.branches && view == lineageSessions && viewItem =~ /;pullRequest;/",
           "group": "0_open@4"
         },
         {
           "command": "lineage.createPullRequest",
-          "when": "view == lineageSessions && viewItem =~ /;branch;/ && config.lineage.git.pullRequests && !(viewItem =~ /;pullRequest;/)",
+          "when": "config.lineage.git.branches && view == lineageSessions && viewItem =~ /;branch;/ && viewItem =~ /;checkout;/ && config.lineage.git.pullRequests && !(viewItem =~ /;pullRequest;/)",
           "group": "0_open@5"
         },
         {
@@ -812,21 +754,6 @@
           "group": "3_util@3"
         },
         {
-          "command": "lineage.switchWorkspace",
-          "when": "view == lineageSessions && viewItem =~ /;project;/",
-          "group": "1_actions@5"
-        },
-        {
-          "command": "lineage.newSessionFromPicker",
-          "when": "view == lineageSessions && viewItem =~ /;project;/",
-          "group": "1_actions@6"
-        },
-        {
-          "command": "lineage.setProjectAccount",
-          "when": "view == lineageSessions && viewItem =~ /;project;/",
-          "group": "1_actions@7"
-        },
-        {
           "command": "lineage.newSessionFromAccount",
           "when": "view == lineageAccounts && viewItem =~ /;account;/",
           "group": "inline@1"
@@ -860,6 +787,76 @@
           "command": "lineage.removeAccount",
           "when": "view == lineageAccounts && viewItem =~ /;account;/",
           "group": "3_remove@1"
+        },
+        {
+          "command": "lineage.newSessionInProject",
+          "group": "0_open@1",
+          "when": "view == lineageSessions && viewItem =~ /;project;/"
+        },
+        {
+          "command": "lineage.chatInProject",
+          "group": "0_open@2",
+          "when": "view == lineageSessions && viewItem =~ /;project;/"
+        },
+        {
+          "command": "lineage.chatHistory",
+          "group": "0_open@3",
+          "when": "view == lineageSessions && viewItem =~ /;project;/"
+        },
+        {
+          "command": "lineage.newSubproject",
+          "group": "1_manage@1",
+          "when": "view == lineageSessions && viewItem =~ /;project;/"
+        },
+        {
+          "command": "lineage.renameProjectInline",
+          "group": "1_manage@2",
+          "when": "view == lineageSessions && viewItem =~ /;project;/"
+        },
+        {
+          "command": "lineage.closeProject",
+          "group": "1_manage@3",
+          "when": "view == lineageSessions && viewItem =~ /;project;/"
+        },
+        {
+          "command": "lineage.deleteProject",
+          "group": "1_manage@4",
+          "when": "view == lineageSessions && viewItem =~ /;project;/"
+        },
+        {
+          "command": "lineage.configureProject",
+          "group": "2_settings@1",
+          "when": "view == lineageSessions && viewItem =~ /;project;/"
+        },
+        {
+          "command": "lineage.newSessionInSubproject",
+          "group": "0_open@1",
+          "when": "view == lineageSessions && viewItem =~ /;subproject;/"
+        },
+        {
+          "command": "lineage.renameSubproject",
+          "group": "1_manage@1",
+          "when": "view == lineageSessions && viewItem =~ /;named;/"
+        },
+        {
+          "command": "lineage.removeSubproject",
+          "group": "1_manage@2",
+          "when": "view == lineageSessions && viewItem =~ /;subproject;/"
+        },
+        {
+          "command": "lineage.newSessionInProject",
+          "group": "inline@1",
+          "when": "view == lineageSessions && viewItem =~ /;project;/"
+        },
+        {
+          "command": "lineage.chatInProject",
+          "group": "inline@2",
+          "when": "view == lineageSessions && viewItem =~ /;project;/"
+        },
+        {
+          "command": "lineage.newSessionInSubproject",
+          "group": "inline@1",
+          "when": "view == lineageSessions && viewItem =~ /;subproject;/"
         }
       ],
       "commandPalette": [
@@ -924,10 +921,6 @@
           "when": "false"
         },
         {
-          "command": "lineage.newSessionFromPicker",
-          "when": "false"
-        },
-        {
           "command": "lineage.moveAccountUp",
           "when": "false"
         },
@@ -949,6 +942,46 @@
         },
         {
           "command": "lineage.copyBranchName",
+          "when": "false"
+        },
+        {
+          "command": "lineage.newSessionInSubproject",
+          "when": "false"
+        },
+        {
+          "command": "lineage.copyBranchPath",
+          "when": "config.lineage.git.branches"
+        },
+        {
+          "command": "lineage.createPullRequest",
+          "when": "config.lineage.git.branches"
+        },
+        {
+          "command": "lineage.newWorktree",
+          "when": "config.lineage.git.branches"
+        },
+        {
+          "command": "lineage.openPullRequest",
+          "when": "config.lineage.git.branches"
+        },
+        {
+          "command": "lineage.openWorktreeWindow",
+          "when": "config.lineage.git.branches"
+        },
+        {
+          "command": "lineage.removeWorktree",
+          "when": "config.lineage.git.branches"
+        },
+        {
+          "command": "lineage.revealBranch",
+          "when": "config.lineage.git.branches"
+        },
+        {
+          "command": "lineage.showBranches",
+          "when": "config.lineage.git.branches"
+        },
+        {
+          "command": "lineage.showDirectoryInExplorer",
           "when": "false"
         }
       ],
@@ -992,61 +1025,6 @@
           "command": "lineage.forkAndCompact",
           "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;archived;/",
           "group": "0_open@2"
-        },
-        {
-          "command": "lineage.chatInProject",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
-          "group": "0_open@1"
-        },
-        {
-          "command": "lineage.chatHistory",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
-          "group": "0_open@2"
-        },
-        {
-          "command": "lineage.newSessionInProject",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
-          "group": "0_open@3"
-        },
-        {
-          "command": "lineage.renameProjectInline",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
-          "group": "0_open@4"
-        },
-        {
-          "command": "lineage.configureProject",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
-          "group": "0_open@5"
-        },
-        {
-          "command": "lineage.newSubproject",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
-          "group": "0_open@6"
-        },
-        {
-          "command": "lineage.moveProject",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
-          "group": "1_actions@0"
-        },
-        {
-          "command": "lineage.addProjectDirectory",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
-          "group": "1_actions@1"
-        },
-        {
-          "command": "lineage.openProject",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
-          "group": "1_actions@2"
-        },
-        {
-          "command": "lineage.closeProject",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
-          "group": "2_close@0"
-        },
-        {
-          "command": "lineage.deleteProject",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
-          "group": "2_close@1"
         },
         {
           "command": "lineage.projectFromFolder",
@@ -1104,84 +1082,119 @@
           "group": "3_util@3"
         },
         {
-          "command": "lineage.switchWorkspace",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
-          "group": "1_actions@3"
-        },
-        {
-          "command": "lineage.newSessionFromPicker",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
-          "group": "1_actions@4"
-        },
-        {
-          "command": "lineage.setProjectAccount",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
-          "group": "1_actions@5"
-        },
-        {
           "command": "lineage.newSessionInBranch",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/",
+          "when": "config.lineage.git.branches && webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/ && viewItem =~ /;checkout;/",
           "group": "0_open@1"
         },
         {
           "command": "lineage.revealBranch",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/",
+          "when": "config.lineage.git.branches && webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/ && viewItem =~ /;checkout;/",
           "group": "0_open@2"
         },
         {
           "command": "lineage.copyBranchName",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/",
+          "when": "config.lineage.git.branches && webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/",
           "group": "1_copy@1"
         },
         {
           "command": "lineage.copyBranchPath",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/",
+          "when": "config.lineage.git.branches && webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/ && viewItem =~ /;checkout;/",
           "group": "1_copy@2"
         },
         {
           "command": "lineage.hideBranch",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/ && !(viewItem =~ /;primary;/)",
+          "when": "config.lineage.git.branches && webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/ && !(viewItem =~ /;primary;/)",
           "group": "2_curate@1"
         },
         {
           "command": "lineage.showBranches",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/",
+          "when": "config.lineage.git.branches && webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/",
           "group": "2_curate@2"
         },
         {
           "command": "lineage.openWorktreeWindow",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/",
+          "when": "config.lineage.git.branches && webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/ && viewItem =~ /;checkout;/",
           "group": "0_open@3"
         },
         {
           "command": "lineage.newWorktree",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/",
+          "when": "config.lineage.git.branches && webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/",
           "group": "3_worktree@1"
         },
         {
           "command": "lineage.removeWorktree",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/ && !(viewItem =~ /;primary;/)",
+          "when": "config.lineage.git.branches && webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/ && viewItem =~ /;checkout;/ && !(viewItem =~ /;primary;/)",
           "group": "3_worktree@2"
         },
         {
-          "command": "lineage.newWorktree",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
-          "group": "1_actions@6"
-        },
-        {
           "command": "lineage.openPullRequest",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;pullRequest;/",
+          "when": "config.lineage.git.branches && webviewId == 'lineageSessionsInline' && viewItem =~ /;pullRequest;/",
           "group": "0_open@4"
         },
         {
           "command": "lineage.createPullRequest",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/ && config.lineage.git.pullRequests && !(viewItem =~ /;pullRequest;/)",
+          "when": "config.lineage.git.branches && webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/ && viewItem =~ /;checkout;/ && config.lineage.git.pullRequests && !(viewItem =~ /;pullRequest;/)",
           "group": "0_open@5"
         },
         {
           "command": "lineage.showBranches",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;branchOthers;/",
+          "when": "config.lineage.git.branches && webviewId == 'lineageSessionsInline' && viewItem =~ /;branchOthers;/",
           "group": "0_open@1"
+        },
+        {
+          "command": "lineage.newSessionInProject",
+          "group": "0_open@1",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/"
+        },
+        {
+          "command": "lineage.chatInProject",
+          "group": "0_open@2",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/"
+        },
+        {
+          "command": "lineage.chatHistory",
+          "group": "0_open@3",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/"
+        },
+        {
+          "command": "lineage.newSubproject",
+          "group": "1_manage@1",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/"
+        },
+        {
+          "command": "lineage.renameProjectInline",
+          "group": "1_manage@2",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/"
+        },
+        {
+          "command": "lineage.closeProject",
+          "group": "1_manage@3",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/"
+        },
+        {
+          "command": "lineage.deleteProject",
+          "group": "1_manage@4",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/"
+        },
+        {
+          "command": "lineage.configureProject",
+          "group": "2_settings@1",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/"
+        },
+        {
+          "command": "lineage.newSessionInSubproject",
+          "group": "0_open@1",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;subproject;/"
+        },
+        {
+          "command": "lineage.renameSubproject",
+          "group": "1_manage@1",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;named;/"
+        },
+        {
+          "command": "lineage.removeSubproject",
+          "group": "1_manage@2",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;subproject;/"
         }
       ]
     },
@@ -1231,7 +1244,7 @@
       {
         "view": "lineageSessions",
         "when": "!lineage.onlyActive",
-        "contents": "No live Claude Code sessions found.\n[New Claude Session](command:lineage.newSession)\n[New Project](command:lineage.newProject)\nA project is a name plus one or more directories; sessions running in any of them group under it.\nFlock reads `claude agents --json` every few seconds. If sessions are running but none appear, set `lineage.claudeBinary` to the full path of your claude CLI."
+        "contents": "No live Claude Code sessions found.\n[New Claude Session](command:lineage.newSession)\n[New Project](command:lineage.newProject)\nA project is a name and a directory; every session running in it groups under it. Add a second directory later and each one gets a row of its own.\nFlock reads `claude agents --json` every few seconds. If sessions are running but none appear, set `lineage.claudeBinary` to the full path of your claude CLI."
       },
       {
         "view": "lineageSessions",
@@ -1359,7 +1372,7 @@
         "lineage.workspaces.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Show the workspace switcher in the status bar. A workspace scopes this window to one project: switching saves the current tab layout under the project you leave, hides what does not belong to the target, and restores the target's saved layout. Foreign sessions are parked: with tmux installed (see `lineage.tmux`) their tab hides while the conversation keeps running — busy ones included — and reattaches when you switch back; without tmux the terminal closes and the conversation resumes from its transcript, in which case busy sessions are never closed. Unsaved editors and terminals Flock does not own are never touched. The terminal panel is never used."
+          "description": "Show the workspace switcher in the status bar. A workspace scopes this window to one project: switching saves the current tab layout under the project you leave, hides what does not belong to the target, and restores the target's saved layout. Foreign sessions are parked: with tmux installed (see `lineage.tmux`) their tab hides while the conversation keeps running — busy ones included — and reattaches when you switch back; without tmux the terminal closes and the conversation resumes from its transcript, in which case busy sessions are never closed. Unsaved editors and terminals Flock does not own are never touched. The terminal panel is never used. KNOWN ISSUE in 0.1.2: a switch decides membership by containment while the sidebar decides it by longest match, so if one project's directory contains another's the two disagree and both projects' saved layouts can name the same session. If your projects nest, leave workspace mode or turn this off."
         },
         "lineage.workspaces.resumeSessions": {
           "type": "boolean",
@@ -1376,6 +1389,19 @@
           "default": true,
           "description": "The Explorer follows the active project: switching projects swaps the built-in file tree to that project's directories — the main one on top, any extra connected directories as their own collapsible roots below it, wherever they live on disk. Outline and Timeline are untouched. Requires running \"Flock: Follow the Active Project in the Explorer\" once per window, which converts it to a Flock workspace (one reload, then switching is instant and no terminal is lost). With this off, an already-converted window keeps its folders where they are."
         },
+        "lineage.explorer.scope": {
+          "type": "string",
+          "enum": [
+            "directory",
+            "project"
+          ],
+          "enumDescriptions": [
+            "One root: the directory you are working in. Which one that is follows the session you have focused, so the file tree moves with you. The Project view lists the rest — click one to send the tree there.",
+            "Every connected directory as its own collapsible root, the main one on top. The shape Flock shipped before this setting existed."
+          ],
+          "default": "directory",
+          "markdownDescription": "How much of the active project the Explorer shows. `directory` keeps the file tree to the one directory you are in, the way a plain folder window does; `project` shows every connected directory as its own root. Only applies when `#lineage.explorer.followProject#` is on. Takes effect on the next project switch — no reload."
+        },
         "lineage.accounts.enabled": {
           "type": "boolean",
           "default": true,
@@ -1384,7 +1410,7 @@
         "lineage.accounts.section": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Draw **Accounts** as a second section of the Flock sidebar. On by default: the accounts are worth a row of their own.\n\nThe only reason to turn it off is the top bar. VS Code merges a view's buttons into the container header — the row that reads **FLOCK** — only while that container shows exactly one section, so while Accounts is drawn the bell, `+`, fork and the gear sit on the **SESSIONS** row just below it instead. Off moves them up one row, and costs you the Accounts section.\n\nNothing about accounts stops working while it is off. Usage is still read, new sessions are still routed, a session is still pinned to its account for life, and every account verb — **Add Account…**, **Sign In**, **Set Default Account**, **Set Project Account…** — is in the Command Palette under **Flock**. The switch is also in the gear menu at the top of the sidebar."
+          "markdownDescription": "Draw **Accounts** as a second section of the Flock sidebar. On by default: the accounts are worth a row of their own.\n\nThe only reason to turn it off is the top bar. VS Code merges a view's buttons into the container header — the row that reads **FLOCK** — only while that container shows exactly one section, so while Accounts is drawn the bell, New Project, `+`, fork and the gear sit on the **SESSIONS** row just below it instead. Off moves them up one row, and costs you the Accounts section.\n\nNothing about accounts stops working while it is off. Usage is still read, new sessions are still routed, a session is still pinned to its account for life, and every account verb — **Add Account…**, **Sign In**, **Set Default Account**, **Set Project Account…** — is in the Command Palette under **Flock**. The switch is also in the gear menu at the top of the sidebar."
         },
         "lineage.viewStyle": {
           "type": "string",
@@ -1422,10 +1448,25 @@
           "default": false,
           "markdownDescription": "**The one thing in Flock that reaches the network.** With this on, Flock runs `gh pr list --state all --limit 100 --json ...` in each project's repository and shows the pull request on each branch row — number, state and check rollup as a small chip, with **Open Pull Request in Browser** on the row's menu. It shells out to the [`gh` CLI](https://cli.github.com) you installed and authenticated: Flock makes no HTTP requests of its own, bundles no API client and never sees a token. Polled only while the Sessions view is visible, at most once every five minutes per repository, and cached. If `gh` is missing, not signed in, or the repository has no GitHub remote, the rows render exactly as they do with this off and one line goes to the **Flock** output channel. Off by default, because everything else in Flock is local."
         },
+        "lineage.git.branches": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Show a project’s **git branches** as rows, with the worktree verbs (*New Worktree*, *Remove Worktree*), the per-branch colours and the pull-request chip.\n\nOff by default. The feature works, but it is a lot of rows in a sidebar that has to stay readable — turn it on if you run one agent per worktree.\n\nThis does not change which project a session belongs to: a session in a linked checkout stays under the project that owns the repository either way."
+        },
         "lineage.git.worktreePath": {
           "type": "string",
           "default": "../${repo}-${branch}",
           "markdownDescription": "Where **New Worktree…** puts a new checkout. `${repo}` is the repository directory's name and `${branch}` the branch name with anything a path cannot carry replaced by `-`. A relative pattern is resolved against the repository's main worktree, so the default puts `feat/x` of `~/code/app` at `~/code/app-feat-x`. An absolute path is used as written, and a leading `~/` expands. Must contain `${branch}`, or every branch would resolve to the same directory. Flock always shows the exact `git worktree add` command before running it."
+        },
+        "lineage.preview.directoryModel": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "PREVIEW. Hang the branch rows off a **directory** instead of off the project, and list **every local branch** of that directory’s repository rather than only the checked-out ones.\n\nA project’s directories are its subprojects, and a directory is exactly one git repository (or none) — so the directory is the row a branch belongs under. A project spanning three repositories no longer shows three branches called `main` with no way to tell which is which.\n\nOutside the fold: the directory’s **own checkout**, and any branch with a **session running on it**. Everything else — including a worktree with nothing running in it — goes in one **Branches (N)** row, newest commit first, **shut by default**. That is what makes listing a 180-branch repository cost one row.\n\nNeeds `#lineage.git.branches#`. Draws in the inline sidebar (`#lineage.viewStyle#`: `inline`, the default); the native tree keeps the rows it has today."
+        },
+        "lineage.preview.demoProject": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "PREVIEW. Add a **fabricated project** to the tree — *Flock (demo)* — to look at the directory-and-branch layout without needing a repository shaped the right way.\n\nThree directories: one repository with two checkouts, one directory *inside* that repository, and one that is not a repository at all. Nothing on it is real, nothing on it can be clicked into existence, and it has **no sessions** — a session row comes from the real roster, so a made-up one would draw nothing. For sessions under a branch, use `#lineage.preview.directoryModel#` on your own projects.\n\nTurning this off removes it completely."
         }
       }
     },
@@ -1452,14 +1493,18 @@
             "title": "Your sessions are already here",
             "description": "Flock reads the Claude Code CLI's own session registry, so anything you have run `claude` on shows up with no setup.\n[Open the Sessions view](command:workbench.view.extension.lineage)",
             "media": { "markdown": "media/walkthrough/sessions.md" },
-            "completionEvents": ["onCommand:lineage.refresh"]
+            "completionEvents": [
+              "onCommand:lineage.refresh"
+            ]
           },
           {
             "id": "flock.start",
             "title": "Start one from the tree",
             "description": "Press + on any project row. The session appears immediately with its name selected — type over it or press Enter. No dialog.\n[New Claude Session](command:lineage.newSession)",
             "media": { "markdown": "media/walkthrough/start.md" },
-            "completionEvents": ["onCommand:lineage.newSession"]
+            "completionEvents": [
+              "onCommand:lineage.newSession"
+            ]
           },
           {
             "id": "flock.attention",

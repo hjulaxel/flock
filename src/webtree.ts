@@ -14,7 +14,7 @@
 //     ["webview/context"] drives the same verbs with the same handlers;
 //   * theming — every colour in webtree.css is a VS Code theme variable.
 // What IS re-implemented here: rows, expand/collapse, selection, arrow-key
-// navigation, drag-to-reparent, the attention badges, and reveal.
+// navigation, drag-to-file-under-a-project, the attention badges, and reveal.
 //
 // This module depends only on vscode, ./types, ./log, ./viewmodel and
 // ./projects: the row model is built by viewmodel.ts, and this file renders it
@@ -40,15 +40,22 @@ import type {
   TreeDeps,
 } from './types';
 import { log, logError } from './log';
-import { BRANCH_COLOR_COUNT, computeGrouping } from './projects';
+import { buildDemoProject } from './demoProject';
+import {
+  BRANCH_COLOR_COUNT,
+  computeGrouping,
+  projectBranchList,
+} from './projects';
 import type { GroupingResult } from './projects';
 import {
   attentionCountOf,
   branchRowKey,
   buildViewModel,
   folderRowKey,
+  othersRowKey,
   projectRowKey,
   sessionRowKey,
+  subprojectRowKey,
 } from './viewmodel';
 import type { ViewRow } from './viewmodel';
 
@@ -369,6 +376,10 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
    *  one announcement and is cleared for every fresh page. */
   private clientReady = false;
   private readonly collapsed = new Set<string>();
+  /** Row keys the user has OPENED, for the one row kind whose default is shut:
+   *  the branch fold. A second set rather than a second meaning for the one above
+   *  — see ViewModelInput.opened. */
+  private readonly opened = new Set<string>();
 
   private lastForest: SessionForest = EMPTY_FOREST;
   private groupCacheForest: SessionForest | null = null;
@@ -423,26 +434,74 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
         ),
         worktreesOf: (dir) =>
           this.safe('worktreesOf', () => this.deps.worktreesOf?.(dir) ?? [], []),
+        // `lineage.git.branches`. Read per grouping like every other setting
+        // here, so the block appears and disappears on the next tick rather
+        // than on a window reload.
+        branchRows: this.safe('branchRows', () => this.deps.branchRows?.(), false),
+        localBranchesOf: (dir) =>
+          this.safe(
+            'localBranchesOf',
+            () => this.deps.localBranchesOf?.(dir) ?? [],
+            [],
+          ),
+        directoryModel: this.safe(
+          'directoryModel',
+          () => this.deps.directoryModel?.(),
+          false,
+        ),
+        // The NAMED subprojects, and the stamp saying which one a session was
+        // started in. Grouping inputs rather than rendering ones: which row a
+        // session belongs to has to be the same answer in both view styles.
+        subprojects: this.safe('subprojects', () => this.deps.subprojects?.(), []),
+        stampOf: (id) =>
+          this.safe('stampOf', () => this.deps.stampOf?.(id), undefined),
       },
       this.groupCache,
     );
+    // The demo project is APPENDED to the finished result, downstream of every
+    // rule that decides what belongs where — so it cannot claim a real session,
+    // cannot move a real row, and cannot be reached by anything that reads the
+    // store. Last in the list because it is the least important row on screen.
+    // See src/demoProject.ts.
+    if (this.safe('demoProject', () => this.deps.demoProject?.(), false)) {
+      this.groupCache = {
+        ...this.groupCache,
+        projects: [...this.groupCache.projects, buildDemoProject(Date.now())],
+      };
+    }
     this.groupCacheForest = forest;
     return this.groupCache;
+  }
+
+  /** The rendered SUBPROJECT row a client message names, or undefined. Same
+   *  contract as branchRowFor below and for the same reason: the page names a
+   *  row, this side reads the directory out of the model it just posted, so the
+   *  only directories a click can reach are ones the user was looking at. */
+  private subprojectRowFor(key: unknown): ViewRow | undefined {
+    if (typeof key !== 'string' || !key.startsWith('subproject:')) {
+      return undefined;
+    }
+    try {
+      return this.rows().find((r) => r.kind === 'subproject' && r.key === key);
+    } catch (err) {
+      logError('webtree.subprojectRowFor', err);
+      return undefined;
+    }
   }
 
   /** The rendered branch row a client message names, or undefined. Looked up in
    *  the model this view just posted, which is what makes a click unable to
    *  reach a worktree the user was not looking at. */
   private branchRowFor(key: unknown): ViewRow | undefined {
-    const parts = branchRowParts(key);
-    if (!parts) return undefined;
+    // Parsed only as a GUARD — that the key names a branch row of a real project
+    // — and then matched on the key itself, the way subprojectRowFor does. A
+    // project spanning two repositories has two branches called `main`, and the
+    // pair differ only by the directory their key carries: a lookup by
+    // (projectId, branch) would hand both clicks to whichever row came first, and
+    // start a session in the wrong checkout.
+    if (branchRowParts(key) === undefined) return undefined;
     try {
-      return this.rows().find(
-        (r) =>
-          r.kind === 'branch' &&
-          r.projectId === parts.projectId &&
-          r.chip?.full === parts.branch,
-      );
+      return this.rows().find((r) => r.kind === 'branch' && r.key === key);
     } catch (err) {
       logError('webtree.branchRowFor', err);
       return undefined;
@@ -456,8 +515,12 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
   branchesOf(projectId: string): readonly BranchInfo[] {
     try {
       const grouping = this.grouping(this.forest());
-      return (
-        grouping.projects.find((p) => p.projectId === projectId)?.branches ?? []
+      // Through projectBranchList, so a palette verb finds the checkouts of a
+      // SPLIT project too — under the directory model those live on its directory
+      // rows, and reading the project node alone would tell New Worktree… that a
+      // repository with six checkouts has none.
+      return projectBranchList(
+        grouping.projects.find((p) => p.projectId === projectId),
       );
     } catch (err) {
       logError('webtree.branchesOf', err);
@@ -471,6 +534,9 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
       forest,
       grouping: this.grouping(forest),
       collapsed: this.collapsed,
+      // The rows whose default is SHUT — only the branch fold. Kept apart from
+      // `collapsed` so neither set has two meanings; see ViewModelInput.opened.
+      opened: this.opened,
       providerFor: (id) => this.deps.providerFor(id),
       isBoundHere: (id) => this.deps.isBoundHere(id),
       // Optional all the way down: an unwired dep leaves every row 'hosted',
@@ -503,6 +569,14 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
           () => this.deps.pullRequestFor?.(repoDir, branch),
           undefined,
         ),
+      // Read per post like the rest, so turning the preview on or off takes
+      // effect on the next tick rather than on a window reload — which is the
+      // whole point of shipping it as a switch.
+      directoryModel: this.safe(
+        'directoryModel',
+        () => this.deps.directoryModel?.(),
+        false,
+      ),
     });
   }
 
@@ -731,7 +805,7 @@ ${branchPaletteCss()}  }
   }
 
   private pruneCollapsed(): void {
-    if (this.collapsed.size === 0) return;
+    if (this.collapsed.size === 0 && this.opened.size === 0) return;
     const forest = this.forest();
     const grouping = this.grouping(forest);
     // Every row kind that can be collapsed, not just sessions: pruning only
@@ -752,10 +826,25 @@ ${branchPaletteCss()}  }
       for (const b of p.branches ?? []) {
         live.add(branchRowKey(p.projectId, b.name));
       }
+      live.add(othersRowKey(p.projectId));
+      // And the same again per SUBPROJECT ROW under the directory model, where the
+      // branches and the fold belong to a row and their keys carry its id. Without
+      // these every fold a user opens would be pruned on the next tick and shut
+      // itself.
+      for (const sub of p.subprojects ?? []) {
+        live.add(subprojectRowKey(p.projectId, sub.id));
+        live.add(othersRowKey(p.projectId, sub.id));
+        for (const b of sub.branches ?? []) {
+          live.add(branchRowKey(p.projectId, b.name, sub.id));
+        }
+      }
     }
     for (const g of grouping.folders) live.add(folderRowKey(g.key));
     for (const key of Array.from(this.collapsed)) {
       if (!live.has(key)) this.collapsed.delete(key);
+    }
+    for (const key of Array.from(this.opened)) {
+      if (!live.has(key)) this.opened.delete(key);
     }
   }
 
@@ -989,10 +1078,16 @@ ${branchPaletteCss()}  }
         case 'toggle': {
           const key = typeof msg.key === 'string' ? msg.key : '';
           if (key === '') return;
-          if (this.collapsed.has(key)) this.collapsed.delete(key);
+          // Which SET a key lives in follows from what its default is, not from
+          // what the click was: the branch fold starts shut, so its key records
+          // having been opened, and every other row starts open and records having
+          // been closed. One flip either way — the alternative is a set whose
+          // membership means two different things depending on the prefix.
+          const set = key.startsWith('others:') ? this.opened : this.collapsed;
+          if (set.has(key)) set.delete(key);
           else {
-            if (this.collapsed.size > CACHE_SOFT_LIMIT) this.collapsed.clear();
-            this.collapsed.add(key);
+            if (set.size > CACHE_SOFT_LIMIT) set.clear();
+            set.add(key);
           }
           this.post();
           return;
@@ -1081,6 +1176,20 @@ ${branchPaletteCss()}  }
             });
             return;
           }
+          // A SUBPROJECT row's `+`, resolved the same way: the page names the
+          // row, this side reads the directory off the model it posted. The
+          // project row's `+` is withdrawn while these exist precisely so that
+          // no button in the tree has to guess which directory was meant.
+          if (String(msg.action) === 'newSessionInSubproject') {
+            const row = this.subprojectRowFor(msg.key);
+            if (!row?.cwd || row.cwd === '' || !row.projectId) return;
+            await this.deps.runCommand('newSessionInSubproject', {
+              type: 'subproject',
+              projectId: row.projectId,
+              dir: row.cwd,
+            });
+            return;
+          }
           const command = PROJECT_ROW_ACTIONS[String(msg.action)];
           if (command === undefined) return;
           const projectId = projectIdFromKey(msg.key);
@@ -1133,79 +1242,84 @@ ${branchPaletteCss()}  }
   }
 
   /**
-   * Drop semantics, identical to the native tree's:
-   *   onto a PROJECT  -> teach the project this session's directory (not lineage)
-   *   onto a SESSION  -> re-parent, refusing self-parent and cycles
-   *   onto a FOLDER   -> detach to a root
+   * Drop semantics. A drag moves a session between PROJECTS and does nothing
+   * else:
+   *   onto a PROJECT (or one of its subproject rows) -> teach that project this
+   *                                                     session's directory
+   *   anything else                                  -> refused
+   *
+   * LINEAGE IS NOT DRAGGABLE, and that is the whole rule. A drop onto a session
+   * row used to re-parent, and a drop onto a folder row used to detach to a
+   * root — so a fork could be dragged out of the tree it branched from, and an
+   * unrelated conversation could be dragged into one. Both produce a tree that
+   * states something false: the spine says "this branched from that", the
+   * transcripts say otherwise, and nothing on screen distinguishes the edge the
+   * user drew from the ones claude actually recorded. A shape that took one
+   * careless drag to corrupt and a state-file edit to repair.
+   *
+   * So ancestry is left to the thing that owns it — `recordLaunch` at fork time,
+   * and inference from the transcripts — and the gesture keeps the one meaning
+   * a user can be wrong about harmlessly: which project a top-level session is
+   * filed under, which is an ADDRESS, derived from a directory, editable from
+   * the project's own verbs, and true or false independently of any transcript.
+   *
+   * Only a visible ROOT moves. A row drawn inside a tree is frozen: that is what
+   * `canDrag` withholds from every non-root row (see viewmodel.ts), and this is
+   * the same rule enforced on the message, because the page is not trusted to be
+   * the only thing that ever posts one.
    */
   private async onDrop(msg: ClientMessage): Promise<void> {
     const targetKey = typeof msg.targetKey === 'string' ? msg.targetKey : '';
     if (targetKey === '') return;
 
-    // A PROJECT was dragged: onto another project it becomes its
-    // subproject, onto the background (or a folder row, which belongs to no
-    // project) it goes back to the top level. Handled before the session path
-    // and never mixed with it — a project id and a session id are both bare
-    // uuids, so the only thing telling the two gestures apart is which key the
-    // page reported as the source.
-    const draggedProject = projectIdFromKey(msg.sourceKey);
-    if (draggedProject !== undefined) {
-      const onto =
-        targetKey === BACKGROUND_DROP_KEY || targetKey.startsWith('folder:')
-          ? null
-          : projectIdFromKey(targetKey);
-      if (onto === undefined) return; // a session row: not a place for a project
-      if (onto === draggedProject) return;
-      await this.deps.reparentProject?.(draggedProject, onto);
-      return;
-    }
+    // A PROJECT source is DECLINED. Dragging a project row onto another project
+    // filed it there as a subproject; that is retired (a subproject is a
+    // directory now), and the row no longer offers the drag — `canDrag` is false
+    // on it. Checked first and never mixed with the session path anyway, because
+    // a project id and a session id are both bare uuids and the only thing
+    // telling the two gestures apart is which key the page reported as the
+    // source.
+    if (projectIdFromKey(msg.sourceKey) !== undefined) return;
 
     const dragged = typeof msg.sessionId === 'string' ? msg.sessionId : '';
     if (!isSessionId(dragged)) return;
 
-    if (targetKey.startsWith('project:')) {
-      const projectId = targetKey.slice('project:'.length);
-      const forest = this.forest();
-      // Only a visible ROOT can move: a project row renders roots only, so
-      // dragging a nested fork onto it would silently do nothing on screen while
-      // still appending its cwd to the project's directory list.
-      if (!forest.visibleRoots.includes(dragged)) {
+    // A SUBPROJECT row counts as its project: the gesture means "this work
+    // belongs over there", and the row aimed at is one of that project's
+    // directories. Resolved through the RENDERED model rather than by slicing the
+    // key, because a dirKey can contain a colon on Windows — and because the page
+    // must never be able to name a project id the view did not draw.
+    const ontoSub = this.subprojectRowFor(targetKey);
+    const ontoProject = targetKey.startsWith('project:')
+      ? targetKey.slice('project:'.length)
+      : ontoSub?.projectId;
+    if (ontoProject === undefined || ontoProject === '') {
+      // A session row is the one wrong target worth explaining: it looks like it
+      // should do something, it used to, and silence would read as a bug. A
+      // folder row is left silent — nothing about it suggests it accepts a
+      // session, and a message for every stray drop would be noise.
+      if (sessionIdFromKey(targetKey) !== undefined) {
+        log('webtree.drop: refused lineage drag', dragged, '->', targetKey);
         this.notify(
-          'Flock: only a top-level session can be moved to a project — a ' +
-            'fork follows the session it branched from.',
+          'Flock: sessions cannot be dragged into or out of a tree — a fork ' +
+            'sits under the session it branched from. Drag a top-level ' +
+            'session onto a project to file it there.',
         );
-        return;
       }
-      await this.deps.assignToProject(dragged, projectId);
       return;
     }
 
-    if (targetKey.startsWith('folder:')) {
-      await this.deps.reparent(dragged, null);
+    // Only a visible ROOT can move: a project row renders roots only, so
+    // dragging a nested fork onto it would silently do nothing on screen while
+    // still appending its cwd to the project's directory list.
+    if (!this.forest().visibleRoots.includes(dragged)) {
+      this.notify(
+        'Flock: only a top-level session can be moved to a project — a ' +
+          'fork follows the session it branched from.',
+      );
       return;
     }
-
-    const target = sessionIdFromKey(targetKey);
-    if (!target || target === dragged) return;
-    if (this.isDescendantOf(target, dragged)) {
-      log('webtree.drop: refused cycle', dragged, '->', target);
-      return;
-    }
-    await this.deps.reparent(dragged, target);
-  }
-
-  /** True when `candidateId` sits at or below `ancestorId` — i.e. re-parenting
-   *  `ancestorId` under it would close a cycle. */
-  private isDescendantOf(candidateId: string, ancestorId: string): boolean {
-    const forest = this.forest();
-    const seen = new Set<string>();
-    let cursor: string | null = candidateId;
-    while (cursor && !seen.has(cursor)) {
-      if (cursor === ancestorId) return true;
-      seen.add(cursor);
-      cursor = forest.nodes.get(cursor)?.parentId ?? null;
-    }
-    return false;
+    await this.deps.assignToProject(dragged, ontoProject);
   }
 
   private notify(message: string): void {
@@ -1230,6 +1344,7 @@ ${branchPaletteCss()}  }
       }
     }
     this.collapsed.clear();
+    this.opened.clear();
     this.view = undefined;
     this.clientReady = false;
   }

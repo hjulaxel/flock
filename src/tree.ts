@@ -1,4 +1,5 @@
-// src/tree.ts — TreeDataProvider + TreeView + drag-and-drop reparenting.
+// src/tree.ts — TreeDataProvider + TreeView + drag-and-drop (a session onto a
+// project, which is the only thing a drag says; see handleDrop).
 //
 // A view layer and nothing more: it must not fire onDidChangeTreeData with []
 // (fire undefined), mutate the forest, execute any command, or import
@@ -27,16 +28,22 @@ import type {
   ProjectGroupNode,
   ProjectRecord,
   ProviderId,
+  SubprojectRecord,
   PullRequest,
   SessionForest,
   SessionNode,
   SessionRef,
+  SubprojectNode,
   TreeDeps,
   TreeNode,
 } from './types';
 import { log, logError } from './log';
 import { projectUri, sessionUri } from './decorations';
-import { computeGrouping, unbranchedRoots } from './projects';
+import {
+  computeGrouping,
+  projectBranchList,
+  unbranchedRoots,
+} from './projects';
 import type { GroupingResult } from './projects';
 
 /** TreeView.reveal expands at most 3 levels — the API's hard cap. */
@@ -79,6 +86,7 @@ import {
   sessionContextValue,
   statusDescriptor,
   statusTone,
+  subprojectRowKey,
 } from './viewmodel';
 
 export {
@@ -131,6 +139,9 @@ function nodeKey(el: TreeNode): string {
   // Project id FIRST and split nowhere, for the reason branchRowKey gives: a
   // branch name may contain anything a ref can, a colon included.
   if (el.type === 'branch') return `branch:${el.projectId}:${el.branch}`;
+  if (el.type === 'subproject') {
+    return subprojectRowKey(el.projectId, el.id);
+  }
   return el.id;
 }
 
@@ -142,6 +153,12 @@ function groupingSignature(
   hiddenFolders: readonly string[],
   groupByFolder: boolean,
   onlyProjectSessions: boolean,
+  branchRows: boolean,
+  /** The NAMED subprojects. In the signature for the same reason `parentId` is:
+   *  adding, renaming or re-pointing a lane changes nothing else about the
+   *  project, so without it the cached grouping would keep drawing the old rows
+   *  until some unrelated roster tick happened to change the forest. */
+  lanes: readonly SubprojectRecord[] = [],
 ): string {
   const p = projects
     .map(
@@ -158,7 +175,13 @@ function groupingSignature(
         }`,
     )
     .join('\u0002');
-  return `${groupByFolder ? '1' : '0'}${onlyProjectSessions ? '1' : '0'}|${p}|${hiddenFolders.join('\u0002')}`;
+  const l = lanes
+    .map(
+      (x) =>
+        `${x.id}\u0000${x.projectId}\u0000${x.name}\u0000${x.dir}`,
+    )
+    .join('\u0002');
+  return `${groupByFolder ? '1' : '0'}${onlyProjectSessions ? '1' : '0'}${branchRows ? '1' : '0'}|${p}|${hiddenFolders.join('\u0002')}|${l}`;
 }
 
 // ---------------------------------------------------------------- provider
@@ -186,6 +209,10 @@ export class LineageTreeProvider
   /** The same interning for branch container rows, keyed
    *  `<projectId>\u0000<branch>`. See branchRef(). */
   private readonly branchRefs = new Map<string, BranchTreeNode>();
+
+  /** And for subproject rows, keyed `<projectId>` + the row's own id — NOT its
+   *  directory, because two named lanes may share one. See subprojectRef(). */
+  private readonly subprojectRefs = new Map<string, SubprojectNode>();
 
   /** There is no API to READ expansion state and no collapse API, so shadow
    *  it from the TreeView's expand/collapse events. Only explicit user
@@ -271,12 +298,18 @@ export class LineageTreeProvider
       () => this.deps.hiddenFolders(),
       [],
     );
+    const branchRows =
+      this.safe('branchRows', () => this.deps.branchRows?.(), false) === true;
+
+    const lanes = this.safe('subprojects', () => this.deps.subprojects?.(), []);
 
     const signature = groupingSignature(
       projects,
       hiddenFolders,
       groupByFolder,
       onlyProjectSessions,
+      branchRows,
+      lanes,
     );
     if (
       this.groupCacheForest === forest &&
@@ -293,6 +326,11 @@ export class LineageTreeProvider
         hiddenFolders,
         groupByFolder,
         onlyProjectSessions,
+        // The NAMED subprojects, and the stamp that says which one a session was
+        // started in. Both are grouping inputs rather than rendering ones: which
+        // row a session belongs to must be the same answer in both view styles.
+        subprojects: lanes,
+        stampOf: (id) => this.safe('stampOf', () => this.deps.stampOf?.(id), undefined),
         // The native tree draws no chips — a TreeItem has one label, one
         // icon and no room for a strip of buttons — but it must still CLAIM
         // worktree sessions for their project, or the two view styles would
@@ -305,6 +343,11 @@ export class LineageTreeProvider
             return [];
           }
         },
+        // `lineage.git.branches`. Part of the grouping SIGNATURE below as well,
+        // or flipping the setting would leave the cached grouping — and its
+        // branch rows — in place until the next roster tick happened to change
+        // the forest.
+        branchRows,
       },
       this.groupCache,
     );
@@ -381,8 +424,11 @@ export class LineageTreeProvider
   branchesOf(projectId: string): readonly BranchInfo[] {
     try {
       const grouping = this.groupingFor(this.forest());
-      return (
-        grouping.projects.find((p) => p.projectId === projectId)?.branches ?? []
+      // Through projectBranchList for the same reason webtree.ts is: under the
+      // directory model a split project's checkouts hang off its DIRECTORY rows,
+      // and a palette verb reading the project node alone would find none.
+      return projectBranchList(
+        grouping.projects.find((p) => p.projectId === projectId),
       );
     } catch (err) {
       logError('tree.branchesOf', err);
@@ -465,7 +511,7 @@ export class LineageTreeProvider
         return this.projectChildren(forest, el);
       }
 
-      if (el.type === 'branch') {
+      if (el.type === 'branch' || el.type === 'subproject') {
         return el.rootIds.map((id) => this.sessionRef(id));
       }
 
@@ -483,13 +529,19 @@ export class LineageTreeProvider
   }
 
   /**
-   * What hangs under a project row: its subprojects, then its branches (only
-   * under `lineage.groupSessionsByBranch`), then its sessions.
+   * What hangs under a project row: its subproject DIRECTORIES, or — for a
+   * single-directory project — its branches (only under
+   * `lineage.groupSessionsByBranch`) and its sessions.
    *
-   * SUBPROJECTS FIRST, unlike the Explorer's folders-before-files by accident:
-   * a project's sessions are a list that grows all day and its subprojects are
-   * a structure that does not, so putting the stable thing at the top is what
-   * keeps the structure findable once there are fifteen sessions under it.
+   * STRUCTURE FIRST, then the list: a project's sessions are a list that grows
+   * all day and its directories are a structure that does not, so putting the
+   * stable thing at the top is what keeps it findable once there are fifteen
+   * sessions under it.
+   *
+   * The directory split is exclusive, exactly as it is in the inline sidebar (see
+   * viewmodel.pushProject): every session the project claimed is inside one of
+   * these rows, so listing them here as well would draw each one twice. The two
+   * views must never disagree about which rows a project contains.
    */
   private projectChildren(
     forest: SessionForest,
@@ -498,9 +550,17 @@ export class LineageTreeProvider
     const grouping = this.groupingFor(forest);
     const byId = new Map(grouping.projects.map((p) => [p.projectId, p] as const));
     const out: TreeNode[] = [];
+    // Legacy record nesting, still drawn while a `parentId` written by an older
+    // build survives to the next activation — see ProjectGroupNode.depth.
     for (const childId of el.childProjectIds ?? []) {
       const child = byId.get(childId);
       if (child) out.push(child);
+    }
+
+    const subprojects = el.subprojects ?? [];
+    if (subprojects.length > 0) {
+      for (const node of subprojects) out.push(this.subprojectRef(node));
+      return out;
     }
 
     const branches = el.branches ?? [];
@@ -530,6 +590,72 @@ export class LineageTreeProvider
       ...unbranchedRoots(el.rootIds, branches).map((id) => this.sessionRef(id)),
     );
     return out;
+  }
+
+  /** Interned subproject node, for the same reason branchRef interns: the
+   *  workbench keys expansion state on element identity, so handing it a fresh
+   *  object per refresh would shut every open directory on every roster tick.
+   *
+   *  The grouping already reuses its own node objects when nothing changed (see
+   *  projects.reuseUnchanged), but only per PROJECT — a project gaining a session
+   *  in one directory produces fresh nodes for all of them. This narrows that to
+   *  the row that actually changed. */
+  private subprojectRef(node: SubprojectNode): SubprojectNode {
+    const key = `${node.projectId}\u0000${node.id}`;
+    const existing = this.subprojectRefs.get(key);
+    if (
+      existing &&
+      existing.dir === node.dir &&
+      existing.label === node.label &&
+      existing.main === node.main &&
+      existing.rootIds.length === node.rootIds.length &&
+      existing.rootIds.every((id, i) => id === node.rootIds[i])
+    ) {
+      return existing;
+    }
+    const next: SubprojectNode = { ...node, rootIds: node.rootIds.slice() };
+    if (this.subprojectRefs.size > CACHE_SOFT_LIMIT) this.subprojectRefs.clear();
+    this.subprojectRefs.set(key, next);
+    return next;
+  }
+
+  /**
+   * One DIRECTORY of a project, as a native row.
+   *
+   * Always expandable, like the project row above it and for the same reason: the
+   * directory exists whether or not anything is running in it, and a row that lost
+   * its toggle when its last session ended would move everything below it for a
+   * reason the user did not cause. Clicking it therefore opens and shuts it — the
+   * `+` is in the context menu, where a native row has to keep its verbs.
+   */
+  private subprojectItem(el: SubprojectNode): vscode.TreeItem {
+    const item = new vscode.TreeItem(
+      el.label,
+      this.isCollapsed(el)
+        ? vscode.TreeItemCollapsibleState.Collapsed
+        : vscode.TreeItemCollapsibleState.Expanded,
+    );
+    item.id = nodeKey(el);
+    // The count only. A path here would repeat the label and then be truncated —
+    // the hover is where the address belongs. Mirrors the inline row, except that
+    // this one cannot tell whether it is open (the workbench owns that), so it
+    // shows the number either way.
+    item.description = el.rootIds.length > 0 ? String(el.rootIds.length) : undefined;
+    // The plain folder glyph, against the project's `root-folder`: the native tree
+    // indents 8px per level and draws no band, so the icon is most of what says
+    // which rows are the roots of the view.
+    item.iconPath = new vscode.ThemeIcon('folder');
+    item.contextValue = contextValueOf(
+      el.main ? ['subproject', 'primary'] : ['subproject'],
+    );
+    item.tooltip = [
+      el.dir,
+      el.rootIds.length === 1 ? '1 session' : `${el.rootIds.length} sessions`,
+      el.main ? 'the project’s main directory' : '',
+    ]
+      .filter((line) => line !== '')
+      .join('\n');
+    return item;
   }
 
   /** Interned branch node, for the same reason sessionRef interns: the
@@ -578,6 +704,7 @@ export class LineageTreeProvider
     try {
       if (el.type === 'group') return this.groupItem(el);
       if (el.type === 'project') return this.projectItem(el);
+      if (el.type === 'subproject') return this.subprojectItem(el);
       if (el.type === 'branch') return this.branchItem(el);
       return this.sessionItem(el, this.forest());
     } catch (err) {
@@ -986,6 +1113,12 @@ export class LineageTreeProvider
       if (el.type === 'group') this.appendGroupTooltip(md, el);
       else if (el.type === 'project') this.appendProjectTooltip(md, el);
       else if (el.type === 'branch') this.appendBranchTooltip(md, el);
+      // A subproject's hover is set on the item itself (a path and a count — see
+      // subprojectItem) and has nothing to resolve lazily: no verbs to link, no
+      // probe to read. Left as the plain string rather than rebuilt as markdown
+      // here, because overwriting it with an empty MarkdownString is how a row
+      // silently loses its address.
+      else if (el.type === 'subproject') return item;
       else this.appendSessionTooltip(md, el);
       item.tooltip = md;
     } catch (err) {
@@ -1158,17 +1291,26 @@ export class LineageTreeProvider
   handleDrag(source: readonly TreeNode[], dt: vscode.DataTransfer): void {
     try {
       const ids: string[] = [];
+      // SESSIONS ONLY. A project row used to ride the same payload under a
+      // `project:` prefix, to be dropped onto another project and filed there —
+      // retired with record nesting, so the prefix is no longer produced here.
+      // The READER for it stays (parseDraggedProjectIds, below), because an older
+      // window can still be the source of a drag this one receives, and the
+      // honest response to that payload is to decline it rather than to read it
+      // as a session id.
+      // ROOTS ONLY, for the reason handleDrop gives: what a drag can change is
+      // which project a session is filed under, and a row inside a tree has no
+      // filing of its own — it is wherever the session it branched from is. A
+      // fork picked up here could only ever be refused on the way down, so it
+      // is never picked up. (Multi-select drags the roots and leaves the forks
+      // behind rather than declining the lot: the roots in the selection are
+      // exactly the part of it that has an answer.)
+      const roots = new Set(this.forest().visibleRoots);
       for (const el of source) {
-        if (el.type === 'session') ids.push(el.id);
-        // A project row drags too, to be filed under another one. It rides
-        // the SAME payload under a `project:` prefix rather than a second mime
-        // type: the array has always been read through a uuid-shaped filter
-        // (parseDraggedIds), so a prefixed entry is invisible to every existing
-        // reader — including an older window's, if two versions ever share a
-        // drag.
-        else if (el.type === 'project') ids.push(`project:${el.projectId}`);
+        if (el.type === 'session' && roots.has(el.id)) ids.push(el.id);
       }
-      if (ids.length === 0) return; // folder groups and branches are not draggable
+      if (ids.length === 0) return; // headers, folders, branches and forks
+
       dt.set(TREE_DND_MIME, new vscode.DataTransferItem(JSON.stringify(ids)));
       dt.set('text/plain', new vscode.DataTransferItem(ids[0]));
     } catch (err) {
@@ -1186,25 +1328,13 @@ export class LineageTreeProvider
 
       const raw = await transferred.asString();
 
-      // A PROJECT drag first, and never mixed with the session path: onto
-      // a project row it becomes that project's subproject, onto a folder row
-      // or empty space it goes back to the top level, onto a session row
-      // nothing happens (a project cannot be filed under a conversation).
-      const draggedProjects = parseDraggedProjectIds(raw);
-      if (draggedProjects.length > 0) {
-        const onto =
-          target === undefined || target.type === 'group'
-            ? null
-            : target.type === 'project'
-              ? target.projectId
-              : undefined;
-        if (onto === undefined) return;
-        for (const id of draggedProjects) {
-          if (id === onto) continue;
-          await this.deps.reparentProject?.(id, onto);
-        }
-        return;
-      }
+      // A PROJECT payload is DECLINED, before the session path and never mixed
+      // with it. Filing a project under another project is retired (a subproject
+      // is a directory now), and this build no longer produces the payload — but
+      // an older window sharing a drag still can, and a `project:<uuid>` string
+      // must never fall through to `parseDraggedIds` and be mistaken for a
+      // session.
+      if (parseDraggedProjectIds(raw).length > 0) return;
 
       const ids = parseDraggedIds(raw);
       if (ids.length === 0) return;
@@ -1214,7 +1344,12 @@ export class LineageTreeProvider
       // Dropping on a PROJECT is a different verb entirely: it does not touch
       // lineage, it teaches the project about the directory the session runs
       // in. That is the whole gesture for "this work belongs to that project".
-      if (target && target.type === 'project') {
+      // A SUBPROJECT row counts as its project here. The gesture means "this work
+      // belongs over there", and the row the user aimed at is a directory of that
+      // project — so the alternative is to fall through to the detach path below
+      // and silently pull the session out of its lineage instead, which is the
+      // one outcome a drop onto a project's own row must never produce.
+      if (target && (target.type === 'project' || target.type === 'subproject')) {
         // Only a visible ROOT can move: a project row renders roots only, so
         // dragging a nested fork onto it would silently do nothing on screen
         // while still appending its cwd to the project's directory list.
@@ -1233,20 +1368,25 @@ export class LineageTreeProvider
         return;
       }
 
-      // Dropping on a folder group (or on empty space) detaches to a root.
-      const newParentId =
-        target && target.type === 'session' ? target.id : null;
-
-      for (const id of ids) {
-        if (id === newParentId) {
-          log('tree.handleDrop: refused self-parent', id);
-          continue;
-        }
-        if (newParentId !== null && isDescendantOf(forest, newParentId, id)) {
-          log('tree.handleDrop: refused cycle', id, '->', newParentId);
-          continue;
-        }
-        await this.deps.reparent(id, newParentId);
+      // EVERY OTHER TARGET IS REFUSED. Dropping on a session used to re-parent
+      // and dropping on a folder row (or empty space) used to detach to a root
+      // — so one careless drag could pull a fork out of the tree it branched
+      // from, or file an unrelated conversation inside one, and the spine would
+      // then state an ancestry no transcript backs with nothing on screen to
+      // tell it from the real ones. Lineage is left to what records it: the
+      // edge minted at fork time, and inference from the transcripts.
+      //
+      // A session target says so out loud, because that gesture did something
+      // yesterday. A folder row or empty space stays silent — neither ever
+      // looked like it accepted a session, and a message per stray drop is
+      // noise.
+      if (target && target.type === 'session') {
+        log('tree.handleDrop: refused lineage drag', ids[0], '->', target.id);
+        notify(
+          'Flock: sessions cannot be dragged into or out of a tree — a fork ' +
+            'sits under the session it branched from. Drag a top-level ' +
+            'session onto a project to file it there.',
+        );
       }
     } catch (err) {
       logError('tree.handleDrop', err);
@@ -1274,6 +1414,7 @@ export class LineageTreeProvider
       if (
         key.startsWith('group:') ||
         key.startsWith('project:') ||
+        key.startsWith('subproject:') ||
         key.startsWith('branch:')
       ) {
         continue;
@@ -1321,23 +1462,12 @@ function parseDraggedProjectIds(raw: string): string[] {
   }
 }
 
-/** True when `candidateId` sits anywhere below `ancestorId` in the forest —
- *  i.e. reparenting `ancestorId` under it would close a cycle. */
-function isDescendantOf(
-  forest: SessionForest,
-  candidateId: string,
-  ancestorId: string,
-): boolean {
-  const seen = new Set<string>();
-  let cursor: string | null = candidateId;
-  while (cursor && !seen.has(cursor)) {
-    if (cursor === ancestorId) return true;
-    seen.add(cursor);
-    const node: SessionNode | undefined = forest.nodes.get(cursor);
-    cursor = node ? node.parentId : null;
-  }
-  return false;
-}
+// `isDescendantOf` was here: the cycle guard a drag-reparent needed, so that
+// dropping a session onto its own descendant could be refused. Retired with the
+// gesture — no drop writes a parent edge any more, so there is no cycle to
+// close. The forest's own guards against a cyclic edge (lineage.ts) stay: they
+// answer for state files written before this and for inference, neither of
+// which this file is the source of.
 
 // ----------------------------------------------------------- registration
 

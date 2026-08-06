@@ -1489,12 +1489,31 @@ export class WorkspaceManager {
         return false;
       }
 
-      if (!this.deps.hasTranscript(tip)) return false;
-      this.deps.repairResumeLeaf?.(tip);
+      // A session that never took a turn wrote no transcript, so there is
+      // nothing to `--resume` — and refusing here was how a workspace switch
+      // lost every session created and not yet written in: parked on the way
+      // out, silently skipped on the way back, still flagged `parked` and now
+      // unreachable from the switch that put it there. It comes home the only
+      // way it can, by starting under its own id (free: no transcript claims
+      // it), which is the same answer `resumeFlow` gives the click.
+      //
+      // NOT a never-started FORK, which is why the recorded edge is consulted:
+      // that branch is displaying its ancestor's history, and only a replay
+      // (`--fork-session --resume <ancestor>`) brings it back as what it was.
+      // Getting that wrong would not merely skip the row, it would spend the
+      // id on a blank conversation and lose the branch for good — so an
+      // unstarted fork stays skipped here and reopens from its own click,
+      // where `resumeFlow` has the ancestor walk to do it properly.
+      const started = this.deps.hasTranscript(tip);
+      if (!started) {
+        const recordedParent = record.parentId;
+        if (typeof recordedParent === 'string' && recordedParent !== '') return false;
+      }
+      if (started) this.deps.repairResumeLeaf?.(tip);
       const account = this.accountLaunch(tip);
       const binding = await this.deps.launchSession({
         sessionId: tip,
-        resumeId: tip,
+        ...(started ? { resumeId: tip } : {}),
         ...account,
         cwd: this.deps.sessionCwd(tip) ?? record?.cwd,
         ...(record?.title !== undefined ? { title: record.title } : {}),

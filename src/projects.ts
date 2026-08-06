@@ -21,9 +21,12 @@ import type {
   BranchInfo,
   EditorialRecord,
   GroupNode,
+  LocalBranch,
   ProjectGroupNode,
   ProjectRecord,
   ProviderId,
+  SubprojectNode,
+  SubprojectRecord,
   Worktree,
 } from './types';
 
@@ -166,6 +169,17 @@ export function baseName(p: string): string {
   return i < 0 ? norm : norm.slice(i + 1);
 }
 
+/** The directory `p` sits in, or '' when there is nothing above it. Same
+ *  no-node:path discipline as {@link baseName}, and used for the same one thing:
+ *  telling two subprojects called `src` apart by what contains them. */
+export function parentDir(p: string): string {
+  const norm = normalizeDir(p);
+  if (norm === '' || norm === '/') return '';
+  const i = norm.lastIndexOf('/');
+  if (i < 0) return '';
+  return i === 0 ? '/' : norm.slice(0, i);
+}
+
 // ------------------------------------------------------------- project shape
 
 /** rootDir first, then the extras, normalized and deduped. Always the list to
@@ -188,6 +202,482 @@ export function projectDirs(p: ProjectRecord): string[] {
 
 export function providerOfProject(p: ProjectRecord | undefined): ProviderId {
   return isProviderId(p?.provider) ? p.provider : DEFAULT_PROVIDER;
+}
+
+// --------------------------------------------------------------- subprojects
+//
+// A SUBPROJECT IS A DIRECTORY. That is the whole model, and it is worth stating
+// plainly because it replaced one where a subproject was a project record filed
+// under another project.
+//
+// What was wrong with the old one was not the tree — nesting drew fine — it was
+// that a subproject was a full project in every other respect. It had its own
+// name to invent, its own provider, its own AI account, its own saved workspace,
+// its own settings menu, and its own directory that could be anywhere at all,
+// including somewhere its parent had never heard of. Every one of those was a
+// decision demanded of the user for something whose entire job was sorting rows,
+// and together they were most of the reason a project's context menu had grown to
+// fourteen entries.
+//
+// So: a project is scoped to ONE directory. Add a second and the project has two
+// subprojects, one per directory, each holding the sessions running under it.
+// There is nothing to name, nothing to configure, and nothing that can point
+// somewhere surprising — the rows ARE the directories, so they cannot disagree
+// with them.
+
+/**
+ * How many directories a project needs before its rows split up.
+ *
+ * TWO, for the reason BRANCH_CHIPS_MIN is two: at one directory there is nothing
+ * to sort. Every project anybody has ever made has one, and giving each of them
+ * a single subproject row — restating the project's own address, one level in,
+ * above the same sessions that were there before — would cost a row per project
+ * forever to say nothing. Below the threshold the tree is byte-identical to the
+ * one before subprojects existed; add a directory and the split appears on its
+ * own.
+ */
+export const SUBPROJECT_MIN = 2;
+
+/**
+ * The label each of a project's directories gets, disambiguated.
+ *
+ * The basename, which is what you call a directory — except that a monorepo
+ * makes `api/src` and `web/src` an ordinary pair, and two rows both reading
+ * `src` is a tree that cannot be used. Those get their parent prepended
+ * (`api/src`), and anything STILL colliding after that gets the whole path,
+ * because at that point the only honest label is the address itself.
+ *
+ * Case-insensitively, matching `pathKey`: on the two platforms this ships on,
+ * `Src` and `src` are one name and would read as a duplicate on screen.
+ */
+export function subprojectLabels(dirs: readonly string[]): string[] {
+  const bases = dirs.map((d) => baseName(d) || normalizeDir(d));
+  const taken = (labels: readonly string[]): Map<string, number> => {
+    const counts = new Map<string, number>();
+    for (const l of labels) {
+      const key = l.toLowerCase();
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return counts;
+  };
+
+  const baseCounts = taken(bases);
+  const second = dirs.map((d, i) => {
+    if ((baseCounts.get(bases[i].toLowerCase()) ?? 0) < 2) return bases[i];
+    const up = baseName(parentDir(d));
+    return up === '' ? normalizeDir(d) : `${up}/${bases[i]}`;
+  });
+
+  const secondCounts = taken(second);
+  return second.map((label, i) =>
+    (secondCounts.get(label.toLowerCase()) ?? 0) < 2
+      ? label
+      : normalizeDir(dirs[i]),
+  );
+}
+
+/**
+ * A project's directories as rows, with its sessions filed into them.
+ *
+ * LONGEST MATCH WINS, exactly as project membership does (see matchProject) and
+ * for the same reason: a project listing both `~/app` and `~/app/api` must put a
+ * session in `~/app/api` under the api row, not under the one that merely
+ * contains it. This is also what makes the v6 migration a no-op for the user —
+ * a subproject that used to be its own record at `~/app/api` becomes a directory
+ * at `~/app/api`, and its sessions land in the same place on screen.
+ *
+ * THERE IS NO PROJECT-WIDE ROOT. Once a project has directories, every session it
+ * claims belongs to exactly one of them, and the main directory is not a bucket
+ * for the ones that did not fit — it is directory number one and nothing more.
+ * Making that true rather than merely stating it is what `worktreesOf` is for.
+ *
+ * The one way a session used to miss every directory was the common way: a linked
+ * git WORKTREE. `matchProject` hands a project every checkout of every repository
+ * its directories sit in (that is why an agent in `~/app-feat-x` is under the
+ * project at `~/app` without anybody registering the path), and a rule that only
+ * compared listed directories could not see those — so they piled into the main
+ * row. So this asks the SAME question project membership asks, one level down:
+ * a directory claims a session when the session is inside it, or inside a
+ * checkout of the repository AT it.
+ *
+ * And it asks it about the MAIN CHECKOUT'S SPELLING of the path — see
+ * canonicalCheckoutPath. A session in `~/app-feat-x/api`, in a linked worktree of
+ * the monorepo at `~/app`, is working on `api`, so it belongs to the `api` row
+ * rather than to whichever row happens to own the repository. Without that step a
+ * split monorepo would send every worktree session to the main directory, which is
+ * exactly the catch-all this design refuses.
+ *
+ * The `at < 0` fallback below is therefore unreachable through the product: any
+ * cwd the project claimed, it claimed through one of these directories under this
+ * same rule. It stays because the two rules are computed in different places from
+ * different inputs (the grouping pass hands this function whatever `worktreesOf`
+ * answered *this* tick, and a probe can land between the two), and because
+ * dropping the row instead would make a stale cache a way to lose a running
+ * agent. It is a bug-catcher, not a design feature — and a session sitting in the
+ * main row that plainly is not inside it is the shape that bug would take.
+ */
+export interface SubprojectInput {
+  project: ProjectRecord;
+  rootIds: readonly string[];
+  cwdOf: (sessionId: string) => string | undefined;
+  /**
+   * This project's NAMED lanes, in the order they were made. v7 — see
+   * SubprojectRecord.
+   *
+   * Absent or empty is every project that has never used the feature, and gives
+   * exactly the directory rows this function returned before lanes existed. The
+   * caller filters by project; entries naming another one are ignored here anyway.
+   */
+  lanes?: readonly SubprojectRecord[];
+  /**
+   * The lane a session was STARTED in, from EditorialRecord.subprojectId, or
+   * undefined for one that was not started in a lane.
+   *
+   * The only input that can tell two lanes on one directory apart, which is why it
+   * exists at all: their directories are identical, so every derived rule answers
+   * the same for both. Absent for every session that predates the field and every
+   * one started by hand in a terminal — those are placed by directory, exactly as
+   * they always have been.
+   */
+  stampOf?: (sessionId: string) => string | undefined;
+  /**
+   * The checkouts of the repository at one of this project's directories, MAIN
+   * WORKTREE FIRST — which is the order `git worktree list` reports and
+   * parseWorktreeList preserves (see src/git.ts). [] for a directory that is not
+   * in a repository, and for one whose probe has not landed yet; the caller
+   * cannot tell those apart and must not need to.
+   *
+   * Optional so every caller that does not care about worktrees — which is most
+   * of the tests and every non-git project — behaves exactly as it did before this
+   * argument existed.
+   */
+  worktreesOf?: (dir: string) => readonly Worktree[];
+}
+
+/** The identity of an implicit row: a directory with no lane named in it. Prefixed
+ *  so it can never collide with a lane's uuid, and so a reader can tell the two
+ *  kinds apart without consulting the store. See SubprojectNode.id. */
+export const implicitSubprojectId = (dir: string): string =>
+  `dir:${pathKey(dir)}`;
+
+export function buildSubprojects(input: SubprojectInput): SubprojectNode[] {
+  const project = input.project;
+  const dirs = projectDirs(project);
+  if (dirs.length === 0) return [];
+  const labels = subprojectLabels(dirs);
+
+  // The project's own lanes, in creation order, each with a usable name. A lane
+  // whose name sanitized to '' still draws — the user can rename it — and takes
+  // its directory's basename in the meantime, which is what an implicit row would
+  // have said.
+  const lanes = (input.lanes ?? []).filter(
+    (l): l is SubprojectRecord =>
+      !!l && l.deleted !== true && l.projectId === project.id && l.dir !== '',
+  );
+
+  const nodes: SubprojectNode[] = lanes.map((lane) => ({
+    type: 'subproject',
+    projectId: project.id,
+    id: lane.id,
+    name: lane.name,
+    implicit: false,
+    dir: normalizeDir(lane.dir),
+    dirKey: pathKey(lane.dir),
+    label: lane.name.trim() === '' ? baseName(lane.dir) : lane.name,
+    // Never on a named lane: `main` marks the row standing for the project's own
+    // address, which Remove Subproject refuses. Removing a LANE removes a name,
+    // and is always allowed.
+    main: false,
+    rootIds: [],
+  }));
+
+  // One implicit row per directory NOBODY HAS NAMED A LANE IN. This is what keeps
+  // every existing project's tree byte-identical: with no lanes at all, these are
+  // the only nodes and they are the directory rows that were here before.
+  const named = new Set(nodes.map((n) => n.dirKey));
+  const implicitAt = new Map<string, number>();
+  dirs.forEach((dir, i) => {
+    const key = pathKey(dir);
+    if (named.has(key)) return;
+    implicitAt.set(key, nodes.length);
+    nodes.push({
+      type: 'subproject',
+      projectId: project.id,
+      id: implicitSubprojectId(dir),
+      name: '',
+      implicit: true,
+      dir,
+      dirKey: key,
+      label: labels[i],
+      main: i === 0,
+      rootIds: [],
+    });
+  });
+
+  // BELOW THE THRESHOLD THERE ARE NO ROWS, and the threshold now counts NODES
+  // rather than directories — but a NAMED lane always earns its row. One
+  // directory and no lanes is every project anybody has ever made, and giving it a
+  // single row restating its own address would cost a row per project forever to
+  // say nothing (see SUBPROJECT_MIN). One directory and one lane is different: you
+  // typed that name on purpose, and the row is where its `+` and its branches live.
+  if (nodes.length < SUBPROJECT_MIN && lanes.length === 0) return [];
+
+  // Read ONCE per directory rather than once per session: `worktreesOf` is a
+  // cache lookup, but a window with forty live sessions would otherwise run it
+  // forty times over the same handful of directories.
+  const checkouts = nodes.map((node) =>
+    safeWorktrees(input.worktreesOf, node.dir),
+  );
+  const byId = new Map(nodes.map((node, i) => [node.id, i] as const));
+  // Which node an unstamped session in a given directory belongs to: the FIRST
+  // lane named in it, else its implicit row. That is what makes "no leftover row"
+  // survive naming a lane — the moment a directory has a lane, the lane is where
+  // its unclaimed sessions go, and no second row appears to hold them.
+  const defaultAt = new Map<string, number>();
+  nodes.forEach((node, i) => {
+    if (!defaultAt.has(node.dirKey)) defaultAt.set(node.dirKey, i);
+  });
+  for (const [key, i] of implicitAt) defaultAt.set(key, i);
+  nodes.forEach((node, i) => {
+    if (!node.implicit && !implicitAt.has(node.dirKey)) {
+      const first = defaultAt.get(node.dirKey);
+      if (first === undefined || first > i) defaultAt.set(node.dirKey, i);
+    }
+  });
+
+  for (const rootId of input.rootIds ?? []) {
+    // THE STAMP FIRST. It is the user's own answer to a question nothing else can
+    // answer, and it outranks every derived rule for the same reason an explicit
+    // directory outranks an inferred worktree in matchProject.
+    const stamped = byId.get(safeStamp(input.stampOf, rootId) ?? '');
+    if (stamped !== undefined && !nodes[stamped].implicit) {
+      nodes[stamped].rootIds.push(rootId);
+      continue;
+    }
+    let cwd: string | undefined;
+    try {
+      cwd = input.cwdOf(rootId);
+    } catch {
+      // A cwd lookup that throws is a session with no address: it still belongs
+      // to the project, so it goes to the main row rather than off the tree.
+      cwd = undefined;
+    }
+    const at = subprojectIndexForCwd(nodes, checkouts, cwd);
+    const home = at < 0 ? 0 : (defaultAt.get(nodes[at].dirKey) ?? at);
+    nodes[home].rootIds.push(rootId);
+  }
+  return nodes;
+}
+
+/** `stampOf`, defended. A lookup that throws is a session with no stamp, which is
+ *  the ordinary case for everything Flock did not start. */
+function safeStamp(
+  stampOf: ((sessionId: string) => string | undefined) | undefined,
+  sessionId: string,
+): string | undefined {
+  if (!stampOf) return undefined;
+  try {
+    return stampOf(sessionId) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** `worktreesOf`, defended. A probe that throws is a directory with no checkouts
+ *  — the same answer a non-git directory gives — and must not take the grouping
+ *  pass down with it. */
+function safeWorktrees(
+  worktreesOf: ((dir: string) => readonly Worktree[]) | undefined,
+  dir: string,
+): readonly Worktree[] {
+  if (!worktreesOf) return [];
+  try {
+    return worktreesOf(dir) ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** `localBranchesOf`, defended, for the same reason and with the same answer: a
+ *  directory whose enumeration failed has no fold under it, which is how a
+ *  non-git directory already renders. */
+function safeLocalBranches(
+  localBranchesOf: ((dir: string) => readonly LocalBranch[]) | undefined,
+  dir: string,
+): readonly LocalBranch[] {
+  if (!localBranchesOf) return [];
+  try {
+    return localBranchesOf(dir) ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Where a path inside a LINKED worktree would sit in the main checkout.
+ *
+ * `~/app-feat-x/api/handlers`, in a repository whose main worktree is `~/app`,
+ * is `~/app/api/handlers`. That is the path the project's directory list was
+ * written against: somebody who splits a monorepo into `api` and `web` names the
+ * directories once, in the checkout they were looking at, and every other
+ * checkout of that repository has the same shape under a different prefix.
+ *
+ * Returns '' when there is nothing to translate — not a repository, no linked
+ * worktree containing the path, or a path already in the main checkout — and the
+ * caller then has nothing extra to consider. LONGEST checkout wins, because
+ * `git worktree add` is perfectly capable of putting one checkout inside another
+ * and the deeper prefix is the one the path is actually in.
+ *
+ * Sliced on the NORMALIZED spellings so the offset is meaningful: `isWithin`
+ * compares case-folded prefixes of exactly these strings, so a match guarantees
+ * the prefix is that many characters long. The case of what comes back is the
+ * main worktree's own plus the tail as the session spelled it, which is the pair
+ * every other comparison here is already case-insensitive about.
+ */
+export function canonicalCheckoutPath(
+  checkouts: readonly Worktree[],
+  cwd: string | undefined,
+): string {
+  const target = normalizeDir(cwd);
+  if (target === '' || checkouts.length === 0) return '';
+  const root = normalizeDir(checkouts[0]?.dir);
+  if (root === '') return '';
+
+  let best = '';
+  for (const wt of checkouts) {
+    const dir = normalizeDir(wt?.dir);
+    if (dir === '' || !isWithin(dir, target)) continue;
+    if (dir.length > best.length) best = dir;
+  }
+  // Nothing contains it, or the main checkout itself does — either way the
+  // path needs no second spelling.
+  if (best === '' || pathKey(best) === pathKey(root)) return '';
+  return `${root}${target.slice(best.length)}`;
+}
+
+/**
+ * Which directory row a session belongs to, or -1.
+ *
+ * Two passes over the same question, and the order between them is the whole
+ * rule: a directory that CONTAINS the session outranks one that merely owns the
+ * repository the session is checked out from. That mirrors matchProject's own
+ * tie-break — an explicit statement beats an inference — one level down.
+ *
+ * Within a pass, deeper wins; at equal depth, the earlier directory wins, which
+ * makes the answer stable and puts a genuine tie on the main directory (the same
+ * choice every project-level verb makes).
+ */
+function subprojectIndexForCwd(
+  nodes: readonly SubprojectNode[],
+  checkouts: readonly (readonly Worktree[])[],
+  cwd: string | undefined,
+): number {
+  const target = normalizeDir(cwd);
+  if (target === '') return -1;
+
+  const deepestContaining = (path: string): number => {
+    let at = -1;
+    let deepest = -1;
+    for (let i = 0; i < nodes.length; i++) {
+      if (!isWithin(nodes[i].dir, path)) continue;
+      const depth = nodes[i].dirKey.length;
+      if (depth > deepest) {
+        deepest = depth;
+        at = i;
+      }
+    }
+    return at;
+  };
+
+  const direct = deepestContaining(target);
+  if (direct >= 0) return direct;
+
+  // Nothing lists a directory containing it. Ask again as the main checkout
+  // would spell it, once per repository this project touches — two directories in
+  // one repository produce the same translation, so the answer does not depend on
+  // which of them is asked first.
+  for (let i = 0; i < nodes.length; i++) {
+    const canonical = canonicalCheckoutPath(checkouts[i] ?? [], target);
+    if (canonical === '') continue;
+    const derived = deepestContaining(canonical);
+    if (derived >= 0) return derived;
+  }
+
+  // A checkout of a repository one of these directories sits in, whose path maps
+  // nowhere they list — the repository's own root is outside the project, say.
+  // The directory that owns the repository is the honest answer.
+  for (let i = 0; i < nodes.length; i++) {
+    for (const wt of checkouts[i] ?? []) {
+      if (isWithin(normalizeDir(wt?.dir), target)) return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * v6: every nested project record folded into its top-level ancestor.
+ *
+ * Pure, and separate from the write for the usual reason — the RULES are worth
+ * testing without a store — but also because this is the one migration in the
+ * ladder that destroys something. A child's directories survive (they become the
+ * ancestor's, which is what puts its sessions back on screen in the same place);
+ * its NAME, provider, account override, saved workspace and closed-ness do not.
+ * That is the cost of the model change and it is paid once, here, where it can be
+ * read.
+ *
+ * Directories are collected in tree preorder — the ancestor's own first, then
+ * each descendant's in display order — so the ancestor's `rootDir` never moves.
+ * A project's main directory is what every project-level verb defaults to, and a
+ * migration that silently re-pointed it would change where `+` starts a session.
+ *
+ * Deduped on `pathKey`, because a parent and child listing the same directory is
+ * exactly the arrangement the old model tolerated (the deeper record won the tie)
+ * and the new one has no room for.
+ */
+export interface FlattenedProjects {
+  /** Ancestors whose directory list changed, with the list to write. */
+  merged: { id: string; rootDir: string; dirs: string[] }[];
+  /** Records to tombstone: every project that was filed under another one. */
+  removed: string[];
+}
+
+export function flattenNestedProjects(
+  projects: readonly ProjectRecord[],
+): FlattenedProjects {
+  const live = (projects ?? []).filter(
+    (p): p is ProjectRecord => !!p?.id && p.deleted !== true,
+  );
+  const tree = buildProjectTree(live);
+  const merged: FlattenedProjects['merged'] = [];
+  const removed: string[] = [];
+
+  for (const rootId of tree.roots) {
+    const subtree = projectSubtree(tree, rootId);
+    if (subtree.length < 2) continue; // nothing filed under it
+
+    const dirs: string[] = [];
+    const seen = new Set<string>();
+    for (const id of subtree) {
+      const p = tree.byId.get(id)?.project;
+      if (!p) continue;
+      for (const dir of projectDirs(p)) {
+        const key = pathKey(dir);
+        if (key === '' || seen.has(key)) continue;
+        seen.add(key);
+        dirs.push(dir);
+      }
+    }
+    // A root with no usable directory of its own cannot be written (the store's
+    // sanitizer drops a project with no rootDir), so leave the whole subtree
+    // alone rather than half-migrate it. Unreachable through the product —
+    // `newProjectFlow` refuses an empty directory — and reachable by hand-editing
+    // state.json, which is exactly the case this guard is for.
+    if (dirs.length === 0) continue;
+
+    merged.push({ id: rootId, rootDir: dirs[0], dirs: dirs.slice(1) });
+    for (const id of subtree.slice(1)) removed.push(id);
+  }
+  return { merged, removed };
 }
 
 // ------------------------------------------------------------ project tree
@@ -752,6 +1242,268 @@ export function buildBranches(
   return branches;
 }
 
+/**
+ * Should this branch be on screen under a DIRECTORY row, absent any decision by
+ * the user?
+ *
+ * The directory model's policy, and it is narrower than defaultBranchVisibility
+ * on purpose — narrower because the list it curates is so much longer. That one
+ * chose among a project's CHECKOUTS, of which there are two or six; this one
+ * chooses among a repository's BRANCHES, of which there are eighty, and a rule
+ * that promoted every checkout would put the ten stale worktrees somebody forgot
+ * to prune above the sessions they are trying to read.
+ *
+ * So exactly two things earn a row outside the fold:
+ *
+ *   - the checkout AT this directory row. That branch is what the row currently
+ *     IS: hiding a directory's own branch inside a fold labelled "everything
+ *     else" would be hiding the row's own address from it.
+ *   - a branch something is RUNNING on. This is the one the user asked for in so
+ *     many words, and it is the same instinct defaultBranchVisibility had: a live
+ *     agent whose row you cannot see is the worst outcome this feature could
+ *     produce.
+ *
+ * Everything else folds — INCLUDING a checkout with nothing running in it, which
+ * is the deliberate difference from the older policy. A worktree you are not
+ * using this week is a directory on disk, not a piece of work in flight, and it
+ * is one click away in the fold with its age beside it.
+ *
+ * Not a memory: recomputed every render, so a branch that goes quiet drops back
+ * into the fold. `shownBranches` is how a user keeps one regardless.
+ */
+export function directoryBranchVisibility(branch: {
+  dir: string;
+  rootIds: readonly string[];
+  ownCheckout: boolean;
+}): boolean {
+  if (branch.ownCheckout) return true;
+  return branch.rootIds.length > 0;
+}
+
+/**
+ * Every branch of the repository at ONE directory, as rows: promoted first, then
+ * the fold's contents.
+ *
+ * This is the directory model's answer to buildBranches, and the differences are
+ * the feature:
+ *
+ *   1. IT LISTS THE REPOSITORY, not the checkouts. `localBranches` is every
+ *      `refs/heads/` entry (src/branchList.ts), so a branch nobody has checked
+ *      out still gets a row — with `dir: ''`, because there is no directory to
+ *      start a session in and the row offers a worktree instead.
+ *   2. IT IS ANCHORED ON ONE DIRECTORY, so `primary` stops meaning "the
+ *      repository's main worktree" as the only distinguished row and `ownCheckout`
+ *      — the checkout AT this directory — becomes the one that matters. For a
+ *      project whose directory IS the repository root those are the same branch;
+ *      for a project pointed at `~/app/api` inside a monorepo, or at a linked
+ *      worktree, they are not, and the row's own branch is the one it should lead
+ *      with.
+ *   3. IT DOES NOT DROP ANYTHING. Every branch is in the returned list; `shown`
+ *      says which side of the fold it is on. A caller that ignores `shown`
+ *      renders the whole repository, which is what makes the fold a layout rather
+ *      than a filter.
+ *
+ * ORDER, which is the whole of the colour contract (see buildBranches): the
+ * directory's own checkout first — so it keeps colour 0 for as long as it is
+ * checked out there — then the rest of the promoted rows alphabetically, then the
+ * fold NEWEST COMMIT FIRST. Recency is what makes a long fold navigable, and it
+ * is only applied where the list is long: the promoted rows are few and are
+ * scanned by name.
+ */
+export function buildDirectoryBranches(input: {
+  /** The directory row this list hangs under. Its own checkout leads. */
+  dir: string;
+  /** `git worktree list` for that directory, main worktree first. */
+  worktrees: readonly Worktree[];
+  /** Every local branch of the same repository, from src/branchList.ts. Absent
+   *  or empty gives a checkouts-only list, which is what a window shows in the
+   *  moment before the enumeration lands. */
+  localBranches?: readonly LocalBranch[];
+  /** Sessions filed under this directory row. */
+  rootIds: readonly string[];
+  cwdOf: (sessionId: string) => string | undefined;
+  /** For `shownBranches` / `hiddenBranches`. Curation is the PROJECT's, not the
+   *  directory's: the lists are stored per project record, and a branch name is
+   *  distinctive enough that pinning `feat/x` in a project with two repositories
+   *  pinning it in both is a smaller surprise than a second pair of lists to
+   *  keep. */
+  project?: ProjectRecord;
+}): BranchInfo[] {
+  const own = pathKey(input.dir);
+  const checkouts = dedupeWorktrees(input.worktrees);
+  if (checkouts.length === 0 && (input.localBranches ?? []).length === 0) {
+    return [];
+  }
+
+  interface Draft {
+    name: string;
+    dir: string;
+    primary: boolean;
+    ownCheckout: boolean;
+    rootIds: string[];
+    lastCommitAt?: number;
+  }
+
+  const drafts: Draft[] = checkouts.map((wt, index) => ({
+    name: branchLabel(wt),
+    dir: wt.dir,
+    // Git lists the main worktree first, so index 0 is the repository's own root.
+    primary: index === 0,
+    ownCheckout: own !== '' && pathKey(wt.dir) === own,
+    rootIds: [],
+  }));
+
+  // A directory that is in a repository but is not itself a checkout — `~/app/api`
+  // inside the monorepo at `~/app` — has no own checkout among the worktrees. The
+  // repository's main worktree is the row's branch in that case: it is the
+  // checkout the directory is physically inside.
+  if (!drafts.some((d) => d.ownCheckout)) {
+    const inside = drafts.find((d) => isWithin(d.dir, input.dir));
+    if (inside) inside.ownCheckout = true;
+  }
+
+  const byName = new Map<string, Draft>();
+  for (const draft of drafts) byName.set(draft.name, draft);
+
+  // Every ref that has no checkout. A branch already drafted from a worktree is
+  // skipped rather than duplicated, and picks up its commit date on the way past —
+  // the age is a fact about the branch, not about whether it has a directory.
+  for (const local of input.localBranches ?? []) {
+    const name = typeof local?.name === 'string' ? local.name.trim() : '';
+    if (name === '') continue;
+    const existing = byName.get(name);
+    if (existing) {
+      existing.lastCommitAt = local.committedAt;
+      continue;
+    }
+    const draft: Draft = {
+      name,
+      dir: '',
+      primary: false,
+      ownCheckout: false,
+      rootIds: [],
+      lastCommitAt: local.committedAt,
+    };
+    byName.set(name, draft);
+    drafts.push(draft);
+  }
+
+  // Sessions land on the CHECKOUT that contains them, longest match first — the
+  // same rule as everywhere else here. A branch with no checkout can hold no
+  // session, which is exactly why it cannot be promoted by one.
+  for (const rootId of input.rootIds ?? []) {
+    let cwd: string | undefined;
+    try {
+      cwd = input.cwdOf(rootId);
+    } catch {
+      cwd = undefined;
+    }
+    const at = branchIndexForCwd(drafts, cwd);
+    if (at >= 0) drafts[at].rootIds.push(rootId);
+  }
+
+  const hidden = input.project?.hiddenBranches ?? [];
+  const pinned = input.project?.shownBranches ?? [];
+  const isShown = (draft: Draft): boolean => {
+    if (hidden.includes(draft.name)) return false;
+    if (pinned.includes(draft.name)) return true;
+    return directoryBranchVisibility(draft);
+  };
+
+  const promoted = drafts.filter(isShown);
+  const folded = drafts.filter((d) => !isShown(d));
+
+  promoted.sort((a, b) => {
+    // The row's own branch leads, whatever it is called.
+    if (a.ownCheckout !== b.ownCheckout) return a.ownCheckout ? -1 : 1;
+    return cmp(a.name.toLowerCase(), b.name.toLowerCase()) || cmp(a.dir, b.dir);
+  });
+  folded.sort(
+    (a, b) =>
+      // Newest first. An unread date is 0 and sorts last, which is where a
+      // branch we know nothing about belongs.
+      (b.lastCommitAt ?? 0) - (a.lastCommitAt ?? 0) ||
+      cmp(a.name.toLowerCase(), b.name.toLowerCase()),
+  );
+
+  return [...promoted, ...folded].map((draft, position) => ({
+    name: draft.name,
+    dir: draft.dir,
+    colorIndex: position % BRANCH_COLOR_COUNT,
+    rootIds: draft.rootIds,
+    primary: draft.primary,
+    shown: isShown(draft),
+    ...(draft.lastCommitAt === undefined ? {} : { lastCommitAt: draft.lastCommitAt }),
+  }));
+}
+
+/**
+ * Every branch a PROJECT can currently offer a verb, wherever the rows put it.
+ *
+ * The join between the two layouts, and the reason it exists is a verb rather than
+ * a row: **New Worktree…** and **Remove Worktree** reach a project from the
+ * command palette with no row to start from, and they resolve their target against
+ * the branch list the view is showing (`getBranches`). Under the directory model a
+ * split project's own `branches` is empty — its directories carry them — so a
+ * palette verb reading only the project node would be told the repository has no
+ * checkouts and refuse.
+ *
+ * The project's own list when it has one; otherwise the union of its directories',
+ * in directory order. Deduped on NAME AND DIRECTORY together: two directories of
+ * one repository report the same checkouts (that is one entry), and two directories
+ * in two repositories can each have a `main` at a different path (that is two,
+ * because they are two places a session can run).
+ */
+export function projectBranchList(
+  node:
+    | {
+        branches?: readonly BranchInfo[];
+        subprojects?: readonly { branches?: readonly BranchInfo[] }[];
+      }
+    | undefined,
+): readonly BranchInfo[] {
+  const own = node?.branches ?? [];
+  if (own.length > 0) return own;
+  const out: BranchInfo[] = [];
+  const seen = new Set<string>();
+  for (const sub of node?.subprojects ?? []) {
+    for (const branch of sub?.branches ?? []) {
+      if (!branch) continue;
+      // A SPACE delimits the two halves: `git check-ref-format` forbids one in a
+      // ref name, so the first space always ends the name however many the path
+      // then contains. Deliberately not a control character — see the note on
+      // hasControlChar in src/commands.ts for what a literal one in a source file
+      // costs.
+      const key = `${branch.name} ${pathKey(branch.dir)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(branch);
+    }
+  }
+  return out;
+}
+
+/** The same normalize-and-dedupe pass projectWorktrees makes, for one directory:
+ *  the same checkout reported twice would be the same branch twice. */
+function dedupeWorktrees(worktrees: readonly Worktree[]): Worktree[] {
+  const out: Worktree[] = [];
+  const seen = new Set<string>();
+  for (const wt of worktrees ?? []) {
+    const dir = normalizeDir(wt?.dir);
+    if (dir === '') continue;
+    const key = pathKey(dir);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      dir,
+      branch: typeof wt.branch === 'string' ? wt.branch : '',
+      head: typeof wt.head === 'string' ? wt.head : '',
+      detached: wt.detached === true,
+    });
+  }
+  return out;
+}
+
 /** A worktree's chip label: its branch, or the detached marker. */
 function branchLabel(wt: Worktree): string {
   const name = typeof wt.branch === 'string' ? wt.branch.trim() : '';
@@ -767,7 +1519,11 @@ function branchLabel(wt: Worktree): string {
  * disagree with the chips on the first nested-worktree it met.
  */
 export function branchIndexForCwd(
-  branches: readonly BranchInfo[],
+  /** Anything with a `dir`. Widened from BranchInfo so the drafts inside
+   *  buildDirectoryBranches can be filed by the same function that files the
+   *  finished ones — two implementations of "which checkout is this session in"
+   *  would disagree on the first nested worktree they met. */
+  branches: readonly { dir: string }[],
   cwd: string | undefined,
 ): number {
   const target = normalizeDir(cwd);
@@ -811,6 +1567,64 @@ export interface GroupingInput {
    * that do not care about branches, which then behave exactly as before.
    */
   worktreesOf?: (dir: string) => readonly Worktree[];
+  /**
+   * `lineage.git.branches` — whether a project gets BRANCH ROWS at all.
+   *
+   * THE ONE GATE. Off, every project's `branches` is empty, which is the same
+   * state a non-git project has always been in: no rows, no colours, no fold, no
+   * "Others", and every downstream reader already handles it because it is the
+   * ordinary case. That is why the switch lives here rather than in the two
+   * renderers — one place to turn it off, and no surface can disagree with the
+   * other about whether the feature is on.
+   *
+   * Absent reads as OFF, matching the setting's default. Note that this does NOT
+   * gate `worktreesOf`: worktree-derived MEMBERSHIP still runs, so a session in a
+   * linked checkout stays under the project that owns the repository. Hiding the
+   * rows must not move anybody's sessions.
+   */
+  branchRows?: boolean;
+  /**
+   * The local branches of the repository at `dir` — every `refs/heads/` entry,
+   * not only the checked-out ones. From the cache in src/branchList.ts, and
+   * synchronous by the same contract `worktreesOf` has: grouping must never be
+   * the thing that waits on a subprocess.
+   *
+   * Absent gives a checkouts-only branch list, which is both what a window shows
+   * in the moment before the enumeration lands and what every test that does not
+   * care about branch rows already describes.
+   */
+  localBranchesOf?: (dir: string) => readonly LocalBranch[];
+  /**
+   * Every NAMED subproject, from the store. v7 — see SubprojectRecord.
+   *
+   * Absent or empty means no project has lanes, which is every store before v7 and
+   * every project that has not used the feature: the rows are then exactly the
+   * directory rows this pass has always produced.
+   */
+  subprojects?: readonly SubprojectRecord[];
+  /**
+   * The lane a session was started in — EditorialRecord.subprojectId.
+   *
+   * Kept out of the session's own record shape and passed as a lookup for the same
+   * reason `cwdOf` is: this module is pure, and the forest it is handed carries
+   * roster facts rather than editorial ones.
+   */
+  stampOf?: (sessionId: string) => string | undefined;
+  /**
+   * `lineage.preview.directoryModel` — branches hang off DIRECTORY rows.
+   *
+   * The whole of the preview switch, in one place for the reason `branchRows` is:
+   * one gate, and no renderer can disagree with another about whether the feature
+   * is on. Off (the default), every project's branch block is built exactly as it
+   * was — a per-project union of checkouts under the project row — and each
+   * subproject's `branches` is empty, which is the state every existing reader
+   * already handles because it is the ordinary case.
+   *
+   * On, the two swap places: a project with one directory keeps its branches on
+   * the project row (that row IS its directory), and a project with several puts
+   * each repository's branches under the directory it belongs to.
+   */
+  directoryModel?: boolean;
 }
 
 /**
@@ -860,6 +1674,36 @@ function sameIds(a: readonly string[], b: readonly string[]): boolean {
   return true;
 }
 
+/** Subproject equality, for the identity-reuse pass. Same contract as
+ *  {@link sameBranches}: everything the rows DRAW, session lists included, so a
+ *  session moving from one directory to another repaints both rows and a poll
+ *  tick that changed nothing repaints neither. */
+function sameSubprojects(
+  a: readonly SubprojectNode[] | undefined,
+  b: readonly SubprojectNode[] | undefined,
+): boolean {
+  const x = a ?? [];
+  const y = b ?? [];
+  if (x.length !== y.length) return false;
+  for (let i = 0; i < x.length; i++) {
+    if (
+      x[i].dirKey !== y[i].dirKey ||
+      x[i].dir !== y[i].dir ||
+      x[i].label !== y[i].label ||
+      x[i].main !== y[i].main ||
+      !sameIds(x[i].rootIds, y[i].rootIds) ||
+      // The directory's own branch block, which under the directory model is most
+      // of what the row draws. Without this a branch appearing under one
+      // directory would hand the workbench the previous node and keep the old
+      // rows until something else about the directory happened to change.
+      !sameBranches(x[i].branches, y[i].branches)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /** Chip-row equality, for the identity-reuse pass. Compares everything the row
  *  DRAWS — including each chip's session list, because that is what lights its
  *  attention dot — so a branch gaining an unseen session produces a fresh
@@ -878,6 +1722,9 @@ function sameBranches(
       x[i].colorIndex !== y[i].colorIndex ||
       x[i].primary !== y[i].primary ||
       x[i].shown !== y[i].shown ||
+      // The age the fold draws. Changes exactly when somebody commits to the
+      // branch, which is exactly when the row is out of date.
+      x[i].lastCommitAt !== y[i].lastCommitAt ||
       !sameIds(x[i].rootIds, y[i].rootIds)
     ) {
       return false;
@@ -925,6 +1772,20 @@ export function computeGrouping(
   const projects = all.filter((p) => !closed.has(p.id));
   const hiddenFolders = input?.hiddenFolders ?? [];
   const hasProjects = projects.length > 0;
+  // Read once, here, so every decision below asks the same two questions of the
+  // same two answers.
+  const branchRows = input?.branchRows === true;
+  const directoryModel = input?.directoryModel === true;
+  // The named lanes, bucketed by project ONCE. The store hands them over in
+  // project-then-creation order, and that order is the row order, so bucketing
+  // preserves it.
+  const lanesByProject = new Map<string, SubprojectRecord[]>();
+  for (const lane of input?.subprojects ?? []) {
+    if (!lane || lane.deleted === true) continue;
+    const list = lanesByProject.get(lane.projectId);
+    if (list) list.push(lane);
+    else lanesByProject.set(lane.projectId, [lane]);
+  }
 
   // Resolved ONCE per project, not once per session: `worktreesOf` is a cache
   // read, but the union-and-dedupe below is not free and a window with 40 live
@@ -986,6 +1847,42 @@ export function computeGrouping(
       if (!p) return null;
       const dirs = projectDirs(p);
       const rootIds = claimed.get(p.id) ?? [];
+      // The project's NAMED lanes, plus one row per directory nobody named a lane
+      // in — which for a project that has never used lanes is exactly the directory
+      // rows this tree has always drawn. Independent of the branch block (a project
+      // can be split whether or not it is a repository) but NOT independent of its
+      // worktrees: the same checkouts that make a session this project's are what
+      // decide which of its rows the session belongs to, so that there is nothing
+      // left over. See buildSubprojects.
+      const subprojects = buildSubprojects({
+        project: p,
+        rootIds,
+        cwdOf: input.cwdOf,
+        lanes: lanesByProject.get(p.id) ?? [],
+        ...(input.stampOf === undefined ? {} : { stampOf: input.stampOf }),
+        ...(input.worktreesOf === undefined
+          ? {}
+          : { worktreesOf: input.worktreesOf }),
+      });
+      // THE DIRECTORY MODEL'S ONE STRUCTURAL CHOICE, made here so that neither
+      // renderer can make it differently: a project with several directories puts
+      // each repository's branches under the directory it belongs to, and one with
+      // a single directory keeps them on the project row — because that row IS its
+      // directory. Both halves read the same builder, so the only difference
+      // between them is which rows hold the result.
+      const directoryBranches = directoryModel && branchRows;
+      if (directoryBranches) {
+        for (const sub of subprojects) {
+          sub.branches = buildDirectoryBranches({
+            dir: sub.dir,
+            worktrees: safeWorktrees(input?.worktreesOf, sub.dir),
+            localBranches: safeLocalBranches(input?.localBranchesOf, sub.dir),
+            rootIds: sub.rootIds,
+            cwdOf: input.cwdOf,
+            project: p,
+          });
+        }
+      }
       return {
         type: 'project',
         projectId: p.id,
@@ -994,12 +1891,37 @@ export function computeGrouping(
         dirs,
         provider: providerOfProject(p),
         rootIds,
-        branches: buildBranches(
-          worktreesByProject.get(p.id) ?? [],
-          rootIds,
-          input.cwdOf,
-          p,
-        ),
+        subprojects,
+        // Empty unless the branch block is switched on — see
+        // GroupingInput.branchRows. Deliberately still built from the same
+        // worktree data when it IS on, so turning the setting on is the only
+        // difference between the two trees.
+        //
+        // Under the directory model a SPLIT project's branches live on its
+        // directory rows instead, so this is empty for exactly the projects whose
+        // subprojects now carry them — nothing is drawn twice and nothing is lost.
+        branches: !branchRows
+          ? []
+          : directoryBranches
+            ? subprojects.length > 0
+              ? []
+              : buildDirectoryBranches({
+                  dir: dirs[0] ?? '',
+                  worktrees: safeWorktrees(input?.worktreesOf, dirs[0] ?? ''),
+                  localBranches: safeLocalBranches(
+                    input?.localBranchesOf,
+                    dirs[0] ?? '',
+                  ),
+                  rootIds,
+                  cwdOf: input.cwdOf,
+                  project: p,
+                })
+              : buildBranches(
+                  worktreesByProject.get(p.id) ?? [],
+                  rootIds,
+                  input.cwdOf,
+                  p,
+                ),
         branchesCollapsed: p.branchesCollapsed === true,
         parentProjectId: node?.parentId ?? null,
         depth: node?.depth ?? 0,
@@ -1074,6 +1996,7 @@ function reuseUnchanged(
       sameIds(old.rootIds, p.rootIds) &&
       old.branchesCollapsed === p.branchesCollapsed &&
       sameBranches(old.branches, p.branches) &&
+      sameSubprojects(old.subprojects, p.subprojects) &&
       // Everything the row's PLACE in the tree draws. Without these a
       // project that was moved, or that gained a subproject, would hand the
       // workbench the previous object and keep its old indent until something

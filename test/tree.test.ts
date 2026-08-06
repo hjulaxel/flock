@@ -106,7 +106,6 @@ function project(
 
 interface Harness {
   deps: TreeDeps & DecorationDeps;
-  reparented: Array<[string, string | null]>;
   assigned: Array<[string, string]>;
   setForest(f: SessionForest): void;
   setGrouping(on: boolean): void;
@@ -129,10 +128,8 @@ function harness(forest: SessionForest): Harness {
   // Default: no media on disk, so the tree takes its codicon fallback. Tests
   // that care about the svg path install their own.
   let mediaPath: (relative: string) => string | undefined = () => undefined;
-  const reparented: Array<[string, string | null]> = [];
   const assigned: Array<[string, string]> = [];
   return {
-    reparented,
     assigned,
     setForest: (f) => {
       current = f;
@@ -162,9 +159,6 @@ function harness(forest: SessionForest): Harness {
       getForest: () => current,
       onDidChangeData: () => ({ dispose: () => undefined }),
       isBoundHere: (id) => bound.has(id),
-      reparent: async (childId, newParentId) => {
-        reparented.push([childId, newParentId]);
-      },
       groupByFolder: () => grouping,
       projects: () => projects,
       hiddenFolders: () => hiddenFolders,
@@ -942,27 +936,38 @@ describe('LineageTreeProvider drag and drop', () => {
     expect(dt.get('text/plain')?.value).toBe(A);
   });
 
-  it('refuses a drop onto the node itself', async () => {
+  it('never picks up a session drawn inside a tree', () => {
+    // C is a fork of A. It has no filing of its own — it is wherever A is —
+    // so the one drop it could be offered would be refused, and it is simply
+    // never picked up. A mixed selection drags the roots and leaves it.
+    const forks = new DataTransfer();
+    p.handleDrag([ref(C)], forks as never);
+    expect(forks.get(TREE_DND_MIME)).toBeUndefined();
+    expect(forks.get('text/plain')).toBeUndefined();
+
+    const mixed = new DataTransfer();
+    p.handleDrag([ref(B), ref(C)], mixed as never);
+    expect(mixed.get(TREE_DND_MIME)?.value).toBe(JSON.stringify([B]));
+  });
+
+  it('refuses every drop onto a session — lineage is not draggable', async () => {
+    // Onto itself, onto a descendant, and onto an unrelated root: all three
+    // used to write (or refuse) a hand-made parent edge. None of them moves
+    // anything now.
     await drop(p, ref(A), [A]);
-    expect(h.reparented).toEqual([]);
-  });
-
-  it('refuses a drop onto its own descendant (no cycles)', async () => {
     await drop(p, ref(D), [A]);
-    expect(h.reparented).toEqual([]);
+    await drop(p, ref(B), [C]);
+    expect(h.assigned).toEqual([]);
   });
 
-  it('detaches to a root when dropped on a group or on empty space', async () => {
+  it('refuses a drop on a group or on empty space — that was the detach', async () => {
     const groups = p.getChildren() as GroupNode[];
     await drop(p, groups[1], [C]);
     await drop(p, undefined, [D]);
-    expect(h.reparented).toEqual([
-      [C, null],
-      [D, null],
-    ]);
+    expect(h.assigned).toEqual([]);
   });
 
-  it('assigns to the project instead of reparenting when dropped on one', async () => {
+  it('assigns to the project when dropped on one', async () => {
     h.setProjects([project('p1', 'Alpha', '/tmp/alpha')]);
     const roots = p.getChildren();
     const projectRow = roots.find((r) => r.type === 'project');
@@ -970,20 +975,18 @@ describe('LineageTreeProvider drag and drop', () => {
 
     await drop(p, projectRow as ProjectGroupNode, [B]);
     expect(h.assigned).toEqual([[B, 'p1']]);
-    // Flock is untouched — this gesture is about addresses, not ancestry.
-    expect(h.reparented).toEqual([]);
   });
 
   it('ignores a non-root session dropped on a project', async () => {
     // A project row renders visible ROOTS only, so assigning a nested fork
     // could never move it on screen — it would just append its cwd to the
-    // project's directory list and look like the gesture had failed.
+    // project's directory list and look like the gesture had failed. The drag
+    // no longer offers one either; this is the guard on the message.
     h.setProjects([project('p1', 'Alpha', '/tmp/alpha')]);
     const projectRow = p.getChildren().find((r) => r.type === 'project');
 
     await drop(p, projectRow as ProjectGroupNode, [C]);
     expect(h.assigned).toEqual([]);
-    expect(h.reparented).toEqual([]);
   });
 
   it('assigns only the roots when a mixed selection is dropped', async () => {
@@ -992,11 +995,6 @@ describe('LineageTreeProvider drag and drop', () => {
 
     await drop(p, projectRow as ProjectGroupNode, [B, C]);
     expect(h.assigned).toEqual([[B, 'p1']]);
-  });
-
-  it('reparents onto another session', async () => {
-    await drop(p, ref(B), [C]);
-    expect(h.reparented).toEqual([[C, B]]);
   });
 });
 
@@ -1139,27 +1137,25 @@ describe('LineageTreeProvider: subprojects', () => {
     expect((provider.getParent(ref(B)) as ProjectGroupNode)?.projectId).toBe('api');
   });
 
-  it('gives a subproject row its own glyph and the subproject token', () => {
+  it('gives a legacy nested project row its own glyph, and no nesting token', () => {
     const { provider } = nested();
     const app = provider.getChildren()[0] as ProjectGroupNode;
     const api = provider.getChildren(app)[0] as ProjectGroupNode;
     const item = provider.getTreeItem(api);
     expect((item.iconPath as unknown as { id: string }).id).toBe('folder-library');
-    expect(item.contextValue).toContain(';subproject;');
-    expect(provider.getTreeItem(app).contextValue).toContain(';parentProject;');
+    // `;subproject;` belongs to a DIRECTORY row now, and a project row must not
+    // match it — the two carry the same projectId, so a shared token would put
+    // Remove Subproject on a project and Delete Project on a directory.
+    expect(item.contextValue).toBe(';project;');
+    expect(provider.getTreeItem(app).contextValue).toBe(';project;');
   });
 
-  it('drags a project row and files it under the drop target', async () => {
-    const moves: Array<[string, string | null]> = [];
+  it('does not drag a project row at all', async () => {
+    // The gesture filed one project under another; nesting records is retired, so
+    // there is no legal target left and the payload is never produced.
     const h = harness(forestOf([node(A, { cwd: '/code/app' })]));
     h.setProjects([APP, project('other', 'other', '/code/other')]);
-    const deps: TreeDeps = {
-      ...h.deps,
-      reparentProject: async (projectId, newParentId) => {
-        moves.push([projectId, newParentId]);
-      },
-    };
-    const provider = new LineageTreeProvider(deps);
+    const provider = new LineageTreeProvider(h.deps);
     const roots = provider.getChildren() as ProjectGroupNode[];
     const app = roots.find((p) => p.projectId === 'app') as ProjectGroupNode;
     const other = roots.find((p) => p.projectId === 'other') as ProjectGroupNode;
@@ -1167,24 +1163,29 @@ describe('LineageTreeProvider: subprojects', () => {
     const dt = new DataTransfer();
     provider.handleDrag([other], dt as never);
     await provider.handleDrop(app, dt as never);
-    expect(moves).toEqual([['other', 'app']]);
-
-    // Onto a folder row: back to the top level.
-    moves.length = 0;
-    const dt2 = new DataTransfer();
-    provider.handleDrag([other], dt2 as never);
-    const group: GroupNode = {
-      type: 'group',
-      key: '/tmp',
-      cwd: '/tmp',
-      label: 'tmp',
-      rootIds: [],
-    };
-    await provider.handleDrop(group, dt2 as never);
-    expect(moves).toEqual([['other', null]]);
+    // Nothing was carried, so nothing happened — and in particular the
+    // project's id was not read as a session id by the path below it.
+    expect(h.assigned).toEqual([]);
   });
 
-  it('never lets a project drag reach the session reparent path', async () => {
+  it('declines a project payload from an older window rather than reading it as a session', async () => {
+    // A mixed install can still be the SOURCE of a drag: 0.1.1 puts
+    // `project:<uuid>` in the same array session ids travel in. Falling
+    // through would hand that string to the session path.
+    const h = harness(forestOf([node(A, { cwd: '/code/app' })]));
+    h.setProjects([APP]);
+    const provider = new LineageTreeProvider(h.deps);
+    const app = provider.getChildren()[0] as ProjectGroupNode;
+    const dt = new DataTransfer();
+    dt.set(
+      'application/vnd.code.tree.lineagesessions',
+      { asString: async () => JSON.stringify([`project:${A}`]) } as never,
+    );
+    await provider.handleDrop(app, dt as never);
+    expect(h.assigned).toEqual([]);
+  });
+
+  it('never lets a project drag reach the session path', async () => {
     const h = harness(forestOf([node(A, { cwd: '/code/app' })]));
     h.setProjects([APP]);
     const provider = new LineageTreeProvider(h.deps);
@@ -1192,8 +1193,120 @@ describe('LineageTreeProvider: subprojects', () => {
     const dt = new DataTransfer();
     provider.handleDrag([app], dt as never);
     await provider.handleDrop(ref(A), dt as never);
-    expect(h.reparented).toEqual([]);
     expect(h.assigned).toEqual([]);
+  });
+});
+
+describe('LineageTreeProvider: directory subprojects', () => {
+  const SPLIT = project('p1', 'app', '/code/app', { dirs: ['/code/app/api'] });
+
+  function build() {
+    const h = harness(
+      forestOf([
+        node(A, { cwd: '/code/app/lib' }),
+        node(B, { cwd: '/code/app/api/handlers' }),
+      ]),
+    );
+    h.setProjects([SPLIT]);
+    return { provider: new LineageTreeProvider(h.deps), harness: h };
+  }
+
+  it('hangs one row per directory under the project, main first', () => {
+    const { provider } = build();
+    const app = provider.getChildren()[0] as ProjectGroupNode;
+    const kids = provider.getChildren(app);
+    expect(kids.map((k) => k.type)).toEqual(['subproject', 'subproject']);
+    expect(kids.map((k) => (k.type === 'subproject' ? k.label : ''))).toEqual([
+      'app',
+      'api',
+    ]);
+  });
+
+  it('lists no session directly under the project', () => {
+    // The split is exclusive, exactly as it is in the inline sidebar: every
+    // session the project claimed is inside one of these rows, so listing them
+    // here too would draw each one twice. The two views must not disagree about
+    // which rows a project contains.
+    const { provider } = build();
+    const app = provider.getChildren()[0] as ProjectGroupNode;
+    expect(
+      provider.getChildren(app).filter((k) => k.type === 'session'),
+    ).toEqual([]);
+  });
+
+  it('files each session under the directory that contains it', () => {
+    const { provider } = build();
+    const app = provider.getChildren()[0] as ProjectGroupNode;
+    const [main, api] = provider.getChildren(app);
+    expect(provider.getChildren(main).map((k) => (k as SessionRef).id)).toEqual([A]);
+    expect(provider.getChildren(api).map((k) => (k as SessionRef).id)).toEqual([B]);
+  });
+
+  it('interns the node so an open directory survives a roster tick', () => {
+    // The workbench keys expansion state on element identity: a fresh object per
+    // refresh would shut every open row on every poll.
+    const { provider, harness: h } = build();
+    const first = provider.getChildren(
+      provider.getChildren()[0] as ProjectGroupNode,
+    )[0];
+    h.setForest(
+      forestOf([
+        node(A, { cwd: '/code/app/lib' }),
+        node(B, { cwd: '/code/app/api/handlers' }),
+      ]),
+    );
+    const second = provider.getChildren(
+      provider.getChildren()[0] as ProjectGroupNode,
+    )[0];
+    expect(second).toBe(first);
+  });
+
+  it('gives the row the subproject token, and `primary` on the main one', () => {
+    const { provider } = build();
+    const app = provider.getChildren()[0] as ProjectGroupNode;
+    const [main, api] = provider.getChildren(app);
+    expect(provider.getTreeItem(main).contextValue).toBe(';subproject;primary;');
+    expect(provider.getTreeItem(api).contextValue).toBe(';subproject;');
+    // The count, and the folder glyph against the project's root marker: the
+    // native tree draws no band, so the icon is most of what says which rows are
+    // the roots of the view.
+    expect(provider.getTreeItem(api).description).toBe('1');
+    expect(
+      (provider.getTreeItem(api).iconPath as unknown as { id: string }).id,
+    ).toBe('folder');
+  });
+
+  it('stays expandable with nothing in it', () => {
+    const h = harness(forestOf([]));
+    h.setProjects([SPLIT]);
+    const provider = new LineageTreeProvider(h.deps);
+    const app = provider.getChildren()[0] as ProjectGroupNode;
+    const [main] = provider.getChildren(app);
+    expect(provider.getTreeItem(main).collapsibleState).toBe(
+      TreeItemCollapsibleState.Expanded,
+    );
+    expect(provider.getTreeItem(main).description).toBeUndefined();
+  });
+
+  it('takes a session dropped on a directory into that project', async () => {
+    // A subproject row counts as its project: the gesture means "this work
+    // belongs over there", and the row aimed at is one of that project's
+    // directories.
+    const { provider, harness: h } = build();
+    const app = provider.getChildren()[0] as ProjectGroupNode;
+    const api = provider.getChildren(app)[1];
+    const dt = new DataTransfer();
+    provider.handleDrag([ref(A)], dt as never);
+    await provider.handleDrop(api, dt as never);
+    expect(h.assigned).toEqual([[A, 'p1']]);
+  });
+
+  it('emits nothing for a single-directory project', () => {
+    const h = harness(forestOf([node(A, { cwd: '/code/app' })]));
+    h.setProjects([project('p1', 'app', '/code/app')]);
+    const provider = new LineageTreeProvider(h.deps);
+    const app = provider.getChildren()[0] as ProjectGroupNode;
+    expect(provider.getChildren(app).map((k) => k.type)).toEqual(['session']);
   });
 });
 
@@ -1215,6 +1328,9 @@ describe('LineageTreeProvider: branch grouping', () => {
     const deps: TreeDeps = {
       ...h.deps,
       worktreesOf: () => WORKTREES,
+      // The block's master switch. Explicit in every branch test now that it is
+      // off by default — `lineage.git.branches`, see CONFIG_KEYS.gitBranches.
+      branchRows: () => true,
       groupSessionsByBranch: () => on,
     };
     return { provider: new LineageTreeProvider(deps) };
@@ -1265,6 +1381,7 @@ describe('LineageTreeProvider: branch grouping', () => {
     const provider = new LineageTreeProvider({
       ...h.deps,
       worktreesOf: () => WORKTREES,
+      branchRows: () => true,
       groupSessionsByBranch: () => true,
     });
     const app = provider.getChildren()[0] as ProjectGroupNode;

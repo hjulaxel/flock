@@ -28,6 +28,7 @@ import type {
   PullRequestState,
   SessionForest,
   SessionNode,
+  SubprojectNode,
 } from './types';
 import { branchIndexForCwd, unbranchedRoots } from './projects';
 import type { GroupingResult } from './projects';
@@ -335,18 +336,19 @@ export function sessionContextValue(
   return contextValueOf(tokens);
 }
 
+/**
+ * A project row's context tokens: `project`, plus `empty` when nothing is filed
+ * under it.
+ *
+ * The nesting pair that used to be here — `subproject` on a row filed under
+ * another project, `parentProject` on one with children — is gone with record
+ * nesting. `subproject` now belongs to a DIRECTORY row and must never appear on
+ * a project row as well: the two rows carry the same projectId, so a shared token
+ * would put both menus on both rows.
+ */
 export function projectContextValue(el: ProjectGroupNode): string {
   const tokens: ContextToken[] = ['project'];
   if (el.rootIds.length === 0) tokens.push('empty');
-  // Two independent facts about where the row sits, each a positive token so a
-  // `when` clause never has to negate a viewItem regex: a middle project carries
-  // both, a leaf under a root only the first, a root with children only the
-  // second, and a lone top-level project neither — which is every project
-  // anybody had before nesting existed.
-  if (typeof el.parentProjectId === 'string' && el.parentProjectId !== '') {
-    tokens.push('subproject');
-  }
-  if ((el.childProjectIds?.length ?? 0) > 0) tokens.push('parentProject');
   return contextValueOf(tokens);
 }
 
@@ -354,6 +356,11 @@ export function projectContextValue(el: ProjectGroupNode): string {
 
 export type RowKind =
   | 'project'
+  /** ONE DIRECTORY of a multi-directory project, with the sessions running in
+   *  it as its children. See projects.buildSubprojects — a project with one
+   *  directory emits none of these, which is every project until somebody adds a
+   *  second. */
+  | 'subproject'
   | 'folder'
   | 'session'
   /** ONE branch, on its own row, inside the project's band. */
@@ -593,6 +600,20 @@ export interface ViewModelInput {
   grouping: GroupingResult;
   /** Row keys the user has explicitly collapsed. Default is expanded. */
   collapsed: ReadonlySet<string>;
+  /**
+   * Row keys the user has explicitly OPENED, for the rows whose default is shut.
+   *
+   * A second set rather than a second meaning for `collapsed`, which is the field
+   * every other row reads and which means exactly one thing: "the user closed
+   * this". Exactly one row kind defaults to shut — the branch fold, which stands
+   * for every branch in a repository and would otherwise cost a hundred rows the
+   * moment a project row opened — and inverting the sense of the shared set for
+   * that one case is how a renderer ends up drawing a row nobody asked for.
+   *
+   * Optional: absent means nothing has been opened, so every fold is shut, which
+   * is the correct starting state.
+   */
+  opened?: ReadonlySet<string>;
   providerFor(sessionId: string): ProviderId;
   isBoundHere(sessionId: string): boolean;
   /** The webview's own view id, needed in the row context so `when` clauses can
@@ -623,19 +644,72 @@ export interface ViewModelInput {
    *  Absent, or returning undefined, means no chip — which is the default state of
    *  this feature and the way every existing test describes a branch row. */
   pullRequestFor?(repoDir: string, branch: string): PullRequest | undefined;
+  /**
+   * `lineage.preview.directoryModel` — the branch block belongs to a DIRECTORY
+   * row rather than to the project.
+   *
+   * The renderer's half of the switch whose other half is
+   * GroupingInput.directoryModel: that one decides which node carries the
+   * branches, this one decides how they are drawn. Both read the same setting, and
+   * the layout only changes when they agree — a grouping that filled
+   * `SubprojectNode.branches` while the renderer ignored it would draw the tree it
+   * always drew, which is the safe direction for a preview to fail in.
+   *
+   * Absent reads as OFF, matching the setting's default.
+   */
+  directoryModel?: boolean;
 }
+
+/** Shared empty set, so the common case allocates nothing per paint. */
+const EMPTY_KEYS: ReadonlySet<string> = new Set<string>();
 
 export const sessionRowKey = (id: string): string => `session:${id}`;
 export const projectRowKey = (id: string): string => `project:${id}`;
 export const folderRowKey = (key: string): string => `folder:${key}`;
+/**
+ * The directory a branch row hangs under, folded into its key — or '' for the
+ * project-level block.
+ *
+ * Needed because a project can span two REPOSITORIES, and both of them almost
+ * certainly have a branch called `main`. Two rows with one key is two rows that
+ * share a collapse state, a context menu target and an identity in the
+ * workbench's node map, so the second one would open and close the first. Absent
+ * for the single-directory case so every existing key — and every collapse state
+ * a user already has on disk — is byte-identical to the one before this existed.
+ */
+const branchScopeSuffix = (subprojectId?: string): string =>
+  subprojectId === undefined || subprojectId === '' ? '' : `:${subprojectId}`;
+/** One row per SUBPROJECT of a project, so the key names both.
+ *
+ *  Keyed on the subproject's `id` rather than on its directory, because two named
+ *  lanes may name the SAME directory (see SubprojectRecord) and one key between
+ *  them would make one row's click open and close the other. An implicit row's id
+ *  is `dir:<dirKey>`, which can contain `:` on Windows — hence the project id
+ *  first and a split on the first two colons only, the same rule branchRowKey
+ *  follows. */
+export const subprojectRowKey = (
+  projectId: string,
+  subprojectId: string,
+): string => `subproject:${projectId}:${subprojectId}`;
 /** One row per branch, so the key has to name the branch too. The name is
  *  user-controlled and may contain anything a ref can, `:` included — which is
  *  why the project id comes FIRST and the split is on the first two colons
- *  only (see branchRowParts). */
-export const branchRowKey = (projectId: string, branch: string): string =>
-  `branch:${projectId}:${branch}`;
-export const othersRowKey = (projectId: string): string =>
-  `others:${projectId}`;
+ *  only (see branchRowParts).
+ *
+ *  `subprojectId` scopes it to one row of the project and is appended LAST, after
+ *  the branch, so an unscoped key is byte-identical to the one this function
+ *  produced before the argument existed — a user's collapsed rows survive the
+ *  upgrade. See branchScopeSuffix for why the scope is needed at all. */
+export const branchRowKey = (
+  projectId: string,
+  branch: string,
+  subprojectId?: string,
+): string => `branch:${projectId}:${branch}${branchScopeSuffix(subprojectId)}`;
+/** The fold at the tail of a branch block, scoped the same way and for the same
+ *  reason: two rows of one project each have their own fold, and one collapse
+ *  state between them would open both. */
+export const othersRowKey = (projectId: string, subprojectId?: string): string =>
+  `others:${projectId}${branchScopeSuffix(subprojectId)}`;
 
 /**
  * ONE BRANCH, one row.
@@ -678,18 +752,75 @@ export const othersRowKey = (projectId: string): string =>
  * except where it already did (Hide Branch on the primary), so a fact a verb needs
  * has to be a token that is present rather than one that is absent.
  */
-export function branchTokens(primary: boolean, hasPullRequest: boolean): ContextToken[] {
+export function branchTokens(
+  primary: boolean,
+  hasPullRequest: boolean,
+  /** The branch has a worktree. Defaults to TRUE so every existing caller — and
+   *  every branch row that exists at all with the preview off — carries the token
+   *  it always effectively had: a branch row could only come from a checkout
+   *  then. See the token's own note in types.ts. */
+  hasCheckout = true,
+): ContextToken[] {
   const tokens: ContextToken[] = ['branch'];
   if (primary) tokens.push('primary');
   if (hasPullRequest) tokens.push('pullRequest');
+  if (hasCheckout) tokens.push('checkout');
   return tokens;
+}
+
+/**
+ * How long ago the branch was committed to, in the two or three characters a row
+ * has room for: `2h`, `6d`, `3w`, `8mo`, `2y`.
+ *
+ * The fold's only content besides the name, and what turns a wall of a hundred
+ * and eighty branches into something you can read down: the ones you might care
+ * about are at the top, and this says how far down "today" stops. Formatted here
+ * rather than by git's own `%(committerdate:relative)` for the reason every other
+ * formatting decision lives in this file — the native tree and the inline sidebar
+ * must not word the same fact differently — and because git's version is prose
+ * ("2 days ago") where a row has room for a token.
+ *
+ * '' when there is nothing to say: no date was read, or the date is in the
+ * future, which a clock skew between two machines sharing a repository can
+ * produce and which no wording of "in -3 days" improves.
+ */
+export function formatBranchAge(
+  committedAt: number | undefined,
+  now: number,
+): string {
+  if (typeof committedAt !== 'number' || !Number.isFinite(committedAt)) return '';
+  if (committedAt <= 0) return '';
+  const seconds = Math.floor(now / 1000) - Math.floor(committedAt);
+  if (seconds < 0) return '';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${Math.max(1, minutes)}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 14) return `${days}d`;
+  const weeks = Math.floor(days / 7);
+  if (weeks < 9) return `${weeks}w`;
+  const months = Math.floor(days / 30);
+  if (months < 24) return `${months}mo`;
+  return `${Math.floor(days / 365)}y`;
 }
 
 function branchRow(
   el: ProjectGroupNode,
   chip: BranchChip,
   viewId: string,
-  place: { depth: number; indent: number; expandable: boolean; expanded: boolean },
+  place: {
+    depth: number;
+    indent: number;
+    expandable: boolean;
+    expanded: boolean;
+    /** The subproject row this block belongs to, for the row key — absent for the
+     *  project-level block. See branchScopeSuffix. */
+    subprojectId?: string;
+    /** Pre-formatted age (see formatBranchAge), for a branch with no checkout.
+     *  Passed in rather than computed here because `now` belongs to the caller. */
+    age?: string;
+  },
   /** The checkout's standing, for the HOVER. The chip already carries the
    *  one-token form the row draws (`chip.sync`); this is the same facts as
    *  sentences, which is a thing only the tooltip has room for. Passed rather
@@ -703,8 +834,14 @@ function branchRow(
   const what = chip.count
     ? `${chip.count} session${chip.count === 1 ? '' : 's'}`
     : 'no sessions yet';
+  // A branch that exists only as a ref. Under the directory model most of a
+  // repository's branches are these, and everything a row can offer changes:
+  // there is nowhere to start a session, so the click and the `+` both go, and
+  // the age takes the description column instead of a session count.
+  const checkout = chip.dir !== '';
+  const age = place.age ?? '';
   const row: ViewRow = {
-    key: branchRowKey(el.projectId, chip.full),
+    key: branchRowKey(el.projectId, chip.full, place.subprojectId),
     kind: 'branch',
     // Level with the sessions it sits above rather than with the header above
     // it, so the block reads as part of the project rather than as a heading.
@@ -720,11 +857,20 @@ function branchRow(
     // Flat, it is noise: the sessions are already on screen underneath, in this
     // branch's colour, so the number restates them in the column the eye scans
     // for what they cannot say (see the note in media/webtree.js).
-    description: place.expandable && chip.count > 0 ? String(chip.count) : '',
+    // A branch with no checkout says its AGE instead — the one fact that makes a
+    // long fold readable, and the one thing a ref can say for itself.
+    description: !checkout
+      ? age
+      : place.expandable && chip.count > 0
+        ? String(chip.count)
+        : '',
     expandable: place.expandable,
     expanded: place.expandable && place.expanded,
     icon: { type: 'codicon', id: 'none' },
-    muted: false,
+    // Dimmed when there is no checkout behind it: the row is a fact about the
+    // repository rather than a place anything is happening, and it sits in a fold
+    // full of them.
+    muted: !checkout,
     closed: false,
     canRename: false,
     canDrag: false,
@@ -739,12 +885,16 @@ function branchRow(
       projectId: el.projectId,
       dir: chip.dir,
       branch: chip.full,
-      viewItem: contextValueOf(branchTokens(chip.primary, pr !== undefined)),
+      viewItem: contextValueOf(
+        branchTokens(chip.primary, pr !== undefined, checkout),
+      ),
       preventDefaultContextMenuItems: true,
     },
     tooltip: [
       chip.full,
-      `${what}${chip.attention ? ', finished work waiting' : ''}`,
+      checkout
+        ? `${what}${chip.attention ? ', finished work waiting' : ''}`
+        : 'no checkout — this branch is a ref and nothing on disk',
       // Between the session count and the path, because it is a fact about the
       // BRANCH and the path below it is a fact about the disk. Contributes
       // nothing when the status was never read, so the hover of an unprobed row
@@ -754,11 +904,18 @@ function branchRow(
       // request is a fact about the branch. Contributes nothing at all with
       // `lineage.git.pullRequests` off, which is the default.
       ...pullRequestLines(pr),
-      chip.dir,
-      place.expandable
-        ? 'Click to show its sessions · + starts a new one here'
-        : 'Click to start a session here',
-    ].join('\n'),
+      // The age, for a ref with no directory to name instead. Both would be
+      // redundant: a checkout's age is one `git log` away and its path is the
+      // thing you actually want to copy.
+      checkout ? chip.dir : age === '' ? '' : `last commit ${age} ago`,
+      checkout
+        ? place.expandable
+          ? 'Click to show its sessions · + starts a new one here'
+          : 'Click to start a session here'
+        : 'New Worktree… to check it out somewhere',
+    ]
+      .filter((line) => line !== '')
+      .join('\n'),
     projectId: el.projectId,
     cwd: chip.dir,
     chip,
@@ -767,7 +924,13 @@ function branchRow(
   // of its own — the same trade the project header made when the chips took its
   // `+` away, in the other direction. Ungrouped there is no button: the whole
   // row already is one.
-  if (place.expandable) {
+  //
+  // Never on a branch with no checkout: a `+` there would have to invent a
+  // directory, which is `git worktree add` — a verb that creates a directory and
+  // a ref, and one this extension only ever runs from an explicit confirmation.
+  // The context menu's **New Worktree…** is that path, and it is the whole of what
+  // the row offers.
+  if (place.expandable && checkout) {
     row.actions = [
       { id: 'newSessionInBranch', icon: 'add', title: `New session on ${chip.full}` },
     ];
@@ -776,36 +939,63 @@ function branchRow(
 }
 
 /**
- * The tail of a branch block: "Others (12)".
+ * The tail of a branch block: "Others (12)", or — under the directory model —
+ * "Branches (183)", the door to every branch in the repository.
  *
- * The door to everything the block is not showing, and the reason the default
- * policy can afford to be aggressive about hiding. Without it, a project with
- * twenty worktrees would either cost twenty rows or silently lose eighteen of
- * them; with it, the block stays the size of the work in flight and the rest is
- * one click away.
+ * The reason the promotion policy can afford to be as narrow as it is. Without
+ * it, a repository with a hundred and eighty branches would either cost a hundred
+ * and eighty rows or silently lose a hundred and seventy-eight of them; with it,
+ * the block above stays the size of the work in flight and the whole repository
+ * is one click below it.
  *
- * Deliberately NOT a branch row with a flag. Nothing that applies to a branch
- * applies here — there is no worktree to start a session in, no name to copy,
- * nothing to hide — so it carries its own context token and its own verb.
+ * TWO BEHAVIOURS, and which one it has depends on whether the rows it stands for
+ * exist:
+ *
+ *   - project-level block (the preview off): the branches are the project's
+ *     checkouts, the fold is NOT expandable, and clicking it opens the
+ *     **Show Branches…** picker — because there is no complete list to expand
+ *     into, only a curation decision to change.
+ *   - directory block (the preview on): the fold IS expandable and the branches
+ *     are underneath it, because the list is now genuinely complete. Nothing to
+ *     pick from a modal when the answer is a row you can click.
+ *
+ * Deliberately NOT a branch row with a flag either way. Nothing that applies to a
+ * branch applies to the fold — there is no worktree to start a session in, no
+ * name to copy, nothing to hide — so it carries its own context token and its own
+ * verb.
  */
 function othersRow(
   el: ProjectGroupNode,
   count: number,
   viewId: string,
-  place: { depth: number; indent: number },
+  place: {
+    depth: number;
+    indent: number;
+    /** Scopes the key to one row of the project. See branchScopeSuffix. */
+    subprojectId?: string;
+    /** The fold opens onto the branches themselves rather than into a picker. */
+    expandable?: boolean;
+    expanded?: boolean;
+    /** What the fold is called. 'Branches' when it stands for the whole
+     *  repository, 'Others' when it stands for the part of a curated list that is
+     *  not on screen — the two are different promises and must not share a word. */
+    label?: string;
+  },
 ): ViewRow {
+  const expandable = place.expandable === true;
+  const label = place.label ?? 'Others';
   return {
-    key: othersRowKey(el.projectId),
+    key: othersRowKey(el.projectId, place.subprojectId),
     kind: 'branchOthers',
     depth: place.depth,
     indent: place.indent,
-    label: 'Others',
+    label,
     // The count is the whole content of this row: it is the difference between
     // "there is more" and "there are twelve more", and the second is what
     // decides whether you go looking.
     description: String(count),
-    expandable: false,
-    expanded: false,
+    expandable,
+    expanded: expandable && place.expanded !== false,
     icon: { type: 'codicon', id: 'none' },
     muted: true,
     closed: false,
@@ -821,10 +1011,123 @@ function othersRow(
       viewItem: contextValueOf(['branchOthers']),
       preventDefaultContextMenuItems: true,
     },
-    tooltip: `${count} branch${count === 1 ? '' : 'es'} not shown in ${el.label}\nClick to choose which to show`,
+    tooltip: expandable
+      ? `${count} more branch${count === 1 ? '' : 'es'} in this repository\nClick to show them`
+      : `${count} branch${count === 1 ? '' : 'es'} not shown in ${el.label}\nClick to choose which to show`,
     projectId: el.projectId,
     othersCount: count,
   };
+}
+
+/**
+ * ONE DIRECTORY of a project, as a row.
+ *
+ * A container, unlike a branch row: its children are the sessions running in
+ * that directory and it expands and collapses like the project above it. That is
+ * the difference in purpose — a branch row was an ANNOTATION on a flat list
+ * (which is why nesting under it had to be opt-in), where a subproject row exists
+ * for no other reason than to hold rows, and one that held nothing would not be
+ * worth drawing.
+ *
+ * It carries no status dot of its own. The project's dot already rolls up
+ * everything underneath it (see pushProject), and a second dot one level in would
+ * say the same thing twice in the same column — the eye reads a column of dots as
+ * a list of things wanting attention, and a container repeating its children's
+ * mark is how that column stops meaning anything. Attention still travels: the
+ * hover says so, and the sessions themselves are one click away.
+ */
+/**
+ * A subproject row's context tokens.
+ *
+ * `named` is the one that matters and it is a POSITIVE token, following the rule
+ * branchTokens states: the manifest matches on a token being present rather than
+ * absent. Rename Subproject and Remove Subproject apply to a lane the user made;
+ * neither applies to an implicit row, which is a directory of the project and is
+ * governed by the project's own directory verbs.
+ *
+ * `primary` stays what it was — the row standing for the project's own address,
+ * which Remove Subproject refuses — and can only appear on an implicit row.
+ */
+export function subprojectTokens(node: {
+  main: boolean;
+  implicit: boolean;
+}): ContextToken[] {
+  const tokens: ContextToken[] = ['subproject'];
+  if (node.main) tokens.push('primary');
+  if (!node.implicit) tokens.push('named');
+  return tokens;
+}
+
+function subprojectRow(
+  el: ProjectGroupNode,
+  node: SubprojectNode,
+  viewId: string,
+  place: { depth: number; indent: number; expanded: boolean },
+): ViewRow {
+  const count = node.rootIds.length;
+  const row: ViewRow = {
+    key: subprojectRowKey(el.projectId, node.id),
+    kind: 'subproject',
+    depth: place.depth,
+    indent: place.indent,
+    label: node.label,
+    // The count, and only when the row is shut. Open, the sessions are on screen
+    // underneath and the number restates them; shut, it is the only thing the row
+    // says about what is inside it — the same rule a collapsed branch row follows.
+    description: !place.expanded && count > 0 ? String(count) : '',
+    // ALWAYS expandable, even empty, exactly as a project row is: the directory
+    // is a real directory whether or not anything is running in it, and a row
+    // that lost its toggle when its last session ended would move the rows below
+    // it for a reason the user did not cause.
+    expandable: true,
+    expanded: place.expanded,
+    icon: { type: 'codicon', id: 'none' },
+    muted: false,
+    closed: false,
+    // Nothing to rename: the label IS the directory's name. Renaming one would
+    // mean a per-directory label on the project record — a name to invent and
+    // keep true, which is the cost the directory model exists to avoid.
+    canRename: false,
+    canDrag: false,
+    // A header, not a node in anyone's lineage — see the note in pushProject.
+    rails: [],
+    descends: false,
+    context: {
+      webviewSection: 'subproject',
+      webviewId: viewId,
+      // `type: 'subproject'` plus a dir and the ROW's id, which is what
+      // subprojectArgOf() reads. Deliberately NOT `type: 'project'`:
+      // projectIdFromArg would accept it and every project verb would then take a
+      // subproject row as its target.
+      //
+      // `id` is what makes a verb able to name ONE of two lanes on the same
+      // directory — the dir alone no longer identifies a row.
+      type: 'subproject',
+      projectId: el.projectId,
+      dir: node.dir,
+      id: node.id,
+      viewItem: contextValueOf(subprojectTokens(node)),
+      preventDefaultContextMenuItems: true,
+    },
+    tooltip: [
+      node.dir,
+      count === 1 ? '1 session' : `${count} sessions`,
+      node.main ? 'the project’s main directory' : '',
+      'Click to open and shut · + starts a session here',
+    ]
+      .filter((line) => line !== '')
+      .join('\n'),
+    projectId: el.projectId,
+    cwd: node.dir,
+  };
+  // The `+` the project row's own would otherwise have to guess at. A project
+  // with two directories cannot start a session without picking one, so the
+  // button belongs on the rows that ARE the answer — the same trade the branch
+  // block made, for the same reason.
+  row.actions = [
+    { id: 'newSessionInSubproject', icon: 'add', title: `New session in ${node.label}` },
+  ];
+  return row;
 }
 
 function safeProvider(
@@ -871,6 +1174,12 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
   const rows: ViewRow[] = [];
   const forest = input.forest;
   const collapsed = input.collapsed;
+  /** The rows whose default is SHUT and that the user has opened. Empty unless
+   *  the caller tracks them — see ViewModelInput.opened. */
+  const opened = input.opened ?? EMPTY_KEYS;
+  /** `lineage.preview.directoryModel`. Read once so no row can disagree with
+   *  another about which layout it is in. */
+  const dirModel = input.directoryModel === true;
 
   // `rails` is the ancestor-column state described on ViewRow.rails, threaded
   // down the walk because it is the one fact a row cannot work out from itself:
@@ -987,7 +1296,21 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
       closed,
       // Ghosts have no transcript and no editorial identity worth naming.
       canRename: !node.ghost,
-      canDrag: !node.ghost,
+      // Only a row at the TOP of its group drags. What a drag can change is
+      // which project a session is filed under, and a row drawn inside a tree
+      // has no filing of its own — it is wherever the session it branched from
+      // is. Lineage itself is not draggable at all; see webtree.onDrop for why.
+      //
+      // `rails` is the question, not `depth` and not `parentId`. `depth` counts
+      // the project and directory rows above this one too, so every session
+      // under a project would fail it. `rails` is empty for exactly the rows
+      // pushed from a group's `rootIds` and non-empty for every row pushed by
+      // the child recursion — i.e. it is precisely "is this drawn inside a
+      // tree", which is the rule as the user reads it off the screen. It also
+      // agrees with `forest.visibleRoots` (the guard the drop side applies)
+      // including on a PROMOTED child, whose parent row is not on screen and
+      // which is therefore a root in both senses.
+      canDrag: !node.ghost && rails.length === 0,
       rails,
       descends: expanded,
       context: {
@@ -1054,12 +1377,21 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
     const key = projectRowKey(el.projectId);
     const branches = el.branches ?? [];
     const active = branches.length >= BRANCH_CHIPS_MIN;
+    // The project's directories, once there is more than one of them. When there
+    // are, THEY hold the sessions and the project row holds nothing but them.
+    const subprojects = el.subprojects ?? [];
+    const split = subprojects.length > 0;
     // Where this project sits in the PROJECT tree, and therefore how far in
     // everything it draws is pushed. `depth` doubles as the outline level: a
     // subproject's row is a child of its parent's row, and its own contents
     // start one level below that.
     const level = Math.max(0, el.depth ?? 0);
-    const grouped = active && input.groupByBranch === true;
+    // Branch grouping and a directory split are two answers to "what are this
+    // project's sessions filed under", and a row cannot be under both. The
+    // DIRECTORY wins: it is the structure the user typed in, where grouping by
+    // branch is a view preference — and a session claimed by a branch row and a
+    // subproject row at once would be drawn twice.
+    const grouped = active && !split && input.groupByBranch === true;
     /** The checkout's standing, read through the same `safe`-less contract every
      *  other input here has: a lookup that throws is a lookup that answered
      *  nothing, and a branch row with no numbers is a valid branch row. */
@@ -1160,11 +1492,12 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
       // and an empty one is waiting rather than finished.
       closed: false,
       canRename: true,
-      // A project row DRAGS: onto another project row it becomes that project's
-      // subproject, onto the background it goes back to the top level. The same
-      // gesture the Explorer moves a folder with, and the reason nesting does
-      // not need a dialog to be usable.
-      canDrag: true,
+      // A project row no longer drags. It used to, onto another project row, to
+      // file itself there as a subproject — and there is nothing left for that
+      // gesture to mean: a subproject is a directory now, and a project is not a
+      // directory you can hand to another project. A draggable row with no legal
+      // target is a control that does nothing, so the row stops offering it.
+      canDrag: false,
       // A project is a section header, not the top of a lineage: it carries the
       // same toggle the sessions do, but no rail runs from it down to the roots
       // underneath. Those roots are separate lineages that happen to be filed
@@ -1221,7 +1554,12 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
         // exactly the behaviour that changed — and the old chats are one
         // right-click away under View Chat History.
         { id: 'chat', icon: 'chat', title: `New chat in ${el.label}` },
-        ...(active
+        // Withdrawn for the SAME reason the chip row withdraws it, one model
+        // later: a `+` here has to pick a directory, and with the directories
+        // themselves on screen — each carrying its own `+` that says where it
+        // starts — a button whose whole job is a silent guess at that question is
+        // how sessions end up in the wrong one.
+        ...(active || split
           ? []
           : [
               {
@@ -1243,6 +1581,120 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
     rows.push(row);
     if (!expanded) return;
 
+    /**
+     * ONE DIRECTORY'S BRANCH BLOCK: the promoted rows, then the fold, then every
+     * branch inside the fold when it is open.
+     *
+     * The directory model's renderer, and the only one that draws a branch with
+     * no checkout. Shared by both places a directory row can be — the project row
+     * of a single-directory project, and each subproject row of a split one —
+     * because those are the same thing at two indents, and two copies of this
+     * would eventually disagree about what a fold contains.
+     *
+     * Returns the sessions no promoted branch took, for the caller to draw under
+     * the directory itself. Nothing is ever dropped: that return value plus the
+     * rows pushed here account for every id handed in.
+     */
+    const pushDirectoryBranches = (opts: {
+      branches: readonly BranchInfo[];
+      rootIds: readonly string[];
+      /** Absent for the project-level block — see branchScopeSuffix. */
+      subprojectId?: string;
+      depth: number;
+      indent: number;
+    }): readonly string[] => {
+      const promoted = opts.branches.filter((b) => b.shown);
+      const inFold = opts.branches.filter((b) => !b.shown);
+      const scope =
+        opts.subprojectId === undefined ? {} : { subprojectId: opts.subprojectId };
+      // NESTING HAS TO BUY SOMETHING. It costs every session under this directory
+      // a level, so it applies only when there is more than one promoted branch to
+      // tell apart — the same threshold, and the same argument, as BRANCH_CHIPS_MIN
+      // itself. An ordinary repository with one checkout and four sessions draws
+      // them directly under the directory, exactly as a project with no repository
+      // does.
+      const nest = promoted.length >= BRANCH_CHIPS_MIN;
+
+      for (const branch of promoted) {
+        const chip = toChip(branch);
+        const chipKey = branchRowKey(el.projectId, chip.full, opts.subprojectId);
+        // A branch with nothing in it stays a plain click-to-start row: an
+        // expandable row that opens onto nothing is a control that does not work.
+        const expandableChip = nest && chip.count > 0;
+        rows.push(
+          branchRow(
+            el,
+            chip,
+            input.viewId,
+            {
+              depth: opts.depth,
+              indent: opts.indent,
+              expandable: expandableChip,
+              expanded: !collapsed.has(chipKey),
+              ...scope,
+              age: formatBranchAge(branch.lastCommitAt, input.now),
+            },
+            statusOf(chip.dir),
+            prOf(chip.full),
+          ),
+        );
+        if (!expandableChip || collapsed.has(chipKey)) continue;
+        for (const id of branch.rootIds) {
+          pushSession(id, opts.depth + 1, [], opts.indent);
+        }
+      }
+
+      // The tail of the list rather than a peer of it: everything above is work in
+      // flight, and this is the door to the rest of the repository. Expandable,
+      // because under this model the rows behind it genuinely exist — see
+      // othersRow for why the project-level fold opens a picker instead.
+      if (inFold.length > 0) {
+        const foldKey = othersRowKey(el.projectId, opts.subprojectId);
+        // SHUT BY DEFAULT, which is what makes "show every branch on the machine"
+        // affordable: a hundred and eighty branches cost one row until asked for.
+        // `collapsed` holds the rows the user has shut, so the default has to be
+        // expressed the other way round — a fold is open only once its key is in
+        // the OPENED set.
+        const open = opened.has(foldKey);
+        rows.push(
+          othersRow(el, inFold.length, input.viewId, {
+            depth: opts.depth,
+            indent: opts.indent,
+            ...scope,
+            expandable: true,
+            expanded: open,
+            label: 'Branches',
+          }),
+        );
+        if (open) {
+          for (const branch of inFold) {
+            const chip = toChip(branch);
+            rows.push(
+              branchRow(
+                el,
+                chip,
+                input.viewId,
+                {
+                  depth: opts.depth + 1,
+                  indent: opts.indent,
+                  // Never a container. A branch in the fold has no sessions — that
+                  // is what put it there — so there is nothing to open onto.
+                  expandable: false,
+                  expanded: false,
+                  ...scope,
+                  age: formatBranchAge(branch.lastCommitAt, input.now),
+                },
+                statusOf(chip.dir),
+                prOf(chip.full),
+              ),
+            );
+          }
+        }
+      }
+
+      return nest ? unbranchedRoots(opts.rootIds, promoted) : opts.rootIds;
+    };
+
     // Sessions of this project that the branch block will NOT account for:
     // everything, in the flat layout; only what is not under a shown branch,
     // in the grouped one.
@@ -1252,7 +1704,7 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
     // — a fold that quietly removed four running sessions from the tree. Folded,
     // every session comes back to sitting directly under the project, which is
     // exactly what folding the block asks for.
-    const loose =
+    let loose: readonly string[] =
       grouped && !folded ? unbranchedRoots(el.rootIds, branches) : el.rootIds;
 
     // Between the header and the sessions, stacked one per row and wearing the
@@ -1269,7 +1721,16 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
     // session that lost its colour because you tidied the list above it would
     // read as having moved.
     branchScope = { branches, colored: active };
-    if (!folded) {
+    if (!folded && dirModel && !split) {
+      // THE PROJECT ROW IS ITS DIRECTORY when there is only one of them, so its
+      // branches hang here — one indent in, exactly where the checkouts used to.
+      loose = pushDirectoryBranches({
+        branches,
+        rootIds: el.rootIds,
+        depth: level + 1,
+        indent: level,
+      });
+    } else if (!folded) {
       for (const chip of chips) {
         // Grouped, a branch with nothing in it stays a plain click-to-start
         // row: an expandable row that opens onto nothing is a control that
@@ -1309,6 +1770,67 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
           }),
         );
       }
+    }
+
+    // SPLIT BY DIRECTORY. Each of the project's directories, in the order the
+    // project lists them (main first), with the sessions running in it as its
+    // children — so nothing is `loose` and the project row draws no sessions of
+    // its own.
+    //
+    // Every session the project claimed is in exactly one of these rows
+    // (buildSubprojects files a worktree session under the directory that owns the
+    // repository, so there is nothing left over), which is what makes this safe to
+    // do instead of the flat list rather than as well as it: the split cannot lose
+    // a row.
+    if (split) {
+      for (const node of subprojects) {
+        const subKey = subprojectRowKey(el.projectId, node.id);
+        const open = !collapsed.has(subKey);
+        // `indent: level + 1` on the row AND on its sessions, which mirrors
+        // exactly what a project header does with its own: a header and the rows
+        // filed under it share an x, and the band plus the bold label are what say
+        // which is the heading (see the note in media/webtree.js). One level in
+        // from the project is what makes the containment readable.
+        rows.push(
+          subprojectRow(el, node, input.viewId, {
+            depth: level + 1,
+            indent: level + 1,
+            expanded: open,
+          }),
+        );
+        if (!open) continue;
+        // THE DIRECTORY'S OWN REPOSITORY. Its branches, then whatever they did
+        // not account for — which is every session when the directory has one
+        // branch or none, i.e. in every project that is not being run one agent
+        // per worktree.
+        const dirBranches = node.branches ?? [];
+        let dirLoose: readonly string[] = node.rootIds;
+        if (dirModel && dirBranches.length > 0) {
+          // Scoped per directory, so a session takes the colour of the branch it
+          // is on IN ITS OWN repository — two directories of one project can be
+          // two repositories, and a shared scope would colour a session by a
+          // branch of the wrong one.
+          branchScope = {
+            branches: dirBranches,
+            colored: dirBranches.length >= BRANCH_CHIPS_MIN,
+          };
+          dirLoose = pushDirectoryBranches({
+            branches: dirBranches,
+            rootIds: node.rootIds,
+            subprojectId: node.id,
+            depth: level + 2,
+            indent: level + 1,
+          });
+        }
+        for (const id of dirLoose) pushSession(id, level + 2, [], level + 1);
+        branchScope = null;
+      }
+      branchScope = null;
+      for (const childId of el.childProjectIds ?? []) {
+        const child = projectById.get(childId);
+        if (child) pushProject(child);
+      }
+      return;
     }
 
     // What is left over: every session in the flat layout, and in the grouped

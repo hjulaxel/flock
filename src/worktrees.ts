@@ -91,7 +91,11 @@ export function slugifyBranch(branch: unknown): string {
     // Strip the combining marks NFKD just split off, so `feature/café` slugs to
     // `feature-cafe` rather than to `feature-caf-`.
     .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    // Letters and numbers in ANY script, not just ASCII: a branch named entirely
+    // in Chinese or Cyrillic would otherwise slug to '' and be refused a worktree.
+    // \p{M} keeps the vowel marks NFKD splits off Indic and Thai letters; the
+    // Latin ones it splits off are already gone from the pass above.
+    .replace(/[^\p{L}\p{N}\p{M}._-]+/gu, '-')
     // Runs of separators collapse to ONE dash, dots included — which is what
     // turns `a/../../b` into `a-b` rather than into `a-..-..-b`. A single dot
     // survives, because `v1.2` is a name somebody means; two in a row never are,

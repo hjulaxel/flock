@@ -26,7 +26,8 @@ import * as vscode from 'vscode';
 
 import { COMMANDS, PROJECT_VIEW_ID } from './types';
 import type { DisposableLike, ProjectRecord } from './types';
-import { baseName, projectDirs } from './projects';
+import { baseName, normalizeDir, pathKey, projectDirs } from './projects';
+import type { ExplorerScope } from './explorer';
 import { log, logError } from './log';
 
 // -------------------------------------------------------------------- rows
@@ -34,8 +35,23 @@ import { log, logError } from './log';
 export type ProjectViewRow =
   /** The active project itself. */
   | { kind: 'project'; project: ProjectRecord }
-  /** One of its directories. `main` is the project's rootDir. */
-  | { kind: 'dir'; path: string; label: string; main: boolean }
+  /** One of its directories.
+   *
+   *  `main` is the project's rootDir. `current` is "the folder tree below is
+   *  rooted here", which under `'project'` scope is true of every row and under
+   *  `'directory'` scope of exactly one — it decides what CLICKING does, since a
+   *  directory that is not down there cannot be revealed. `showing` is whether
+   *  to SAY so, which is only worth doing when it distinguishes this row from
+   *  the others: never under `'project'` scope, and not for a project with a
+   *  single directory, where it would label the only row it could mean. */
+  | {
+      kind: 'dir';
+      path: string;
+      label: string;
+      main: boolean;
+      current: boolean;
+      showing: boolean;
+    }
   /** Anchored, but no project is active — the Explorer shows nothing of ours. */
   | { kind: 'none' }
   /** Not a Flock workspace: the feature has never been set up here. */
@@ -49,6 +65,12 @@ export interface ProjectViewDeps {
   /** How many sessions the tree is currently rendering under this project.
    *  Optional: without it the header simply omits the count. */
   sessionCount?(projectId: string): number;
+  /** How much of the project the Explorer below is showing. Optional: absent
+   *  means `'project'`, under which every directory row is a root down there. */
+  scope?(): ExplorerScope;
+  /** The directory the folder tree is rooted at under `'directory'` scope.
+   *  Optional; absent falls back to the project's main directory. */
+  currentDir?(): string | undefined;
   /** Fires whenever the model behind the rows moved — the same signal the
    *  sidebar repaints on. */
   onDidChangeData(listener: () => void): DisposableLike;
@@ -62,10 +84,20 @@ export interface ProjectViewDeps {
 export function projectRows(
   project: ProjectRecord | undefined,
   anchored: boolean,
+  opts: { scope?: ExplorerScope; currentDir?: string } = {},
 ): ProjectViewRow[] {
   if (!anchored) return [{ kind: 'setup' }];
   if (!project) return [{ kind: 'none' }];
   const dirs = projectDirs(project);
+  // Under `'project'` scope every directory is down there as its own root, so
+  // every row is current and marking one would be a lie. Under `'directory'`
+  // scope exactly one is — resolved the same way `narrowToCurrent` resolves it,
+  // and falling back to the same directory, so the mark and the tree cannot
+  // disagree.
+  const narrowed = (opts.scope ?? 'project') === 'directory';
+  const wanted = pathKey(normalizeDir(opts.currentDir ?? ''));
+  const found = wanted === '' ? -1 : dirs.findIndex((d) => pathKey(d) === wanted);
+  const currentIndex = found < 0 ? 0 : found;
   return [
     { kind: 'project', project },
     ...dirs.map((path, i) => ({
@@ -76,6 +108,8 @@ export function projectRows(
       // question this row answers is "where does it live".
       label: baseName(path) || path,
       main: i === 0,
+      current: narrowed ? i === currentIndex : true,
+      showing: narrowed && dirs.length > 1 && i === currentIndex,
     })),
   ];
 }
@@ -108,13 +142,17 @@ export class ProjectViewProvider
     if (element) return [];
     let project: ProjectRecord | undefined;
     let anchored = false;
+    let scope: ExplorerScope | undefined;
+    let currentDir: string | undefined;
     try {
       project = this.deps.activeProject();
       anchored = this.deps.anchored();
+      scope = this.deps.scope?.();
+      currentDir = this.deps.currentDir?.();
     } catch (err) {
       logError('projectview.getChildren', err);
     }
-    return projectRows(project, anchored);
+    return projectRows(project, anchored, { scope, currentDir });
   }
 
   getTreeItem(row: ProjectViewRow): vscode.TreeItem {
@@ -173,23 +211,43 @@ export class ProjectViewProvider
     path: string;
     label: string;
     main: boolean;
+    current: boolean;
+    showing: boolean;
   }): vscode.TreeItem {
     const item = new vscode.TreeItem(
       row.label,
       vscode.TreeItemCollapsibleState.None,
     );
-    item.iconPath = new vscode.ThemeIcon(row.main ? 'folder-active' : 'folder');
-    item.description = row.main ? 'main' : undefined;
+    item.iconPath = new vscode.ThemeIcon(
+      row.current ? 'folder-active' : 'folder',
+    );
+    // Empty string rather than undefined would paint an empty description
+    // slot; the old code passed undefined for "no description" and so does this.
+    const description = [row.main ? 'main' : '', row.showing ? 'showing' : '']
+      .filter((s) => s !== '')
+      .join(' · ');
+    item.description = description === '' ? undefined : description;
     item.tooltip = row.path;
     item.contextValue = row.main ? 'lineageProjectDir;main' : 'lineageProjectDir';
-    // Selects this directory's root down in the folder tree. The rows up here
-    // name the project's directories; the tree below is where you open them.
+    // TWO DIFFERENT CLICKS, because the row means two different things. When
+    // this directory is already a root down there, the useful move is to select
+    // it — `revealInExplorer`, which is what the row has always done. When it is
+    // NOT (the other directories, under `'directory'` scope), revealing it would
+    // do nothing at all: the path is not in the tree. So the click re-roots the
+    // tree instead, which is the only way to reach that directory without
+    // starting a session in it first.
     try {
-      item.command = {
-        command: 'revealInExplorer',
-        title: 'Reveal in Explorer',
-        arguments: [vscode.Uri.file(row.path)],
-      };
+      item.command = row.current
+        ? {
+            command: 'revealInExplorer',
+            title: 'Reveal in Explorer',
+            arguments: [vscode.Uri.file(row.path)],
+          }
+        : {
+            command: COMMANDS.showDirectoryInExplorer,
+            title: 'Show This Directory in the Explorer',
+            arguments: [row.path],
+          };
     } catch (err) {
       logError('projectview.dirCommand', err);
     }

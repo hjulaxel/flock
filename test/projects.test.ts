@@ -9,9 +9,12 @@ import { describe, expect, it } from 'vitest';
 import {
   baseName,
   buildBranches,
+  buildSubprojects,
   chatsForProject,
   computeGrouping,
   defaultBranchVisibility,
+  flattenNestedProjects,
+  parentDir,
   BRANCH_AUTOSHOW_LIMIT,
   isHiddenFolder,
   isWithin,
@@ -21,6 +24,8 @@ import {
   projectClaiming,
   projectDirs,
   providerOfProject,
+  subprojectLabels,
+  SUBPROJECT_MIN,
   validateProjectName,
 } from '../src/projects';
 import type { GroupingInput } from '../src/projects';
@@ -542,6 +547,7 @@ describe('computeGrouping: worktrees', () => {
       groupByFolder: true,
       onlyProjectSessions: false,
       worktreesOf: appWorktrees,
+      branchRows: true,
     });
     expect(out.projects[0].rootIds).toEqual(['A', 'B', 'C']);
     // D is genuinely elsewhere and still falls through to a folder row.
@@ -572,6 +578,7 @@ describe('computeGrouping: worktrees', () => {
       groupByFolder: true,
       onlyProjectSessions: false,
       worktreesOf: appWorktrees,
+      branchRows: true,
     });
     const branches = out.projects[0].branches ?? [];
     // '(detached)' sorts before 'feat/x'; `main` holds position 0 regardless
@@ -590,6 +597,7 @@ describe('computeGrouping: worktrees', () => {
       groupByFolder: true,
       onlyProjectSessions: false,
       worktreesOf: appWorktrees,
+      branchRows: true,
     });
     const byName = new Map(
       (out.projects[0].branches ?? []).map((b) => [b.name, b.rootIds]),
@@ -612,6 +620,7 @@ describe('computeGrouping: worktrees', () => {
       groupByFolder: true,
       onlyProjectSessions: false,
       worktreesOf: appWorktrees,
+      branchRows: true,
     });
     const branches = out.projects[0].branches ?? [];
     expect(branches).toHaveLength(3);
@@ -631,6 +640,7 @@ describe('computeGrouping: worktrees', () => {
       groupByFolder: true,
       onlyProjectSessions: false,
       worktreesOf: () => nested,
+      branchRows: true,
     });
     const byName = new Map(
       (out.projects[0].branches ?? []).map((b) => [b.name, b.rootIds]),
@@ -651,6 +661,7 @@ describe('computeGrouping: worktrees', () => {
       groupByFolder: true,
       onlyProjectSessions: false,
       worktreesOf: appWorktrees,
+      branchRows: true,
     });
     // Both directories are checkouts of the same repo and each reports all
     // three worktrees. `main` twice on the chip row would be worse than no row.
@@ -668,6 +679,9 @@ describe('computeGrouping: worktrees', () => {
       worktreesOf: () => {
         throw new Error('git exploded');
       },
+      // With the block ON, so the empty result below is the probe failing
+      // rather than the gate being shut.
+      branchRows: true,
     });
     // Degrades to a tree with no branch rows rather than taking the sidebar down.
     expect(out.projects[0].branches).toEqual([]);
@@ -683,6 +697,7 @@ describe('computeGrouping: worktrees', () => {
       groupByFolder: true,
       onlyProjectSessions: false,
       worktreesOf: appWorktrees,
+      branchRows: true,
     };
     const first = computeGrouping(input);
     const second = computeGrouping(input, first);
@@ -699,11 +714,369 @@ describe('computeGrouping: worktrees', () => {
       groupByFolder: true,
       onlyProjectSessions: false,
       worktreesOf: () => APP_WORKTREES.slice(0, 1),
+      branchRows: true,
     };
     const first = computeGrouping(base);
     const second = computeGrouping({ ...base, worktreesOf: appWorktrees }, first);
     expect(second.projects[0]).not.toBe(first.projects[0]);
     expect(second.projects[0].branches).toHaveLength(3);
+  });
+});
+
+// ------------------------------------------------------------ the branch gate
+
+describe('computeGrouping: branchRows, the branch block’s switch', () => {
+  const projects = [project('p1', 'App', '/code/app')];
+  const worktrees = [
+    { dir: '/code/app', branch: 'main', head: 'a', detached: false },
+    { dir: '/code/app-feat-x', branch: 'feat/x', head: 'b', detached: false },
+  ];
+  const cwds = cwdMap({ A: '/code/app/src', B: '/code/app-feat-x' });
+
+  const group = (over: Partial<GroupingInput>) =>
+    computeGrouping({
+      visibleRootIds: ['A', 'B'],
+      cwdOf: cwds,
+      projects,
+      hiddenFolders: [],
+      groupByFolder: true,
+      onlyProjectSessions: false,
+      worktreesOf: () => worktrees,
+      ...over,
+    });
+
+  it('is OFF when absent — the shipped default', () => {
+    expect(group({}).projects[0].branches).toEqual([]);
+  });
+
+  it('is off when explicitly false', () => {
+    expect(group({ branchRows: false }).projects[0].branches).toEqual([]);
+  });
+
+  it('draws the block when on', () => {
+    expect(group({ branchRows: true }).projects[0].branches).toHaveLength(2);
+  });
+
+  it('DOES NOT move a session out of its project when off', () => {
+    // The whole point of gating the rows rather than the probe. `/code/app-feat-x`
+    // is a linked worktree nobody added to the project, so without
+    // worktree-derived membership session B would fall out to a folder row —
+    // which would make turning a view option off a way to lose a session.
+    const off = group({ branchRows: false });
+    expect(off.projects[0].rootIds).toEqual(['A', 'B']);
+    expect(off.folders).toEqual([]);
+    const on = group({ branchRows: true });
+    expect(on.projects[0].rootIds).toEqual(off.projects[0].rootIds);
+  });
+
+  it('repaints the project row when the switch flips', () => {
+    // In the reuse comparison, or flipping the setting would leave the previous
+    // object — and its branch rows — on screen until something else changed.
+    const base: GroupingInput = {
+      visibleRootIds: ['A'],
+      cwdOf: cwds,
+      projects,
+      hiddenFolders: [],
+      groupByFolder: true,
+      onlyProjectSessions: false,
+      worktreesOf: () => worktrees,
+      branchRows: true,
+    };
+    const first = computeGrouping(base);
+    const second = computeGrouping({ ...base, branchRows: false }, first);
+    expect(second.projects[0]).not.toBe(first.projects[0]);
+    expect(second.projects[0].branches).toEqual([]);
+  });
+});
+
+// --------------------------------------------------------------- subprojects
+
+describe('parentDir', () => {
+  it('answers the directory above', () => {
+    expect(parentDir('/code/app/api')).toBe('/code/app');
+    expect(parentDir('/code')).toBe('/');
+  });
+
+  it('has nothing above a root or a nothing', () => {
+    expect(parentDir('/')).toBe('');
+    expect(parentDir('')).toBe('');
+  });
+});
+
+describe('subprojectLabels', () => {
+  it('uses the basename when that is unambiguous', () => {
+    expect(subprojectLabels(['/code/app', '/code/infra'])).toEqual([
+      'app',
+      'infra',
+    ]);
+  });
+
+  it('prepends the parent when two basenames collide', () => {
+    // The monorepo case, and the reason this function exists: two rows both
+    // reading `src` is a tree you cannot use.
+    expect(subprojectLabels(['/code/api/src', '/code/web/src'])).toEqual([
+      'api/src',
+      'web/src',
+    ]);
+  });
+
+  it('collides case-insensitively, matching pathKey', () => {
+    expect(subprojectLabels(['/code/api/Src', '/code/web/src'])).toEqual([
+      'api/Src',
+      'web/src',
+    ]);
+  });
+
+  it('leaves an unambiguous sibling alone while disambiguating the pair', () => {
+    expect(
+      subprojectLabels(['/code/app', '/code/api/src', '/code/web/src']),
+    ).toEqual(['app', 'api/src', 'web/src']);
+  });
+
+  it('falls back to the whole path when the parent does not help either', () => {
+    // `a/src` twice: the two-component form still collides, so the only honest
+    // label left is the address itself.
+    expect(subprojectLabels(['/one/a/src', '/two/a/src'])).toEqual([
+      '/one/a/src',
+      '/two/a/src',
+    ]);
+  });
+});
+
+describe('buildSubprojects', () => {
+  const cwds = cwdMap({
+    A: '/code/app/lib',
+    B: '/code/app/api/handlers',
+    C: '/code/app-feat-x/src',
+    D: undefined,
+  });
+
+  it('emits nothing for a project with one directory', () => {
+    // Every project anybody has ever made. A single row restating the project's
+    // own address would cost a row per project forever to say nothing.
+    const p = project('p1', 'App', '/code/app');
+    expect(
+      buildSubprojects({ project: p, rootIds: ['A'], cwdOf: cwds }),
+    ).toEqual([]);
+    expect(SUBPROJECT_MIN).toBe(2);
+  });
+
+  it('emits one row per directory once there are two, main first', () => {
+    const p = project('p1', 'App', '/code/app', { dirs: ['/code/app/api'] });
+    const out = buildSubprojects({ project: p, rootIds: [], cwdOf: cwds });
+    expect(out.map((s) => s.dir)).toEqual(['/code/app', '/code/app/api']);
+    expect(out.map((s) => s.label)).toEqual(['app', 'api']);
+    expect(out.map((s) => s.main)).toEqual([true, false]);
+    expect(out.map((s) => s.dirKey)).toEqual(['/code/app', '/code/app/api']);
+  });
+
+  it('files each session under the LONGEST matching directory', () => {
+    // The rule that makes the v6 migration invisible: a subproject that used to
+    // be its own record at /code/app/api becomes a directory at /code/app/api,
+    // and its sessions land in the same place on screen.
+    const p = project('p1', 'App', '/code/app', { dirs: ['/code/app/api'] });
+    const out = buildSubprojects({ project: p, rootIds: ['A', 'B'], cwdOf: cwds });
+    expect(out[0].rootIds).toEqual(['A']);
+    expect(out[1].rootIds).toEqual(['B']);
+  });
+
+  it('sends a session no directory claims to the MAIN one', () => {
+    // C runs in a linked git worktree the project does not list; matchProject
+    // gave it to this project anyway. Dropping it would make adding a second
+    // directory a way to lose a row.
+    const p = project('p1', 'App', '/code/app', { dirs: ['/code/app/api'] });
+    const out = buildSubprojects({ project: p, rootIds: ['C', 'D'], cwdOf: cwds });
+    expect(out[0].rootIds).toEqual(['C', 'D']);
+    expect(out[1].rootIds).toEqual([]);
+  });
+
+  it('keeps every session, whatever the directories say', () => {
+    const p = project('p1', 'App', '/code/app', {
+      dirs: ['/code/app/api', '/code/other'],
+    });
+    const out = buildSubprojects({
+      project: p,
+      rootIds: ['A', 'B', 'C', 'D'],
+      cwdOf: cwds,
+    });
+    const filed = out.flatMap((s) => s.rootIds).sort();
+    expect(filed).toEqual(['A', 'B', 'C', 'D']);
+  });
+
+  it('survives a cwdOf that throws by filing under main', () => {
+    const p = project('p1', 'App', '/code/app', { dirs: ['/code/app/api'] });
+    const out = buildSubprojects({
+      project: p,
+      rootIds: ['A'],
+      cwdOf: () => {
+        throw new Error('forest changed');
+      },
+    });
+    expect(out[0].rootIds).toEqual(['A']);
+  });
+});
+
+describe('computeGrouping: subprojects', () => {
+  const cwds = cwdMap({ A: '/code/app/lib', B: '/code/app/api/x' });
+
+  it('attaches nothing to a single-directory project', () => {
+    const out = computeGrouping({
+      visibleRootIds: ['A'],
+      cwdOf: cwds,
+      projects: [project('p1', 'App', '/code/app')],
+      hiddenFolders: [],
+      groupByFolder: true,
+      onlyProjectSessions: false,
+    });
+    expect(out.projects[0].subprojects).toEqual([]);
+    expect(out.projects[0].rootIds).toEqual(['A']);
+  });
+
+  it('splits a two-directory project, keeping rootIds whole', () => {
+    const out = computeGrouping({
+      visibleRootIds: ['A', 'B'],
+      cwdOf: cwds,
+      projects: [
+        project('p1', 'App', '/code/app', { dirs: ['/code/app/api'] }),
+      ],
+      hiddenFolders: [],
+      groupByFolder: true,
+      onlyProjectSessions: false,
+    });
+    // `rootIds` still names every session in the project — the split is a
+    // rendering decision, and the roll-up that lights the project's dot reads
+    // this list.
+    expect(out.projects[0].rootIds).toEqual(['A', 'B']);
+    expect(out.projects[0].subprojects?.map((s) => s.rootIds)).toEqual([
+      ['A'],
+      ['B'],
+    ]);
+  });
+
+  it('repaints the row when a session moves between directories', () => {
+    const base: GroupingInput = {
+      visibleRootIds: ['A', 'B'],
+      cwdOf: cwds,
+      projects: [
+        project('p1', 'App', '/code/app', { dirs: ['/code/app/api'] }),
+      ],
+      hiddenFolders: [],
+      groupByFolder: true,
+      onlyProjectSessions: false,
+    };
+    const first = computeGrouping(base);
+    const same = computeGrouping(base, first);
+    expect(same.projects[0]).toBe(first.projects[0]);
+    // B's cwd moves out of api and into the main directory: same project, same
+    // rootIds, different rows — so the object has to be fresh.
+    const moved = computeGrouping(
+      { ...base, cwdOf: cwdMap({ A: '/code/app/lib', B: '/code/app/lib2' }) },
+      first,
+    );
+    expect(moved.projects[0]).not.toBe(first.projects[0]);
+    expect(moved.projects[0].subprojects?.map((s) => s.rootIds)).toEqual([
+      ['A', 'B'],
+      [],
+    ]);
+  });
+});
+
+describe('flattenNestedProjects: the v6 migration rules', () => {
+  it('leaves a flat set of projects alone', () => {
+    const out = flattenNestedProjects([
+      project('a', 'A', '/code/a'),
+      project('b', 'B', '/code/b'),
+    ]);
+    expect(out).toEqual({ merged: [], removed: [] });
+  });
+
+  it('folds a child’s directory into its parent and tombstones the child', () => {
+    const out = flattenNestedProjects([
+      project('p', 'App', '/code/app'),
+      project('c', 'Api', '/code/app/api', { parentId: 'p' }),
+    ]);
+    expect(out.merged).toEqual([
+      { id: 'p', rootDir: '/code/app', dirs: ['/code/app/api'] },
+    ]);
+    expect(out.removed).toEqual(['c']);
+  });
+
+  it('never moves the parent’s main directory', () => {
+    // Every project-level verb starts at rootDir, so a migration that re-pointed
+    // it would change where `+` starts a session.
+    const out = flattenNestedProjects([
+      project('p', 'App', '/code/app', { dirs: ['/code/app/extra'] }),
+      project('c', 'Api', '/code/aaa', { parentId: 'p' }),
+    ]);
+    expect(out.merged[0].rootDir).toBe('/code/app');
+    expect(out.merged[0].dirs).toEqual(['/code/app/extra', '/code/aaa']);
+  });
+
+  it('collapses a whole chain into the top-level ancestor', () => {
+    const out = flattenNestedProjects([
+      project('a', 'A', '/code/a'),
+      project('b', 'B', '/code/a/b', { parentId: 'a' }),
+      project('c', 'C', '/code/a/b/c', { parentId: 'b' }),
+    ]);
+    expect(out.merged).toEqual([
+      { id: 'a', rootDir: '/code/a', dirs: ['/code/a/b', '/code/a/b/c'] },
+    ]);
+    expect(out.removed.sort()).toEqual(['b', 'c']);
+  });
+
+  it('dedupes a directory a parent and child both listed', () => {
+    // The old model tolerated this (the deeper record won the tie); the new one
+    // has no room for it.
+    const out = flattenNestedProjects([
+      project('p', 'App', '/code/app'),
+      project('c', 'Also', '/code/app', { parentId: 'p' }),
+    ]);
+    expect(out.merged).toEqual([
+      { id: 'p', rootDir: '/code/app', dirs: [] },
+    ]);
+    expect(out.removed).toEqual(['c']);
+  });
+
+  it('folds a CLOSED child in too — its directories become the parent’s', () => {
+    // The child's closed-ness does not survive, which is the cost of the model
+    // change. state.migrateV5ToV6 logs it per project for exactly that reason.
+    const out = flattenNestedProjects([
+      project('p', 'App', '/code/app'),
+      project('c', 'Api', '/code/app/api', { parentId: 'p', hidden: true }),
+    ]);
+    expect(out.merged[0].dirs).toEqual(['/code/app/api']);
+    expect(out.removed).toEqual(['c']);
+  });
+
+  it('ignores tombstones', () => {
+    const out = flattenNestedProjects([
+      project('p', 'App', '/code/app'),
+      { ...project('c', '', ''), deleted: true, parentId: 'p' },
+    ]);
+    expect(out).toEqual({ merged: [], removed: [] });
+  });
+
+  it('is idempotent: a second pass over its own output changes nothing', () => {
+    const before = [
+      project('p', 'App', '/code/app'),
+      project('c', 'Api', '/code/app/api', { parentId: 'p' }),
+    ];
+    const first = flattenNestedProjects(before);
+    const after = [
+      project('p', 'App', first.merged[0].rootDir, {
+        dirs: first.merged[0].dirs,
+      }),
+    ];
+    expect(flattenNestedProjects(after)).toEqual({ merged: [], removed: [] });
+  });
+
+  it('re-roots a child whose parent is gone rather than merging it anywhere', () => {
+    // buildProjectTree already treats an unknown parentId as top-level, and a
+    // migration must not invent a merge target for it.
+    const out = flattenNestedProjects([
+      project('c', 'Api', '/code/app/api', { parentId: 'nope' }),
+    ]);
+    expect(out).toEqual({ merged: [], removed: [] });
   });
 });
 

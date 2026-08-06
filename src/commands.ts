@@ -37,6 +37,7 @@ import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 
 import { log, logError } from './log';
+import { isDemoId } from './demoProject';
 import {
   COMMANDS,
   CONTEXT_HOOKS_INSTALLED,
@@ -62,7 +63,6 @@ import type {
 } from './types';
 import {
   buildProjectTree,
-  canReparentProject,
   chatsForProject,
   isWithin,
   matchProject,
@@ -72,6 +72,7 @@ import {
   projectDirs,
   projectSubtree,
   providerOfProject,
+  subprojectLabels,
   validateProjectName,
 } from './projects';
 import {
@@ -440,6 +441,42 @@ function unknownGroupRefusal(arg: unknown): string {
   return 'Flock: those sessions report no working directory, so there is no folder to act on.';
 }
 
+/**
+ * '' when the row is actionable, else the reason it is not — for the DEMO project.
+ *
+ * `lineage.preview.demoProject` puts a fabricated project in the tree, and its
+ * rows carry real-looking context objects because that is what makes the menus
+ * draw at all. So every verb that could reach one has to refuse it here, at the
+ * front, rather than downstream where `getProject` returns undefined and the flow
+ * says "that project no longer exists" — which is true of a project that never
+ * existed and still the wrong thing to tell somebody.
+ *
+ * Checked on the ROW's id rather than on the setting: turning the switch off
+ * between a click and its handler is not a case worth a second read, and an id
+ * that starts with the demo prefix is never a real one either way.
+ */
+/** Every id-shaped field a command argument can carry, so one guard can look at
+ *  all of them without knowing which row kind it was handed. Shape-only and
+ *  total: anything that is not an object contributes nothing. */
+function idsInArg(arg: unknown): string[] {
+  if (arg === null || typeof arg !== 'object') return [];
+  const obj = arg as Record<string, unknown>;
+  const out: string[] = [];
+  for (const field of ['projectId', 'id', 'sessionId']) {
+    const value = obj[field];
+    if (typeof value === 'string' && value !== '') out.push(value);
+  }
+  return out;
+}
+
+function demoRefusal(...ids: readonly (string | undefined)[]): string {
+  if (!ids.some((id) => isDemoId(id))) return '';
+  return (
+    'Flock: that is the demo project — nothing on it is real, and no directory ' +
+    'behind it exists. Turn off lineage.preview.demoProject to remove it.'
+  );
+}
+
 /** A ProjectGroupNode's id, when the command came from a project row. */
 export function projectIdFromArg(arg: unknown): string | undefined {
   if (arg === null || typeof arg !== 'object') return undefined;
@@ -448,6 +485,42 @@ export function projectIdFromArg(arg: unknown): string | undefined {
   return typeof obj.projectId === 'string' && obj.projectId.length > 0
     ? obj.projectId
     : undefined;
+}
+
+/**
+ * A subproject-row invocation: `{type:'subproject', projectId, dir}`.
+ *
+ * A SEPARATE reader from `projectIdFromArg`, with a different `type`, and that is
+ * the point: a subproject row carries its project's id, so a shared shape would
+ * let every project verb — rename, close, delete — take a directory row as its
+ * target. The two verbs that belong on one read this instead.
+ *
+ * `dir` is checked for shape only. Both callers re-resolve it against the
+ * project's live directory list before doing anything with it, so a stale row is
+ * a refusal rather than a session spawned somewhere nobody is looking.
+ */
+export function subprojectArgOf(
+  arg: unknown,
+): { projectId: string; dir: string; id: string } | undefined {
+  if (arg === null || typeof arg !== 'object') return undefined;
+  const obj = arg as {
+    type?: unknown;
+    projectId?: unknown;
+    dir?: unknown;
+    id?: unknown;
+  };
+  if (obj.type !== 'subproject') return undefined;
+  if (typeof obj.projectId !== 'string' || obj.projectId === '') return undefined;
+  if (typeof obj.dir !== 'string' || obj.dir.trim() === '') return undefined;
+  // The ROW's identity — a SubprojectRecord id for a named lane, `dir:<key>` for
+  // an implicit one (see SubprojectNode.id). Shape-only here; every caller
+  // re-resolves it against the rows the view actually drew, so a stale row is a
+  // refusal rather than a write against a lane that is gone.
+  return {
+    projectId: obj.projectId,
+    dir: obj.dir,
+    id: typeof obj.id === 'string' ? obj.id : '',
+  };
 }
 
 /** Write to the clipboard and say so, without letting a clipboard that refuses
@@ -1239,45 +1312,34 @@ async function pickProjectDirectory(
 }
 
 /**
- * Create a project: a name, a main directory, and as many extra directories as
- * the user wants to add before committing.
+ * Create a project: pick a directory. That is the whole flow.
  *
- * The directory list is built BEFORE anything is written, so escaping at any
- * step leaves no half-made project behind. `seed` lets "Make Project from this
- * Folder" skip straight to the directory list.
+ * IT USED TO ASK TWICE. After the folder dialog came a quick pick offering
+ * "Create Project" and "Add Another Directory…", looping until the user
+ * committed — a confirmation step whose only job was to let you add directories
+ * you had not been asked for and almost never wanted. Every project starts with
+ * one directory; the second one is a thing you discover later, on a project that
+ * already exists, and it now has its own verb there (Add Subproject). So the
+ * dialog's OK button is the confirmation, and picking a folder makes a project.
  *
- * The name is generated, not asked for: the project is created under its main
+ * `seed` lets "Make Project from this Folder" skip the dialog entirely.
+ *
+ * The name is generated, not asked for: the project is created under its
  * directory's basename (deduped the same case-insensitive way
  * `validateProjectName` refuses a clash) and renamed in place on its own row
  * afterwards, which is the same create-then-name gesture every other verb uses.
  */
 async function newProjectFlow(
   deps: CommandDeps,
-  seed?: { rootDir?: string; name?: string; parentId?: string },
+  seed?: { rootDir?: string; name?: string },
 ): Promise<string | undefined> {
-  // A subproject starts its directory pick INSIDE its parent, because
-  // that is where it is going to be nine times out of ten — `~/code/app` then
-  // `api`, not `~/code/app` then a walk back up from wherever the last dialog
-  // happened to be. The dialog is still a full picker; only its opening
-  // directory changes, so filing a subproject somewhere else entirely (a
-  // sibling checkout, a notes folder) is exactly as available as it was.
-  const parent = seed?.parentId ? deps.getProject(seed.parentId) : undefined;
   const rootDir =
     normalizeDir(seed?.rootDir) ||
-    (await pickDirectory(
-      'Use as Main Directory',
-      parent
-        ? `Main directory for a project inside ${parent.name}`
-        : 'Main directory for the project',
-      parent ? projectDirs(parent)[0] : undefined,
-    ));
+    (await pickDirectory('Use as Project Directory', 'Directory for the project'));
   if (!rootDir) return undefined;
 
   // Refused before anything is written: two projects listing one directory have
-  // no defined owner for the sessions in it (see projectClaiming), and a
-  // subproject is where that used to happen by accident — the dialog opens inside
-  // the parent, so accepting it without navigating chose the parent's own
-  // directory and the new project silently took the parent's sessions.
+  // no defined owner for the sessions in it (see projectClaiming).
   //
   // The message names the project that has it and the two ways forward, because
   // "no" on its own here reads as a bug: the directory the user picked is a
@@ -1287,10 +1349,8 @@ async function newProjectFlow(
     void vscode.window.showWarningMessage(
       `Flock: "${claimed.name}" already covers ${rootDir}, so a second project ` +
         'on it would have no defined owner for the sessions in there.\n\n' +
-        (parent && claimed.id === parent.id
-          ? 'Pick a subdirectory instead — a subproject on ' +
-            `${baseName(rootDir)}/something takes just the sessions under it.`
-          : 'Pick a subdirectory, or add this directory to that project.'),
+        'Pick a subdirectory, or add this directory to that project as a ' +
+        'subproject.',
       { modal: true },
     );
     return undefined;
@@ -1303,74 +1363,9 @@ async function newProjectFlow(
     MAX_PROJECT_NAME_LEN,
   );
 
-  const extraDirs: string[] = [];
-  const seen = new Set<string>([pathKey(rootDir)]);
-  for (;;) {
-    const items: ActionPick[] = [
-      {
-        label: '$(check) Create Project',
-        description: `${name} · ${1 + extraDirs.length} director${
-          extraDirs.length === 0 ? 'y' : 'ies'
-        }`,
-        action: 'done',
-      },
-      {
-        label: '$(add) Add Another Directory…',
-        description: 'A project can span any number of directories',
-        action: 'add',
-      },
-    ];
-    for (const dir of extraDirs) {
-      items.push({
-        label: `$(close) Remove ${baseName(dir)}`,
-        description: dir,
-        action: 'remove',
-        payload: dir,
-      });
-    }
-    const chosen = await vscode.window.showQuickPick(items, {
-      title: parent ? `New Project in ${parent.name} — ${name}` : `New Project — ${name}`,
-      placeHolder: `Main: ${rootDir}`,
-      ignoreFocusOut: true,
-    });
-    if (!chosen) return undefined; // escape cancels the whole verb
-    if (chosen.action === 'done') break;
-    if (chosen.action === 'remove' && chosen.payload) {
-      const i = extraDirs.indexOf(chosen.payload);
-      if (i >= 0) extraDirs.splice(i, 1);
-      seen.delete(pathKey(chosen.payload));
-      continue;
-    }
-    const dir = await pickDirectory('Add to Project', `Add a directory to ${name}`);
-    if (!dir) continue;
-    if (seen.has(pathKey(dir))) {
-      void vscode.window.showInformationMessage(
-        `"${baseName(dir)}" is already in this project.`,
-      );
-      continue;
-    }
-    seen.add(pathKey(dir));
-    extraDirs.push(dir);
-  }
-
   const id = randomUUID();
-  await deps.upsertProject(id, {
-    name,
-    rootDir,
-    dirs: extraDirs,
-    // Written with the create rather than through setProjectParent: there is
-    // no cycle to check against a project that does not exist yet, and one
-    // write means a half-made project cannot exist even for a tick.
-    ...(parent ? { parentId: parent.id } : {}),
-  });
-  log(
-    'project: created',
-    id,
-    name,
-    rootDir,
-    `+${extraDirs.length} dir(s)`,
-    parent ? `under ${parent.name}` : '(top level)',
-  );
+  await deps.upsertProject(id, { name, rootDir, dirs: [] });
+  log('project: created', id, name, rootDir);
   deps.refresh();
   // Select the new project's row and open an editor on its label: the tree is
   // where the name lives from now on, and the generated one is only a default.
@@ -1565,28 +1560,61 @@ async function startSessionInWorktree(
   dir: string,
   branch: string,
 ): Promise<void> {
-  // Named for the BRANCH, not the project: on a project whose chips are
-  // showing, "app 3" tells you nothing and "feat/x 2" tells you everything.
-  // The counter is scoped to the whole project so two branches never
+  await startSessionInProjectDir(deps, project, dir, branch, `on branch ${branch}`);
+}
+
+/**
+ * A session in one named DIRECTORY of a project, named after that directory.
+ *
+ * Shared by the two verbs that know exactly where they are starting — a
+ * subproject row's `+` and a branch chip's — because everything after "which
+ * directory" is identical between them: the naming rule, the routing, the pin,
+ * the reveal, the rename-in-place. Two copies would drift on the first change,
+ * and the drift would be invisible until somebody noticed one of them had stopped
+ * pinning its account.
+ *
+ * `stem` names the session and `what` names it in the LOG, which are different
+ * strings on purpose: `feat/x` is the title you want on the row, and "on branch
+ * feat/x" is the sentence you want when reading back what happened.
+ */
+async function startSessionInProjectDir(
+  deps: CommandDeps,
+  project: ProjectRecord,
+  dir: string,
+  stem: string,
+  what: string,
+  /** The NAMED lane this launch is starting in, when it came from one. Stamped
+   *  onto the session for life — it is the only thing that can say which of two
+   *  lanes on one directory the session belongs to (see
+   *  EditorialRecord.subprojectId). Absent for a launch from an implicit
+   *  directory row, which needs no stamp: the directory answers on its own. */
+  subprojectId?: string,
+): Promise<void> {
+  // Named for the DIRECTORY, not the project: under a project that has split
+  // into rows, "app 3" tells you nothing and "api 2" tells you which row it is
+  // in. The counter is scoped to the whole project so two directories never
   // produce the same name.
   const title = nextFreeName(
-    branch,
+    stem,
     namesUnder(deps, [...projectDirs(project), dir]),
   );
 
-  // A worktree belongs to the project whose chip row it came from, so
-  // the routing question is already answered — no directory lookup.
+  // The directory belongs to the project whose row it came from, so the routing
+  // question is already answered — no directory lookup.
   const routed = routeNewSession(deps, project.id);
 
   const sessionId = randomUUID();
   await deps.recordLaunch(sessionId, null, dir);
   await deps.upsertRecord(sessionId, { title });
-  log('new:', shortId(sessionId), 'on branch', branch, dir);
+  log('new:', shortId(sessionId), what, dir);
   const binding = await deps.launchSession({
     sessionId,
     cwd: dir,
     title,
     ...launchAccountOptions(routed),
+    ...(subprojectId === undefined || subprojectId === ''
+      ? {}
+      : { subprojectId }),
   });
   if (!binding) {
     log('new: launch failed for', shortId(sessionId));
@@ -2725,6 +2753,11 @@ async function refusedLiveWriter(
  * wraps in `new-session -A` under the recorded name, and tmux hands back the
  * very process already writing the transcript. For those this flow IS the
  * attach verb.
+ *
+ * And one session it opens WITHOUT resuming: a row that has never taken a turn
+ * has no transcript to reopen, so it cold-starts under its own id instead —
+ * see the comment on `started` below. Clicking a session you created and never
+ * wrote in has to open something.
  */
 export async function resumeFlow(
   deps: AccountCommandDeps,
@@ -2752,7 +2785,30 @@ export async function resumeFlow(
     return false;
   }
 
-  if (!deps.hasTranscript(sessionId)) {
+  // Claude writes a transcript LAZILY — nothing reaches disk until the first
+  // turn. So a session created and then left alone (the `+` you clicked before
+  // being pulled into something else) has a row, an id, a name, a directory and
+  // no bytes anywhere. `--resume` has nothing to name, and this used to be the
+  // end of it: the row stayed on screen and refused to open, which is the one
+  // thing a row must never do.
+  //
+  // It opens by STARTING instead. Same id — free precisely because no
+  // transcript claims it — same directory, same name, same account pin: the
+  // launch that created the row, run again. Two shapes, because a branch that
+  // never took a turn is not a blank conversation:
+  //
+  //   * a fork whose ancestor HAS a transcript reopens as that fork
+  //     (`--fork-session --resume <ancestor> --session-id <this>`), which is
+  //     the history it was showing on screen before it was closed;
+  //   * everything else opens fresh (`--session-id <this>`).
+  //
+  // A GHOST is the exception, and stays refused: it is an ancestor INFERRED
+  // from a child's recorded edge, never a row anything here created, and
+  // starting a conversation under its id would mint the history the tree is
+  // only guessing at.
+  const started = deps.hasTranscript(sessionId);
+  const coldFrom = started ? undefined : forkableAncestor(deps, sessionId);
+  if (!started && node?.ghost === true) {
     void vscode.window.showWarningMessage(
       'No transcript on disk for this session — there is nothing to reopen.',
     );
@@ -2776,22 +2832,34 @@ export async function resumeFlow(
   // false positive that would make this an obstacle instead of a guard.
   //
   // Not for the attach path: that hands back the very process already writing
-  // the file, which is the whole point of the detach tier.
-  if (detached === undefined && (await refusedLiveWriter(deps, sessionId))) {
+  // the file, which is the whole point of the detach tier. Nor for a cold open,
+  // which has no transcript for anything to be a second writer ON.
+  if (started && detached === undefined && (await refusedLiveWriter(deps, sessionId))) {
     return false;
   }
 
   // Same repair as the fork path, and for the same reason: a plain `--resume`
   // walks back from the same recorded leaf, so reopening a session could drop
-  // the tail of the very turn you were reading when you closed it.
-  reportResumeLeaf(deps, sessionId, 'resume');
+  // the tail of the very turn you were reading when you closed it. A cold open
+  // repairs the leaf it is about to REPLAY — its ancestor's — for the same
+  // reason `forkFlow` does, and a fresh start has no leaf at all.
+  if (started) reportResumeLeaf(deps, sessionId, 'resume');
+  else if (coldFrom !== undefined) reportResumeLeaf(deps, coldFrom, 'fork');
 
-  const cwd = node?.cwd ?? deps.getRecord(sessionId)?.cwd;
+  const cwd =
+    node?.cwd ??
+    deps.getRecord(sessionId)?.cwd ??
+    // A cold fork falls through to the transcript's side exactly as `forkFlow`
+    // does: a branch that recorded no directory still has to open somewhere.
+    (coldFrom === undefined
+      ? undefined
+      : (deps.getForest().nodes.get(coldFrom)?.cwd ?? deps.getRecord(coldFrom)?.cwd));
   log(
-    'resume:',
+    started ? 'resume:' : 'cold open:',
     shortId(sessionId),
     cwd ?? '(no cwd)',
     ...(detached !== undefined ? [`(attach: ${detached})`] : []),
+    ...(coldFrom !== undefined ? [`(replaying ${shortId(coldFrom)})`] : []),
   );
 
   // The account this conversation started on, re-injected. Passed even on
@@ -2799,7 +2867,12 @@ export async function resumeFlow(
   // it was launched with and the `-e` flags are ignored — because `-A` falls
   // through to a fresh `--resume` when the detached session died while parked,
   // and that launch must land on the same account as the first one.
-  const routed = pinnedLaunch(deps, sessionId);
+  //
+  // A cold FORK follows the ancestor instead, for the reason `forkFlow` gives:
+  // `--fork-session --resume` has to read a transcript that lives inside one
+  // account's config directory and nowhere else, so routing it elsewhere would
+  // not merely misbill the branch, it would fail to find its history.
+  const routed = pinnedLaunch(deps, coldFrom ?? sessionId);
 
   // The resumed process keeps this id, so sessionId === resumeId: the
   // LINEAGE_NODE_ID stamp and the binding both name what will be running.
@@ -2814,14 +2887,21 @@ export async function resumeFlow(
 
   const binding = await deps.launchSession({
     sessionId,
-    resumeId: sessionId,
+    // Exactly one of the three shapes, never two: `resumeId` outranks
+    // `parentId` in the launcher, so a cold open that also carried a resume id
+    // would silently reopen the ancestor under the child's name.
+    ...(started
+      ? { resumeId: sessionId }
+      : coldFrom !== undefined
+        ? { parentId: coldFrom }
+        : {}),
     cwd,
     ...(tabTitle !== undefined ? { title: tabTitle } : {}),
     ...(detached !== undefined ? { tmuxName: detached } : {}),
     ...launchAccountOptions(routed),
   });
   if (!binding) {
-    log('resume: launch failed for', shortId(sessionId));
+    log(started ? 'resume:' : 'cold open:', 'launch failed for', shortId(sessionId));
     return false;
   }
   // Records the pin on THIS generation's record when the answer came from the
@@ -2837,13 +2917,25 @@ export async function resumeFlow(
 }
 
 /**
- * One menu for everything you can do to a project. A separate command per
- * field would be six more palette entries and six more context-menu rows for
- * operations you touch about once per project per year.
+ * SETTINGS: everything you can do to a project that is not one of the seven
+ * things on its context menu.
  *
- * Every branch re-reads the project through `deps.getProject` afterwards, so
- * an edit made in another window between two steps is never clobbered by a
- * stale copy captured at the top.
+ * The menu is the answer to a right-click that had grown to fourteen entries.
+ * Nine of them were reached constantly (start something, chat, rename, close,
+ * delete) and the rest about once per project per year — which directory is the
+ * main one, which provider it runs, which AI account it bills to, whether this
+ * window should scope itself to it. Those are the ones in here, and the split is
+ * along exactly that line: the row holds what you do to a project, this holds
+ * what a project IS.
+ *
+ * Four entries are DELEGATED to the commands that already own them
+ * (`setProjectAccount`, `newSessionFromPicker`, `switchWorkspace`,
+ * `openProject`) rather than reimplemented, because each has a picker, a
+ * refusal and a message of its own that must not exist twice.
+ *
+ * Every branch that stays in the loop re-reads the project through
+ * `deps.getProject` afterwards, so an edit made in another window between two
+ * steps is never clobbered by a stale copy captured at the top.
  */
 export async function configureProjectFlow(
   deps: CommandDeps,
@@ -2858,28 +2950,20 @@ export async function configureProjectFlow(
       return;
     }
     const dirs = projectDirs(project);
-    const items: ActionPick[] = [
-      {
-        label: '$(edit) Rename…',
-        description: project.name,
-        action: 'rename',
-      },
-      {
-        label: '$(add) Add Directory…',
-        description: `${dirs.length} in this project`,
-        action: 'addDir',
-      },
-    ];
+    const items: ActionPick[] = [];
+    // Only for a project that HAS more than one directory. Both verbs are about
+    // choosing between them, and a menu that offers a choice between one thing is
+    // a menu entry that has to explain itself when clicked.
     if (dirs.length > 1) {
       items.push(
         {
           label: '$(star-full) Set Main Directory…',
-          description: dirs[0],
+          description: `${baseName(dirs[0])} — where project-level verbs start`,
           action: 'setMain',
         },
         {
-          label: '$(remove) Remove Directory…',
-          description: 'Keeps the directory on disk',
+          label: '$(remove) Remove Subproject…',
+          description: 'Takes a directory off the project; keeps it on disk',
           action: 'removeDir',
         },
       );
@@ -2891,63 +2975,57 @@ export async function configureProjectFlow(
         action: 'provider',
       },
       {
-        // The same flag, said the way the verbs on the row say it.
-        // "Hide" and "Show" described a filter; this is a project you put away
-        // and take back out, and calling it two different things in two menus
-        // is how a user ends up believing they are two features.
-        label:
-          project.hidden === true
-            ? '$(folder-opened) Open Project'
-            : '$(archive) Close Project…',
-        description:
-          project.hidden === true
-            ? 'Bring this project back into the tree'
-            : 'Leaves the tree; nothing is deleted and nothing stops',
-        action: 'toggleHidden',
+        label: '$(account) Set AI Account…',
+        description: 'Which account this project’s new sessions launch on',
+        action: 'account',
       },
       {
-        label: '$(trash) Delete Project',
-        description: 'Removes the project only — never the directories',
-        action: 'delete',
+        label: '$(add) New Session From…',
+        description: 'Start one on a specific account, whatever the routing says',
+        action: 'sessionFrom',
+      },
+      {
+        label: '$(layers) Switch Workspace…',
+        description: 'Show only this project’s tabs in this window',
+        action: 'workspace',
+      },
+      {
+        label: '$(folder-opened) Open in New Window',
+        description: 'The project’s directory, as an ordinary VS Code window',
+        action: 'openWindow',
       },
     );
 
     const chosen = await vscode.window.showQuickPick(items, {
-      title: `Project — ${project.name}`,
+      title: `Settings — ${project.name}`,
       placeHolder: dirs.join('  ·  '),
       ignoreFocusOut: true,
     });
     if (!chosen) return;
 
-    if (chosen.action === 'rename') {
-      // The in-place editor wherever one exists, the quick input only where one
-      // does not — the same two-step every other naming path takes.
-      //
-      // The two halves end this menu differently ON PURPOSE. An inline edit is
-      // handed to the sidebar row and is still open when this call returns:
-      // reopening the QuickPick behind it would take the keyboard back, blur
-      // the input, and the client commits on blur — so the rename would post
-      // the UNCHANGED name and visibly do nothing, with the Configure menu
-      // sitting on top of it. The menu therefore closes and the row is where
-      // the interaction continues. The quick-input fallback, by contrast, is
-      // finished by the time it resolves, so the loop can reopen the menu and
-      // re-read `project` to show the new name.
-      if (await deps.beginInlineRenameProject(projectId)) return;
-      await vscode.commands.executeCommand(COMMANDS.renameProject, {
+    // The five verbs that are ALSO whole commands elsewhere are delegated rather
+    // than reimplemented, and each one ENDS this menu instead of looping back.
+    // They open a picker or a window of their own, and a QuickPick reopening
+    // behind one takes the keyboard off it.
+    if (
+      chosen.action === 'account' ||
+      chosen.action === 'sessionFrom' ||
+      chosen.action === 'workspace' ||
+      chosen.action === 'openWindow'
+    ) {
+      const command =
+        chosen.action === 'account'
+          ? COMMANDS.setProjectAccount
+          : chosen.action === 'sessionFrom'
+            ? COMMANDS.newSessionFromPicker
+            : chosen.action === 'workspace'
+              ? COMMANDS.switchWorkspace
+              : COMMANDS.openProject;
+      await vscode.commands.executeCommand(command, {
         type: 'project',
         projectId,
       });
-      continue;
-    }
-
-    if (chosen.action === 'addDir') {
-      const dir = await pickDirectory(
-        'Add to Project',
-        `Add a directory to ${project.name}`,
-      );
-      if (!dir) continue;
-      await addDirectoryToProject(deps, projectId, dir);
-      continue;
+      return;
     }
 
     if (chosen.action === 'setMain') {
@@ -2974,22 +3052,17 @@ export async function configureProjectFlow(
         folder: dir,
       }));
       const pick = await vscode.window.showQuickPick(removable, {
-        placeHolder: 'Remove which directory from the project?',
+        placeHolder: 'Remove which subproject from the project?',
         matchOnDescription: true,
         ignoreFocusOut: true,
       });
       if (!pick?.folder) continue;
-      // Re-read after the picker — same reason as setMain above.
-      const fresh = deps.getProject(projectId);
-      if (!fresh) continue;
-      const removed = pick.folder;
-      await deps.upsertProject(projectId, {
-        dirs: projectDirs(fresh)
-          .slice(1)
-          .filter((d) => pathKey(d) !== pathKey(removed)),
-      });
-      deps.refresh();
-      continue;
+      // Through the row's own verb, so the confirmation and its wording cannot be
+      // skipped by coming in through this menu instead — the same discipline the
+      // close and delete entries used to follow from here. It ends the menu: the
+      // directory list this loop is showing is exactly what the removal changed.
+      await removeSubprojectFlow(deps, projectId, pick.folder);
+      return;
     }
 
     if (chosen.action === 'provider') {
@@ -3008,22 +3081,6 @@ export async function configureProjectFlow(
       if (!pick) continue;
       await deps.upsertProject(projectId, { provider: pick.provider });
       deps.refresh();
-      continue;
-    }
-
-    if (chosen.action === 'toggleHidden') {
-      // Through the same flows the row's own verbs use, so the confirmation
-      // and the running-session warning cannot be skipped by coming in through
-      // this menu instead. Reopening asks nothing — putting something away is
-      // the direction that deserves a question.
-      if (project.hidden === true) await reopenProject(deps, project);
-      else if (!(await closeProjectFlow(deps, project))) continue;
-      return;
-    }
-
-    if (chosen.action === 'delete') {
-      const confirmed = await confirmDeleteProject(deps, project);
-      if (confirmed) return;
       continue;
     }
   }
@@ -3059,12 +3116,12 @@ export async function closeProjectFlow(
   // Closing a parent closes everything under it (computeGrouping), so the
   // dialog has to say so — a project putting four other projects away with it
   // is exactly the surprise a confirmation exists to prevent.
-  const nested = subprojectCount(deps, project.id);
+  const nested = nestedProjectCount(deps, project.id);
   const detail = [
     'The project leaves the tree, with its sessions. Nothing is deleted: no ' +
       'transcript, no directory, no record — and nothing stops.',
     nested > 0
-      ? `Its ${nested} subproject${nested === 1 ? '' : 's'} ${
+      ? `${nested} project${nested === 1 ? '' : 's'} filed under it ${
           nested === 1 ? 'goes' : 'go'
         } with it, and ${nested === 1 ? 'comes' : 'come'} back when it does.`
       : '',
@@ -3097,84 +3154,13 @@ export async function closeProjectFlow(
   return true;
 }
 
-/**
- * Re-file a project: pick where it goes, or Top Level.
- *
- * The picker lists every project the move is LEGAL for and nothing else — the
- * subtree being moved is absent (you cannot file something under itself), and
- * so is anything that would take the chain past the depth cap. Offering a
- * choice and then refusing it is how a picker teaches people not to trust it;
- * `canReparentProject` is the same function the store enforces with, so the two
- * cannot drift.
- *
- * No confirmation. Moving a project changes where a row is drawn and nothing
- * else — no session moves, no directory changes, no membership is recomputed —
- * and it is undone by moving it back.
+/* REMOVED — `moveProjectFlow`, the picker behind "Move Project…". It re-filed a
+ * project under another project, which is a thing that no longer exists: a
+ * subproject is a DIRECTORY (see COMMANDS.newSubproject), so there is no parent
+ * to pick. The store's `setProjectParent` and the tree's `canReparentProject`
+ * both stay, because a `parentId` an older build wrote still has to render as
+ * something until v6 migrates it away — but nothing in the product creates one.
  */
-export async function moveProjectFlow(
-  deps: CommandDeps,
-  projectId: string,
-): Promise<boolean> {
-  const project = deps.getProject(projectId);
-  if (!project) return false;
-  const all = deps.allProjects();
-  const tree = buildProjectTree(all);
-  const shown = new Set(all.map((p) => p.id));
-
-  const items: ActionPick[] = [];
-  if (typeof project.parentId === 'string' && project.parentId !== '') {
-    items.push({
-      label: '$(home) Top Level',
-      description: 'Not filed under anything',
-      action: 'top',
-    });
-  }
-  for (const id of tree.order) {
-    if (!shown.has(id) || id === projectId) continue;
-    const node = tree.byId.get(id);
-    const candidate = node?.project;
-    if (!candidate) continue;
-    if (candidate.id === project.parentId) continue; // already there
-    if (!canReparentProject(all, projectId, candidate.id).ok) continue;
-    const depth = node?.depth ?? 0;
-    items.push({
-      label: `${'    '.repeat(depth)}$(folder) ${candidate.name}`,
-      description: candidate.hidden === true ? 'closed' : '',
-      detail: projectDirs(candidate)[0] ?? '',
-      action: 'project',
-      payload: candidate.id,
-    });
-  }
-
-  if (items.length === 0) {
-    void vscode.window.showInformationMessage(
-      `Flock: there is nowhere to move "${project.name}" — every other project is inside it.`,
-    );
-    return false;
-  }
-
-  const chosen = await vscode.window.showQuickPick(items, {
-    title: `Move ${project.name}`,
-    placeHolder: 'File this project under…',
-    matchOnDescription: true,
-    matchOnDetail: true,
-    ignoreFocusOut: true,
-  });
-  if (!chosen) return false;
-
-  const target = chosen.action === 'top' ? null : (chosen.payload ?? null);
-  const ok = await deps.setProjectParent(projectId, target);
-  if (!ok) {
-    void vscode.window.showWarningMessage(
-      `Flock: could not move "${project.name}" there.`,
-    );
-    return false;
-  }
-  log('project: moved', project.name, '->', target ?? '(top level)');
-  deps.refresh();
-  void deps.revealProject(projectId);
-  return true;
-}
 
 /** The other half, and deliberately question-free: a project coming back
  *  cannot surprise anybody, and the whole feature is worthless if taking
@@ -3210,10 +3196,22 @@ function runningInProject(deps: CommandDeps, project: ProjectRecord): number {
 }
 
 /** How many projects are filed under this one, at any depth. */
-function subprojectCount(deps: CommandDeps, projectId: string): number {
+function nestedProjectCount(deps: CommandDeps, projectId: string): number {
   const tree = buildProjectTree(deps.allProjects());
-  // The subtree includes the project itself, which is not a subproject of
-  // itself — hence the -1, and hence 0 for a project that has none.
+  // The subtree includes the project itself, which is not nested inside itself —
+  // hence the -1, and hence 0 for a project with nothing under it.
+  //
+  // ZERO ON A MIGRATED STORE, which is every store from the first launch of
+  // 0.1.2 on: nothing creates a `parentId` any more (a subproject is a DIRECTORY
+  // — see COMMANDS.newSubproject). It is still read because a record an older
+  // window merged in can carry one until the next activation folds it away, and
+  // a Close or Delete dialog that failed to mention four other projects it was
+  // about to take with it would be the exact surprise those dialogs exist to
+  // prevent.
+  //
+  // Deliberately NOT renamed to say "subproject": a project's DIRECTORIES are
+  // what that word means now, they always travel with it, and a dialog counting
+  // them would be telling the user about the rows they can already see.
   return Math.max(0, projectSubtree(tree, projectId).length - 1);
 }
 
@@ -3253,7 +3251,7 @@ async function confirmDeleteProject(
   // nothing as no pointer at all. Said out loud here because the close verb
   // right above does take the subtree with it, and two neighbouring verbs that
   // differ on that must not leave the user to find out which is which.
-  const nested = subprojectCount(deps, project.id);
+  const nested = nestedProjectCount(deps, project.id);
   const choice = await vscode.window.showWarningMessage(
     `Delete the project "${project.name}"?`,
     {
@@ -3263,7 +3261,7 @@ async function confirmDeleteProject(
           'transcript is touched, and its sessions reappear under their ' +
           'folders.',
         nested > 0
-          ? `Its ${nested} subproject${nested === 1 ? '' : 's'} ${
+          ? `${nested} project${nested === 1 ? '' : 's'} filed under it ${
               nested === 1 ? 'is' : 'are'
             } kept and ${nested === 1 ? 'moves' : 'move'} to the top level.`
           : '',
@@ -3278,6 +3276,282 @@ async function confirmDeleteProject(
   log('project: deleted', project.id, project.name);
   deps.refresh();
   return true;
+}
+
+/**
+ * ADD A SUBPROJECT: the project gets one more directory.
+ *
+ * A SUBPROJECT IS A DIRECTORY, and there is no second concept and no second word
+ * for it. "Sub-folder" does not appear anywhere in Flock.
+ *
+ * A folder dialog and nothing else. It opens INSIDE the project, because that is
+ * where the answer is nine times out of ten — `~/code/app` then `api`, not a walk
+ * back up from wherever the last dialog happened to be — but it is a full picker,
+ * so a directory somewhere else entirely (a sibling checkout, an infra directory, a
+ * notes folder) is exactly as reachable.
+ *
+ * IT CREATES NOTHING. Flock does not make directories: the only writes it makes
+ * outside its own storage are the two worktree verbs, both of which show the exact
+ * `git` command first. A directory that does not exist yet is one to make in a
+ * terminal or a file manager, and then pick here.
+ *
+ * What happens next is the whole feature: at two directories the project's sessions
+ * split into a row each (see projects.buildSubprojects), and at one there are no
+ * subproject rows at all. So this is how a project gets its second row, and Remove
+ * Subproject is how it gets back to none.
+ */
+async function newSubprojectFlow(
+  deps: CommandDeps,
+  projectId: string,
+): Promise<void> {
+  const project = deps.getProject(projectId);
+  if (!project) {
+    void vscode.window.showInformationMessage(
+      'Flock: that project no longer exists.',
+    );
+    return;
+  }
+  const dirs = projectDirs(project);
+
+  // WHICH DIRECTORY the lane works in, and the pick is uniform however many the
+  // project has — because the two things this verb can mean are always both
+  // available. A lane in a directory the project already covers is the common case
+  // (`magma-cs-mcp`, and two lanes of work in it); a directory the project does
+  // not cover yet is how a project comes to span more than one at all, and is
+  // where the old add-a-directory behaviour lives.
+  //
+  // Uniform even at ONE directory, which is where it matters most: a flow that
+  // skipped the pick there would leave no way to ever reach a second directory.
+  const ELSEWHERE = 'Another directory…';
+  const labels = subprojectLabels(dirs);
+  const picked = await vscode.window.showQuickPick(
+    [
+      ...dirs.map((d, i) => ({
+        label: labels[i],
+        description: i === 0 ? 'the project’s main directory' : '',
+        detail: d,
+        dir: d,
+      })),
+      {
+        label: ELSEWHERE,
+        description: '',
+        detail: 'Pick a directory this project does not cover yet',
+        dir: '',
+      },
+    ],
+    {
+      title: `Add a subproject to ${project.name}`,
+      placeHolder: 'Which directory does it work in?',
+      ignoreFocusOut: true,
+    },
+  );
+  if (!picked) return;
+  let dir = picked.dir;
+  if (picked.label === ELSEWHERE) {
+    const chosen = await pickDirectory(
+      'Add as Subproject',
+      `A directory of ${project.name}`,
+      dirs[0],
+    );
+    if (!chosen) return;
+    dir = chosen;
+  }
+  if (dir === '') return;
+
+  const name = await askSubprojectName(deps, project, dir);
+  // Escape at any step means nothing happens — the project is untouched, and
+  // nothing on disk was ever going to be.
+  if (name === undefined) return;
+
+  // A directory the project does not cover yet becomes one of its directories as
+  // well. Without that, project membership would not claim the sessions the lane's
+  // own `+` starts there — the lane would draw and hold nothing.
+  if (!dirs.some((d) => pathKey(d) === pathKey(dir))) {
+    if (!(await addDirectoryToProject(deps, projectId, dir))) return;
+  }
+
+  const id = randomUUID();
+  await deps.upsertSubproject?.(id, { projectId, name, dir });
+  log('project:', projectId, 'gained subproject', name, 'at', dir);
+  deps.refresh();
+  void deps.revealProject(projectId);
+}
+
+/** A lane's name, validated as it is typed. Names are per PROJECT: two lanes in
+ *  one project called the same thing would be two rows you cannot tell apart,
+ *  which is the one thing the name exists to prevent. */
+async function askSubprojectName(
+  deps: CommandDeps,
+  project: ProjectRecord,
+  dir: string,
+  /** Editing rather than creating: this lane may keep its own name. */
+  selfId?: string,
+): Promise<string | undefined> {
+  const taken = (deps.allSubprojects?.() ?? []).filter(
+    (l) => l.projectId === project.id && l.id !== selfId,
+  );
+  const value = await vscode.window.showInputBox({
+    title: selfId === undefined ? `New subproject in ${project.name}` : 'Rename subproject',
+    prompt: `A lane of work in ${dir}`,
+    placeHolder: 'Server rewrite',
+    ...(selfId === undefined
+      ? {}
+      : { value: taken.length === 0 ? '' : undefined }),
+    ignoreFocusOut: true,
+    validateInput: (raw) => {
+      const name = raw.trim();
+      if (name === '') return 'Name cannot be empty.';
+      if (name.length > MAX_PROJECT_NAME_LEN) {
+        return `Name must be ${MAX_PROJECT_NAME_LEN} characters or fewer (currently ${name.length}).`;
+      }
+      if (taken.some((l) => l.name.trim().toLowerCase() === name.toLowerCase())) {
+        return `"${project.name}" already has a subproject called that.`;
+      }
+      return undefined;
+    },
+  });
+  const name = value?.trim();
+  return name === undefined || name === '' ? undefined : name;
+}
+
+/** RENAME a lane. The name is the whole of what a lane has that a directory row
+ *  does not, so this is its only settable field. */
+async function renameSubprojectFlow(
+  deps: CommandDeps,
+  projectId: string,
+  subprojectId: string,
+): Promise<void> {
+  const project = deps.getProject(projectId);
+  const lane = deps.getSubproject?.(subprojectId);
+  if (!project || !lane || lane.projectId !== projectId) {
+    void vscode.window.showInformationMessage(
+      'Flock: that subproject no longer exists.',
+    );
+    return;
+  }
+  const name = await askSubprojectName(deps, project, lane.dir, lane.id);
+  if (name === undefined || name === lane.name) return;
+  await deps.upsertSubproject?.(subprojectId, { name });
+  log('subproject:', subprojectId, 'renamed to', name);
+  deps.refresh();
+}
+
+/**
+ * REMOVE a lane.
+ *
+ * Removes a NAME, and nothing else. The directory stays on disk and stays the
+ * project's, nothing running stops, and the sessions that were filed here keep
+ * their rows — their stamp goes dangling, which every reader treats as absent, so
+ * they go back to being placed by directory exactly as a session started by hand in
+ * a terminal always has been. That is worth saying in the dialog, because "remove"
+ * beside a list of sessions reads like a delete to anybody who has not done it
+ * before.
+ */
+async function removeNamedSubprojectFlow(
+  deps: CommandDeps,
+  projectId: string,
+  subprojectId: string,
+): Promise<void> {
+  const project = deps.getProject(projectId);
+  const lane = deps.getSubproject?.(subprojectId);
+  if (!project || !lane || lane.projectId !== projectId) return;
+
+  const siblings = (deps.allSubprojects?.() ?? []).filter(
+    (l) => l.projectId === projectId,
+  );
+  const label = lane.name.trim() === '' ? baseName(lane.dir) : lane.name;
+  const choice = await vscode.window.showWarningMessage(
+    `Remove the subproject "${label}" from "${project.name}"?`,
+    {
+      modal: true,
+      detail:
+        `${lane.dir}\n\nThe directory stays exactly as it is and nothing running ` +
+        'in it stops. Its sessions keep their rows — they go back to being filed ' +
+        'by directory, which is where a session started outside Flock already sits.' +
+        (siblings.length === 1
+          ? `\n\nIt is the last subproject of "${project.name}", so its rows go ` +
+            'away and its sessions sit directly under the project again.'
+          : ''),
+    },
+    'Remove Subproject',
+  );
+  if (choice !== 'Remove Subproject') return;
+  await deps.deleteSubproject?.(subprojectId);
+  log('subproject:', subprojectId, 'removed from', projectId);
+  deps.refresh();
+}
+
+/**
+ * REMOVE A SUBPROJECT: take one directory back off the project.
+ *
+ * Removes a ROW, never a directory: nothing on disk is touched, no session is
+ * signalled, and the sessions that were under it are still in the tree — they
+ * simply stop being this project's, and land wherever they belonged before it
+ * listed their directory (a folder row, or another project that covers them).
+ * That is worth a sentence in the dialog, because "remove" next to a path reads
+ * like a delete to anybody who has not done it before.
+ *
+ * The MAIN directory is refused. Removing it would mean removing the project's
+ * own address, which is Delete Project wearing the wrong label — and the store
+ * would refuse the write anyway (a project with no rootDir does not sanitize).
+ */
+async function removeSubprojectFlow(
+  deps: CommandDeps,
+  projectId: string,
+  rawDir: string,
+): Promise<void> {
+  const project = deps.getProject(projectId);
+  if (!project) return;
+  const dirs = projectDirs(project);
+  const dir = normalizeDir(rawDir);
+  const at = dirs.findIndex((d) => pathKey(d) === pathKey(dir));
+  if (at < 0) {
+    void vscode.window.showInformationMessage(
+      `Flock: "${project.name}" no longer lists ${dir}.`,
+    );
+    return;
+  }
+  if (at === 0) {
+    void vscode.window.showWarningMessage(
+      `Flock: ${baseName(dir)} is the main directory of "${project.name}" — ` +
+        'removing it would leave the project with no address at all. Set ' +
+        'another directory as the main one first (Settings → Set Main ' +
+        'Directory), or delete the project.',
+      { modal: true },
+    );
+    return;
+  }
+
+  const remaining = dirs.length - 1;
+  const choice = await vscode.window.showWarningMessage(
+    `Remove ${baseName(dir)} from "${project.name}"?`,
+    {
+      modal: true,
+      detail:
+        `${dir}\n\nThe directory stays exactly as it is on disk and nothing ` +
+        'running in it stops. Its sessions leave this project — they go back ' +
+        'to wherever they sat before it covered them.' +
+        (remaining === 1
+          ? `\n\n"${project.name}" is left with one directory, so its ` +
+            'subproject rows go away and its sessions sit directly under it ' +
+            'again.'
+          : ''),
+    },
+    'Remove Subproject',
+  );
+  if (choice !== 'Remove Subproject') return;
+
+  // Re-read AFTER the dialog: it is modal, but another window can still write,
+  // and a `dirs` patch replaces the list wholesale.
+  const fresh = deps.getProject(projectId);
+  if (!fresh) return;
+  await deps.upsertProject(projectId, {
+    dirs: projectDirs(fresh)
+      .slice(1)
+      .filter((d) => pathKey(d) !== pathKey(dir)),
+  });
+  log('project:', projectId, 'lost directory', dir);
+  deps.refresh();
 }
 
 /** Additive and idempotent: adding a directory a project already covers is a
@@ -4314,6 +4588,17 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
 
   const register = (id: string, human: string, handler: Handler): void => {
     const guarded = async (...args: unknown[]): Promise<void> => {
+      // THE DEMO PROJECT'S ONE GATE, and it is here — in front of every command
+      // at once — rather than repeated in the forty flows a demo row's context
+      // menu can reach. A fabricated row carries a real-looking argument by
+      // design (that is what makes the menus draw), so the refusal has to happen
+      // before any flow reads it, and one place is the only way it cannot be
+      // forgotten in the forty-first.
+      const refusal = demoRefusal(...args.map(idsInArg).flat());
+      if (refusal !== '') {
+        void vscode.window.showInformationMessage(refusal);
+        return;
+      }
       try {
         await handler(...args);
       } catch (err) {
@@ -4892,25 +5177,69 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     await newProjectFlow(deps);
   });
 
-  // The two nesting verbs. Both take a project row's argument shape and
-  // both fall back to a picker, so each is equally usable from the palette
-  // (where a subproject of nothing is the one thing they must not create —
-  // hence the pick, not a silent top-level project).
-  register(COMMANDS.newSubproject, 'new subproject', async (arg?: unknown) => {
-    const parentId =
+  // The subproject pair: one directory more, one directory less. Both take a
+  // project row's argument shape and both fall back to a picker, so each is
+  // equally usable from the palette.
+  register(COMMANDS.newSubproject, 'add subproject', async (arg?: unknown) => {
+    const projectId =
       projectIdFromArg(arg) ??
-      (await pickProject(deps, 'Create a subproject inside which project?'));
-    if (!parentId) return;
-    if (!deps.getProject(parentId)) return;
-    await newProjectFlow(deps, { parentId });
+      (await pickProject(deps, 'Add a subproject to which project?'));
+    if (!projectId) return;
+    await newSubprojectFlow(deps, projectId);
   });
 
-  register(COMMANDS.moveProject, 'move project', async (arg?: unknown) => {
-    const id =
+  // Reached from a subproject ROW, which knows its directory — and from the
+  // palette, where it does not, so the project comes first and then its own
+  // directory list. `dirs.length === 1` is refused with the reason rather than
+  // offering a pick of the one directory that cannot be removed.
+  register(COMMANDS.renameSubproject, 'rename subproject', async (arg?: unknown) => {
+    const direct = subprojectArgOf(arg);
+    if (!direct) return;
+    await renameSubprojectFlow(deps, direct.projectId, direct.id);
+  });
+
+  register(COMMANDS.removeSubproject, 'remove subproject', async (arg?: unknown) => {
+    const direct = subprojectArgOf(arg);
+    if (direct) {
+      // A NAMED lane and a DIRECTORY row are two different things to remove, and
+      // the row says which it is. Removing a lane removes a name; removing a
+      // directory row takes the directory off the project.
+      const lane = deps.getSubproject?.(direct.id);
+      if (lane && lane.projectId === direct.projectId) {
+        await removeNamedSubprojectFlow(deps, direct.projectId, direct.id);
+        return;
+      }
+      await removeSubprojectFlow(deps, direct.projectId, direct.dir);
+      return;
+    }
+    const projectId =
       projectIdFromArg(arg) ??
-      (await pickProject(deps, 'Move which project?', { includeHidden: true }));
-    if (!id) return;
-    await moveProjectFlow(deps, id);
+      (await pickProject(deps, 'Remove a subproject from which project?'));
+    if (!projectId) return;
+    const project = deps.getProject(projectId);
+    if (!project) return;
+    const dirs = projectDirs(project);
+    if (dirs.length < 2) {
+      void vscode.window.showInformationMessage(
+        `Flock: "${project.name}" has one directory, so it has no subprojects — ` +
+          'add a second one with "Add Subproject".',
+      );
+      return;
+    }
+    const pick = await vscode.window.showQuickPick(
+      dirs.slice(1).map((dir) => ({
+        label: baseName(dir),
+        description: dir,
+        folder: dir,
+      })),
+      {
+        placeHolder: `Remove which subproject of ${project.name}?`,
+        matchOnDescription: true,
+        ignoreFocusOut: true,
+      },
+    );
+    if (!pick?.folder) return;
+    await removeSubprojectFlow(deps, projectId, pick.folder);
   });
 
   // The open/close pair. Two verbs and not one toggle, for the reason
@@ -5015,25 +5344,6 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   });
 
   register(
-    COMMANDS.addProjectDirectory,
-    'add directory to project',
-    async (arg?: unknown) => {
-      const id =
-        projectIdFromArg(arg) ??
-        (await pickProject(deps, 'Add a directory to which project?'));
-      if (!id) return;
-      const project = deps.getProject(id);
-      if (!project) return;
-      const dir = await pickDirectory(
-        'Add to Project',
-        `Add a directory to ${project.name}`,
-      );
-      if (!dir) return;
-      await addDirectoryToProject(deps, id, dir);
-    },
-  );
-
-  register(
     COMMANDS.newSessionInProject,
     'new session in project',
     async (arg?: unknown) => {
@@ -5042,6 +5352,59 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         (await pickProject(deps, 'Start a session in which project?'));
       if (!id) return;
       await newSessionInProjectFlow(deps, id);
+    },
+  );
+
+  // A session in one named DIRECTORY of a project — a subproject row's `+`.
+  //
+  // The directory arrives already resolved (the views look it up in the model
+  // they rendered rather than trusting a path from a page) and is re-validated
+  // here anyway against the project's live list, because this is a registered
+  // command: the palette, a keybinding and another extension can all reach it
+  // with an argument nobody vetted. A stale row therefore starts nothing rather
+  // than spawning a shell in a directory the project no longer covers.
+  register(
+    COMMANDS.newSessionInSubproject,
+    'new session in subproject',
+    async (arg?: unknown) => {
+      const parsed = subprojectArgOf(arg);
+      if (!parsed) return;
+      const project = deps.getProject(parsed.projectId);
+      if (!project) return;
+      // A NAMED LANE is re-resolved against the store: it names its own directory,
+      // which does not have to be one the project lists (see SubprojectRecord.dir),
+      // and it is what the session gets stamped with.
+      const lane = deps.getSubproject?.(parsed.id);
+      if (lane && lane.projectId === project.id) {
+        await startSessionInProjectDir(
+          deps,
+          project,
+          normalizeDir(lane.dir),
+          lane.name.trim() === '' ? baseName(lane.dir) : lane.name,
+          `in ${project.name}`,
+          lane.id,
+        );
+        return;
+      }
+      const dir = projectDirs(project).find(
+        (d) => pathKey(d) === pathKey(parsed.dir),
+      );
+      if (dir === undefined) {
+        void vscode.window.showInformationMessage(
+          `Flock: "${project.name}" no longer covers ${parsed.dir}.`,
+        );
+        return;
+      }
+      // An IMPLICIT row needs no stamp: its directory answers on its own, and a
+      // stamp would tie the session to a row that exists only while the project
+      // has more than one directory.
+      await startSessionInProjectDir(
+        deps,
+        project,
+        dir,
+        baseName(dir),
+        `in ${project.name}`,
+      );
     },
   );
 
@@ -5978,6 +6341,23 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     if (answer !== go) return;
     await follow.call(deps);
   });
+
+  // No confirmation and no reload: this is the same in-place folder splice a
+  // project switch does, and it is undone by clicking another row. The argument
+  // arrives from a TreeItem command, so it is whatever the view passed —
+  // validated here rather than trusted, since a bad path would splice the
+  // Explorer onto nothing.
+  register(
+    COMMANDS.showDirectoryInExplorer,
+    'show directory in the Explorer',
+    async (arg?: unknown) => {
+      const show = deps.showDirectoryInExplorer;
+      if (!show) return;
+      const dir = typeof arg === 'string' ? arg.trim() : '';
+      if (dir === '') return;
+      await show.call(deps, dir);
+    },
+  );
 
   register(
     COMMANDS.stopFollowingInExplorer,

@@ -20,13 +20,21 @@ when installed — and shows a single row: the current generation, wearing the
 conversation's name and history. Fork and resume always act on that newest
 generation, never on a stale copy.
 
-**Worktrees are read on a timer, and changed only when you ask.** Two git
-commands run by themselves, both reads, both cached:
+**Worktrees are read on a timer, and changed only when you ask.** One of the two
+commands below runs on any install; the other only with the branch rows on.
+
+The `git worktree list` probe is not part of `lineage.git.branches`, and that is
+deliberate: it is what files a session running in a linked checkout under the
+project that owns the repository, and turning a view option off must never move
+somebody's sessions. The status probe *is* — its only reader is the `↑2 ↓1 *` on a
+branch row, so with the rows off it never runs.
+
+Both are reads, both cached:
 
 | Command | When | Cached |
 | --- | --- | --- |
-| `git worktree list --porcelain` | once per project directory | 30 s |
-| `git status --porcelain=v2 --branch` | once per worktree, for the `↑2 ↓1 *` on its row | 15 s |
+| `git worktree list --porcelain` | once per project directory, always | 30 s |
+| `git status --porcelain=v2 --branch` | once per worktree, for the `↑2 ↓1 *` on its row — `lineage.git.branches` only | 15 s |
 
 The status probe runs with `GIT_OPTIONAL_LOCKS=0`, because `git status` otherwise
 rewrites the index to save the stat cache it just refreshed — which would be a
@@ -43,9 +51,12 @@ and no branch is ever switched or deleted.
 
 ### Making and unmaking worktrees
 
-**New Worktree…** is on a branch row, on a project row (a repository with one
-checkout has no branch rows, and that is exactly when you want this) and in the
-command palette. It offers the repository's local branches — minus any that
+Everything in this section needs `lineage.git.branches`, which is **off** — see
+[Branches and worktrees are parked](../README.md#branches-and-worktrees-are-parked).
+With it off, none of these verbs is in a menu or in the palette, and nothing here
+can run.
+
+**New Worktree…** is on a branch row and in the command palette. It offers the repository's local branches — minus any that
 already have a checkout, which `git worktree add` refuses — plus **New branch…**
 for a name that does not exist yet. Typing the name of a branch that does exist
 means "check that one out here", and Flock drops the `-b` accordingly.
@@ -67,7 +78,9 @@ you remove can be added back.
 ### Pull requests
 
 Off by default, behind `lineage.git.pullRequests`, and the only thing in Flock
-that reaches the network. Turning it on has Flock run
+that reaches the network. It needs `lineage.git.branches` on as well — the chip it
+draws lives on a branch row, and there are no branch rows without it. Turning both
+on has Flock run
 
 ```sh
 gh pr list --state all --limit 100 \
@@ -114,9 +127,11 @@ and are removed by deleting that directory. Flock **never** edits
 
 ## Projects
 
-A project is **a name, a main directory, and any number of extra directories**.
-Create one from the new-folder icon in the view title (**New Project…**), or
-from a folder row's **Make a Project from this Folder…**.
+A project is **a name and a directory**. Create one from the new-folder icon at
+the top of the view (**New Project…**) or from a folder row's **Make a Project
+from this Folder…**; either way it is one folder dialog and no confirmation step.
+The name is generated from the directory and selected on its own row for you to
+type over.
 
 Membership is derived from each session's working directory, never stored on the
 session: the project whose directory is the *longest* match wins, so `~/code`
@@ -124,51 +139,172 @@ and `~/code/api` can both be projects and each session lands in the right one.
 Nothing is written to your session records, so renaming a project, adding a
 directory, or deleting it entirely never rewrites session state.
 
-**Configure Project…** (the gear on a project row) covers rename, add/remove
-directory, set the main directory, set the provider, hide, and delete. Deleting
-a project removes the grouping only — never a directory, session or transcript.
+A right-click gives you seven things — **New Session**, **New Chat**, **Old
+Chats…**, **Add Subproject**, **Rename Project**, **Close Project**, **Delete
+Project** — and **Settings**, which holds what a project *is* rather than what you
+do to it: which directory is the main one, which to remove, the provider, the AI
+account, **Switch Workspace…** and **Open in New Window**. Deleting a project
+removes the grouping only — never a directory, session or transcript.
 
 Dragging a session onto a project row adds that session's directory to the
-project. Dragging a session onto *another session* re-parents it. Those are two
-different gestures on purpose: one is about addresses, one about ancestry.
+project. That is the only thing a drag does.
+
+**Lineage is not draggable.** Only a top-level session can be picked up, and a
+project row (or one of its subproject rows) is the only place it can be dropped
+— so a fork cannot be dragged out of the tree it branched from, and nothing can
+be dragged into one. A tree that says "this branched from that" has to be true,
+and it is: every edge comes from the fork that created it or from the
+transcripts, never from a gesture. Project rows themselves do not drag either.
 
 ### Subprojects
 
-A project can be filed **under** another project, to any depth and any breadth
-— a monorepo with `api`, `web` and `infra` under it, each with its own
-directories, provider and account. Nesting changes where a row is drawn and
-nothing else: membership is still the longest-matching-directory rule, so a
-session in `~/code/app/api` lands in the `api` subproject and one in
-`~/code/app/docs` stays with the parent.
+**A subproject is a lane of work in a directory.** A project is scoped to one
+directory, and that is the ordinary case: a single-directory project with no lanes
+has no subproject rows at all, and its sessions sit directly under it exactly as
+they always have.
 
-- **New Subproject…** on a project row creates one, with the directory picker
-  already opened inside the parent.
-- **Move Project…**, or dragging a project row onto another project row, files
-  an existing project somewhere else. Dropping it on empty space below the tree
-  takes it back to the top level.
-- Closing a project closes everything under it, and opening it brings the whole
-  thing back. **Deleting** one does not delete its subprojects — they move to
-  the top level, because a delete that took four other projects with it would
-  be a very different verb.
+There are two ways a project comes to have rows, and they are different questions:
 
-Two ways a project tree can be wrong are handled rather than prevented: a
-subproject whose parent has been deleted is drawn at the top level, and a move
-that would close a loop is refused with a reason. Projects nest at most eight
-deep.
+- **Two lanes in the same directory.** `~/magma-cs-mcp` is one folder, and "the
+  server rewrite" and "the CS tooling" are two bodies of work in it. Nothing on
+  disk tells those apart — same path, same repository, same branches — so a lane
+  has a **name**, and that name is the only thing that can.
+- **Two directories.** A project spanning a repo, an infra directory and a notes
+  folder gets a row per directory, labelled by its basename. These need no name:
+  the directory is the answer.
+
+**Add Subproject** asks which directory the lane works in — the project's own
+directories, or **Another directory…** for one it does not cover yet — and then
+asks for a name. The directory pick is offered even when the project has only one
+directory, because those are always both things this verb can mean. It creates
+nothing on disk: Flock does not make directories, and a directory that does not
+exist yet is one to make in a terminal or a file manager and then pick here.
+
+**Rename Subproject** and **Remove Subproject** are on a lane. Removing one removes
+a **name**: the directory stays, nothing running stops, and the sessions filed there
+keep their rows — they go back to being placed by directory, which is where a session
+you started outside Flock already sits. On a plain **directory** row, Remove
+Subproject takes the directory off the project instead, and the project's main
+directory is refused — that is its own address, and **Delete Project** is the verb
+for it.
+
+**Which lane a session is in is the one thing Flock stores about a session.**
+Everything else — which project, which directory, which branch — is derived from its
+working directory, every render, and nothing is written to your session records. Two
+lanes in one folder have identical working directories, so there is nothing to derive
+from: a session belongs to the lane whose `+` started it, recorded once at launch and
+never re-decided. A fork carries its parent's lane, and a `/clear` carries the
+conversation's. A session Flock did not start carries nothing, and lands in the
+first lane of the directory it is running in.
+
+Which **directory** row an unstamped session lands in is the same longest-match rule
+project membership uses: with `~/code/app` and `~/code/app/api` both listed, a
+session in `~/code/app/api/handlers` is under `api` and one in `~/code/app/lib` is
+under `app`.
+
+**There is no project-wide row.** Once a project has two directories, every
+session it claims belongs to exactly one of them, and the main directory is
+directory number one rather than a bucket for the ones that fit nowhere. What
+makes that true rather than merely stated is that a directory claims a session the
+same way a project does — the directory *plus the worktrees of the repository at
+it*. So a session in `~/code/app-feat`, a linked worktree of the monorepo at
+`~/code/app`, belongs to `app`; and one in `~/code/app-feat/api` belongs to **api**,
+because that is what it is working on. A worktree path is read as the main
+checkout would spell it, which is the spelling your directory list was written
+against.
+
+A lane has a **name and a directory, and nothing else**: no provider, no AI
+account, no saved workspace, no settings menu, and it cannot contain another lane.
+The project's own `+` is withdrawn while the rows exist, because a `+` there would
+have to guess which of them you meant.
+
+> **Projects inside projects is retired, and this is not it coming back.** Until
+> 0.1.1 a subproject was a whole project record filed under another one — its own
+> name, provider, AI account, routing and saved workspace, nested to any depth — and
+> all of that was decided for something whose job was sorting rows. The first launch
+> of 0.1.2 folds every nested project into its ancestor's directory list and removes
+> the child record; the child's provider, account override and closed-ness do not
+> survive, and the **Flock** output channel names each one it folded.
+>
+> A lane is a name, a directory and a parent. It exists because the directory-only
+> model could not express two pieces of work in one folder — which is a real thing
+> people do, and the only thing that came back.
 
 ### Branch grouping
 
-`lineage.groupSessionsByBranch` (off by default) changes what a project's branch
-rows *are*. Normally they are a list above the sessions: which worktrees exist,
-what colour each one is, click to start a session there. With the setting on,
-each branch row becomes a container — its sessions hang underneath it, it folds
-shut, and the `+` on the row is what starts a session in that worktree.
+Both of these need `lineage.git.branches`, which is **off** — see
+[Branches and worktrees are parked](../README.md#branches-and-worktrees-are-parked).
+
+`lineage.groupSessionsByBranch` changes what a project's branch rows *are*.
+Normally they are a list above the sessions: which worktrees exist, what colour
+each one is, click to start a session there. With the setting on, each branch row
+becomes a container — its sessions hang underneath it, it folds shut, and the `+`
+on the row is what starts a session in that worktree.
 
 It applies to a project with two or more worktrees, which is the same threshold
-the branch rows themselves appear at. Anything the branch rows do not account
-for — a session on a branch you folded away into **Others**, or in a project
-directory outside the repository — keeps its place directly under the project.
-It is a layout, never a filter: no setting in Flock hides a session's row.
+the branch rows themselves appear at, and **not** to a project that has split into
+subproject directories: a session cannot be filed under a directory and a branch
+at once, so the directories win and the branch rows stay the flat list. Anything
+the branch rows do not account for — a session on a branch you folded away into
+**Others**, or in a project directory outside the repository — keeps its place
+directly under the project. It is a layout, never a filter: no setting in Flock
+hides a session's row.
+
+### The directory model (preview)
+
+`lineage.preview.directoryModel` moves the branch rows off the project and onto a
+**directory**, and lists **every local branch** of that directory's repository
+instead of only the checked-out ones. It needs `lineage.git.branches` too, and it
+is off by default.
+
+The two changes are one idea. A project's directories are its subprojects, and a
+directory is exactly one git repository or none — so a directory is what a branch
+belongs *under*. A project spanning three repositories used to show three branches
+called `main` with nothing to say which was which; now each one sits under the
+directory it came from. A project with a single directory keeps its branches on the
+project row, because that row *is* its directory.
+
+And once a branch row is anchored on a repository rather than on a union, listing
+the whole repository becomes affordable:
+
+```
+▾ app                      ← the project, and its first directory
+    main            ↑1     ← this directory's own checkout
+  ▸ Branches (183)         ← every other local branch, shut
+  ▾ api                    ← another directory, another branch list
+      main
+    ▸ Branches (12)
+  ▾ notes                  ← not a repository: no branches at all
+```
+
+Outside the fold: the directory's **own checkout**, and any branch with a
+**session running on it**. Everything else folds — including a worktree with
+nothing running in it, which is the deliberate difference from the older policy: a
+checkout you are not using this week is a directory on disk, not work in flight.
+**Hide Branch** and **Show Branches…** still override both directions.
+
+The fold is **shut by default** and holds the rest of the repository newest-commit
+first, each row with its age (`2d`, `3w`). A branch with no checkout has no
+directory to run in, so it has no `+` and no session verbs — its swatch is hollow
+and its menu offers **New Worktree…**, which is the verb that gives it somewhere to
+live. Nothing about the fold hides a session: a branch cannot be folded away while
+something is running on it.
+
+Two sessions or more on different branches of one directory nest under their branch
+rows; a single promoted branch draws its sessions directly under the directory,
+because nesting costs every row a level and one branch has nothing to tell apart.
+
+> Draws in the **inline** sidebar (`lineage.viewStyle: inline`, the default). With
+> `native` the tree keeps the rows it has today — directories and their sessions,
+> no branch block — which is what it already drew.
+
+`lineage.preview.demoProject` is the other half of the preview: a fabricated
+project, *Flock (demo)*, with three directories, two repositories and a branch in
+every state a row can draw. Nothing on it is real, none of its directories exist,
+and it has **no sessions** — a session row comes from the real roster, so a made-up
+one would draw nothing at all. Every verb refuses it, and turning the setting off
+removes it completely. It is for judging the shape; the setting above is for
+judging it against your own repositories.
 
 ## Notifications
 
@@ -290,7 +426,7 @@ Flock owns the process.
 | Age, token count, status dot | yes | yes | yes |
 | Fork tree — who forked from whom | exact | inferred | inferred |
 | Notifications: dot, bell, toast | yes | yes | yes |
-| Branch colour, worktree grouping | yes | yes | yes |
+| Filed under its project, worktrees included | yes | yes | yes |
 | Rename the row, mute it, delete it | yes | yes | yes |
 | **Fork Here** — branch off a copy | yes | yes | yes |
 | Copy Session ID | yes | yes | yes |
@@ -387,6 +523,13 @@ where it was, so there is nothing to confirm. Click it, or the inline resume
 button, and the session picks up from its last saved turn. Closing the tab with
 its own × does exactly the same thing. If VS Code itself asks about terminating,
 that is its own `terminal.integrated.confirmOnKill` setting.
+
+**A session you never wrote in opens too.** Claude writes a transcript on the
+first turn, so a session you created and walked away from has a row and nothing
+on disk — there is no conversation to pick up from. Clicking it starts one under
+the same row: same id, same directory, same name, same account. A *fork* you
+never wrote in comes back as the fork it was, showing the history it branched
+from.
 
 **Delete means "this does not belong in the tree".** It removes the row only,
 and the **Undo** button on the toast — or **Restore Deleted Session…** — brings
@@ -498,7 +641,7 @@ manifest.
 
 - **`inline`** (default) — the extension draws the rows, which is what makes
   renaming in place possible. Right-click menus, theming, the attention badge
-  and drag-to-reparent all work as normal.
+  and dragging a session onto a project all work as normal.
 - **`native`** — the built-in VS Code tree widget. Better keyboard and screen
   reader support, but rename opens a box at the top of the window instead of on
   the row.
@@ -526,10 +669,10 @@ The complete list of processes Flock ever starts:
 | --- | --- | --- |
 | `claude agents --json` | read | on the roster poll |
 | `git worktree list --porcelain` | read | on the roster poll, cached 30 s |
-| `git status --porcelain=v2 --branch` | read | on repaint, cached 15 s |
-| `git for-each-ref …refs/heads/` | read | when the New Worktree… picker opens |
-| `git worktree add` | **writes** | New Worktree…, after a confirmation |
-| `git worktree remove` | **writes** | Remove Worktree, after one or two |
+| `git status --porcelain=v2 --branch` | read | on repaint, cached 15 s — `lineage.git.branches` only |
+| `git for-each-ref …refs/heads/` | read | when the New Worktree… picker opens — `lineage.git.branches` only |
+| `git worktree add` | **writes** | New Worktree…, after a confirmation — `lineage.git.branches` only |
+| `git worktree remove` | **writes** | Remove Worktree, after one or two — `lineage.git.branches` only |
 | `gh pr list …` | read, **network** | only with `lineage.git.pullRequests` on |
 | `gh pr create --web` | opens a browser page | Create Pull Request… |
 | `claude`, and `tmux -L lineage` around it | — | when you start a session |

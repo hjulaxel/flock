@@ -163,6 +163,9 @@ function usageReason(
   else if (!snapshot) parts.push('no usage data');
   else if (snapshot.error === 'no-credentials') parts.push('not signed in');
   else if (snapshot.error === 'expired') parts.push('sign-in expired');
+  // 'token-stale' falls through to the generic line on purpose: the account is
+  // signed in and perfectly routable, we just have no meter for it this minute.
+  // Naming the sign-in here would be the same false alarm the row avoids.
   else if (snapshot.error) parts.push('usage unavailable');
   else parts.push('fresh 5h window');
 

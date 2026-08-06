@@ -315,7 +315,6 @@ export class TranscriptStatsCache {
    *  asked about, so the cache is bounded by what is on screen rather than by
    *  every transcript this window has ever rendered. */
   prune(keep: ReadonlySet<string>): void {
-    if (this.cache.size <= keep.size) return;
     for (const id of [...this.cache.keys()]) {
       if (!keep.has(id)) this.cache.delete(id);
     }
