@@ -162,6 +162,17 @@ export const CONTEXT_EXPLORER_FOLLOW = 'lineage.explorerFollow';
  */
 export const STATE_SCHEMA_VERSION = 7;
 
+/** The first schema version written by a build in which branch rows are OFF by
+ *  default. 0.1.1 and earlier drew a row per checkout unconditionally and wrote
+ *  v5; 0.1.2 parked them behind `lineage.git.branches` and writes v6 or later.
+ *
+ *  So a state.json that claimed LESS than this when a window first read it was
+ *  written by a build whose branch rows drew — which is the whole test for "did
+ *  this person just lose rows they were using". See git.branchRowsAdvice, and
+ *  StateStore.schemaVersionAtLoad for why the claim is captured rather than
+ *  re-derived. */
+export const BRANCH_ROWS_PARKED_AT_SCHEMA = 6;
+
 // ------------------------------------------------------------------ lineage
 
 /** forkedFrom sits on line 1 of every native fork observed; 50 gives ample

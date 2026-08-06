@@ -17,6 +17,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   WorktreeCache,
+  branchRowsAdvice,
   listWorktrees,
   parseWorktreeList,
   shortBranch,
@@ -313,5 +314,69 @@ describe('WorktreeCache', () => {
     const before = calls.length;
     cache.get('/repo');
     expect(calls).toHaveLength(before);
+  });
+});
+
+// -------------------------------------------------- the one-time notice
+
+// The rows drew unconditionally in 0.1.1 and are behind a setting now, so an
+// upgrader watches them vanish with nothing in the product to explain it. This
+// is the decision about whether to say so once. Everything it needs is passed
+// in, so the whole matrix runs without a git binary or a workbench.
+describe('branchRowsAdvice', () => {
+  /** Somebody who upgraded from 0.1.1 with worktrees, and would be looking at
+   *  rows that are no longer there. The one case that speaks. */
+  const upgrader = {
+    branchRowsEnabled: false,
+    schemaVersionAtLoad: 5,
+    parkedAtSchema: 6,
+    maxWorktrees: 3,
+    dismissed: false,
+  };
+
+  it('offers exactly once to the person who just lost rows', () => {
+    expect(branchRowsAdvice(upgrader)).toBe('offer');
+  });
+
+  it('says nothing once it has been asked', () => {
+    expect(branchRowsAdvice({ ...upgrader, dismissed: true })).toBe('none');
+  });
+
+  it('says nothing when the rows are already on', () => {
+    expect(branchRowsAdvice({ ...upgrader, branchRowsEnabled: true })).toBe(
+      'none',
+    );
+  });
+
+  it('says nothing to a fresh install, which never had the rows', () => {
+    expect(branchRowsAdvice({ ...upgrader, schemaVersionAtLoad: null })).toBe(
+      'none',
+    );
+  });
+
+  it('says nothing to somebody already on a build that parked them', () => {
+    // A file claiming 6 or 7 was written by 0.1.2 or later: the rows were
+    // already off for that person, so nothing changed under them.
+    expect(branchRowsAdvice({ ...upgrader, schemaVersionAtLoad: 6 })).toBe(
+      'none',
+    );
+    expect(branchRowsAdvice({ ...upgrader, schemaVersionAtLoad: 7 })).toBe(
+      'none',
+    );
+  });
+
+  it('says nothing about a repository that never had a branch row anyway', () => {
+    // The test that keeps this from firing for nearly everybody: one checkout
+    // drew no branch rows in 0.1.1 either, so there is nothing to explain.
+    expect(branchRowsAdvice({ ...upgrader, maxWorktrees: 1 })).toBe('none');
+    expect(branchRowsAdvice({ ...upgrader, maxWorktrees: 0 })).toBe('none');
+  });
+
+  it('treats an unprobed count as nothing to say, never as a reason to speak', () => {
+    expect(branchRowsAdvice({ ...upgrader, maxWorktrees: NaN })).toBe('none');
+  });
+
+  it('speaks the moment a second checkout exists, and not before', () => {
+    expect(branchRowsAdvice({ ...upgrader, maxWorktrees: 2 })).toBe('offer');
   });
 });

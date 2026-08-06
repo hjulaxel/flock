@@ -108,6 +108,72 @@ afterEach(() => {
   for (const d of dirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
 });
 
+// -------------------------------------------------- schemaVersionAtLoad
+
+// What state.json claimed BEFORE the ladder ran. It is the only evidence of
+// which build an install last ran, it survives exactly one read — the first
+// write stamps the file forward — and an upgrade notice keys off it, so the
+// capture has to happen at the right moment and then stop happening.
+describe('StateStore.schemaVersionAtLoad', () => {
+  it('is null before anything has been read', () => {
+    const store = makeStore(tempDir());
+    expect(store.schemaVersionAtLoad).toBeNull();
+  });
+
+  it('is null for a fresh install, where there is no file at all', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    expect(store.schemaVersionAtLoad).toBeNull();
+  });
+
+  it('reports the version the file claimed, not the one we migrated it to', async () => {
+    const dir = tempDir();
+    fs.writeFileSync(
+      path.join(dir, 'state.json'),
+      JSON.stringify({ version: 5, records: {}, projects: {} }),
+    );
+    const store = makeStore(dir);
+    await store.load();
+
+    expect(store.schemaVersionAtLoad).toBe(5);
+  });
+
+  it('survives the write that stamps the file forward', async () => {
+    const dir = tempDir();
+    fs.writeFileSync(
+      path.join(dir, 'state.json'),
+      JSON.stringify({ version: 5, records: {}, projects: {} }),
+    );
+    const store = makeStore(dir);
+    await store.load();
+    await store.upsert(S1, { title: 'anything' });
+    await store.reloadFromDisk();
+
+    // The file now says 7. The question this answers is "what did this install
+    // last run", which is still 5 and has to stay 5 for the rest of the window.
+    expect((readFile(dir) as LineageState).version).toBe(STATE_SCHEMA_VERSION);
+    expect(store.schemaVersionAtLoad).toBe(5);
+  });
+
+  it('reads a file with no version at all as 0, not as a fresh install', async () => {
+    // A 0.1.0 file predates versioning. It is emphatically not a new install,
+    // and telling the two apart is the whole point of the field.
+    const dir = tempDir();
+    fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ nodes: {} }));
+    const store = makeStore(dir);
+    await store.load();
+    expect(store.schemaVersionAtLoad).toBe(0);
+  });
+
+  it('reports a corrupt file as null rather than guessing a version for it', async () => {
+    const dir = tempDir();
+    fs.writeFileSync(path.join(dir, 'state.json'), '{not json');
+    const store = makeStore(dir);
+    await store.load();
+    expect(store.schemaVersionAtLoad).toBeNull();
+  });
+});
+
 // ---------------------------------------------------------------- lifecycle
 
 describe('StateStore: load and first write', () => {

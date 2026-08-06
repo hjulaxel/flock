@@ -28,6 +28,7 @@ import * as os from 'node:os';
 import {
   ARCHIVE_RESCAN_MIN_MS,
   COMMANDS,
+  BRANCH_ROWS_PARKED_AT_SCHEMA,
   CONFIG_KEYS,
   CONFIG_SECTION,
   CONTEXT_HAS_FORKABLE,
@@ -118,7 +119,7 @@ import {
   describeForkEdge,
 } from './daemon';
 import { BranchListCache } from './branchList';
-import { WorktreeCache } from './git';
+import { WorktreeCache, branchRowsAdvice } from './git';
 import { BranchStatusCache } from './gitBranches';
 import { PullRequestCache, openPullRequestCreatePage } from './pullRequests';
 import {
@@ -195,6 +196,13 @@ const TMUX_NOTICE_KEY = 'lineage.tmuxNoticeShown';
  *  sessions rather than at an empty sidebar with a toast over it. */
 const TMUX_NOTICE_DELAY_MS = 12_000;
 const TMUX_INSTALL_URL = 'https://github.com/tmux/tmux/wiki/Installing';
+/** globalState, same reasoning as TMUX_NOTICE_KEY: a per-install "already
+ *  asked" with nothing to merge across windows. */
+const BRANCH_ROWS_NOTICE_KEY = 'lineage.branchRowsNoticeShown';
+/** Staggered well behind the tmux notice. Both are once-per-install and rarely
+ *  both apply, but an upgrade onto a machine without tmux is exactly when they
+ *  would collide, and two stacked warnings read as something being wrong. */
+const BRANCH_ROWS_NOTICE_DELAY_MS = 30_000;
 /** One turn end can be reported twice (Stop hook + the poll transition); a
  *  second doneAt stamp inside this window is the same turn, not a new one. */
 const DONE_DEDUPE_MS = 15_000;
@@ -1035,6 +1043,89 @@ export async function activate(
   const worktrees = new WorktreeCache();
   context.subscriptions.push(worktrees);
   context.subscriptions.push(worktrees.onDidChange(() => refreshViews()));
+
+  // One-time nudge about the rows 0.1.2 turned off. Deferred and staggered
+  // behind the tmux one for the same reason that one is deferred — it is
+  // advice, nothing about startup should wait on a toast, and two warnings
+  // stacked on top of each other is not a first impression worth having.
+  //
+  // The decision is `branchRowsAdvice` in src/git.ts, pure and tested; this
+  // supplies the world. The world costs one `git worktree list` per project
+  // directory, which is why it is `warm` (awaited, off the render path) rather
+  // than `get`: the answer has to be real before we speak, and a notice that
+  // fired on a cold cache would say "you have one checkout" to everybody.
+  const branchNoticeShown = (): boolean =>
+    context.globalState.get<boolean>(BRANCH_ROWS_NOTICE_KEY) === true;
+  const suppressBranchNotice = (): void => {
+    void context.globalState.update(BRANCH_ROWS_NOTICE_KEY, true);
+  };
+  setTimeout(() => {
+    void (async (): Promise<void> => {
+      try {
+        // Cheap tests first: every one of these avoids the probes entirely.
+        if (
+          branchRowsAdvice({
+            branchRowsEnabled: boolCfg(CONFIG_KEYS.gitBranches, false),
+            schemaVersionAtLoad: store.schemaVersionAtLoad,
+            parkedAtSchema: BRANCH_ROWS_PARKED_AT_SCHEMA,
+            maxWorktrees: 2, // assumed, pending the probe below
+            dismissed: branchNoticeShown(),
+          }) === 'none'
+        ) {
+          return;
+        }
+
+        let maxWorktrees = 0;
+        for (const project of store.getProjects()) {
+          if (project.deleted === true) continue;
+          for (const dir of projectDirs(project)) {
+            const list = await worktrees.warm(dir);
+            maxWorktrees = Math.max(maxWorktrees, list.length);
+            if (maxWorktrees >= 2) break;
+          }
+          if (maxWorktrees >= 2) break;
+        }
+
+        if (
+          branchRowsAdvice({
+            branchRowsEnabled: boolCfg(CONFIG_KEYS.gitBranches, false),
+            schemaVersionAtLoad: store.schemaVersionAtLoad,
+            parkedAtSchema: BRANCH_ROWS_PARKED_AT_SCHEMA,
+            maxWorktrees,
+            dismissed: branchNoticeShown(),
+          }) !== 'offer'
+        ) {
+          return;
+        }
+
+        const SHOW = 'Show branch rows';
+        const KEEP_OFF = 'Keep them off';
+        const choice = await vscode.window.showInformationMessage(
+          'Flock used to give every checkout of a repository its own row. ' +
+            'Those rows are behind a setting now, off by default, because a ' +
+            'repository with six checkouts is six rows before the first ' +
+            'session. Nothing moved: your worktree sessions are filed exactly ' +
+            'where they were.',
+          SHOW,
+          KEEP_OFF,
+        );
+        if (choice === SHOW) {
+          await cfg().update(
+            CONFIG_KEYS.gitBranches,
+            true,
+            vscode.ConfigurationTarget.Global,
+          );
+          suppressBranchNotice();
+        } else if (choice === KEEP_OFF) {
+          suppressBranchNotice();
+        }
+        // Dismissed with the X: not suppressed, so it asks once more next
+        // time. Same rule as the tmux notice above.
+      } catch (err) {
+        logError('branchRows.notice', err);
+      }
+    })();
+  }, BRANCH_ROWS_NOTICE_DELAY_MS);
 
   // What each of those checkouts can say about itself: ahead/behind and dirt.
   // A second cache rather than more fields on the first, because the two probes

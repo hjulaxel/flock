@@ -151,6 +151,11 @@ Nothing about it is unfinished: it reads real worktrees, `git worktree add` and
 rules are covered by the same tests they always were. Turn the setting on to get
 all of it back, including its menus.
 
+If you were running 0.1.1 and had these rows, Flock offers them back once on the
+first launch after the upgrade, rather than letting them vanish on you. It only
+asks when a repository of yours actually has more than one checkout, and it never
+asks twice.
+
 Worktree MEMBERSHIP is not part of the switch. A session started in a linked
 checkout is filed under the project that owns the repository whether the rows are
 drawn or not — turning a view option off must never move somebody's sessions.

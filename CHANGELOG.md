@@ -4,6 +4,42 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] — 2026-08-06
+
+### Added
+
+- **Flock offers the branch rows back, once, to the people who had them.** 0.1.1
+  gave every checkout of a repository its own row. 0.1.2 parked all of it behind
+  `lineage.git.branches`, off — which is the right call for a sidebar 250px wide,
+  and the wrong thing to have happen to you with no explanation. Nobody reads a
+  changelog to find out why something they were using stopped appearing; they
+  assume it broke.
+
+  So an upgrade says it once, with **Show branch rows** and **Keep them off**,
+  and never raises it again whichever you pick. Dismissing it outright asks once
+  more next time, which is the rule the tmux notice already follows.
+
+  **It is deliberately hard to trigger**, because a notice that fires for
+  everybody is a notice about nothing. Every one of these has to hold: the rows
+  are off, `state.json` claimed a schema version written by a build in which
+  they still drew, and at least one of your repositories has **more than one
+  checkout**. That last test is the load-bearing one — a single-checkout
+  repository drew no branch rows in 0.1.1 either, so nothing about the upgrade
+  changed what its owner sees. A fresh install and anybody already on 0.1.2 are
+  silent for the same reason: neither ever had the rows.
+
+  Telling an upgrade from a fresh install needs evidence that survives for
+  exactly one read, since the first write stamps `state.json` forward and after
+  that nothing on disk remembers which build wrote it. The store now captures
+  what the file claimed before the migration ladder runs, and holds it for the
+  window's life. A file with no version at all is a 0.1.0 install, not a new
+  one; a file it could not read is neither, and stays quiet.
+
+  Thirty seconds after startup, staggered well behind the tmux notice so two
+  warnings never stack — an upgrade onto a machine without tmux is exactly when
+  they would collide. The `git worktree list` probes only run once the cheap
+  tests have already passed.
+
 ## [0.1.2] — 2026-08-06
 
 ### Upgrading from 0.1.1

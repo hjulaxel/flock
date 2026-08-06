@@ -147,6 +147,60 @@ export function shortBranch(ref: unknown): string {
     : trimmed;
 }
 
+// ------------------------------------------------------ the one-time notice
+
+/** Whether to tell somebody that branch rows exist and are off.
+ *  `offer` — they were drawing rows before the upgrade and are not now. */
+export type BranchRowsAdvice = 'none' | 'offer';
+
+/**
+ * Whether to mention branch rows once, after an upgrade that turned them off.
+ *
+ * Pure, so the matrix is testable without a workbench or a git binary; the
+ * wiring in extension.ts only supplies the world and acts on the answer. Same
+ * shape and same reasoning as tmux.tmuxAdvice.
+ *
+ * WHY THIS EXISTS. 0.1.1 drew a row per checkout whenever a project had more
+ * than one, and 0.1.2 parked all of it behind `lineage.git.branches`, off. That
+ * is a deliberate decision about a 250px sidebar — but it lands on the user as
+ * rows that silently vanished, with no way to learn from the product where they
+ * went. Nobody reads a changelog to find out why something they were using
+ * stopped appearing; they assume it broke.
+ *
+ * It stays quiet in every case where it would be noise:
+ *  - Already asked. Once per install, never on a timer.
+ *  - The setting is already on — they have the rows, or have found the switch.
+ *  - A fresh install (`schemaVersionAtLoad === null`). Nothing vanished for
+ *    somebody who never had it, and a new user does not need a tour.
+ *  - A state file already written by a build that parked the rows: they were on
+ *    0.1.2 or later, so the rows were never drawing for them either.
+ *  - No repository with more than one checkout. This is the important one: a
+ *    single-checkout repository drew NO branch rows in 0.1.1 either, so nothing
+ *    about the upgrade changed what that person sees. Without this test the
+ *    notice would fire for nearly everybody and be about nothing.
+ */
+export function branchRowsAdvice(opts: {
+  /** `lineage.git.branches`. */
+  branchRowsEnabled: boolean;
+  /** StateStore.schemaVersionAtLoad — what state.json claimed before the
+   *  migration ladder ran, or null when there was no file. */
+  schemaVersionAtLoad: number | null;
+  /** BRANCH_ROWS_PARKED_AT_SCHEMA, injected so the test states the threshold
+   *  it is asserting rather than importing the answer. */
+  parkedAtSchema: number;
+  /** The most checkouts on any ONE of this user's repositories. Below two,
+   *  no branch row would have drawn before the upgrade either. */
+  maxWorktrees: number;
+  dismissed: boolean;
+}): BranchRowsAdvice {
+  if (opts.dismissed) return 'none';
+  if (opts.branchRowsEnabled) return 'none';
+  if (opts.schemaVersionAtLoad === null) return 'none';
+  if (opts.schemaVersionAtLoad >= opts.parkedAtSchema) return 'none';
+  if (!Number.isFinite(opts.maxWorktrees) || opts.maxWorktrees < 2) return 'none';
+  return 'offer';
+}
+
 // ----------------------------------------------------------------- probing
 
 export interface ProbeOptions {

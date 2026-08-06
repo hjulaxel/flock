@@ -1197,6 +1197,26 @@ export class StateStore implements DisposableLike {
   /** Best-effort counters; handy in the output channel and in tests. */
   readonly stats = { reads: 0, writes: 0, conflicts: 0, corruptBackups: 0 };
 
+  /** The schema version state.json CLAIMED the first time this store read it,
+   *  before the ladder ran — or null when there was no file to read.
+   *
+   *  It is the only honest answer to "which build did this install last run",
+   *  and it is captured rather than derived because it survives for exactly one
+   *  read: the first write stamps the file forward, after which nothing on disk
+   *  remembers. Set once and never updated, so a later reload (which by then
+   *  sees the migrated version) cannot erase the evidence.
+   *
+   *  `null` means a fresh install, NOT "an old file we could not date": a hard
+   *  read error leaves it null too, and an upgrade notice that fires on an IO
+   *  error would be worse than one that stays quiet. */
+  private schemaVersionSeen: number | null = null;
+  private schemaVersionCaptured = false;
+
+  /** @see schemaVersionSeen */
+  get schemaVersionAtLoad(): number | null {
+    return this.schemaVersionSeen;
+  }
+
   private memory: LineageState = emptyState();
   private serialized: string = stableStringify(emptyState());
   private pendingMutations: Mutator[] = [];
@@ -2349,6 +2369,14 @@ export class StateStore implements DisposableLike {
     this.emitChange();
   }
 
+  /** Record what the file claimed, once, on the first read that got far enough
+   *  to have an opinion. Every later read sees a version this process wrote. */
+  private captureSchemaVersion(version: number | null): void {
+    if (this.schemaVersionCaptured) return;
+    this.schemaVersionCaptured = true;
+    this.schemaVersionSeen = version;
+  }
+
   private async readDisk(): Promise<DiskRead> {
     let raw: string;
     try {
@@ -2356,9 +2384,14 @@ export class StateStore implements DisposableLike {
       this.stats.reads++;
     } catch (e) {
       if (errCode(e) === 'ENOENT') {
+        // No file: a fresh install, and the one case that is genuinely "no
+        // previous version" rather than "we could not tell".
+        this.captureSchemaVersion(null);
         const state = emptyState();
         return { state, text: stableStringify(state), ok: true };
       }
+      // Deliberately NOT captured: a hard read error dates nothing, and the
+      // next read may well succeed and have the real answer.
       logError('state: cannot read ' + this.filePath, e);
       return { state: emptyState(), text: '', ok: false };
     }
@@ -2377,15 +2410,24 @@ export class StateStore implements DisposableLike {
         new Error(this.filePath),
       );
       await this.backupCorrupt(raw);
+      this.captureSchemaVersion(null);
       const state = emptyState();
       return { state, text: stableStringify(state), ok: true };
     }
     if (!isPlainObject(parsed)) {
       logError('state: state.json is not an object', new Error(typeof parsed));
       await this.backupCorrupt(raw);
+      this.captureSchemaVersion(null);
       const state = emptyState();
       return { state, text: stableStringify(state), ok: true };
     }
+
+    // Read BEFORE the ladder runs — migrateState stamps the current version
+    // onto whatever it returns, so afterwards there is nothing left to read.
+    const claimed = parsed.version;
+    this.captureSchemaVersion(
+      typeof claimed === 'number' && Number.isFinite(claimed) ? claimed : 0,
+    );
 
     const state = migrateState(parsed);
     return { state, text: stableStringify(state), ok: true };
