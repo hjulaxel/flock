@@ -15,6 +15,8 @@ import * as path from 'node:path';
 import {
   TMUX_CONF,
   TMUX_SOCKET,
+  buildRespawnArgs,
+  buildSetEnvArgs,
   buildTmuxArgs,
   ensureTmuxConf,
   findTmuxBinary,
@@ -314,5 +316,68 @@ describe('tmuxAdvice', () => {
     expect(tmuxInstallHint('darwin')).toBe('brew install tmux');
     expect(tmuxInstallHint('linux')).toBe('sudo apt install tmux');
     expect(tmuxInstallHint('win32')).toBeUndefined();
+  });
+});
+
+describe('buildRespawnArgs', () => {
+  const argv = (over: Record<string, unknown> = {}): string[] =>
+    buildRespawnArgs({
+      name: 'lineage-abc',
+      command: ['/bin/claude', '--resume', 'abc'],
+      ...over,
+    } as Parameters<typeof buildRespawnArgs>[0]);
+
+  it('targets a PANE, which needs the trailing colon', () => {
+    // Verified against tmux 3.6a: a bare `=name` is a SESSION target and
+    // respawn-pane answers "can't find pane". Every session-targeting command
+    // in the module uses the bare form, so this is the one place they differ
+    // and the one place it is easy to get wrong.
+    expect(argv()).toContain('=lineage-abc:');
+    expect(argv()).not.toContain('=lineage-abc');
+  });
+
+  it('keeps the exact-match "=" that stops tmux prefix-matching a name', () => {
+    const target = argv()[argv().indexOf('-t') + 1];
+    expect(target.startsWith('=')).toBe(true);
+  });
+
+  it('kills what is in the pane, so the session cannot die between the two', () => {
+    // -k is what makes kill-and-launch one operation. Without it tmux refuses
+    // a pane that still has a process, and with a separate kill the pane would
+    // empty and take the session (and the tab) with it.
+    expect(argv()).toContain('-k');
+  });
+
+  it('runs on our own socket', () => {
+    expect(argv().slice(0, 2)).toEqual(['-L', 'lineage']);
+  });
+
+  it('passes each environment entry as its own -e KEY=VALUE', () => {
+    const out = argv({ env: { CLAUDE_CONFIG_DIR: '/home/p', LINEAGE_NODE_ID: 'abc' } });
+    expect(out).toContain('CLAUDE_CONFIG_DIR=/home/p');
+    expect(out).toContain('LINEAGE_NODE_ID=abc');
+    expect(out.filter((a) => a === '-e')).toHaveLength(2);
+  });
+
+  it('puts the command last, after --', () => {
+    const out = argv();
+    expect(out.slice(-4)).toEqual(['--', '/bin/claude', '--resume', 'abc']);
+  });
+
+  it('omits -c entirely when there is no cwd', () => {
+    expect(argv()).not.toContain('-c');
+    expect(argv({ cwd: '/work' })).toContain('-c');
+  });
+});
+
+describe('buildSetEnvArgs', () => {
+  it('rewrites the SESSION environment, which -e on the respawn does not', () => {
+    // The launch wrote CLAUDE_CONFIG_DIR into the session with `new-session
+    // -e`, and a respawn's -e only reaches the new process — confirmed with
+    // show-environment, which still reported the old value afterwards.
+    expect(buildSetEnvArgs('lineage-abc', 'CLAUDE_CONFIG_DIR', '/home/p')).toEqual([
+      '-L', 'lineage', 'set-environment', '-t', '=lineage-abc',
+      'CLAUDE_CONFIG_DIR', '/home/p',
+    ]);
   });
 });

@@ -604,6 +604,11 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
       ...(this.deps.hostOf === undefined
         ? {}
         : { hostOf: (id: string) => this.deps.hostOf?.(id) ?? 'none' }),
+      ...(this.deps.accountLabelOf === undefined
+        ? {}
+        : {
+            accountLabelOf: (id: string) => this.deps.accountLabelOf?.(id),
+          }),
       viewId: INLINE_VIEW_ID,
       now: Date.now(),
       // Read per post, like every other setting here, so flipping it takes

@@ -58,7 +58,9 @@ chats, and much more.
   personal plan, or an API key. Each account shows its current usage. An account
   also keeps its own config directory, so you only need to sign in **once per
   account**. New sessions are routed automatically, and a session is then pinned
-  to its account.
+  to its account. Run out of window mid-conversation? **Move to Account...**
+  moves that conversation to another subscription and carries on where it was —
+  with tmux, without even moving the tab.
 
 - **Project workspaces.** Scope a window to one project. Switching saves the tab
   layout you leave and restores the target's. With tmux installed, other

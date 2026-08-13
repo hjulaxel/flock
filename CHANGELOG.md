@@ -4,6 +4,88 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Move a conversation to another account, mid-conversation.** Right-click a
+  session → **Move to Account...**, pick from your accounts with their meters
+  beside them, and the conversation carries on where it was — on the other
+  subscription. It is the answer to the thing that actually happens: you are in
+  the middle of something, the five-hour window fills, and the work you were
+  doing is on the wrong side of a limit.
+
+  Flock shipped its first version of accounts refusing this verb, and the
+  refusal gave a real reason — a conversation's transcript lives inside one
+  account's config directory, so resuming it under another account finds
+  nothing. The reason was right and the conclusion was not. A transcript
+  carries a session id, a working directory, a branch and messages, and
+  **nothing that identifies the login that paid for it**. So "which
+  subscription is this conversation on" turns out to be a question about which
+  directory the file is in, and that is a question with an answer.
+
+  So the move is a move: the transcript is *renamed* into the other account's
+  `projects/<slug>/`, taking the session's task list, file history and
+  session env with it. Never copied — the archive index resolves a session id
+  by scanning the default root first and each account root after it, so a
+  second copy would answer with whichever it reached first, which after a move
+  is the stale one. Exactly one transcript for a session id exists at any
+  moment, and the rename is what guarantees it.
+
+- **On tmux, the tab does not move.** The pane is respawned in place
+  (`respawn-pane -k`), so the terminal you are looking at, its position and its
+  tab are all exactly where they were — the screen redraws and nothing else
+  happens. Twice, because `respawn-pane -k` kills and launches as one operation
+  and there is no instant between them to move a file in: once onto a
+  placeholder that says what is going on, then onto the resume once the bytes
+  have landed. Without tmux the terminal is disposed and relaunched, which
+  works and costs you the tab's position; the notification says which happened.
+
+- **The confirmation says what it costs, because it costs something.** The
+  conversation is kept — it is replayed from the transcript, which moved with
+  it. But the config directory is read once, at exec, so Claude Code restarts:
+  a turn in flight is cut off, anything typed and not sent is lost, and the
+  **prompt cache does not follow**. Caching is per-account, so the first turn on
+  the other account re-reads the whole conversation — slower, and a bigger bite
+  out of the window you just switched to.
+
+- **A session row's hover says which account it is on.** Beside the ownership
+  line, and absent for a conversation on the machine's default login — a line
+  reading "account: default" under every row on a single-account machine is a
+  line nobody needs.
+
+- **`lineage.accounts.offerSwitchAtLimit`, off by default.** On, a session this
+  window is hosting whose account has just run out of its five-hour window gets
+  one notification naming the account with the most room, and a button that
+  opens the move with that account already chosen. The confirmation still
+  appears — pressing a notification button is not consent to restart a process.
+  One offer per window per session, so a meter that re-reads on a timer cannot
+  become a repeating prompt. Off by default because the offer proposes an
+  interruption, and that is only welcome to somebody who decided in advance
+  they would rather be asked.
+
+### Changed
+
+- **A pin is no longer for life — but only a person can change it.**
+  `EditorialRecord.profileId` is still written once by every launch, resume and
+  fork, and the store still refuses a second pin from that path: a launch
+  quietly re-billing a conversation is the failure the write-once rule exists
+  to prevent. Moving one is a separate verb with a separate store method
+  (`moveSessionProfile`), the same split `moveSessionSubproject` already has
+  from `setSessionSubproject`. The move is **chain-wide**: `getSessionProfile`
+  falls back to the earliest pin any generation of the conversation holds, so
+  re-pinning the tip alone would let a `/clear`-era generation drag it back on
+  the next resume.
+
+- **A move may not change the CLI.** Two Claude accounts are interchangeable as
+  far as a transcript is concerned — an OAuth plan and an API-key profile
+  included, since both launch `claude` and write the same layout. A Codex
+  account is not: it does not keep conversations in
+  `<dir>/projects/<slug>/<id>.jsonl` at all, so there would be nothing to move
+  and nothing to resume. The picker only offers accounts the conversation could
+  actually run on, so the refusal is a list you never see rather than an error
+  you hit.
+
 ## [0.1.4] — 2026-08-14
 
 ### Added

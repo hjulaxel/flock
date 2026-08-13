@@ -474,6 +474,12 @@
         "category": "Flock"
       },
       {
+        "command": "lineage.switchSessionAccount",
+        "title": "Move to Account...",
+        "category": "Flock",
+        "icon": "$(arrow-swap)"
+      },
+      {
         "command": "lineage.hideBranch",
         "title": "Hide Branch",
         "category": "Flock"
@@ -747,6 +753,11 @@
           "command": "lineage.renameSession",
           "when": "view == lineageSessions && viewItem =~ /;session;/",
           "group": "1_actions@2"
+        },
+        {
+          "command": "lineage.switchSessionAccount",
+          "when": "view == lineageSessions && viewItem =~ /;session;/ && lineage.manyAccounts",
+          "group": "1_actions@3"
         },
         {
           "command": "lineage.closeSession",
@@ -1538,6 +1549,11 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "Draw **Accounts** as a second section of the Flock sidebar. On by default: the accounts are worth a row of their own.\n\nThe only reason to turn it off is the top bar. VS Code merges a view's buttons into the container header — the row that reads **FLOCK** — only while that container shows exactly one section, so while Accounts is drawn the bell, New Project, `+`, fork and the gear sit on the **SESSIONS** row just below it instead. Off moves them up one row, and costs you the Accounts section.\n\nNothing about accounts stops working while it is off. Usage is still read, new sessions are still routed, a session is still pinned to its account for life, and every account verb — **Add Account…**, **Sign In**, **Set Default Account**, **Set Project Account…** — is in the Command Palette under **Flock**. The switch is also in the gear menu at the top of the sidebar."
+        },
+        "lineage.accounts.offerSwitchAtLimit": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Offer to **move a running conversation to another account** when the account it is on uses up its five-hour window.\n\nFlock already reads every account's meters, so it knows the moment one fills — and that is the moment somebody with a second subscription wants the conversation they were in the middle of moved. When this is on, a session hosted by this window whose account has just run out gets one notification naming the account with the most room, and a button that starts the ordinary **Move to Account...** flow with that account already chosen. The confirmation still appears: what the move costs — Claude Code restarts, the turn in flight is cut off, and the prompt cache does not follow — is the same however the flow was reached.\n\n**Off by default.** The offer proposes an interruption, so it is only welcome to somebody who decided in advance that they would rather be asked. With it off nothing is lost: the verb is in every session row's context menu whenever you have two accounts a session could run on, and in the Command Palette under **Flock**.\n\nOne offer per five-hour window, per session, so a meter that re-reads on a timer cannot turn into a repeating prompt. The window resetting starts a fresh one."
         },
         "lineage.viewStyle": {
           "type": "string",

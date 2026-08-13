@@ -919,6 +919,22 @@ export interface ViewModelInput {
    *  wiring (and every unit double) renders exactly the rows it did before
    *  ownership existed: absent reads as 'hosted' everywhere. */
   hostOf?(sessionId: string): SessionHost;
+  /**
+   * The LABEL of the account a session is running on, or undefined for one on
+   * the machine's default login.
+   *
+   * A hover line and nothing more, deliberately. Which subscription a
+   * conversation is spending is a real fact about it — it decides what happens
+   * when that account runs out, and it is the thing you need to know before
+   * moving the conversation somewhere else — but it is not what a row is FOR,
+   * and every account name in the description column would cost width that the
+   * name, the age and the branch are already competing for. So it goes where
+   * the ownership sentence and the absolute timestamps go.
+   *
+   * Optional, like every lookup here: absent means the hover reads exactly as
+   * it did before accounts could be switched, which is every unit double.
+   */
+  accountLabelOf?(sessionId: string): string | undefined;
   /** Ahead/behind and dirt for one checkout, from the cache in
    *  src/gitBranches.ts. Synchronous by contract — this is called inside a
    *  paint. Absent, or returning undefined, means the branch rows carry no
@@ -1375,6 +1391,23 @@ function safeHost(
   }
 }
 
+/** Same contract as `safeHost`: an unwired or throwing lookup is "no opinion",
+ *  and a row with no opinion about its account hovers exactly as it always
+ *  did. */
+function safeAccountLabel(
+  input: ViewModelInput,
+  sessionId: string,
+): string | undefined {
+  try {
+    const label = input.accountLabelOf?.(sessionId);
+    return typeof label === 'string' && label.trim() !== ''
+      ? label.trim()
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * The rendered tree, flattened depth-first in display order.
  *
@@ -1592,7 +1625,13 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
         lineageMuted: node.hidden,
         preventDefaultContextMenuItems: true,
       },
-      tooltip: sessionTooltip(node, description, closed, host),
+      tooltip: sessionTooltip(
+        node,
+        description,
+        closed,
+        host,
+        safeAccountLabel(input, id),
+      ),
       sessionId: id,
     };
     // Resolved against the session's OWN cwd, not its parent's: a fork made in
@@ -2303,6 +2342,7 @@ function sessionTooltip(
   description: string,
   closed: boolean,
   host?: SessionHost,
+  accountLabel?: string,
 ): string {
   const lines: string[] = [node.label, node.id];
   const tone = statusTone(node);
@@ -2340,6 +2380,12 @@ function sessionTooltip(
   // fewer verbs than the one above it" only once you know what it means.
   const ownership = hostTooltipLine(host ?? 'none');
   if (ownership !== undefined) lines.push(ownership);
+  // Below the ownership sentence and above the directory, because the three
+  // read as one group: who is running this, whose subscription it spends, and
+  // where. Absent for a conversation on the machine's default login, which is
+  // every session on a single-account machine — a line saying "account:
+  // default" under every row would be a line nobody ever needs.
+  if (accountLabel !== undefined) lines.push(`account: ${accountLabel}`);
   if (node.cwd) lines.push(node.cwd);
   if (node.summary) lines.push(`summary: ${node.summary}`);
   if (node.hidden) lines.push('hidden: sorted last, not counted in the badge');

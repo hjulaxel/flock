@@ -607,6 +607,7 @@ Flock owns the process.
 | **Wrap up** prompt | yes | no | no |
 | tmux parking on a workspace switch | yes | no | no |
 | Account routing and pinning | yes | no | no |
+| **Move to Account...** — switch a conversation's subscription | yes | no | no |
 | Flock-named tab | yes | no | no |
 
 **One caveat on the middle column, stated plainly.** Everything Flock knows about

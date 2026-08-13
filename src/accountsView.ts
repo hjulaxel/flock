@@ -68,6 +68,45 @@ export const ACCOUNTS_VIEW_ID = 'lineageAccounts';
  * extension.ts over the state store, the limits reader and the terminal
  * registry, exactly as every other dependency interface in this codebase.
  */
+/** What `AccountDeps.switchSessionAccount` is asked to do. */
+export interface SwitchAccountRequest {
+  /** The conversation's TIP — the generation that will be resumed. Resolved by
+   *  the caller through `CommandDeps.tipOf`, so the mechanism never has to know
+   *  about generations. */
+  sessionId: string;
+  /** The account it is on now. `null` for a conversation with no pin, which
+   *  lives in the machine's default config directory. */
+  from: AccountProfile | null;
+  to: AccountProfile;
+  /** Where the conversation runs. Needed by the relaunch tier, which has to
+   *  open its terminal somewhere. */
+  cwd?: string;
+  /** The tab name to carry across a relaunch, so the switch does not silently
+   *  rename a conversation the user named. */
+  tabTitle?: string;
+}
+
+export interface SwitchAccountResult {
+  ok: boolean;
+  /**
+   * Was the TAB kept?
+   *
+   * True on the tmux tier, where the pane is respawned and the terminal the
+   * user is looking at never goes away. False when the terminal had to be
+   * disposed and launched again, which moves it to the end of the terminal
+   * list. The caller says which happened, because the user is about to go
+   * looking for their session and the two answers send them to different
+   * places.
+   */
+  inPlace: boolean;
+  /** Sidecar directories that did not follow the transcript (see
+   *  accountMove.SESSION_SIDECAR_DIRS). Empty is the normal case. */
+  skipped: readonly string[];
+  /** Why it did not happen, in one sentence. Present only when `ok` is false,
+   *  and by then the conversation is back where it started. */
+  error?: string;
+}
+
 export interface AccountDeps {
   /** Live accounts, canonical order (accounts.sortProfiles). */
   accounts(): AccountProfile[];
@@ -92,6 +131,24 @@ export interface AccountDeps {
   sessionProfileId(sessionId: string): string | undefined;
   /** Write-once pin. A second, different pin is refused by the store. */
   pinSession(sessionId: string, profileId: string): Promise<void>;
+  /**
+   * MOVE a live conversation onto another account: stop the process, move the
+   * transcript into the target account's config directory, re-pin the chain,
+   * and start it again on the new environment.
+   *
+   * One dependency rather than four because the four have to happen in that
+   * order and unwind together — a transcript that moved while the pin did not
+   * is a conversation nothing can find. commands.ts owns the DECISION (may this
+   * move, to where, does the user still want it after being told the cost) and
+   * this owns the mechanism, which needs the terminal registry, the tmux server
+   * and the filesystem — none of which that module is allowed to import.
+   *
+   * Optional, like every other capability here: a wiring without it (and every
+   * unit double) simply has no switch verb, exactly as before it existed.
+   */
+  switchSessionAccount?(
+    request: SwitchAccountRequest,
+  ): Promise<SwitchAccountResult>;
   /** The cached snapshot for one account, without going anywhere. */
   usage(profile: AccountProfile): UsageSnapshot | null;
   /** All cached snapshots, keyed by account id — what routing.resolveRouting

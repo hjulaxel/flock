@@ -371,6 +371,137 @@ export function killTmuxSession(
 }
 
 /**
+ * Pure. The argv (after the tmux binary) that RESTARTS a wrapped session's
+ * process on a new command and a new environment, in the pane it is already in.
+ *
+ * `-k` kills whatever is running there first, and it is what makes this one
+ * operation rather than two: there is no instant at which the pane is empty, so
+ * the tmux session cannot hit its "last process exited" rule and destroy itself
+ * between the kill and the launch.
+ *
+ * TARGET FORM, verified against tmux 3.6a rather than assumed: a pane target is
+ * `session:window.pane`, so the bare `=<name>` that every SESSION-targeting
+ * command in this file uses is rejected here with `can't find pane`. The
+ * trailing colon is what makes it a pane target — session matched exactly, its
+ * current window, that window's active pane — and the `=` is kept for the same
+ * reason `killTmuxSession` keeps it: without it tmux prefix-matches, and every
+ * name we mint is a prefix of nothing but itself only by luck.
+ */
+export function buildRespawnArgs(opts: {
+  /** The wrapped session's name — `tmuxSessionName(...)`, or the one recorded
+   *  at park. */
+  name: string;
+  /** Start directory for the new process (`-c`). */
+  cwd?: string;
+  /** Environment for the new process (`-e`). Overrides the SESSION environment
+   *  the original `new-session -e` set, which is the entire point: that is
+   *  where the old account's config dir is, and it does not go away on its own.
+   *  See `respawnTmuxPane` for the other half of that. */
+  env?: Readonly<Record<string, string>>;
+  /** The unwrapped launch: [binary, ...args]. */
+  command: readonly string[];
+}): string[] {
+  const args: string[] = ['-L', TMUX_SOCKET, 'respawn-pane', '-k'];
+  if (typeof opts.cwd === 'string' && opts.cwd !== '') {
+    args.push('-c', opts.cwd);
+  }
+  for (const [key, value] of Object.entries(opts.env ?? {})) {
+    args.push('-e', `${key}=${value}`);
+  }
+  args.push('-t', `=${opts.name}:`);
+  args.push('--', ...opts.command);
+  return args;
+}
+
+/**
+ * Pure. The argv that rewrites ONE variable in a wrapped session's own
+ * environment. See `respawnTmuxPane` for why a respawn is not enough on its own.
+ */
+export function buildSetEnvArgs(
+  name: string,
+  key: string,
+  value: string,
+): string[] {
+  return ['-L', TMUX_SOCKET, 'set-environment', '-t', `=${name}`, key, value];
+}
+
+/**
+ * Restart a wrapped session's process IN PLACE, on a different environment.
+ *
+ * WHY THIS EXISTS: an account is a config directory, and a config directory is
+ * an environment variable read once, at exec. So moving a live conversation to
+ * another account means restarting the CLI — and every other way of restarting
+ * it costs the user their tab. Disposing the terminal and launching a new one
+ * puts the session at the end of the terminal list, in a tab they have to go
+ * find again, which for a switch made *because you hit a limit mid-thought* is
+ * most of the interruption the feature exists to avoid. Respawning the pane
+ * keeps the tmux session, the client attached to it, and therefore the VS Code
+ * tab exactly where they were: the screen redraws and nothing else moves.
+ *
+ * TWO COMMANDS, not one, and the second is not belt-and-braces. `-e` on the
+ * respawn sets the environment of the new PROCESS; the SESSION environment that
+ * `new-session -e` wrote at launch still holds the old account's config dir
+ * afterwards (confirmed: `show-environment` still reported the original value
+ * after a successful respawn). Anything that later reads the session's
+ * environment — a person debugging, a future pane — would be told the
+ * conversation is on an account it left. So each variable is written into the
+ * session too.
+ *
+ * Returns whether the RESPAWN succeeded; a `set-environment` that fails is
+ * logged and survived, because by then the process is already running on the
+ * right account and the stale copy is a cosmetic lie rather than a wrong launch.
+ *
+ * Never throws. `false` means the caller must fall back to disposing the
+ * terminal and launching afresh — which is what a session outside the detach
+ * tier does anyway.
+ */
+export async function respawnTmuxPane(
+  binary: string,
+  opts: {
+    name: string;
+    cwd?: string;
+    env?: Readonly<Record<string, string>>;
+    command: readonly string[];
+  },
+): Promise<boolean> {
+  const ok = await new Promise<boolean>((resolve) => {
+    try {
+      execFile(
+        binary,
+        buildRespawnArgs(opts),
+        { timeout: 5000 },
+        (err) => resolve(!err),
+      );
+    } catch (err) {
+      logError('tmux.respawnPane', err);
+      resolve(false);
+    }
+  });
+  if (!ok) return false;
+
+  for (const [key, value] of Object.entries(opts.env ?? {})) {
+    await new Promise<void>((resolve) => {
+      try {
+        execFile(
+          binary,
+          buildSetEnvArgs(opts.name, key, value),
+          { timeout: 2000 },
+          (err) => {
+            // Never logs the VALUE: on an API-key account it is the credential.
+            if (err) logError(`tmux.setEnvironment: ${key} not updated`, err);
+            resolve();
+          },
+        );
+      } catch (err) {
+        logError('tmux.setEnvironment', err);
+        resolve();
+      }
+    });
+  }
+  return true;
+}
+
+/**
  * Resolve how (whether) to wrap a launch, from the config gate and the PATH.
  * One call per launch, so both react to the world without a reload.
  */

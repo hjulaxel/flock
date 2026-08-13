@@ -2122,6 +2122,79 @@ export class StateStore implements DisposableLike {
   }
 
   /**
+   * RE-PIN a conversation onto another account — the one write allowed to
+   * replace a pin, because the user is the one asking.
+   *
+   * Deliberately a different method from `setSessionProfile` above, exactly as
+   * `moveSessionSubproject` is from `setSessionSubproject`, so that "the launch
+   * path must not overwrite" and "the user may move this conversation" never
+   * have to be the same rule. A launch reaching this by accident would be the
+   * silent re-billing the write-once pin exists to prevent; a user reaching it
+   * on purpose has already been told what it costs.
+   *
+   * CHAIN-WIDE, and that is the whole reason this is a store method rather than
+   * one `upsert`. `getSessionProfile` falls back to the EARLIEST pin held by any
+   * member of the conversation's generation chain, so re-pinning the tip alone
+   * would leave a `/clear`-era generation quietly dragging the conversation back
+   * to the account it came from on the next resume. Every member that already
+   * carries a pin is rewritten with it.
+   *
+   * Members with NO pin are left alone, which is not an oversight: tree
+   * membership in this extension is editorial, so minting a record for a
+   * generation that never had one would put an old row back on screen as a side
+   * effect of a billing change. They read the chain's answer through
+   * `getSessionProfile` regardless.
+   *
+   * The BYTES are somebody else's job (see accountMove.ts). This method records
+   * where the conversation now belongs; it does not move it there, and calling
+   * it without moving the transcript would leave a pin naming an account whose
+   * config directory does not hold the conversation.
+   */
+  moveSessionProfile(sessionId: string, profileId: string): Promise<void> {
+    if (!isSessionId(sessionId)) return Promise.resolve();
+    if (!isAccountId(profileId)) {
+      log('state: refusing to move a session to an unusable account id');
+      return Promise.resolve();
+    }
+    return this.enqueue((state, stamp) => {
+      const repin = (id: string): boolean => {
+        const prev = state.records[id];
+        if (prev?.profileId === profileId) return false;
+        const next: Record<string, unknown> = prev ? { ...prev } : {};
+        next.id = id;
+        next.profileId = profileId;
+        next.createdAt = isNonEmptyString(next.createdAt)
+          ? next.createdAt
+          : stamp;
+        next.updatedAt = stamp;
+        state.records[id] = next as unknown as EditorialRecord;
+        return true;
+      };
+
+      let moved = repin(sessionId) ? 1 : 0;
+      for (const chain of Object.values(state.chains ?? {})) {
+        if (!chain.members.includes(sessionId)) continue;
+        for (const member of chain.members) {
+          if (member === sessionId) continue;
+          // Only a member that ALREADY answers the pin question — see above.
+          if (!isAccountId(state.records[member]?.profileId)) continue;
+          if (repin(member)) moved++;
+        }
+        break; // a session belongs to at most one chain
+      }
+      if (moved > 0) {
+        log(
+          'state: moved',
+          sessionId,
+          'to account',
+          profileId,
+          `(${String(moved)} record(s))`,
+        );
+      }
+    });
+  }
+
+  /**
    * Stamp a session with the LANE it was started in. Once, and never again.
    *
    * The same write-once discipline as `setSessionProfile` above, for a related but

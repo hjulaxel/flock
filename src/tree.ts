@@ -290,6 +290,19 @@ export class LineageTreeProvider
     );
   }
 
+  /** Same `safe` discipline as `hostOf` above: a lookup that is not wired, or
+   *  that throws, leaves the hover exactly as it was before accounts. */
+  private accountLabelOf(sessionId: string): string | undefined {
+    const label = this.safe<string | undefined>(
+      'accountLabelOf',
+      () => this.deps.accountLabelOf?.(sessionId),
+      undefined,
+    );
+    return typeof label === 'string' && label.trim() !== ''
+      ? label.trim()
+      : undefined;
+  }
+
   private groupingFor(forest: SessionForest): GroupingResult {
     const groupByFolder = this.safe('groupByFolder', () => this.deps.groupByFolder(), true);
     const onlyProjectSessions = this.safe(
@@ -1363,6 +1376,12 @@ export class LineageTreeProvider
     // inline sidebar's hover — hosts.ts owns it, so the two cannot drift.
     const ownership = hostTooltipLine(this.hostOf(node.id) ?? 'none');
     if (ownership !== undefined) lines.push(mdEscape(ownership));
+    // Which subscription this conversation is spending. Beside the ownership
+    // line on purpose — "who is running it" and "whose plan pays for it" are
+    // the same question asked twice, and on a machine with one account the
+    // second has no answer worth a line, so it is absent rather than "default".
+    const account = this.accountLabelOf(node.id);
+    if (account !== undefined) lines.push(`account: ${mdEscape(account)}`);
 
     const chain = this.parentChain(forest, node);
     if (chain.length > 0) {

@@ -2013,6 +2013,58 @@ describe('state: accounts', () => {
     expect(store.getSessionProfile(S2)).toBe('work');
   });
 
+  it('moveSessionProfile REPLACES a pin the launch path is forbidden to touch', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.upsert(S1, { title: 'session' });
+    await store.setSessionProfile(S1, 'work');
+
+    await store.moveSessionProfile(S1, 'personal');
+    expect(store.getSessionProfile(S1)).toBe('personal');
+
+    // And the write-once rule still holds for the LAUNCH path afterwards: a
+    // resume re-pinning to what it thinks it knows must not undo the move.
+    await store.setSessionProfile(S1, 'work');
+    expect(store.getSessionProfile(S1)).toBe('personal');
+  });
+
+  it('moveSessionProfile re-pins the whole generation chain, not just the tip', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.appendChainMember(S1, S2); // gen 1 -> gen 2
+    await store.setSessionProfile(S1, 'work');
+
+    // Moving the TIP. Without the chain-wide rewrite, generation 1 would keep
+    // its 'work' pin and getSessionProfile's earliest-pin fallback would drag
+    // every later generation straight back to the old account.
+    await store.moveSessionProfile(S2, 'personal');
+
+    expect(store.getSessionProfile(S2)).toBe('personal');
+    expect(store.getSessionProfile(S1)).toBe('personal');
+  });
+
+  it('moveSessionProfile does not mint a record for a chain member that had no pin', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.appendChainMember(S1, S2);
+    await store.setSessionProfile(S2, 'work'); // only the TIP is pinned
+
+    await store.moveSessionProfile(S2, 'personal');
+
+    expect(store.getSessionProfile(S2)).toBe('personal');
+    // Tree membership is editorial: a record here would put an old generation
+    // back on screen as a side effect of a billing change.
+    expect(store.get(S1)).toBeUndefined();
+  });
+
+  it('moveSessionProfile refuses an unusable account id and changes nothing', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.setSessionProfile(S1, 'work');
+    await store.moveSessionProfile(S1, 'Not An Id');
+    expect(store.getSessionProfile(S1)).toBe('work');
+  });
+
   it('a session with no pin anywhere, in or out of a chain, returns undefined', async () => {
     const store = makeStore(tempDir());
     await store.load();

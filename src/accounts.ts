@@ -94,6 +94,71 @@ export function canHostSession(
   return SESSION_PROVIDERS.includes(provider);
 }
 
+/**
+ * The CLI an account's sessions actually run, which is NOT the same question as
+ * its provider.
+ *
+ * `generic` is the API-key profile: a CLAUDE launch authenticated by an
+ * environment variable rather than by a login, so it runs the same binary,
+ * writes the same transcripts into the same directory layout, and is
+ * interchangeable with an OAuth Claude account as far as a conversation on disk
+ * is concerned. That interchangeability is the whole reason this function
+ * exists — see `switchRefusal`.
+ */
+export type SessionCli = 'claude' | 'codex' | 'gemini';
+
+export function cliOfProfile(
+  profile: AccountProfile | null | undefined,
+): SessionCli {
+  const provider = isProviderId(profile?.provider)
+    ? profile.provider
+    : DEFAULT_PROVIDER;
+  if (provider === 'codex') return 'codex';
+  if (provider === 'gemini') return 'gemini';
+  return 'claude';
+}
+
+/** Why a conversation may not be moved to a given account. `null` = it may. */
+export type SwitchRefusal = 'same-account' | 'cannot-host' | 'different-cli';
+
+/**
+ * May this conversation move from `from` to `to`?
+ *
+ * `from` is null for a conversation with no pin — one launched before accounts
+ * existed, or on the machine's default login. Those live in the default config
+ * directory and run `claude`, so they may move onto any account that also runs
+ * claude; there is nothing special about them beyond having no row to name.
+ *
+ * THE RULE THAT MATTERS is `different-cli`. Moving a conversation between two
+ * accounts is a change of LOGIN: the transcript is portable because it carries
+ * no account identity, and the resumed process reads the same file out of a
+ * different directory. Moving it between two CLIs would be neither — a Codex
+ * account does not keep its conversations in `<dir>/projects/<slug>/<id>.jsonl`
+ * at all, so there is nothing to move and nothing to resume. The verb has to
+ * refuse that rather than produce a pin naming an account whose directory does
+ * not hold the conversation, which is exactly the state the whole feature is
+ * built to avoid.
+ */
+export function switchRefusal(
+  from: AccountProfile | null | undefined,
+  to: AccountProfile | null | undefined,
+): SwitchRefusal | null {
+  // Existence first: `cliOfProfile` reads a missing profile as the default
+  // provider, so a null target would otherwise sail through the CLI test.
+  if (!to || to.deleted === true) return 'cannot-host';
+  if (from && from.id === to.id) return 'same-account';
+  // The CLI test outranks `canHostSession` deliberately, and the ordering is
+  // the answer to a question that changes over time. Which providers Flock can
+  // START a session on grows as it learns to launch more CLIs; which CLI a
+  // given conversation was written by never changes. So a Codex account is
+  // refused for the reason that will still be true after the launcher learns
+  // Codex — the conversation is a Claude one — rather than for one that is
+  // about this build's capabilities and will quietly stop applying.
+  if (cliOfProfile(from) !== cliOfProfile(to)) return 'different-cli';
+  if (!canHostSession(to)) return 'cannot-host';
+  return null;
+}
+
 /** POSIX environment variable name. Enforced because these end up as `-e
  *  KEY=VALUE` arguments to the tmux wrap, where a key containing `=` or a
  *  space would silently redraw the boundary between name and value. */
@@ -146,6 +211,37 @@ export function envForProfile(
     }
   }
   return out;
+}
+
+/**
+ * WHERE one account's CLI keeps its state: the directory `envForProfile` points
+ * the launch at, or `defaultDir` when it points at nothing.
+ *
+ * The rule is `envForProfile`'s own first clause, extracted rather than
+ * restated, and it lives beside it for a reason that only matters once
+ * conversations can MOVE between accounts: the place we write a transcript to
+ * has to be the same place the next launch will look for it, and two spellings
+ * of "where does this account live" is how those two come apart. A provider
+ * with no config-dir variable (see CONFIG_DIR_ENV) shares the machine's
+ * directory whatever its `configDir` field says — because that is exactly what
+ * its launch does.
+ *
+ * `defaultDir` is a PARAMETER for the same reason `profileConfigDirFor` takes a
+ * home: this module imports nothing. Callers pass `~/.claude`.
+ */
+export function configDirForProfile(
+  profile: AccountProfile | null | undefined,
+  defaultDir: string,
+): string {
+  const fallback = typeof defaultDir === 'string' ? defaultDir.trim() : '';
+  if (!profile) return fallback;
+  const dirVar = isProviderId(profile.provider)
+    ? CONFIG_DIR_ENV[profile.provider]
+    : undefined;
+  if (dirVar === undefined) return fallback;
+  const dir =
+    typeof profile.configDir === 'string' ? profile.configDir.trim() : '';
+  return dir === '' ? fallback : dir;
 }
 
 /** True for a profile that resolves to an empty environment: the account that

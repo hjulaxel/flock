@@ -132,6 +132,19 @@ export const CONTEXT_HAS_FORKABLE = 'lineage.hasForkable';
  *  one that says how many it is about to take — the same complementary-`when`
  *  shape the bell and the active-only filter already use. */
 export const CONTEXT_MULTI_SELECT = 'lineage.multiSelect';
+/** TWO OR MORE accounts a session can actually run on.
+ *
+ *  Gates the "Move to Account…" entry in a session row's menu, and nothing
+ *  else. The verb stays REGISTERED either way — that is the standing rule for
+ *  every account command, so the palette never reports one missing — but a menu
+ *  entry whose picker can only ever say "there is no other account" is a row of
+ *  clutter in front of every single-account user, which is most of them.
+ *
+ *  Counted over `accounts.canHostSession`, not over the raw roster: an account
+ *  no session can start on is not somewhere a conversation can move to either,
+ *  so a machine with one Claude login and one Gemini row has ONE destination,
+ *  which is none. */
+export const CONTEXT_MANY_ACCOUNTS = 'lineage.manyAccounts';
 /** Gates the project header view inside the BUILT-IN Explorer container.
  *
  *  NOT simply "this window is a Flock workspace". It is "this window has
@@ -958,6 +971,11 @@ export const COMMANDS = {
   newSessionFromPicker: 'lineage.newSessionFromPicker',
   /** Set (or clear) a project's routing override. */
   setProjectAccount: 'lineage.setProjectAccount',
+  /** MOVE an existing conversation to another account: stop it, move its
+   *  transcript into that account's config directory, re-pin the chain, and
+   *  resume it there. On a SESSION row, not an account row — the thing being
+   *  moved is the conversation, and the account is the destination. */
+  switchSessionAccount: 'lineage.switchSessionAccount',
 } as const;
 export type CommandId = (typeof COMMANDS)[keyof typeof COMMANDS];
 
@@ -1134,6 +1152,13 @@ export const CONFIG_KEYS = {
    *  in the view's when-clause — `accountsEnabled` stays the feature's off
    *  switch, this only decides whether the list is drawn in the sidebar. */
   accountsSection: 'accounts.section',
+  /** Offer to move a conversation when the account it is on runs out of its
+   *  five-hour window. OFF by default, and that default is the point: the
+   *  switch is a real interruption — the CLI restarts and the prompt cache does
+   *  not follow — so a notification proposing one is only welcome to somebody
+   *  who has decided in advance that they would rather be asked. Everyone else
+   *  gets the verb in the row's menu and no opinions. */
+  offerSwitchAtLimit: 'accounts.offerSwitchAtLimit',
 } as const;
 
 /**
@@ -2332,6 +2357,12 @@ export interface TreeDeps {
    *  return type is left loose here because types.ts may not import a module
    *  that imports it back. */
   hostOf?(sessionId: string): 'here' | 'flock' | 'foreign' | 'none';
+  /** The LABEL of the account a session runs on, or undefined for the machine's
+   *  default login. One hover line on both surfaces — see
+   *  ViewModelInput.accountLabelOf for why it is a hover and not a column.
+   *  Optional, like every lookup here: absent means the hover reads exactly as
+   *  it did before accounts could be switched. */
+  accountLabelOf?(sessionId: string): string | undefined;
   /** RETIRED: `reparent`. Dropping a session onto another re-parented it, and
    *  dropping one onto a folder row detached it to a root — so a fork could be
    *  dragged out of the tree it branched from and an unrelated conversation

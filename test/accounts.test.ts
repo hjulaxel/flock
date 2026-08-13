@@ -24,6 +24,8 @@ import {
   CLAUDE_CONFIG_DIR_ENV,
   CODEX_HOME_ENV,
   canHostSession,
+  cliOfProfile,
+  configDirForProfile,
   DEFAULT_CLAUDE_PROFILE_ID,
   DEFAULT_CODEX_PROFILE_ID,
   PROFILES_DIR_SEGMENTS,
@@ -38,6 +40,7 @@ import {
   seedDefaultProfiles,
   slugify,
   sortProfiles,
+  switchRefusal,
   uniqueAccountId,
   validateAccountLabel,
 } from '../src/accounts';
@@ -645,5 +648,113 @@ describe('isEnvVarName', () => {
   it('rejects non-string input', () => {
     expect(isEnvVarName(42)).toBe(false);
     expect(isEnvVarName(undefined)).toBe(false);
+  });
+});
+
+// ------------------------------------------------------- where an account lives
+
+describe('accounts: configDirForProfile', () => {
+  const at = (p: Partial<AccountProfile>): string =>
+    configDirForProfile({ id: 'x', provider: 'claude', label: 'X', ...p } as AccountProfile, '/home/.claude');
+
+  it('is the profile directory when the provider has a config-dir variable', () => {
+    expect(at({ configDir: '/home/.lineage/profiles/work' })).toBe(
+      '/home/.lineage/profiles/work',
+    );
+  });
+
+  it('is the default directory for a profile with no configDir', () => {
+    // The DEFAULT ACCOUNT: it inherits whatever the machine is logged in as,
+    // so its conversations are in the machine's own directory.
+    expect(at({})).toBe('/home/.claude');
+  });
+
+  it('is the default directory for a provider with no config-dir variable', () => {
+    // Must agree with envForProfile, which ignores configDir for these — the
+    // place we write a transcript has to be the place the launch looks.
+    const generic: AccountProfile = {
+      id: 'k', provider: 'generic', label: 'K', configDir: '/somewhere/else',
+    } as AccountProfile;
+    expect(configDirForProfile(generic, '/home/.claude')).toBe('/home/.claude');
+    expect(envForProfile(generic)).toEqual({});
+  });
+
+  it('is the default directory for no profile at all', () => {
+    expect(configDirForProfile(null, '/home/.claude')).toBe('/home/.claude');
+  });
+
+  it('trims, so a hand-edited path with whitespace still resolves', () => {
+    expect(at({ configDir: '  /home/x  ' })).toBe('/home/x');
+    expect(at({ configDir: '   ' })).toBe('/home/.claude');
+  });
+});
+
+// --------------------------------------------- may this conversation move here
+
+describe('accounts: cliOfProfile', () => {
+  const of = (provider: string): string =>
+    cliOfProfile({ id: 'x', provider, label: 'X' } as AccountProfile);
+
+  it('maps the API-key profile to claude, because that is what it launches', () => {
+    expect(of('generic')).toBe('claude');
+  });
+
+  it('keeps codex and gemini as themselves', () => {
+    expect(of('codex')).toBe('codex');
+    expect(of('gemini')).toBe('gemini');
+  });
+
+  it('reads an absent or unknown provider as the default one', () => {
+    expect(cliOfProfile(null)).toBe('claude');
+    expect(of('something-else')).toBe('claude');
+  });
+});
+
+describe('accounts: switchRefusal', () => {
+  const acct = (p: Partial<AccountProfile>): AccountProfile =>
+    ({ id: 'a', provider: 'claude', label: 'A', ...p }) as AccountProfile;
+
+  const work = acct({ id: 'work' });
+  const personal = acct({ id: 'personal' });
+
+  it('allows a move between two accounts on the same CLI', () => {
+    expect(switchRefusal(work, personal)).toBeNull();
+  });
+
+  it('allows a move from NO pin — the machine default runs claude too', () => {
+    expect(switchRefusal(null, personal)).toBeNull();
+  });
+
+  it('allows an OAuth account to move to an API-key one', () => {
+    // Different provider, same binary and same transcript layout: the only
+    // thing that changes is how the launch authenticates.
+    expect(switchRefusal(work, acct({ id: 'key', provider: 'generic' }))).toBeNull();
+  });
+
+  it('refuses the account it is already on', () => {
+    expect(switchRefusal(work, work)).toBe('same-account');
+  });
+
+  it('refuses a move that would change the CLI', () => {
+    // A Codex account does not keep its conversations where a Claude one does,
+    // so there would be nothing to move and nothing to resume.
+    expect(switchRefusal(work, acct({ id: 'cdx', provider: 'codex' }))).toBe(
+      'different-cli',
+    );
+  });
+
+  it('refuses a Gemini account for the CLI reason, not the capability one', () => {
+    // Same ordering rule as the Codex case above: "that is not this
+    // conversation's CLI" survives the launcher learning new ones.
+    expect(switchRefusal(work, acct({ id: 'gem', provider: 'gemini' }))).toBe(
+      'different-cli',
+    );
+  });
+
+  it('refuses a deleted account and a missing one', () => {
+    expect(switchRefusal(work, acct({ id: 'gone', deleted: true }))).toBe(
+      'cannot-host',
+    );
+    expect(switchRefusal(work, undefined)).toBe('cannot-host');
   });
 });

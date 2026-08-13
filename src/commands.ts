@@ -83,12 +83,14 @@ import {
   moveDown,
   moveUp,
   slugify,
+  switchRefusal,
   uniqueAccountId,
   validateAccountLabel,
 } from './accounts';
 import {
   describeRouting,
   pinnedLaunchProfile,
+  pinnedProfile,
   resolveRouting,
 } from './routing';
 // Pure, like projects/accounts/routing above — node builtins only, no vscode.
@@ -4662,6 +4664,212 @@ async function setProjectAccountFlow(
   );
 }
 
+/**
+ * MOVE THIS CONVERSATION TO ANOTHER ACCOUNT.
+ *
+ * The verb this feature spent its first version refusing to have, and the
+ * refusal was right for the reason it gave — a conversation's transcript lives
+ * inside one account's config directory, so a resume under another account
+ * finds nothing — and wrong about the conclusion. The transcript is portable:
+ * it carries a session id, a cwd, a branch and messages, and NOTHING that
+ * identifies the login that paid for it. So "which subscription is this
+ * conversation on" is a question about which directory the file is in, and a
+ * question about a file's location has an answer.
+ *
+ * WHAT IT COSTS, and why there is a modal in the middle of it. The config
+ * directory is read once, at exec, so the CLI has to be restarted — there is no
+ * live re-auth to reach for. That means:
+ *
+ *   * the turn in flight is cut off, and anything typed and not sent is gone;
+ *   * the prompt cache does not follow. Caching is per-account, so the first
+ *     turn on the other account re-reads the whole conversation uncached —
+ *     slower, and a bigger bite out of the window you just switched to.
+ *
+ * Nothing is LOST: the conversation is replayed from the transcript, which is
+ * the same file it was already being written to. That is the sentence the
+ * dialog leads with, because "restart Claude Code" is the part that sounds
+ * expensive and the history is the part people are actually afraid for.
+ *
+ * ORDER, and it is the error handling. The account is chosen, then confirmed,
+ * then handed to the mechanism (`AccountDeps.switchSessionAccount`) which stops
+ * the process before it moves a byte and puts everything back if the move
+ * fails. This function's own job ends at "the user said yes to this account".
+ */
+async function switchAccountFlow(
+  deps: AccountCommandDeps,
+  sessionIdArg: string,
+  /** The account to move to, already decided. Set only by the at-the-limit
+   *  offer, which named an account in its own text and must not then ask again
+   *  — the picker would be a question whose answer the user just gave. The
+   *  MODAL is not skipped with it: what the switch costs is the same either
+   *  way, and a notification button is not consent to restart a process. */
+  preselectedAccountId?: string,
+): Promise<void> {
+  const accts = deps.accounts;
+  if (!accts) return;
+  const switchTo = accts.switchSessionAccount;
+  if (!switchTo) return; // a wiring with no mechanism has no verb
+
+  // The TIP, exactly as resume and fork resolve their targets: switching a
+  // superseded generation would move a transcript nothing is going to resume
+  // and leave the live one behind on the old account.
+  const sessionId = deps.tipOf(sessionIdArg);
+  const node = deps.getForest().nodes.get(sessionId);
+  const label = labelFor(deps, sessionId);
+
+  // A GHOST is an ancestor inferred from a child's edge — no transcript, no
+  // process, nothing to move. Same refusal `resumeFlow` gives it.
+  if (node?.ghost === true) {
+    void vscode.window.showWarningMessage(
+      `Flock: "${label}" is an inferred ancestor with no transcript on disk, ` +
+        'so there is no conversation to move.',
+    );
+    return;
+  }
+  if (!deps.hasTranscript(sessionId)) {
+    void vscode.window.showWarningMessage(
+      `Flock: "${label}" has not taken a turn yet, so there is nothing to ` +
+        'move. Start it on the account you want instead.',
+    );
+    return;
+  }
+
+  // OWNERSHIP. The mechanism restarts a process, and restarting one this
+  // window does not own is the same lie `closeFlow` refuses to tell: we would
+  // move the bytes out from under a claude that is still writing them.
+  const host = deps.hostOf?.(sessionId);
+  if (host === 'foreign') {
+    void vscode.window.showWarningMessage(
+      `Flock: "${label}" is running outside Flock, so its account cannot be ` +
+        'changed from here — Flock would have to stop a process it does not ' +
+        'own. Close it where it is running first.',
+    );
+    return;
+  }
+
+  const profiles = accts.accounts();
+  const current = pinnedProfile(accts.sessionProfileId(sessionId), profiles);
+
+  // Only accounts this conversation could actually run on: same CLI, able to
+  // host, not the one it is already on. Building the list from the rule means
+  // the picker cannot offer something the mechanism would then refuse.
+  const choices = profiles.filter((p) => switchRefusal(current, p) === null);
+  if (choices.length === 0) {
+    void vscode.window.showInformationMessage(
+      current
+        ? `Flock: there is no other account "${label}" could run on. ` +
+            'Add one, or check that it is the same kind of account.'
+        : 'Flock: no other account is configured to move this conversation to.',
+    );
+    return;
+  }
+
+  // Named by the offer, and still checked against the same rule the picker's
+  // list is built from: the account could have been deleted, or run out
+  // itself, between the notification appearing and the button being pressed.
+  let target: AccountProfile | undefined;
+  if (preselectedAccountId !== undefined) {
+    target = choices.find((p) => p.id === preselectedAccountId);
+    if (!target) {
+      void vscode.window.showWarningMessage(
+        'Flock: that account is no longer somewhere this conversation can ' +
+          'move to. Pick another.',
+      );
+    }
+  }
+
+  interface SwitchPick extends vscode.QuickPickItem {
+    accountId: string;
+  }
+  const items: SwitchPick[] = choices.map((p) => ({
+    label: p.label,
+    description: accountPickDescription(accts, p),
+    accountId: p.id,
+  }));
+  const chosen = target !== undefined
+    ? undefined
+    : await vscode.window.showQuickPick(items, {
+    // The account it is ON is in the placeholder rather than as a disabled row:
+    // a picker whose first entry cannot be picked reads as a bug, and this is
+    // the one place the current account has to be stated anyway.
+    placeHolder: current
+      ? `"${label}" is on ${current.label} — move it to…`
+      : `"${label}" is on the default login — move it to…`,
+    matchOnDescription: true,
+    ignoreFocusOut: true,
+  });
+  if (target === undefined) {
+    if (!chosen) return;
+    target = accts.getAccount(chosen.accountId);
+  }
+  if (!target) return;
+
+  const MOVE = 'Switch Account';
+  const confirm = await vscode.window.showWarningMessage(
+    `Move "${label}" to ${target.label}?`,
+    {
+      modal: true,
+      detail:
+        'The conversation is kept — it is replayed from its transcript, which ' +
+        'moves with it. Claude Code has to be restarted to pick up the other ' +
+        'account, so a turn in progress is cut off and anything typed but not ' +
+        'sent is lost.\n\n' +
+        'The prompt cache does not move. The first turn on ' +
+        `${target.label} re-reads the whole conversation, which is slower and ` +
+        'takes a larger bite out of that account than a cached turn would.',
+    },
+    MOVE,
+  );
+  if (confirm !== MOVE) return;
+
+  const cwd = node?.cwd ?? deps.getRecord(sessionId)?.cwd;
+  // Read once: a relaunch has to carry the name the user gave the conversation,
+  // and the resume path's bug this avoids was exactly dropping it.
+  const tabTitle = tabTitleFor(deps, sessionId);
+  const result = await vscode.window.withProgress(
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: `Flock: moving "${label}" to ${target.label}…`,
+      cancellable: false,
+    },
+    () =>
+      switchTo({
+        sessionId,
+        from: current,
+        to: target,
+        ...(cwd !== undefined ? { cwd } : {}),
+        ...(tabTitle !== undefined ? { tabTitle } : {}),
+      }),
+  );
+
+  deps.refresh();
+
+  if (!result.ok) {
+    void vscode.window.showErrorMessage(
+      `Flock: "${label}" was not moved — ${
+        result.error ?? 'the switch failed.'
+      } It is still on ${current?.label ?? 'the default login'}.`,
+    );
+    return;
+  }
+
+  // The sidecars are named because their absence is VISIBLE — a blank task
+  // list mid-conversation reads as data loss unless it was announced.
+  if (result.skipped.length > 0) {
+    void vscode.window.showWarningMessage(
+      `Flock: "${label}" is now on ${target.label}, but its ` +
+        `${result.skipped.join(' and ')} did not move with it.`,
+    );
+    return;
+  }
+  vscode.window.setStatusBarMessage(
+    `Flock: "${label}" → ${target.label}${
+      result.inPlace ? '' : ' (in a new terminal)'
+    }`,
+    5000,
+  );
+}
+
 // ---------------------------------------------------------- registration
 
 type Handler = (...args: unknown[]) => void | Promise<void>;
@@ -6802,6 +7010,32 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         (await pickProject(deps, 'Set the AI account for which project?'));
       if (!id) return;
       await setProjectAccountFlow(deps, id);
+    },
+  );
+
+  // A SESSION verb, not an account one. `liveOnly: false` because the case this
+  // exists for is a conversation that has run out of window and stopped being
+  // useful, and an archived one is just as movable — it is a file either way.
+  register(
+    COMMANDS.switchSessionAccount,
+    'switch session account',
+    async (arg?: unknown, accountArg?: unknown) => {
+      const id = await targetSession(
+        deps,
+        arg,
+        'Move which session to another account?',
+        { liveOnly: false },
+      );
+      if (!id) return;
+      // Second argument: the at-the-limit offer already named an account, and
+      // passing it here is what keeps that one button from re-asking.
+      await switchAccountFlow(
+        deps,
+        id,
+        typeof accountArg === 'string' && accountArg !== ''
+          ? accountArg
+          : undefined,
+      );
     },
   );
 

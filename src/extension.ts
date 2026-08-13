@@ -38,18 +38,21 @@ import {
   CONTEXT_HAS_UNSEEN,
   CONTEXT_EXPLORER_FOLLOW,
   CONTEXT_HOOKS_INSTALLED,
+  CONTEXT_MANY_ACCOUNTS,
   CONTEXT_NATIVE_TREE,
   CONTEXT_MULTI_SELECT,
   CONTEXT_ONLY_ACTIVE,
   DEFAULT_BUSY_STALE_MINUTES,
   DEFAULT_PROVIDER,
   DEFAULT_STALE_AFTER_HOURS,
+  ENV_NODE_ID,
   isProviderId,
   isSessionId,
   isTerminalLocationPref,
   shortId,
 } from './types';
 import type {
+  AccountProfile,
   ArchivedSession,
   BackgroundJob,
   BranchDisplay,
@@ -75,6 +78,7 @@ import {
   queryClientSessions,
   queryPanePid,
   resolveTmuxSpawn,
+  respawnTmuxPane,
   tmuxAdvice,
   tmuxInstallHint,
 } from './tmux';
@@ -156,17 +160,29 @@ import type { ProjectViewController } from './projectview';
 // because this file is where the account roster, the pins and the launch env
 // are joined up — the views and the verbs only ever see the interfaces.
 import {
+  canHostSession,
+  configDirForProfile,
   envForProfile,
+  switchRefusal,
   profileConfigDirFor,
   seedDefaultProfiles,
 } from './accounts';
-import { pinnedLaunchProfile } from './routing';
+// The byte half of an account switch: a conversation's transcript is portable
+// between config directories, and this is what moves it. Pure filesystem work,
+// no vscode — see the module header for why the move is a rename.
+import { moveConversation } from './accountMove';
+import { pinnedLaunchProfile, pinnedProfile, rankUsage } from './routing';
 import { hostOfChain, resolveLaunchMode } from './hosts';
 import type { SessionHost } from './hosts';
 import { ensureProfileConfig } from './profileConfig';
 import type { ProfileConfigSources } from './profileConfig';
 import { AccountUsageCache, registerAccountsView } from './accountsView';
-import type { AccountDeps, AccountsViewController } from './accountsView';
+import type {
+  AccountDeps,
+  AccountsViewController,
+  SwitchAccountRequest,
+  SwitchAccountResult,
+} from './accountsView';
 import { LimitsService, formatUsageSummary } from './limits';
 import { StateStore } from './state';
 import { registerDecorations } from './decorations';
@@ -174,7 +190,11 @@ import { registerTree } from './tree';
 import type { TreeController } from './tree';
 import { registerWebtree } from './webtree';
 import type { WebtreeController } from './webtree';
-import { TerminalRegistry } from './terminals';
+// The two pure builders the account switch needs to compose a resume by hand:
+// every other launch in this file goes through `registry.launch`, but a tmux
+// respawn replaces the pane's command directly and therefore has to spell the
+// argv and the environment the same way the launcher would.
+import { TerminalRegistry, buildShellArgs, launchEnv } from './terminals';
 import { TerminalMatcher, terminalPid } from './terminalMatch';
 import {
   adoptBackgroundJob,
@@ -1687,6 +1707,22 @@ export async function activate(
     projectsWithUnseen,
     isBoundHere: (id) => registry.isBoundHere(id),
     hostOf: sessionHostOf,
+    // The account label for the hover, on both surfaces. `pinnedProfile`, not
+    // `pinnedLaunchProfile`: this states what the conversation CLAIMS, and a
+    // pin naming an account no session could start on today is still the true
+    // answer to "whose subscription is this on". Undefined for a conversation
+    // with no pin — the machine's default login, which has no name to give.
+    accountLabelOf: (id) => {
+      try {
+        return (
+          pinnedProfile(store.getSessionProfile(id), store.getAccounts())
+            ?.label ?? undefined
+        );
+      } catch (err) {
+        logError('extension.accountLabelOf', err);
+        return undefined;
+      }
+    },
     // `reparent` was here: a drag onto a session row wrote a hand-made parent
     // edge, and a drag onto a folder row erased one. Retired — lineage is not
     // something a gesture may state, see WebtreeDeps and webtree.onDrop. The
@@ -2283,6 +2319,38 @@ export async function activate(
   await seedAccounts();
   await wireProfileConfigs();
 
+  /** Mirror "is there anywhere to move a conversation TO" into the context key
+   *  the session menu's `when` reads. Re-run on every store change: accounts
+   *  are added and removed from this window and from others, and a menu entry
+   *  that needed a reload to appear would be a menu entry nobody finds. */
+  let lastManyAccounts: boolean | null = null;
+  const syncManyAccountsContext = async (): Promise<void> => {
+    let many = false;
+    try {
+      many = store.getAccounts().filter(canHostSession).length >= 2;
+    } catch (err) {
+      logError('extension.manyAccountsContext', err);
+      return;
+    }
+    if (many === lastManyAccounts) return;
+    lastManyAccounts = many;
+    try {
+      await vscode.commands.executeCommand(
+        'setContext',
+        CONTEXT_MANY_ACCOUNTS,
+        many,
+      );
+    } catch (err) {
+      logError('extension.manyAccountsContext', err);
+    }
+  };
+  await syncManyAccountsContext();
+  context.subscriptions.push(
+    store.onDidChange(() => {
+      void syncManyAccountsContext();
+    }),
+  );
+
   /** The pinned account's launch fields for a conversation — what a resume, a
    *  reattach and a workspace restore all re-inject. `pinnedLaunchProfile`
    *  returns null for a dangling pin — and for a pin naming an account no
@@ -2302,6 +2370,252 @@ export async function activate(
       logError('extension.accountLaunchFor', err);
       return undefined;
     }
+  };
+
+  /**
+   * What a wrapped pane runs BETWEEN the two respawns — see
+   * `switchSessionAccount` for why there are two.
+   *
+   * `exec` so the shell replaces itself and the pane's root process is the
+   * sleep, which is what makes the next respawn's `-k` a clean single kill. The
+   * duration is a day because nothing is ever supposed to reach it: if this is
+   * still running, the switch died between its two halves and the user is
+   * looking at the message, which is a better end state than an empty pane.
+   */
+  const SWITCH_HOLD_COMMAND: readonly string[] = [
+    'sh',
+    '-c',
+    'echo "Flock: switching account — restarting Claude Code…"; exec sleep 86400',
+  ];
+
+  /** Poll until the wrapped pane's root process is no longer `was`, so the move
+   *  cannot start while the old CLI is still flushing its transcript. Bounded:
+   *  a pid we cannot read is not a reason to hang, and the respawn that changed
+   *  it has already returned successfully. */
+  const awaitPanePidChange = async (
+    binary: string,
+    name: string,
+    was: number | undefined,
+  ): Promise<void> => {
+    if (was === undefined) return;
+    for (let i = 0; i < 20; i++) {
+      const now = await queryPanePid(binary, name);
+      if (now === undefined || now !== was) return;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  };
+
+  /** Resolve once the registry says this session's terminal is gone, or after
+   *  `ms`. The timeout is not a failure: `closeTerminal` disposes the pty
+   *  synchronously and this only waits for the close EVENT, so a host that does
+   *  not deliver one must not stall the switch forever. */
+  const awaitTerminalExit = (sessionId: string, ms: number): Promise<void> =>
+    new Promise((resolve) => {
+      let done = false;
+      const finish = (): void => {
+        if (done) return;
+        done = true;
+        try {
+          sub.dispose();
+        } catch {
+          /* already gone */
+        }
+        resolve();
+      };
+      const sub = registry.onDidExit((id) => {
+        if (id === sessionId) finish();
+      });
+      setTimeout(finish, ms);
+    });
+
+  /**
+   * THE MECHANISM behind "move this conversation to another account".
+   * commands.ts owns the decision; this owns the four steps it takes, in the
+   * one order that can be unwound.
+   *
+   *   1. STOP the process. Nothing may be moved while a claude is appending to
+   *      it — that is the second-writer failure every resume path in this
+   *      extension is built to avoid, arriving from the other direction.
+   *   2. MOVE the bytes (accountMove.ts). The only step whose failure aborts,
+   *      and the reason step 1 is separable: if this refuses, the process is
+   *      restarted where it was and nothing has changed but a few seconds.
+   *   3. RE-PIN, chain-wide (state.moveSessionProfile), and wire the target
+   *      account's shared configuration. Without that last part a switch onto
+   *      an account that has never been in this directory greets the resumed
+   *      conversation with a trust dialog — technically correct, and not what
+   *      anybody asked for by clicking "switch account".
+   *   4. START it again on the new environment.
+   *
+   * TWO RESPAWNS, on the wrapped tier. `respawn-pane -k` kills and launches as
+   * one operation, which is exactly what keeps the pane (and therefore the tab)
+   * alive — and exactly why it cannot be the whole answer: there is no moment
+   * between the kill and the launch to move a file in. So the pane is first
+   * respawned onto a placeholder, which is the "stopped" state this function
+   * needs and the user's only visible sign that anything is happening, and then
+   * respawned again onto the resume once the bytes are where the resume will
+   * look for them.
+   */
+  const switchSessionAccount = async (
+    request: SwitchAccountRequest,
+  ): Promise<SwitchAccountResult> => {
+    const { sessionId, from, to, cwd, tabTitle } = request;
+    const fail = (error: string): SwitchAccountResult => ({
+      ok: false,
+      inPlace: false,
+      skipped: [],
+      error,
+    });
+
+    const sources = profileConfigSources();
+    if (sources.defaultDir === '') {
+      return fail('Flock could not work out where your Claude config lives.');
+    }
+    const claude = claudeBin();
+    if (claude === null) {
+      return fail('the Claude Code binary could not be found.');
+    }
+
+    const fromDir = configDirForProfile(from, sources.defaultDir);
+    const toDir = configDirForProfile(to, sources.defaultDir);
+    const resumeArgv = [
+      claude,
+      ...buildShellArgs({ sessionId, resumeId: sessionId }),
+    ];
+    // Same shape the launcher builds, stamp last so it wins a collision.
+    const envFor = (
+      profile: AccountProfile | null,
+    ): Record<string, string> => ({
+      ...launchEnv(envForProfile(profile)),
+      [ENV_NODE_ID]: sessionId,
+    });
+
+    // WHICH TIER. A recorded tmux name counts even when no terminal here is
+    // bound to it: a parked conversation is running in the server, and
+    // restarting it there is the same operation as restarting an attached one.
+    const tmuxBinary = tmuxSpawn()?.binary ?? findTmuxBinary();
+    const recordedName = store.get(sessionId)?.tmux;
+    const tmuxName =
+      registry.tmuxNameOf(sessionId) ??
+      (typeof recordedName === 'string' && recordedName !== ''
+        ? recordedName
+        : undefined);
+    const boundHere = registry.isBoundHere(sessionId);
+
+    // ---- 1. stop ---------------------------------------------------------
+    let wrapped = false;
+    if (tmuxBinary !== null && tmuxName !== undefined) {
+      const wasPid = await queryPanePid(tmuxBinary, tmuxName);
+      wrapped = await respawnTmuxPane(tmuxBinary, {
+        name: tmuxName,
+        ...(cwd !== undefined ? { cwd } : {}),
+        command: SWITCH_HOLD_COMMAND,
+      });
+      if (wrapped) await awaitPanePidChange(tmuxBinary, tmuxName, wasPid);
+      // A respawn that failed means the server does not hold this session after
+      // all — the name is stale. Fall through to the tiers below rather than
+      // treating a missing wrap as a missing session.
+    }
+    const disposed = !wrapped && boundHere
+      ? registry.closeTerminal(sessionId, { killTmux: true })
+      : false;
+    if (disposed) await awaitTerminalExit(sessionId, 3000);
+
+    /** Put it back exactly where it was. Called only when the MOVE refused, so
+     *  by definition the transcript never left the old account. */
+    const restore = async (): Promise<void> => {
+      try {
+        if (wrapped && tmuxBinary !== null && tmuxName !== undefined) {
+          const back = await respawnTmuxPane(tmuxBinary, {
+            name: tmuxName,
+            ...(cwd !== undefined ? { cwd } : {}),
+            env: envFor(from),
+            command: resumeArgv,
+          });
+          if (back) return;
+          // The pane will not take the conversation back; do not leave the
+          // placeholder sitting there pretending to be a session.
+          await killTmuxSession(tmuxBinary, tmuxName);
+        } else if (!disposed) {
+          return; // nothing was stopped, so there is nothing to put back
+        }
+        await registry.launch({
+          sessionId,
+          resumeId: sessionId,
+          ...(cwd !== undefined ? { cwd } : {}),
+          ...(tabTitle !== undefined ? { title: tabTitle } : {}),
+          env: envForProfile(from),
+          ...(from !== null ? { profileId: from.id } : {}),
+        });
+      } catch (err) {
+        logError('extension.switchSessionAccount: restore failed', err);
+      }
+    };
+
+    // ---- 2. move ---------------------------------------------------------
+    const moved = await moveConversation({ sessionId, fromDir, toDir });
+    if (!moved.ok) {
+      await restore();
+      return fail(moved.error ?? 'its transcript could not be moved.');
+    }
+
+    // ---- 3. re-pin and wire the target account ---------------------------
+    await store.moveSessionProfile(sessionId, to.id);
+    if (toDir !== sources.defaultDir) {
+      // Idempotent and additive; the cost of calling it on an already-wired
+      // profile is a handful of lstats, and the cost of NOT calling it on a
+      // fresh one is a trust dialog in front of a conversation the user was
+      // reading a second ago.
+      await ensureProfileConfig(toDir, sources);
+    }
+
+    // ---- 4. start --------------------------------------------------------
+    let inPlace = false;
+    if (wrapped && tmuxBinary !== null && tmuxName !== undefined) {
+      inPlace = await respawnTmuxPane(tmuxBinary, {
+        name: tmuxName,
+        ...(cwd !== undefined ? { cwd } : {}),
+        env: envFor(to),
+        command: resumeArgv,
+      });
+      if (!inPlace) {
+        // The placeholder is still in that pane, and `new-session -A` below
+        // would ATTACH to it rather than start anything. Kill it first.
+        await killTmuxSession(tmuxBinary, tmuxName);
+      }
+    }
+    if (!inPlace && (wrapped || disposed)) {
+      const binding = await registry.launch({
+        sessionId,
+        resumeId: sessionId,
+        ...(cwd !== undefined ? { cwd } : {}),
+        ...(tabTitle !== undefined ? { title: tabTitle } : {}),
+        env: envForProfile(to),
+        profileId: to.id,
+      });
+      if (binding === null) {
+        // The conversation IS on the new account — the bytes and the pin both
+        // moved — it simply has no terminal. Say so rather than claiming a
+        // failure that would send the user looking for a session that is fine.
+        return {
+          ok: true,
+          inPlace: false,
+          skipped: moved.skipped,
+        };
+      }
+    }
+    log(
+      'accounts: switched',
+      shortId(sessionId),
+      '->',
+      to.id,
+      inPlace ? '(in place)' : disposed || wrapped ? '(relaunched)' : '(not running)',
+    );
+    return {
+      ok: true,
+      // Nothing was running, so nothing was lost: vacuously in place.
+      inPlace: inPlace || (!wrapped && !disposed),
+      skipped: moved.skipped,
+    };
   };
 
   let accountsViewController: AccountsViewController | undefined;
@@ -2327,6 +2641,7 @@ export async function activate(
     sessionProfileId: (sessionId) => store.getSessionProfile(sessionId),
     pinSession: (sessionId, profileId) =>
       store.setSessionProfile(sessionId, profileId),
+    switchSessionAccount,
     usage: (profile) => usageCache.get(profile),
     usageMap: () => usageCache.mapFor(store.getAccounts()),
     refreshUsage: (profiles, force) => usageCache.refresh(profiles, { force }),
@@ -2370,6 +2685,94 @@ export async function activate(
   // second call from a visible view a no-op, and every failure inside resolves
   // to "unknown", never a throw.
   void usageCache.refresh(store.getAccounts());
+
+  // ------------------------------------------------- the at-the-limit offer
+  //
+  // OFF BY DEFAULT (CONFIG_KEYS.offerSwitchAtLimit). Flock already knows every
+  // account's five-hour window, and the moment one of them fills is exactly the
+  // moment somebody with a second subscription wants to move the conversation
+  // they were in the middle of — so the extension is in a position to say so
+  // before the user goes looking. It is still an interruption, and one that
+  // proposes another interruption, which is why it is opt-in rather than
+  // merely dismissible.
+  //
+  // ONCE PER WINDOW, keyed on the exhausted window's own reset time: the usage
+  // cache re-reads on a timer, so a naive check would re-offer on every fetch
+  // until the window rolled over. When it does roll over the key changes by
+  // itself, and a conversation that fills the SAME account again gets one fresh
+  // offer, which is right — that is a new thing having happened.
+  const offeredAtLimit = new Map<string, number>();
+
+  /** Non-exhausted accounts this conversation could move to, best first: an
+   *  already-open window beats an untouched one, for the reason routing.ts
+   *  gives — the open window is a sunk cost and spending it is free. */
+  const switchTargetsFor = (
+    from: AccountProfile | null,
+    now: number,
+  ): AccountProfile[] => {
+    const rank = (p: AccountProfile): number =>
+      rankUsage(usageCache.get(p), now) === 'open' ? 0 : 1;
+    return store
+      .getAccounts()
+      .filter(
+        (p) =>
+          switchRefusal(from, p) === null &&
+          rankUsage(usageCache.get(p), now) !== 'exhausted',
+      )
+      .sort((a, b) => rank(a) - rank(b));
+  };
+
+  const maybeOfferSwitchAtLimit = async (): Promise<void> => {
+    if (!boolCfg(CONFIG_KEYS.offerSwitchAtLimit, false)) return;
+    const now = Date.now();
+    const accounts = store.getAccounts();
+    // Sessions THIS window hosts, and only those: the offer restarts a process,
+    // and two windows both proposing to restart the same one is a race with a
+    // dialog in it.
+    for (const sessionId of registry.boundSessionIds()) {
+      try {
+        const from = pinnedProfile(store.getSessionProfile(sessionId), accounts);
+        if (from === null) continue; // no pin, no meter, nothing to be full
+        const snapshot = usageCache.get(from);
+        if (rankUsage(snapshot, now) !== 'exhausted') continue;
+
+        const key = snapshot?.fiveHour?.resetsAt;
+        if (typeof key !== 'number' || !Number.isFinite(key)) continue;
+        if (offeredAtLimit.get(sessionId) === key) continue;
+
+        const [best] = switchTargetsFor(from, now);
+        if (!best) continue; // nowhere to go: the offer would be a complaint
+        offeredAtLimit.set(sessionId, key);
+
+        const label =
+          forest.nodes.get(sessionId)?.label ??
+          store.get(sessionId)?.title ??
+          shortId(sessionId);
+        const MOVE = `Move to ${best.label}`;
+        const choice = await vscode.window.showInformationMessage(
+          `Flock: ${from.label} has used up its five-hour window, and ` +
+            `"${label}" is running on it.`,
+          MOVE,
+        );
+        if (choice !== MOVE) continue;
+        // Through the ordinary verb, with the account already named. The modal
+        // it puts up is not skipped: pressing a notification button is not
+        // consent to restart a process and lose a prompt cache.
+        await vscode.commands.executeCommand(
+          COMMANDS.switchSessionAccount,
+          sessionId,
+          best.id,
+        );
+      } catch (err) {
+        logError('extension.maybeOfferSwitchAtLimit', err);
+      }
+    }
+  };
+  context.subscriptions.push(
+    usageCache.onDidChange(() => {
+      void maybeOfferSwitchAtLimit();
+    }),
+  );
 
   const workspaceManager = new WorkspaceManager({
     getProject: (id) => store.getProject(id),
