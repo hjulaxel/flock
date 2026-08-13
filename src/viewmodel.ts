@@ -26,6 +26,8 @@ import type {
   PullRequest,
   PullRequestChecks,
   PullRequestState,
+  BranchDisplay,
+  SessionBranchDetail,
   SessionForest,
   SessionNode,
   SubprojectNode,
@@ -79,8 +81,8 @@ export function formatTokens(tokens: number | undefined): string {
 }
 
 /**
- * A checkout's standing, as the one short token a branch row has room for:
- * `↑2`, `↓1 *`, `↑3 ↓2 *`.
+ * A checkout's standing against its upstream, as the one short token a branch
+ * row has room for: `↑2`, `↓1`, `↑3 ↓2`.
  *
  * '' when there is nothing to report, which covers BOTH "clean and in sync" and
  * "not read yet" — on a row those two are the same thing, and a row that spent
@@ -89,10 +91,14 @@ export function formatTokens(tokens: number | undefined): string {
  * because it is the one place a permanent fact is worth a full sentence.
  *
  * Ahead before behind, because that is the order the phrase is said in and the
- * order the arrows read in. Dirt last and unnumbered: a count of changed files
- * is a number nobody acts on, where the existence of uncommitted work is the
- * whole of what a branch row can usefully warn about — and it is what Remove
- * Worktree will ask a second time over.
+ * order the arrows read in.
+ *
+ * UNCOMMITTED WORK IS NOT IN HERE, and used to be — `*` was the last token of
+ * this string. It moved to the far side of the branch NAME (see branchIsDirty),
+ * because that is the one thing the mark is about: `feat/x *` says this checkout
+ * has changes in it, where a star at the end of `↑3 ↓2 *` reads as a third
+ * number about the upstream, which it is not. Every surface places it the same
+ * way, the native tree included, so there is still one dialect.
  *
  * Lives here rather than in gitBranches.ts for the same reason formatAge does:
  * this is a RENDERING decision and both surfaces have to make it identically.
@@ -108,8 +114,60 @@ export function formatBranchSync(status: BranchStatus | undefined): string {
   if (Number.isFinite(status.behind) && status.behind > 0) {
     parts.push(`↓${status.behind}`);
   }
-  if (status.dirty || status.untracked) parts.push('*');
   return parts.join(' ');
+}
+
+/**
+ * Is there work in this checkout that is not committed — the `*` that follows a
+ * branch name.
+ *
+ * Modified tracked files and untracked ones both count, and neither is counted:
+ * a number of changed files is a number nobody acts on, where the EXISTENCE of
+ * uncommitted work is the whole of what a branch row can usefully warn about,
+ * and it is what Remove Worktree asks a second time over.
+ *
+ * A predicate rather than a string, because it is drawn as its own element next
+ * to the name on both surfaces and the one that carries a title ("uncommitted
+ * changes") for the pointer.
+ */
+export function branchIsDirty(status: BranchStatus | undefined): boolean {
+  return status !== undefined && (status.dirty === true || status.untracked === true);
+}
+
+/**
+ * Which mark leads a branch — the name of a glyph, shared by both renderers.
+ *
+ * GITHUB'S OWN VOCABULARY, deliberately: somebody arriving from a browser tab
+ * already reads a green arrow as open and a purple merge as landed, and an
+ * extension that invented a fifth convention for the same four states would be
+ * asking them to learn one. The names are codicon ids, which is what lets the
+ * native tree pass this straight to a ThemeIcon while the webview looks the same
+ * string up in its own svg allowlist (ROW_GLYPH_FILES) — one table of names, two
+ * ways of painting it.
+ *
+ *   no request   git-branch                 the mark the line has always had
+ *   draft        git-pull-request-draft     grey: not asking anything yet
+ *   open         git-pull-request           green
+ *   merged       git-merge                  purple: the worktree can go
+ *   closed       git-pull-request-closed    dimmed: over, and it did not land
+ *
+ * A branch with no request keeps `git-branch`, and that is most branches: the
+ * feature is off by default, and with it on plenty of checkouts have no request
+ * yet. The colour, and only the colour, is what the state changes for a reader
+ * scanning the column — see .branch-glyph in webtree.css.
+ */
+export function branchStateIcon(pr: PullRequest | undefined): string {
+  if (!pr) return 'git-branch';
+  switch (pr.state) {
+    case 'draft':
+      return 'git-pull-request-draft';
+    case 'merged':
+      return 'git-merge';
+    case 'closed':
+      return 'git-pull-request-closed';
+    default:
+      return 'git-pull-request';
+  }
 }
 
 /**
@@ -166,6 +224,114 @@ export function formatPullRequestChip(pr: PullRequest): string {
           ? ' •'
           : '';
   return `#${pr.number}${mark}`;
+}
+
+/**
+ * The line drawn under a session: which checkout it is running in, and what
+ * that checkout needs next.
+ *
+ * PRE-FORMATTED, like BranchChip.sync and for the same reason — the client is a
+ * dumb painter, and a decision made here is a decision the native tree cannot
+ * make differently. The two detail levels are the whole of the vocabulary:
+ *
+ *   standard   ⎇ feat/search-ranking *    ↑4
+ *   detailed   ⇡ feat/search-ranking *    ↑4      #128 ✓
+ *              ⑃ fix/csv-import                   #124 merged
+ *              ⎇ spike/preview-cache *   local
+ *
+ * The `*` sits against the NAME rather than at the end of the arrows, because it
+ * is a fact about this checkout and not a third number about its upstream — see
+ * branchIsDirty. The leading mark is `git-branch` until there is a request on the
+ * branch, at which point it takes that request's shape and colour — see
+ * branchStateIcon. Both are drawn by the client from what this returns; neither
+ * is a decision it makes.
+ *
+ * `standard` is not a reduced `detailed`. It is the vocabulary a git prompt and
+ * the SCM view already speak, so the line reads without being learned, and it
+ * reaches nothing but the local status cache — which is why it is the default.
+ *
+ * `detailed` adds exactly two words to it, and both are states the arrows render
+ * as BLANK: `local` for a branch that tracks nothing (never pushed, so ahead and
+ * behind are meaningless rather than zero), and `merged`, which is the one fact
+ * that says a worktree can now be removed. `merged` is a WORD and not the chip's
+ * colour, because the point of moving the branch off the session's name is that
+ * a row should not need colour to be read.
+ *
+ * Note what is deliberately absent at both levels: a "can this be merged" mark.
+ * GitHub computes `mergeable` asynchronously and answers UNKNOWN on a first
+ * read, so the mark would flicker on a row that repaints on a roster tick, and
+ * it would need `gh pr view` per BRANCH where the extension does one `gh pr
+ * list` per repository. Ready-to-merge is the ABSENCE of tokens: a line that
+ * says a branch name and `#128 ✓` and nothing else.
+ */
+export function sessionBranchLine(
+  name: string,
+  status: BranchStatus | undefined,
+  pr: PullRequest | undefined,
+  detail: SessionBranchDetail,
+  /** The worktree this line names. Never drawn — read back by the view when a
+   *  click on the line resolves to a verb, exactly as BranchChip.dir is. */
+  dir = '',
+): SessionBranchLine {
+  const sync = formatBranchSync(status);
+  // THE REQUEST IS THE DETAILED LEVEL'S, and that includes the shape and colour
+  // of the mark. `standard` is the vocabulary a git prompt already speaks and
+  // reaches nothing but the local status cache; a green arrow in it would be the
+  // second dialect the whole level exists to avoid, drawn from a source the level
+  // does not otherwise consult.
+  const state = detail === 'detailed' ? pr : undefined;
+  // The rest is common to both levels, because none of it is about the request:
+  // the star is local, and whether the name is a link is a question about the
+  // upstream.
+  const common = {
+    glyph: branchStateIcon(state),
+    ...(state === undefined ? {} : { state: state.state }),
+    ...(branchIsDirty(status) ? { dirty: true as const } : {}),
+    ...(dir === '' ? {} : { dir }),
+    // A LINK ONLY WHERE THERE IS SOMEWHERE TO GO. `upstream` non-empty is the
+    // probe saying this branch tracks a remote one, which is the only case where
+    // a branch page can exist to open; `''` says it tracks nothing (never
+    // pushed) and `undefined` says nobody has looked. Both of those draw plain
+    // text, so a name that looks clickable always is.
+    ...(typeof status?.upstream === 'string' && status.upstream !== ''
+      ? { link: true as const }
+      : {}),
+  };
+  if (detail !== 'detailed') {
+    // Absent rather than '' when there is nothing to say, so the line reserves
+    // no width for a column it is not using — the rule `sync` follows on a
+    // branch row.
+    return { name, ...common, ...(sync === '' ? {} : { sync }) };
+  }
+  // `local` FIRST, because it qualifies everything after it: it is the reason
+  // there are no arrows, not another fact alongside them. `upstream === ''` is
+  // the probe's way of saying the branch tracks nothing — an unprobed branch has
+  // no status at all and gets no word, since "never pushed" and "not looked at
+  // yet" are different claims and only one of them is ours to make.
+  const detailed =
+    status !== undefined && status.upstream === ''
+      ? ['local', sync].filter((s) => s !== '').join(' ')
+      : sync;
+  return {
+    name,
+    ...common,
+    ...(detailed === '' ? {} : { sync: detailed }),
+    ...(pr === undefined
+      ? {}
+      : {
+          pr: {
+            // A merged request has no checks worth a glyph — they ran, it
+            // landed — so the word takes the glyph's place rather than sitting
+            // beside it.
+            label:
+              pr.state === 'merged'
+                ? `#${pr.number} merged`
+                : formatPullRequestChip(pr),
+            state: pr.state,
+            checks: pr.checks,
+          },
+        }),
+  };
 }
 
 /** The request as sentences, for the hover: the state and the checks in words,
@@ -364,12 +530,7 @@ export type RowKind =
   | 'folder'
   | 'session'
   /** ONE branch, on its own row, inside the project's band. */
-  | 'branch'
-  /** The tail row of a branch block: "Others (12)", which opens a picker of the
-   *  branches this project is not currently showing. Its own kind rather than a
-   *  branch with a flag, because nothing that applies to a branch — hiding it,
-   *  copying its name, starting a session on it — applies to this. */
-  | 'branchOthers';
+  | 'branch';
 
 /**
  * The threshold at which a project's branches become visible.
@@ -424,7 +585,27 @@ export interface BranchChip {
   /** The worktree directory. Round-trips back as the argument to the verb the
    *  row runs, so a click can start a session in the right checkout. */
   dir: string;
-  colorIndex: number;
+  /** Which entry of the branch palette this row takes, in COLOUR mode.
+   *
+   *  Absent in inline mode, and absent is the whole of how the client knows: a
+   *  chip with no colour draws a git-branch mark where the swatch went and takes
+   *  the theme's own foreground for its name. Inline mode says the branch in
+   *  words on every session that needs it, so a palette on top of that is a
+   *  second answer to a question already answered — and the one the reader has
+   *  to learn before it says anything. */
+  colorIndex?: number;
+  /** Which mark stands where the colour swatch would, in INLINE mode — a name
+   *  from the glyph allowlist, chosen by branchStateIcon. In colour mode the
+   *  swatch is the colour key and this is not drawn, because a row cannot be
+   *  both a key and a state at once. */
+  glyph: string;
+  /** The request's state, when there is one: the class the mark and the `#42`
+   *  chip both colour from. See SessionBranchLine.state, which is the same
+   *  field for the same reason. */
+  state?: PullRequestState;
+  /** Uncommitted work in this checkout — the `*` that follows the name, placed
+   *  the same way it is on a session's branch line. */
+  dirty?: true;
   /** Live sessions filed under this branch. Drawn only when non-zero. */
   count: number;
   /** A session on this branch is finished-and-unlooked-at. The same roll-up the
@@ -435,7 +616,7 @@ export interface BranchChip {
    *  refuses it — see hideBranch. */
   primary: boolean;
   /**
-   * Where this checkout stands, PRE-FORMATTED: `↑2 ↓1 *` — see
+   * Where this checkout stands, PRE-FORMATTED: `↑2 ↓1` — see
    * formatBranchSync. A string rather than the BranchStatus it came from,
    * because the client is a dumb painter: handing it three numbers and a flag
    * would put the decision of how they read into the one place that cannot be
@@ -457,6 +638,54 @@ export interface BranchChip {
    * Absent unless `lineage.git.pullRequests` is on AND there is a request on this
    * branch, which for everybody who has not turned it on is always.
    */
+  pr?: {
+    label: string;
+    state: PullRequestState;
+    checks: PullRequestChecks;
+  };
+}
+
+/**
+ * The second line under a session row — see sessionBranchLine, which is the only
+ * thing that builds one.
+ *
+ * Shaped like the half of BranchChip a branch row draws, and deliberately not
+ * reusing that type: a chip is a whole row's click target with a colour index, a
+ * session count and a hide verb, where this is a handful of tokens under a
+ * session's name. Sharing the type would have every reader of a chip asking
+ * which of its fields mean anything here.
+ */
+export interface SessionBranchLine {
+  /** The branch this session's checkout is on. Never elided here — the client
+   *  middle-elides it in CSS, so the full name stays in the DOM for a copy and
+   *  the width decision belongs to the surface that knows the width. */
+  name: string;
+  /** Which mark leads the line — a name from the glyph allowlist, chosen by
+   *  branchStateIcon. `git-branch` until there is a request on the branch. */
+  glyph: string;
+  /** The request's state, when there is one: the CLASS the mark and the chip
+   *  both take their colour from. Absent means the mark stays the theme's own
+   *  icon colour, which is what a branch with no request has always drawn. */
+  state?: PullRequestState;
+  /** Uncommitted work in this checkout — the `*` that follows the name. `true`
+   *  or absent, never `false`: an absent field costs no width, which is the rule
+   *  every optional token on this line follows. */
+  dirty?: true;
+  /** Where the checkout stands: `↑4 ↓3`, and `local …` at the detailed level.
+   *  Absent — not '' — when there is nothing to report. */
+  sync?: string;
+  /** The branch exists on a remote, so its name is a LINK to the branch's page
+   *  there. Decided from the upstream and not from the name: a branch nobody has
+   *  pushed has no page, and a name that looks clickable has to be. */
+  link?: true;
+  /** The worktree directory this line names. NEVER DRAWN. It is here for the
+   *  same reason BranchChip.dir is: a click on the line names a row, and the
+   *  extension reads the directory out of the model it posted rather than
+   *  letting the page name a path. */
+  dir?: string;
+  /** The pull request, at the DETAILED level only. `state` and `checks` travel
+   *  as words for the same reason they do on a chip: they are class names on the
+   *  far side, and the client picks a colour from them rather than a phrase. */
   pr?: {
     label: string;
     state: PullRequestState;
@@ -573,6 +802,9 @@ export interface ViewRow {
   context: Record<string, string | boolean>;
   tooltip: string;
   sessionId?: string;
+  /** Which project this row belongs to. Every project, subproject and branch row
+   *  carries it; a SESSION row carries it only when it drew a branch line, where
+   *  it is what the line's links resolve through. */
   projectId?: string;
   cwd?: string;
   /** `kind === 'branch'` only: the branch this row IS. Named `chip` rather than
@@ -580,14 +812,32 @@ export interface ViewRow {
    *  the branch a session is running on — two different things that would
    *  otherwise share a field name on the same type. */
   chip?: BranchChip;
-  /** `kind === 'branchOthers'` only: how many branches are folded away behind
-   *  this row. Always ≥ 1 — the row is not emitted at zero. */
-  othersCount?: number;
-  /** Session rows only: which branch colour the NAME takes. Set only under a
-   *  project with BRANCH_CHIPS_MIN branches or more — see that constant. Absent
-   *  means "paint the name the way you always did", which is what every row in a
-   *  single-branch or non-git project gets. */
+  /** Session rows only: which branch colour the NAME takes. Set only in COLOUR
+   *  mode (`lineage.git.branchDisplay: color`), and only under a project with
+   *  BRANCH_CHIPS_MIN branches or more — see that constant. Absent means "paint
+   *  the name the way you always did", which is what every row in a single-branch
+   *  or non-git project gets, and what every row gets in inline mode.
+   *
+   *  MUTUALLY EXCLUSIVE with `branchLine`, and that exclusion is the whole of
+   *  what the two modes are: a colour says "these two are on the same thing" in
+   *  no width at all and never says WHICH thing; a line says which, and costs a
+   *  row's height. Both marks at once is one too many — the tint is the one that
+   *  competes with the status dot the tree is actually read for. */
   branchColor?: number;
+  /**
+   * Session rows only: the branch, said on a SECOND LINE under this row.
+   *
+   * Present only under `branchDisplay: inline`, and only on the rows where
+   * it says something new — a session whose checkout differs from the one above
+   * it in its spine, in a project with more than one checkout. A fork made in
+   * its parent's worktree gets none: repeating a branch name down a spine is
+   * noise, and the spine is already drawn.
+   *
+   * A row carrying this is TWO LINES TALL. It is the only field in this model
+   * that changes a row's height, which is why the setting behind it is off by
+   * default and why `.row` can no longer assume `--row-height`.
+   */
+  branchLine?: SessionBranchLine;
   /** Session rows only: the branch this session's cwd is in. Always set when it
    *  is known, even where `branchColor` is not, because the hover can afford a
    *  fact the row has no width for — a single-branch project still answers
@@ -600,20 +850,12 @@ export interface ViewModelInput {
   grouping: GroupingResult;
   /** Row keys the user has explicitly collapsed. Default is expanded. */
   collapsed: ReadonlySet<string>;
-  /**
-   * Row keys the user has explicitly OPENED, for the rows whose default is shut.
-   *
-   * A second set rather than a second meaning for `collapsed`, which is the field
-   * every other row reads and which means exactly one thing: "the user closed
-   * this". Exactly one row kind defaults to shut — the branch fold, which stands
-   * for every branch in a repository and would otherwise cost a hundred rows the
-   * moment a project row opened — and inverting the sense of the shared set for
-   * that one case is how a renderer ends up drawing a row nobody asked for.
-   *
-   * Optional: absent means nothing has been opened, so every fold is shut, which
-   * is the correct starting state.
-   */
-  opened?: ReadonlySet<string>;
+  /* There was an `opened` set here, the complement of `collapsed`, and exactly
+   * one row kind ever used it: the branch fold, whose default was shut. That row
+   * is gone — the whole block is what defaults shut now, per project and per
+   * mode — so a second set with the opposite sense would be a field no row
+   * reads. What the block remembers is `branchesShown` on the project
+   * record, which outlives a window where this never did. */
   providerFor(sessionId: string): ProviderId;
   isBoundHere(sessionId: string): boolean;
   /** The webview's own view id, needed in the row context so `when` clauses can
@@ -628,6 +870,50 @@ export interface ViewModelInput {
    *  row for the worktree they run in. Absent = off, which is the setting's
    *  default and the layout every existing test describes. */
   groupByBranch?: boolean;
+  /**
+   * `lineage.git.branches` — draw the branch BLOCK: a row per branch, the fold,
+   * and "Others".
+   *
+   * The renderer's half of a gate whose other half is GroupingInput.sessionBranch.
+   * That one decides whether the branch list gets BUILT, and it now says yes for
+   * either of two settings; this one decides whether the list gets DRAWN, and it
+   * still answers only to the block's own switch. Without the split, turning the
+   * session line on would have silently added a row per branch to every project.
+   *
+   * Absent reads as ON — every caller that filled `branches` at all, before the
+   * session line existed, meant them to be drawn, and that is every existing
+   * test.
+   */
+  branchBlock?: boolean;
+  /**
+   * `lineage.git.branchDisplay` — HOW a session says which worktree it is in.
+   * Two answers, and they are alternatives rather than levels:
+   *
+   *   color    the session's NAME is tinted from a per-branch palette, and the
+   *            project's branch block is the key to it — one coloured row per
+   *            checkout, open by default because a legend nobody can see is not
+   *            one. No second line. What the arrows would have said lives in the
+   *            hover, which is where this mode puts everything it cannot draw.
+   *   inline   the branch is said in WORDS on a line under the session, and the
+   *            name goes back to the theme's own colour. The block is not a
+   *            legend here — nothing needs decoding — so it is shut until asked
+   *            for, and it becomes the place you go to act on a branch.
+   *
+   * Absent reads as `inline`, matching DEFAULT_BRANCH_DISPLAY: this setting is
+   * only ever read once somebody has turned the branch feature on, so there is no
+   * existing tree to keep identical — the question is which mode a person meets
+   * it in, and that is the one that says which branch in words.
+   */
+  branchDisplay?: BranchDisplay;
+  /** `lineage.git.sessionBranchDetail` — how much the inline line says. Absent
+   *  reads as 'standard'. Moot in colour mode, which has no line. */
+  sessionBranchDetail?: SessionBranchDetail;
+  /** `lineage.git.newSessionInWorktree` — whether the `+` on a project or
+   *  subproject row cuts a worktree first. Absent reads as off, which is the
+   *  setting's default and the button every existing test describes. Read here
+   *  only to TITLE the button; what it does is decided in commands.ts, off the
+   *  same setting. */
+  newSessionInWorktree?: boolean;
   /** Who is running each session (src/hosts.ts). Drives the ownership token
    *  pair, the `elsewhere` marker and one hover line. Optional so an older
    *  wiring (and every unit double) renders exactly the rows it did before
@@ -659,9 +945,6 @@ export interface ViewModelInput {
    */
   directoryModel?: boolean;
 }
-
-/** Shared empty set, so the common case allocates nothing per paint. */
-const EMPTY_KEYS: ReadonlySet<string> = new Set<string>();
 
 export const sessionRowKey = (id: string): string => `session:${id}`;
 export const projectRowKey = (id: string): string => `project:${id}`;
@@ -705,11 +988,14 @@ export const branchRowKey = (
   branch: string,
   subprojectId?: string,
 ): string => `branch:${projectId}:${branch}${branchScopeSuffix(subprojectId)}`;
-/** The fold at the tail of a branch block, scoped the same way and for the same
- *  reason: two rows of one project each have their own fold, and one collapse
- *  state between them would open both. */
-export const othersRowKey = (projectId: string, subprojectId?: string): string =>
-  `others:${projectId}${branchScopeSuffix(subprojectId)}`;
+/* The branch block had a tail row once — "Others (12)" / "Branches (183)" — and
+ * it is gone. It was a fold inside a fold: the whole block is now hidden until
+ * **Show Branches** is picked off the project's own menu, and a second door
+ * one row further down, standing for rows you had already asked to see, was the
+ * part of the layout nobody could read. What it stood for did not go anywhere —
+ * **Choose Branches to Show…** on the same menu promotes any branch in the
+ * repository onto the list, which is the curation decision the row was really
+ * offering. */
 
 /**
  * ONE BRANCH, one row.
@@ -723,7 +1009,7 @@ export const othersRowKey = (projectId: string, subprojectId?: string): string =
  * to come from.
  *
  * The cost is real and is why the fold exists: N branches is N rows before the
- * first session. That is what `branchesCollapsed` and the default-hidden policy
+ * first session. That is what `branchesShown` and the default-hidden policy
  * (defaultBranchVisibility) are for — the block is meant to be curated down to
  * the few branches you are actually working on, not to list the repository.
  *
@@ -912,7 +1198,7 @@ function branchRow(
         ? place.expandable
           ? 'Click to show its sessions · + starts a new one here'
           : 'Click to start a session here'
-        : 'New Worktree… to check it out somewhere',
+        : '+ checks it out and starts a session there',
     ]
       .filter((line) => line !== '')
       .join('\n'),
@@ -920,103 +1206,30 @@ function branchRow(
     cwd: chip.dir,
     chip,
   };
-  // Grouped, a click TOGGLES the row, so the verb it used to run needs a button
-  // of its own — the same trade the project header made when the chips took its
-  // `+` away, in the other direction. Ungrouped there is no button: the whole
-  // row already is one.
+  // EVERY branch row carries the `+`, including a branch with no checkout.
   //
-  // Never on a branch with no checkout: a `+` there would have to invent a
-  // directory, which is `git worktree add` — a verb that creates a directory and
-  // a ref, and one this extension only ever runs from an explicit confirmation.
-  // The context menu's **New Worktree…** is that path, and it is the whole of what
-  // the row offers.
-  if (place.expandable && checkout) {
-    row.actions = [
-      { id: 'newSessionInBranch', icon: 'add', title: `New session on ${chip.full}` },
-    ];
-  }
-  return row;
-}
-
-/**
- * The tail of a branch block: "Others (12)", or — under the directory model —
- * "Branches (183)", the door to every branch in the repository.
- *
- * The reason the promotion policy can afford to be as narrow as it is. Without
- * it, a repository with a hundred and eighty branches would either cost a hundred
- * and eighty rows or silently lose a hundred and seventy-eight of them; with it,
- * the block above stays the size of the work in flight and the whole repository
- * is one click below it.
- *
- * TWO BEHAVIOURS, and which one it has depends on whether the rows it stands for
- * exist:
- *
- *   - project-level block (the preview off): the branches are the project's
- *     checkouts, the fold is NOT expandable, and clicking it opens the
- *     **Show Branches…** picker — because there is no complete list to expand
- *     into, only a curation decision to change.
- *   - directory block (the preview on): the fold IS expandable and the branches
- *     are underneath it, because the list is now genuinely complete. Nothing to
- *     pick from a modal when the answer is a row you can click.
- *
- * Deliberately NOT a branch row with a flag either way. Nothing that applies to a
- * branch applies to the fold — there is no worktree to start a session in, no
- * name to copy, nothing to hide — so it carries its own context token and its own
- * verb.
- */
-function othersRow(
-  el: ProjectGroupNode,
-  count: number,
-  viewId: string,
-  place: {
-    depth: number;
-    indent: number;
-    /** Scopes the key to one row of the project. See branchScopeSuffix. */
-    subprojectId?: string;
-    /** The fold opens onto the branches themselves rather than into a picker. */
-    expandable?: boolean;
-    expanded?: boolean;
-    /** What the fold is called. 'Branches' when it stands for the whole
-     *  repository, 'Others' when it stands for the part of a curated list that is
-     *  not on screen — the two are different promises and must not share a word. */
-    label?: string;
-  },
-): ViewRow {
-  const expandable = place.expandable === true;
-  const label = place.label ?? 'Others';
-  return {
-    key: othersRowKey(el.projectId, place.subprojectId),
-    kind: 'branchOthers',
-    depth: place.depth,
-    indent: place.indent,
-    label,
-    // The count is the whole content of this row: it is the difference between
-    // "there is more" and "there are twelve more", and the second is what
-    // decides whether you go looking.
-    description: String(count),
-    expandable,
-    expanded: expandable && place.expanded !== false,
-    icon: { type: 'codicon', id: 'none' },
-    muted: true,
-    closed: false,
-    canRename: false,
-    canDrag: false,
-    rails: [],
-    descends: false,
-    context: {
-      webviewSection: 'branchOthers',
-      webviewId: viewId,
-      type: 'project',
-      projectId: el.projectId,
-      viewItem: contextValueOf(['branchOthers']),
-      preventDefaultContextMenuItems: true,
+  // It used to be withheld there, and the argument was that a `+` on a ref would
+  // have to invent a directory — `git worktree add`, a verb that writes. That
+  // argument survives; what changed is where it points. Somebody looking at a
+  // branch row wants a session on that branch, and whether a checkout for it
+  // happens to exist yet is Flock's problem rather than a reason to make them
+  // find a different verb: the `+` runs the worktree flow first and starts the
+  // session in what it made. The confirmation quoting the exact `git worktree
+  // add` is still there — see newSessionInBranch — so nothing writes without
+  // being shown first. The button is now the one place a branch row can be
+  // ACTED on, which is why it no longer waits for the row to be expandable
+  // either: ungrouped, clicking a checkout row already starts a session, but a
+  // ref has nothing a plain click could mean.
+  row.actions = [
+    {
+      id: 'newSessionInBranch',
+      icon: 'add',
+      title: checkout
+        ? `New session on ${chip.full}`
+        : `New worktree and session on ${chip.full}`,
     },
-    tooltip: expandable
-      ? `${count} more branch${count === 1 ? '' : 'es'} in this repository\nClick to show them`
-      : `${count} branch${count === 1 ? '' : 'es'} not shown in ${el.label}\nClick to choose which to show`,
-    projectId: el.projectId,
-    othersCount: count,
-  };
+  ];
+  return row;
 }
 
 /**
@@ -1174,9 +1387,6 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
   const rows: ViewRow[] = [];
   const forest = input.forest;
   const collapsed = input.collapsed;
-  /** The rows whose default is SHUT and that the user has opened. Empty unless
-   *  the caller tracks them — see ViewModelInput.opened. */
-  const opened = input.opened ?? EMPTY_KEYS;
   /** `lineage.preview.directoryModel`. Read once so no row can disagree with
    *  another about which layout it is in. */
   const dirModel = input.directoryModel === true;
@@ -1193,8 +1403,61 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
   // per session because membership is a PROJECT's answer: the same directory
   // can be a worktree of one project and merely a subdirectory of another, and
   // a global lookup would colour a row by whichever it met first.
-  let branchScope: { branches: readonly BranchInfo[]; colored: boolean } | null =
-    null;
+  let branchScope: {
+    branches: readonly BranchInfo[];
+    colored: boolean;
+    /** The repository's MAIN worktree, for the pull-request lookup — one
+     *  directory per repository, so six checkouts ask `gh` once. Empty when the
+     *  scope has no branches to anchor on, which the lookup reads as "no
+     *  request", the same answer a project without `gh` gets. */
+    repoDir: string;
+    /** Whose branches these are. Carried so a session's branch LINE can name its
+     *  project back to the view — the line's two links resolve through the same
+     *  (projectId, dir) pair a branch row's click does, and a session row has no
+     *  project of its own to read it off. */
+    projectId: string;
+  } | null = null;
+  /** `lineage.git.branchDisplay`, read once. Two rows depend on it and they must
+   *  not disagree: the line goes on exactly when the tint comes off. */
+  const inlineMode = input.branchDisplay !== 'color';
+  /** `lineage.git.newSessionInWorktree`, read once for the same reason: it is
+   *  what every `+` in the tree TITLES itself with, and two rows disagreeing
+   *  about what the button does is worse than either answer. */
+  const worktreeDefault = input.newSessionInWorktree === true;
+  const sessionBranchDetail: SessionBranchDetail =
+    input.sessionBranchDetail === 'detailed' ? 'detailed' : 'standard';
+
+  /**
+   * The two git lookups, read through a `safe`-less contract: a lookup that
+   * throws is a lookup that answered nothing, and a row with no numbers is a
+   * valid row.
+   *
+   * At buildViewModel scope rather than inside pushProject because the branch
+   * BLOCK and the line under a SESSION both ask them, and two copies of a
+   * try/catch around the same cache is how one of them ends up handling a throw
+   * differently from the other.
+   */
+  const statusFor = (dir: string): BranchStatus | undefined => {
+    try {
+      return input.branchStatusOf?.(dir);
+    } catch {
+      return undefined;
+    }
+  };
+  const prFor = (repoDir: string, branch: string): PullRequest | undefined => {
+    if (repoDir === '') return undefined;
+    try {
+      return input.pullRequestFor?.(repoDir, branch);
+    } catch {
+      return undefined;
+    }
+  };
+  /** The repository's anchor for a set of branches: ONE directory per project,
+   *  so a project with six checkouts asks `gh` once for an answer that is the
+   *  same from any of them. The main worktree, because git lists it first and
+   *  buildBranches keeps it first, which makes it the one stable choice. */
+  const repoDirOf = (branches: readonly BranchInfo[]): string =>
+    (branches.find((b) => b.primary) ?? branches[0])?.dir ?? '';
 
   // The preorder list, indexed, so a project row can find the children it has
   // to draw underneath itself. Built once per model rather than per row.
@@ -1212,6 +1475,12 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
     depth: number,
     rails: boolean[],
     indent: number,
+    /** Which branch the row ABOVE this one in the spine is on, as an index into
+     *  the current scope — or -1 for a root, which has nothing above it and
+     *  therefore always says its branch. Threaded rather than looked up because
+     *  it is the same kind of fact `rails` is: a question about a node this row
+     *  has never met. */
+    parentBranchAt = -1,
   ): void => {
     const node = forest.nodes.get(id);
     if (!node) return;
@@ -1341,6 +1610,50 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
       // ViewRow.branch.
       if (branchScope.colored) row.branchColor = branch.colorIndex;
       row.tooltip += `\nbranch: ${branch.name}`;
+      // The second line, on the rows where it says something the row above did
+      // not. `parentBranchAt` is the whole of that test: -1 for a root, so every
+      // root speaks, and equal for a fork that stayed in its parent's checkout,
+      // so it stays quiet. Compared as INDEXES into one scope rather than by
+      // name — two directories of a project can be two repositories with a
+      // branch called `main` in each, and by name those would read as the same
+      // checkout.
+      //
+      // Suppressed under branch GROUPING, where the branch row this session
+      // hangs off already says it, one line up and in bigger type.
+      if (
+        inlineMode &&
+        branchAt !== parentBranchAt &&
+        branchScope.branches.length >= BRANCH_CHIPS_MIN &&
+        input.groupByBranch !== true
+      ) {
+        // ONE lookup of each, reused by the line and by the hover below. Not two
+        // that happen to agree: `prFor` is a cache read on a render path, and a
+        // row that asked twice would double the traffic through it for an answer
+        // it already had.
+        const status = statusFor(branch.dir);
+        const pr =
+          sessionBranchDetail === 'detailed'
+            ? prFor(branchScope.repoDir, branch.name)
+            : undefined;
+        row.branchLine = sessionBranchLine(
+          branch.name,
+          status,
+          pr,
+          sessionBranchDetail,
+          branch.dir,
+        );
+        // The project the line's links resolve against. Set HERE and only here —
+        // on a session row it means "the project whose branch this line names",
+        // which is a claim only a row carrying a branch line can make.
+        row.projectId = branchScope.projectId;
+        // AND THE SAME FACTS IN SENTENCES, which is what a hover is for. The
+        // line itself is four glyphs and a number; a green mark and `↑4 *` are
+        // exactly the kind of shorthand that has to be spelled out SOMEWHERE,
+        // and this is the row's one tooltip. The same two functions the native
+        // tree's branch row hovers with, so the words do not differ by surface.
+        const lines = [...branchStatusLines(status), ...pullRequestLines(pr)];
+        if (lines.length > 0) row.tooltip += `\n${lines.join('\n')}`;
+      }
     }
     // A struck-through bell, right of the name. Muting is a decision the user
     // made about ONE session and then has no way to see: the dot it suppresses
@@ -1366,7 +1679,17 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
         // on below the child unless the child is the last one hanging off it.
         // `indent` is passed straight down: a fork is nested by the SPINE, not
         // by padding, and the project it is filed under has not changed.
-        pushSession(kids[i], depth + 1, [...rails, i < kids.length - 1], indent);
+        //
+        // `branchAt` goes down as the child's parentBranchAt — THIS row's
+        // checkout, not the one the walk started at, so a fork that moved
+        // worktrees says so and a fork under it that moved back says so again.
+        pushSession(
+          kids[i],
+          depth + 1,
+          [...rails, i < kids.length - 1],
+          indent,
+          branchAt,
+        );
       }
     }
   };
@@ -1376,7 +1699,12 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
     drawnProjects.add(el.projectId);
     const key = projectRowKey(el.projectId);
     const branches = el.branches ?? [];
-    const active = branches.length >= BRANCH_CHIPS_MIN;
+    // `active` is "this project has enough branches for the block to be worth
+    // rows"; `branchBlock` is "the user asked for branch rows at all". They came
+    // apart when the session line got its own switch: the grouping now fills
+    // `branches` for EITHER switch, so a non-empty list no longer implies that
+    // anybody wants it drawn. See ViewModelInput.branchBlock.
+    const active = branches.length >= BRANCH_CHIPS_MIN && input.branchBlock !== false;
     // The project's directories, once there is more than one of them. When there
     // are, THEY hold the sessions and the project row holds nothing but them.
     const subprojects = el.subprojects ?? [];
@@ -1392,37 +1720,28 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
     // branch is a view preference — and a session claimed by a branch row and a
     // subproject row at once would be drawn twice.
     const grouped = active && !split && input.groupByBranch === true;
-    /** The checkout's standing, read through the same `safe`-less contract every
-     *  other input here has: a lookup that throws is a lookup that answered
-     *  nothing, and a branch row with no numbers is a valid branch row. */
-    const statusOf = (dir: string): BranchStatus | undefined => {
-      try {
-        return input.branchStatusOf?.(dir);
-      } catch {
-        return undefined;
-      }
-    };
-    // The repository's anchor: ONE directory per project, so a project with six
-    // checkouts asks `gh` once for an answer that is the same from any of them.
-    // The main worktree, because git lists it first and buildBranches keeps it
-    // first, which makes it the one stable choice.
-    const repoDir = (branches.find((b) => b.primary) ?? branches[0])?.dir ?? '';
-    const prOf = (branch: string): PullRequest | undefined => {
-      if (repoDir === '') return undefined;
-      try {
-        return input.pullRequestFor?.(repoDir, branch);
-      } catch {
-        return undefined;
-      }
-    };
+    // See statusFor / prFor / repoDirOf, which every branch-shaped row in this
+    // model shares. `prOf` binds the anchor once so the branch rows below — and
+    // the directory block nested inside this function — all ask about the same
+    // repository, which is the property the anchor exists to have.
+    const repoDir = repoDirOf(branches);
+    const prOf = (branch: string): PullRequest | undefined =>
+      prFor(repoDir, branch);
     const toChip = (b: BranchInfo): BranchChip => {
-      const sync = formatBranchSync(statusOf(b.dir));
-      const pr = prOf(b.name);
+      const status = statusFor(b.dir);
+      const sync = formatBranchSync(status);
+      const pr = prFor(repoDir, b.name);
       return {
         name: b.name,
         full: b.name,
         dir: b.dir,
-        colorIndex: b.colorIndex,
+        // Colour mode only — see BranchChip.colorIndex.
+        ...(inlineMode ? {} : { colorIndex: b.colorIndex }),
+        // The state mark and the star, placed exactly as the line under a
+        // session places them: one vocabulary, whichever row you are reading.
+        glyph: branchStateIcon(pr),
+        ...(pr === undefined ? {} : { state: pr.state }),
+        ...(branchIsDirty(status) ? { dirty: true as const } : {}),
         count: b.rootIds.length,
         attention: subtreeHasUnseen(forest, b.rootIds),
         primary: b.primary,
@@ -1449,7 +1768,49 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
     const hiddenCount = active
       ? branches.filter((b) => !b.shown).length
       : 0;
-    const folded = active && el.branchesCollapsed === true;
+    // SHUT UNTIL ASKED FOR, in both modes and on every project.
+    //
+    // A project with six checkouts was six rows before its first session, for
+    // everybody who turned the feature on, forever. Nothing about a branch row
+    // is urgent: which branch a session is on is said on the session's own row,
+    // and the block is where you go to ACT on a branch — start a session there,
+    // cut or remove a worktree. That is occasional, and occasional things are
+    // asked for rather than kept on screen.
+    //
+    // `branchesShown === true` is the ONLY thing that draws it — a positive
+    // record, written by **Show Branches** and remembered per project, so a
+    // repository you work this way stays open. Absent and false both read as
+    // shut, which is what every project that has never been asked gets.
+    //
+    // The ONE exception is `lineage.groupSessionsByBranch`: there the branch
+    // rows are what the sessions hang off, so hiding them by default would
+    // silently undo the setting the user just turned on.
+    // THE FOLD IS THE PROJECT'S, NOT THE PROJECT-LEVEL BLOCK'S — and that
+    // distinction is a bug fix, not a refinement. `active` is false for a SPLIT
+    // project under the directory model, because there the branches live on the
+    // directory rows and `el.branches` is empty by design (see computeGrouping).
+    // Reading the fold through `active` therefore left every directory block
+    // drawing its rows unasked, which is the one thing the fold exists to stop.
+    //
+    // So `blockFolded` answers only "has this project been asked to show its
+    // branches", and each block below applies it to whatever branches it has.
+    const blockFolded = grouped ? el.branchesShown === false : el.branchesShown !== true;
+    const folded = active && blockFolded;
+    // How many branches the fold's own button stands for. The project's list
+    // when it has one, its directories' lists summed when the directory model
+    // moved them there — the button says "Show 6 branches" either way, and a
+    // count that only knew about one of the two shapes would say nothing at all
+    // on exactly the projects this feature is for.
+    const dirBranchCount = subprojects.reduce(
+      (n, node) => n + (node.branches ?? []).length,
+      0,
+    );
+    // Whether there is a BLOCK to fold at all, in either shape. The toggle is
+    // drawn off this, so a split project under the directory model gets one too.
+    const hasBlock =
+      input.branchBlock !== false &&
+      (active || (dirModel && dirBranchCount >= BRANCH_CHIPS_MIN));
+    const foldCount = active ? chips.length : dirBranchCount;
     // Always expandable, even empty: collapsing an empty project would hide the
     // only affordance it has, and an expandable row with nothing under it reads
     // correctly as "nothing running here yet".
@@ -1523,28 +1884,39 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
       // `newSession` sits to the RIGHT of it, which is the order they are
       // reached for: the chat is the throwaway question, the `+` is the piece
       // of work. Starting one is the single most common thing anybody does on
-      // a project row and it was previously two clicks through a context menu.
+      // a project row.
       //
-      // The `+` is WITHDRAWN once the chip row is present. A `+` on the
-      // project has to pick a directory for you, and it picks rootDir — which,
-      // for somebody running one agent per worktree, is the one checkout they
-      // are least likely to have meant. With chips on screen every branch is a
-      // click and each one says where it starts; keeping a button whose whole
-      // job is a silent guess at the same question, right next to the row that
-      // answers it explicitly, is how you get sessions in the wrong worktree.
-      // Below the threshold there are no chips and the `+` is still the only
-      // one-click way to start anything, so it stays.
-      // The FOLD sits leftmost of the three, because it is the only one that
-      // acts on the rows below rather than creating something new — and because
-      // it must not move when the `+` comes and goes.
+      // THE `+` IS BACK ON EVERY PROJECT AND EVERY SUBPROJECT, unconditionally.
+      // It used to be withdrawn wherever branch rows or directory rows were on
+      // screen, because a `+` on the project has to pick a directory and it
+      // picks rootDir — a silent guess, next to rows that answer the same
+      // question explicitly. What makes it honest again is
+      // `lineage.git.newSessionInWorktree`: the button now has a stated meaning
+      // in both positions — start here, or cut a worktree and start there — and
+      // the title says which, on every row, before it is clicked. A guess you
+      // can read is not a guess.
+      //
+      // The FOLD sits leftmost, before both, because it is the only one that
+      // acts on the rows below rather than creating something new.
+      //
+      // A BRANCH GLYPH, not a chevron. A chevron is the tree's own word for
+      // "this row opens", and it is already spoken twice on this row — by the
+      // twisty at its left, which opens the project. A third one, pointing the
+      // same way and opening something else, says only "more of the same is
+      // below"; the git-branch mark says WHAT is below, which is the one thing
+      // the button has to answer before it is worth a slot.
+      //
+      // The same glyph in both positions, deliberately. The state is the block
+      // itself — rows on screen or not — and a button that changed shape to
+      // report a fact already occupying six rows would be the third mark for it.
       actions: [
-        ...(active
+        ...(hasBlock
           ? [
               {
-                id: folded ? 'unfoldBranches' : 'foldBranches',
-                icon: folded ? 'chevron-right' : 'chevron-down',
-                title: folded
-                  ? `Show ${chips.length} branch${chips.length === 1 ? '' : 'es'}`
+                id: blockFolded ? 'unfoldBranches' : 'foldBranches',
+                icon: 'git-branch',
+                title: blockFolded
+                  ? `Show ${foldCount} branch${foldCount === 1 ? '' : 'es'}`
                   : 'Hide branches',
               },
             ]
@@ -1554,20 +1926,13 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
         // exactly the behaviour that changed — and the old chats are one
         // right-click away under View Chat History.
         { id: 'chat', icon: 'chat', title: `New chat in ${el.label}` },
-        // Withdrawn for the SAME reason the chip row withdraws it, one model
-        // later: a `+` here has to pick a directory, and with the directories
-        // themselves on screen — each carrying its own `+` that says where it
-        // starts — a button whose whole job is a silent guess at that question is
-        // how sessions end up in the wrong one.
-        ...(active || split
-          ? []
-          : [
-              {
-                id: 'newSession',
-                icon: 'add',
-                title: `New Session in ${el.label}`,
-              },
-            ]),
+        {
+          id: 'newSession',
+          icon: 'add',
+          title: worktreeDefault
+            ? `New session in a new worktree of ${el.label}`
+            : `New session in ${el.label}`,
+        },
       ],
     };
     if (hasUnseen) {
@@ -1603,6 +1968,10 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
       depth: number;
       indent: number;
     }): readonly string[] => {
+      // The row this block hangs off — the project header, or the directory row
+      // — is the last one pushed before any of these. It is what carries the
+      // "not shown" count, so it is caught before the block adds rows of its own.
+      const foldOwnerAt = rows.length - 1;
       const promoted = opts.branches.filter((b) => b.shown);
       const inFold = opts.branches.filter((b) => !b.shown);
       const scope =
@@ -1634,7 +2003,7 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
               ...scope,
               age: formatBranchAge(branch.lastCommitAt, input.now),
             },
-            statusOf(chip.dir),
+            statusFor(chip.dir),
             prOf(chip.full),
           ),
         );
@@ -1644,51 +2013,27 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
         }
       }
 
-      // The tail of the list rather than a peer of it: everything above is work in
-      // flight, and this is the door to the rest of the repository. Expandable,
-      // because under this model the rows behind it genuinely exist — see
-      // othersRow for why the project-level fold opens a picker instead.
-      if (inFold.length > 0) {
-        const foldKey = othersRowKey(el.projectId, opts.subprojectId);
-        // SHUT BY DEFAULT, which is what makes "show every branch on the machine"
-        // affordable: a hundred and eighty branches cost one row until asked for.
-        // `collapsed` holds the rows the user has shut, so the default has to be
-        // expressed the other way round — a fold is open only once its key is in
-        // the OPENED set.
-        const open = opened.has(foldKey);
-        rows.push(
-          othersRow(el, inFold.length, input.viewId, {
-            depth: opts.depth,
-            indent: opts.indent,
-            ...scope,
-            expandable: true,
-            expanded: open,
-            label: 'Branches',
-          }),
-        );
-        if (open) {
-          for (const branch of inFold) {
-            const chip = toChip(branch);
-            rows.push(
-              branchRow(
-                el,
-                chip,
-                input.viewId,
-                {
-                  depth: opts.depth + 1,
-                  indent: opts.indent,
-                  // Never a container. A branch in the fold has no sessions — that
-                  // is what put it there — so there is nothing to open onto.
-                  expandable: false,
-                  expanded: false,
-                  ...scope,
-                  age: formatBranchAge(branch.lastCommitAt, input.now),
-                },
-                statusOf(chip.dir),
-                prOf(chip.full),
-              ),
-            );
-          }
+      // NOTHING FOR THE REST OF THE REPOSITORY, and that is the change: the rows
+      // behind `inFold` used to sit under a "Branches (183)" fold at the tail of
+      // this block. A fold inside a fold — the block itself is now hidden until
+      // **Show Branches** is picked off the directory's menu — is one door too
+      // many, and it was the row nobody could read: an italic header with a
+      // number, three indents deep, standing for rows that were never asked for.
+      //
+      // The branches did not become unreachable. **Choose Branches to Show…** on
+      // the same menu lists every one of them and promotes what you pick onto
+      // this block permanently, which is the decision the fold was really
+      // offering — and it costs a modal instead of a hundred and eighty rows.
+      //
+      // What the fold row said that nothing else did is the COUNT, so it moves
+      // onto the hover of the row this block belongs to. "There are 178 more"
+      // is the fact that sends somebody to the menu; without it the menu is a
+      // door with nothing written on it.
+      if (inFold.length > 0 && rows.length > 0) {
+        const owner = rows[foldOwnerAt];
+        if (owner) {
+          owner.tooltip +=
+            `\n${inFold.length} branch${inFold.length === 1 ? '' : 'es'} not shown`;
         }
       }
 
@@ -1720,8 +2065,15 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
     // rows the block is worth, never about the sessions underneath, and a
     // session that lost its colour because you tidied the list above it would
     // read as having moved.
-    branchScope = { branches, colored: active };
-    if (!folded && dirModel && !split) {
+    // `colored: active && !inlineMode` is the mutual exclusion, made in the
+    // one place both surfaces read — see ViewRow.branchColor.
+    branchScope = {
+      branches,
+      colored: active && !inlineMode,
+      repoDir,
+      projectId: el.projectId,
+    };
+    if (!blockFolded && dirModel && !split) {
       // THE PROJECT ROW IS ITS DIRECTORY when there is only one of them, so its
       // branches hang here — one indent in, exactly where the checkouts used to.
       loose = pushDirectoryBranches({
@@ -1730,7 +2082,7 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
         depth: level + 1,
         indent: level,
       });
-    } else if (!folded) {
+    } else if (!blockFolded) {
       for (const chip of chips) {
         // Grouped, a branch with nothing in it stays a plain click-to-start
         // row: an expandable row that opens onto nothing is a control that
@@ -1749,7 +2101,7 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
               expandable: expandableChip,
               expanded: !collapsed.has(chipKey),
             },
-            statusOf(chip.dir),
+            statusFor(chip.dir),
             prOf(chip.full),
           ),
         );
@@ -1759,17 +2111,10 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
           pushSession(id, level + 2, [], level + 1);
         }
       }
-      // Last, after every branch that IS shown, because it is the tail of the
-      // list rather than a peer of it: everything above is on screen, and this
-      // is the door to what is not.
-      if (hiddenCount > 0) {
-        rows.push(
-          othersRow(el, hiddenCount, input.viewId, {
-            depth: level + 1,
-            indent: level,
-          }),
-        );
-      }
+      // No tail row for the branches that are NOT shown — see the note in
+      // pushDirectoryBranches. The count still reaches the user: it is on the
+      // project row's hover, and **Choose Branches to Show…** on its menu is the
+      // picker the row used to open.
     }
 
     // SPLIT BY DIRECTORY. Each of the project's directories, in the order the
@@ -1810,10 +2155,21 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
           // is on IN ITS OWN repository — two directories of one project can be
           // two repositories, and a shared scope would colour a session by a
           // branch of the wrong one.
+          //
+          // Set even while the block is FOLDED, and that is the point: the scope
+          // is what the line under a session resolves its branch through, and
+          // that line is drawn whether or not the rows above it are.
           branchScope = {
             branches: dirBranches,
-            colored: dirBranches.length >= BRANCH_CHIPS_MIN,
+            colored: dirBranches.length >= BRANCH_CHIPS_MIN && !inlineMode,
+            repoDir: repoDirOf(dirBranches),
+            projectId: el.projectId,
           };
+          if (blockFolded) {
+            for (const id of dirLoose) pushSession(id, level + 2, [], level + 1);
+            branchScope = null;
+            continue;
+          }
           dirLoose = pushDirectoryBranches({
             branches: dirBranches,
             rootIds: node.rootIds,

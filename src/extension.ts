@@ -28,6 +28,9 @@ import * as os from 'node:os';
 import {
   ARCHIVE_RESCAN_MIN_MS,
   COMMANDS,
+  BRANCH_FEATURE_SWITCHES,
+  DEFAULT_BRANCH_DISPLAY,
+  isBranchDisplay,
   BRANCH_ROWS_PARKED_AT_SCHEMA,
   CONFIG_KEYS,
   CONFIG_SECTION,
@@ -49,6 +52,7 @@ import {
 import type {
   ArchivedSession,
   BackgroundJob,
+  BranchDisplay,
   DecorationDeps,
   EditorialRecord,
   HookEvent,
@@ -121,7 +125,11 @@ import {
 import { BranchListCache } from './branchList';
 import { WorktreeCache, branchRowsAdvice } from './git';
 import { BranchStatusCache } from './gitBranches';
-import { PullRequestCache, openPullRequestCreatePage } from './pullRequests';
+import {
+  PullRequestCache,
+  openPullRequestCreatePage,
+  readRemoteUrl,
+} from './pullRequests';
 import {
   DEFAULT_WORKTREE_PATH_PATTERN,
   readLocalBranches,
@@ -1708,6 +1716,26 @@ export async function activate(
     // a session in a linked checkout stays under the project that owns the
     // repository. Hiding the rows must not move anybody's sessions.
     branchRows: () => boolCfg(CONFIG_KEYS.gitBranches, false),
+    // `lineage.git.branchDisplay` — WHICH of the two ways a session says its
+    // worktree. Not a second gate: with `branchRows` off there is nothing to
+    // display either way. Anything unrecognised reads as the shipped mode.
+    branchDisplay: () => {
+      const raw = cfg().get<string>(
+        CONFIG_KEYS.gitBranchDisplay,
+        DEFAULT_BRANCH_DISPLAY,
+      );
+      return isBranchDisplay(raw) ? raw : DEFAULT_BRANCH_DISPLAY;
+    },
+    // What the `+` on a project or subproject row does.
+    newSessionInWorktree: () =>
+      boolCfg(CONFIG_KEYS.gitNewSessionInWorktree, false),
+    // Anything that is not 'detailed' reads as 'standard' — a mistyped setting
+    // should show the quieter line, not no line and not a crash.
+    sessionBranchDetail: () =>
+      cfg().get<string>(CONFIG_KEYS.gitSessionBranchDetail, 'standard') ===
+      'detailed'
+        ? 'detailed'
+        : 'standard',
     // Read per render like every other setting here, so the layout flips
     // on the next tick rather than on a window reload.
     groupSessionsByBranch: () =>
@@ -3059,8 +3087,8 @@ export async function activate(
           : [...drop(project.hiddenBranches), branch],
       });
     },
-    setBranchesCollapsed: async (projectId, collapsed) => {
-      await store.upsertProject(projectId, { branchesCollapsed: collapsed });
+    setBranchesShown: async (projectId, shown) => {
+      await store.upsertProject(projectId, { branchesShown: shown });
     },
 
     // THE WORKTREE VERBS. The only wiring in this file behind which the user's
@@ -3090,6 +3118,12 @@ export async function activate(
             output:
               'lineage.git.pullRequests is off, so Flock does not run gh.',
           }),
+    // NOT behind `lineage.git.pullRequests`, and the difference is the whole
+    // reason it is a member of its own: `gh` is a program that talks to GitHub,
+    // where this reads .git/config on the local disk. The setting above is the
+    // promise about the first thing; gating the second on it would be gating a
+    // branch link on a network feature it does not use.
+    remoteUrlOf: (dir, remote) => readRemoteUrl(dir, remote),
     // All three caches, all wholesale. A worktree that appeared or disappeared
     // changes the LIST for every directory of the repository (any checkout
     // reports the same set), the per-worktree statuses keyed under it are about a
@@ -3176,6 +3210,65 @@ export async function activate(
       }
     },
 
+    // The line under a session. No context key either: the gear menu reads the
+    // value through menuState, and the views read it per render — so the write
+    // is the whole of the update, and the config listener at the bottom of
+    // activate() repaints on it like any other `lineage.*` change.
+    setBranchDisplay: async (mode) => {
+      try {
+        await cfg().update(
+          CONFIG_KEYS.gitBranchDisplay,
+          mode,
+          vscode.ConfigurationTarget.Global,
+        );
+      } catch (err) {
+        // Same failure mode, same reason to say so: a menu entry that leaves
+        // the rows exactly as they were reads as a broken control.
+        logError('extension.setBranchDisplay', err);
+        void vscode.window.showWarningMessage(
+          'Flock: could not save the branch display mode — check that ' +
+            'settings are writable.',
+        );
+      }
+    },
+
+    // Every branch-and-worktree switch, written together. See
+    // COMMANDS.showBranchesAndWorktrees for why the verb exists and
+    // BRANCH_FEATURE_SWITCHES for which six settings it is; what is decided here
+    // is only how they are written.
+    //
+    // The OFF column is the manifest's own defaults, restated rather than
+    // deleted: `update(key, undefined)` would clear the value and let a Workspace
+    // or a Folder setting show through, which is a different tree from the one
+    // the person just asked for. Writing the default Global explicitly means OFF
+    // is the exact inverse of ON from wherever ON left things.
+    setBranchAndWorktreeFeatures: async (on) => {
+      const failed: string[] = [];
+      for (const switch_ of BRANCH_FEATURE_SWITCHES) {
+        try {
+          await cfg().update(
+            switch_.key,
+            on ? switch_.on : switch_.off,
+            vscode.ConfigurationTarget.Global,
+          );
+        } catch (err) {
+          // Keep going rather than returning on the first failure. Six writes
+          // that mostly succeeded is a tree with most of the feature in it; six
+          // writes abandoned halfway is the same tree plus a command that looks
+          // like it did nothing. Either way the person is told which keys are
+          // still where they were.
+          logError('extension.setBranchAndWorktreeFeatures', err);
+          failed.push(`lineage.${switch_.key}`);
+        }
+      }
+      if (failed.length > 0) {
+        void vscode.window.showWarningMessage(
+          `Flock: could not save ${failed.join(', ')} — check that settings are ` +
+            'writable. Everything else was set.',
+        );
+      }
+    },
+
     // What the gear menu labels itself with. Read here, together, at the moment
     // the menu opens — the same three facts the `when` clauses this replaced read
     // off two context keys and one configuration value. `hookState` is the live
@@ -3185,6 +3278,14 @@ export async function activate(
       hooksInstalled: store.getHookState().installed === true,
       onlyActive: boolCfg(CONFIG_KEYS.onlyActiveSessions, false),
       accountsSection: boolCfg(CONFIG_KEYS.accountsSection, true),
+      branchDisplay: isBranchDisplay(
+        cfg().get<string>(CONFIG_KEYS.gitBranchDisplay, DEFAULT_BRANCH_DISPLAY),
+      )
+        ? (cfg().get<string>(
+            CONFIG_KEYS.gitBranchDisplay,
+            DEFAULT_BRANCH_DISPLAY,
+          ) as BranchDisplay)
+        : DEFAULT_BRANCH_DISPLAY,
     }),
 
     // Project workspaces

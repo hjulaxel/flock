@@ -374,10 +374,26 @@ export interface ProjectRecord {
    */
   shownBranches?: string[];
   hiddenBranches?: string[];
-  /** The branch block is folded shut. Per project and persisted, because it is
-   *  a statement about how much room this project's branches deserve, which
-   *  does not change between sessions the way a scroll position does. */
-  branchesCollapsed?: boolean;
+  /** The branch block has been ASKED FOR on this project.
+   *
+   *  A POSITIVE record, and the sense is load-bearing. It was
+   *  `branchesCollapsed` — "the user folded this" — back when the block drew by
+   *  default, and the block does not draw by default any more: a project with
+   *  six checkouts is six rows before its first session, on somebody who never
+   *  asked for any of them. Absent or false is therefore the normal state and
+   *  means no branch rows; only **Show Branches** writes `true`.
+   *
+   *  Renaming it rather than inverting it is what makes that safe. Every
+   *  `branchesCollapsed: false` already written — by the old fold toggle, which
+   *  drew on every project — would otherwise read as "this one was explicitly
+   *  opened" and put the rows straight back on the projects that never chose
+   *  them. Under the new name those records simply do not answer, which is the
+   *  truth: nobody has asked yet.
+   *
+   *  Per project and persisted, because it is a statement about how much room
+   *  this project's branches deserve, which does not change between windows the
+   *  way a scroll position does. */
+  branchesShown?: boolean;
   /** TOMBSTONE. A deleted project keeps its key so the record-level
    *  newest-wins merge can express the delete: dropping the key outright makes
    *  a delete indistinguishable from "the other window has not heard of it
@@ -773,6 +789,12 @@ export const COMMANDS = {
    *  that HAS one (the `pullRequest` context token), and only reachable at all
    *  with `lineage.git.pullRequests` on. */
   openPullRequest: 'lineage.openPullRequest',
+  /** The BRANCH's own page on the remote it tracks, in the browser — what a
+   *  branch name in the tree links to. Needs no `gh` and no setting: the url is
+   *  built from `git remote get-url` and the branch's upstream, both of which are
+   *  reads of the local repository. Refused, with a word, for a branch that
+   *  tracks nothing — there is no page for work nobody has pushed. */
+  openBranchOnRemote: 'lineage.openBranchOnRemote',
   /** `gh pr create --web`: the compare page, in the browser, for the user to
    *  finish. Deliberately NOT a request Flock opens itself. Every outward action
    *  in this product ends with a human pressing the button — a verb that silently
@@ -859,6 +881,36 @@ export const COMMANDS = {
    *  writes `lineage.accounts.section`. */
   showAccountsSection: 'lineage.showAccountsSection',
   hideAccountsSection: 'lineage.hideAccountsSection',
+  /** The two DISPLAY MODES, said in the gear menu rather than only in settings.
+   *  Two ids for one setting, the same shape the filter above uses: each command
+   *  knows the mode it means, and the state the user reads back is which of the
+   *  two the menu is offering. Reads and writes `lineage.git.branchDisplay`. */
+  branchDisplayInline: 'lineage.branchDisplayInline',
+  branchDisplayColor: 'lineage.branchDisplayColor',
+  /** Every git-and-worktree switch at once, from the palette.
+   *
+   *  The branch work is spread over six settings — rows, the line under a
+   *  session, how much that line says, the pull-request chips and the two
+   *  previews — and each one is off for its own good reason. That is right for
+   *  a person who wants one of them and wrong for the two who want all of them:
+   *  somebody trying the feature out, and somebody testing a change to it in an
+   *  Extension Development Host. Both had to find six keys in the settings UI,
+   *  knowing all six names.
+   *
+   *  One pair of ids rather than a picker, and no dialog: the palette entry IS
+   *  the choice. `show` writes the six on (with `detailed` for the line, which
+   *  is the level worth looking at when you have asked for everything); `hide`
+   *  writes the shipped defaults back, so the pair is an exact inverse and not
+   *  a one-way door.
+   *
+   *  Two of the six are things Flock otherwise never does unasked — `gh pr
+   *  list` reaches the network, and the demo project puts rows in the tree that
+   *  are not real — so the ON half says so afterwards in a message rather than
+   *  a status-bar flash. Invoking the command is the person's act that those
+   *  two settings require; being told what you just turned on is not the same
+   *  as being asked. */
+  showBranchesAndWorktrees: 'lineage.showBranchesAndWorktrees',
+  hideBranchesAndWorktrees: 'lineage.hideBranchesAndWorktrees',
   /** The gear at the end of the view title, and everything that used to be
    *  behind the `...` beside it.
    *
@@ -960,7 +1012,40 @@ export const CONFIG_KEYS = {
    * anybody's sessions.
    */
   gitBranches: 'git.branches',
-  /** Override the branch-chip palette. Empty = the built-in muted one. */
+  /**
+   * `lineage.git.branchDisplay` — WHICH of the two ways a session says the
+   * worktree it is in: `color` (the name tinted, the block as its key) or
+   * `inline` (the branch in words, on a line of its own). See BranchDisplay,
+   * which is where the trade between them is written down.
+   *
+   * Not a switch with an off position, deliberately. "Off" is `git.branches`
+   * off: no rows, no line, no colours, nothing about branches anywhere. This
+   * only ever answers HOW, and both answers are complete — the same verbs, the
+   * same git reads, the same pull requests.
+   */
+  gitBranchDisplay: 'git.branchDisplay',
+  /** How much the INLINE line says. `standard` is the vocabulary git prompts and
+   *  the SCM view already use — `↑4 ↓3 *` and nothing else. `detailed` adds the
+   *  pull request and the two words the arrows cannot say, `local` and `merged`.
+   *  Moot in colour mode, which has no line. See sessionBranchLine. */
+  gitSessionBranchDetail: 'git.sessionBranchDetail',
+  /**
+   * `lineage.git.newSessionInWorktree` — what the `+` on a project or a
+   * subproject row MEANS.
+   *
+   * Off: start the session in the directory as it is. On: cut a new worktree
+   * first and start it there, one agent per checkout, which is the whole reason
+   * somebody runs the branch feature at all.
+   *
+   * It decides the BUTTON's default and nothing else. Both verbs are on the
+   * row's right-click in both positions — **New Session** and **New Session in
+   * New Worktree…** — because a default is a statement about the common case,
+   * never about what is reachable. The worktree half still confirms and still
+   * quotes the exact `git worktree add`.
+   */
+  gitNewSessionInWorktree: 'git.newSessionInWorktree',
+  /** Override the branch palette used by `branchDisplay: color`. Empty = the
+   *  built-in muted one. Read only in that mode: inline mode tints nothing. */
   branchColors: 'branchColors',
   /** Nest a project's sessions UNDER the branch they are running on, instead
    *  of listing the branches and then the sessions as two flat blocks. OFF by
@@ -1050,6 +1135,38 @@ export const CONFIG_KEYS = {
    *  switch, this only decides whether the list is drawn in the sidebar. */
   accountsSection: 'accounts.section',
 } as const;
+
+/**
+ * WHAT "BRANCHES AND WORKTREES" IS, as a list of settings.
+ *
+ * The feature is six keys, each off for its own reason, and
+ * `lineage.showBranchesAndWorktrees` writes all six. The table lives here rather
+ * than inside that command's implementation for one reason: `off` is supposed to
+ * be the manifest's own default, and a copy of a default that nothing checks is a
+ * copy that drifts. Here, a test can hold it against `contributes.configuration`
+ * — see scaffold.test.ts.
+ *
+ * `on` is not the mirror image of `off` for the detail level: `standard` is right
+ * for somebody who turned one switch on, `detailed` for somebody who asked for
+ * all of it and wants the words the arrows cannot say.
+ *
+ * `lineage.git.branchDisplay` is deliberately NOT in here. It is a preference
+ * about how rows read, not a thing to switch on, and its default is already the
+ * mode somebody turning the feature on wants to meet. Writing it would also make
+ * the Hide half destructive in a way none of the others are: it would throw away
+ * a choice the person made, where every line above only puts a default back.
+ */
+export const BRANCH_FEATURE_SWITCHES: readonly {
+  readonly key: string;
+  readonly on: boolean | string;
+  readonly off: boolean | string;
+}[] = [
+  { key: CONFIG_KEYS.gitBranches, on: true, off: false },
+  { key: CONFIG_KEYS.gitSessionBranchDetail, on: 'detailed', off: 'standard' },
+  { key: CONFIG_KEYS.gitPullRequests, on: true, off: false },
+  { key: CONFIG_KEYS.previewDirectoryModel, on: true, off: false },
+  { key: CONFIG_KEYS.previewDemoProject, on: true, off: false },
+] as const;
 
 /** Age past which `lineage.deleteStale` pre-selects a session. Not a filter —
  *  nothing is ever removed without the user ticking it. */
@@ -1348,6 +1465,68 @@ export type PullRequestState = 'draft' | 'open' | 'merged' | 'closed';
 export type PullRequestChecks = 'none' | 'pending' | 'pass' | 'fail';
 
 /**
+ * How much the line under a session says — `lineage.git.sessionBranchDetail`.
+ *
+ * `standard` is the DEFAULT and is deliberately not a reduced version of
+ * `detailed`: it is the vocabulary git prompts, starship and the SCM view
+ * already use, `↑4 ↓3 *`, so the line reads without anybody learning it. It
+ * reaches nothing but the local status cache.
+ *
+ * `detailed` adds the pull-request chip and the two states the arrows render as
+ * blank — `local` for a branch that tracks nothing, and the word `merged`, which
+ * is the signal that a worktree can be removed. The chip half of it is empty
+ * unless `lineage.git.pullRequests` is also on, since that is what fills the
+ * cache it reads.
+ */
+export type SessionBranchDetail = 'standard' | 'detailed';
+
+/**
+ * HOW A SESSION SAYS WHICH WORKTREE IT IS IN — `lineage.git.branchDisplay`.
+ *
+ * Two modes, and the point is that they are alternatives rather than a switch
+ * with an on position. Both answer the same question and they spend different
+ * things to do it:
+ *
+ *   `color`   The session's NAME takes the branch's colour, and the project's
+ *             branch block is the KEY — one coloured row per checkout. It costs
+ *             no width at all and it answers "are these two on the same thing"
+ *             instantly, down a column, without reading a word. What it cannot
+ *             say is WHICH thing, and everything a colour cannot carry — ahead,
+ *             behind, dirty, the request — is in the hover instead of on the
+ *             row. This is what shipped, and it is one setting away.
+ *
+ *   `inline`  The branch is said in words on a second line under the session,
+ *             the way a git prompt says it, and the name goes back to the
+ *             theme's own colour. It answers "which thing" and carries the
+ *             state tokens where they can be read at a glance. It costs a row's
+ *             height — twelve sessions become twenty-four rows' worth — and it
+ *             needs no legend, which is why the block is shut by default here
+ *             and open in `color`. THE DEFAULT, once the feature is on at all.
+ *
+ * Everything else is the same in both: the branch rows exist, the worktree
+ * verbs work, the pull-request lookup runs, `+` starts a session on a branch.
+ * This decides how a row READS, never what the feature can do.
+ */
+export type BranchDisplay = 'color' | 'inline';
+
+/** What an unset `lineage.git.branchDisplay` means.
+ *
+ *  `inline`, and the argument is that this setting is only ever read by somebody
+ *  who has just turned `lineage.git.branches` ON — the feature is off by default,
+ *  so there is no existing tree to keep identical here. Given a person meeting
+ *  the branch feature for the first time, the mode that says WHICH branch in
+ *  words beats the one that says "same as that one" in a colour and needs a
+ *  legend to say more. `color` is one setting away for anybody who wants the
+ *  density back. */
+export const DEFAULT_BRANCH_DISPLAY: BranchDisplay = 'inline';
+
+/** Narrowing for the configuration read — an unknown string is the default,
+ *  never a third mode. */
+export function isBranchDisplay(value: unknown): value is BranchDisplay {
+  return value === 'color' || value === 'inline';
+}
+
+/**
  * One pull request, as the `gh` CLI reported it.
  *
  * THE ONLY THING IN FLOCK THAT COMES FROM THE NETWORK, and it does not come from
@@ -1437,7 +1616,7 @@ export interface ProjectGroupNode {
    *  identically. */
   branches?: BranchInfo[];
   /** The user has folded this project's branch block shut. */
-  branchesCollapsed?: boolean;
+  branchesShown?: boolean;
   /**
    * SUBPROJECTS: this project's directories, one row each, WITH the sessions
    * running in each of them.
@@ -1503,9 +1682,11 @@ export interface SubprojectNode {
   /** A user-chosen name, or '' for an implicit row — which takes the directory's
    *  basename as its label instead. What `implicit` is really asking. */
   name: string;
-  /** No record behind it: this row IS a directory of the project, drawn because
-   *  the project has more than one and nobody has named a lane in it. Every
-   *  project before v7 draws only these, which is why the tree is unchanged. */
+  /** No record behind it: this row IS a directory of the project. Drawn for every
+   *  directory nobody has named a lane in, and — for as long as it is holding a
+   *  session — for one somebody has, which is where the sessions that predate the
+   *  lane live and why a new lane is empty. Every project before v7 draws only
+   *  these, which is why the tree is unchanged. See buildSubprojects. */
   implicit: boolean;
   /** The directory, in its canonical display spelling. */
   dir: string;
@@ -1690,9 +1871,6 @@ export type ContextToken =
    *  block whose primary branch can be hidden is a block you can empty by
    *  accident and then have to go find the picker to repair. */
   | 'primary'
-  /** The "Others (N)" tail row. Distinct from 'branch' because none of the
-   *  branch verbs apply — there is no single worktree behind it. */
-  | 'branchOthers'
   /** This branch row has a pull request behind it. A THIRD token on a branch
    *  row, never alone, and it exists for exactly one `when` clause: "Open Pull
    *  Request in Browser" is a verb with nothing to open on a branch that has no
@@ -2245,6 +2423,20 @@ export interface TreeDeps {
    *  the setting's default and the tree Flock ships: no branch rows, no per-branch
    *  colours, no fold, no "Others". See CONFIG_KEYS.gitBranches. */
   branchRows?(): boolean;
+  /** `lineage.git.branchDisplay` — WHICH of the two ways a session says the
+   *  worktree it is in, `color` or `inline`. Absent — and any value that is
+   *  neither — reads as `color`, which is what shipped. Moot while `branchRows`
+   *  is off: with no branch feature there is nothing to display either way. */
+  branchDisplay?(): BranchDisplay;
+  /** `lineage.git.sessionBranchDetail`. Absent — and any value that is not
+   *  `'detailed'` — reads as `'standard'`, so a mistyped setting shows the
+   *  quieter line rather than nothing. Moot in colour mode. */
+  sessionBranchDetail?(): SessionBranchDetail;
+  /** `lineage.git.newSessionInWorktree` — whether the `+` on a project or
+   *  subproject row cuts a worktree first. Absent reads as OFF, the setting's
+   *  default. Read by the renderers only to TITLE the button; commands.ts reads
+   *  the same setting to decide what it does. */
+  newSessionInWorktree?(): boolean;
   /** `lineage.groupSessionsByBranch`: nest a project's sessions under the
    *  branch row for the worktree they run in, instead of listing branches and
    *  sessions as two flat blocks. Moot while `branchRows` is off — there are no
@@ -2634,7 +2826,7 @@ export interface CommandDeps {
     shown: boolean,
   ): Promise<void>;
   /** Fold or unfold a project's whole branch block. */
-  setBranchesCollapsed(projectId: string, collapsed: boolean): Promise<void>;
+  setBranchesShown(projectId: string, shown: boolean): Promise<void>;
   // ---- the worktree verbs ---------------------------------------------
   // Every one of these is OPTIONAL and every one of them is absent from the unit
   // doubles, which is the shape the refusal takes: a wiring without them has the
@@ -2705,6 +2897,11 @@ export interface CommandDeps {
    *  browser and returns; it does not create anything, which is the whole
    *  point. */
   createPullRequest?(dir: string): Promise<GitCommandResult>;
+  /** `git remote get-url <remote>` in `dir` — where this repository lives, as
+   *  its own config states it. A local read and not a network one, which is why
+   *  it sits outside the `lineage.git.pullRequests` gate the member above is
+   *  behind. '' for every kind of nothing. */
+  remoteUrlOf?(dir: string, remote: string): Promise<string>;
   upsertProject(id: string, patch: Partial<ProjectRecord>): Promise<void>;
   /** Re-file a project under another one, or at the top level (null).
    *  Refuses a cycle (a project cannot be filed under its own descendant) and
@@ -2736,13 +2933,46 @@ export interface CommandDeps {
    *  and the state the user reads is which of the two the gear menu is
    *  offering, which the view's own `when` clause decides. */
   setAccountsSection(on: boolean): Promise<void>;
+  // ---- the branch line ----------------------------------------------------
+  /** Write `lineage.git.branchDisplay` — which of the two ways a session says
+   *  the worktree it is in. A setter and no getter, like the two above: each of
+   *  the two commands knows the mode it means, and the state the user reads back
+   *  is which half the gear menu offers (see menuState.branchDisplay).
+   *
+   *  A pair of commands as well as a setting because the choice is invisible
+   *  until you know the word for it: somebody who wants the branch on the row
+   *  will not think to search settings for "branch display", and the gear is
+   *  where the other layout switches already live. */
+  setBranchDisplay(mode: BranchDisplay): Promise<void>;
+  // ---- what the `+` means -------------------------------------------------
+  /** `lineage.git.newSessionInWorktree` — read, not written: this one has no
+   *  command pair, because it is a preference about a button rather than a
+   *  thing you flip while looking at the tree. Optional, and absent reads as
+   *  off: a wiring that does not know about it starts sessions in the directory,
+   *  which is what the `+` has always done. */
+  newSessionInWorktree?(): boolean;
+  // ---- every git switch at once -------------------------------------------
+  /** Write all six of the branch-and-worktree settings — `git.branches`,
+   *  `git.sessionBranch`, `git.sessionBranchDetail`, `git.pullRequests`,
+   *  `preview.directoryModel` and `preview.demoProject` — on, or back to the
+   *  values the extension ships with.
+   *
+   *  One member rather than six setters because the six are written together or
+   *  not at all: a partial result is a tree in a state nobody asked for and
+   *  cannot name. Optional, like `menuState`: an older wiring (and every unit
+   *  double that does not care) simply does not offer the pair.
+   *
+   *  Setter and no getter, for the reason the three switches above have none —
+   *  each command knows the value it means. There is no menu labelling itself
+   *  off this one, so there is nothing to read back. */
+  setBranchAndWorktreeFeatures?(on: boolean): Promise<void>;
   // ---- the gear menu ------------------------------------------------------
   /** The state the gear menu labels itself with, read when it opens.
    *
-   *  One member for three answers because they are read together, once, at the
-   *  moment the quick pick is built — and because the alternative is three
+   *  One member for four answers because they are read together, once, at the
+   *  moment the quick pick is built — and because the alternative is four
    *  getters whose only caller is that one function. The `when` clauses this
-   *  replaces read the same three facts off context keys and configuration.
+   *  replaces read the same facts off context keys and configuration.
    *
    *  Optional: absent (an older wiring, every unit double) means the menu offers
    *  BOTH halves of each pair rather than guessing which way it goes, which is
@@ -2751,6 +2981,9 @@ export interface CommandDeps {
     hooksInstalled: boolean;
     onlyActive: boolean;
     accountsSection: boolean;
+    /** `lineage.git.branchDisplay`. Optional so a wiring that predates the two
+     *  modes offers both halves rather than claiming one of them. */
+    branchDisplay?: BranchDisplay;
   };
   // ---- multi-select -------------------------------------------------------
   /** The session ids selected in whichever view is on screen, top to bottom, or

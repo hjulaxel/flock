@@ -391,14 +391,21 @@ export function buildSubprojects(input: SubprojectInput): SubprojectNode[] {
     rootIds: [],
   }));
 
-  // One implicit row per directory NOBODY HAS NAMED A LANE IN. This is what keeps
-  // every existing project's tree byte-identical: with no lanes at all, these are
-  // the only nodes and they are the directory rows that were here before.
+  // One implicit row per DIRECTORY, lanes or no lanes. This is what keeps every
+  // existing project's tree byte-identical: with no lanes at all, these are the
+  // only nodes and they are the directory rows that were here before.
+  //
+  // A directory a lane already names gets one too, and it is the reason A NEW LANE
+  // IS BORN EMPTY: the sessions that were in that folder before you typed the name
+  // stay on the folder's own row, because a name you have just invented cannot
+  // possibly describe work that predates it. The row is pruned again below the
+  // moment it has nothing to hold, so naming every session's lane makes it go away
+  // — it is a remainder, not a permanent leftover.
   const named = new Set(nodes.map((n) => n.dirKey));
   const implicitAt = new Map<string, number>();
   dirs.forEach((dir, i) => {
     const key = pathKey(dir);
-    if (named.has(key)) return;
+    if (implicitAt.has(key)) return;
     implicitAt.set(key, nodes.length);
     nodes.push({
       type: 'subproject',
@@ -429,20 +436,22 @@ export function buildSubprojects(input: SubprojectInput): SubprojectNode[] {
     safeWorktrees(input.worktreesOf, node.dir),
   );
   const byId = new Map(nodes.map((node, i) => [node.id, i] as const));
-  // Which node an unstamped session in a given directory belongs to: the FIRST
-  // lane named in it, else its implicit row. That is what makes "no leftover row"
-  // survive naming a lane — the moment a directory has a lane, the lane is where
-  // its unclaimed sessions go, and no second row appears to hold them.
-  const defaultAt = new Map<string, number>();
+  // Which node an unstamped session in a given directory belongs to: THE
+  // DIRECTORY'S OWN ROW, never a lane. A lane is a name somebody typed, and the
+  // only session it can be sure of is one that was started in it — so a lane holds
+  // exactly its stamped sessions and nothing else, from the moment it is made.
+  //
+  // Falling back to the first lane instead would mean creating "Server rewrite"
+  // silently swept every session already running in that folder into it, including
+  // ones that are plainly the other lane's work. Nothing is orphaned by refusing
+  // that: the folder's row is a subproject too, and it is where those sessions
+  // already were.
+  const defaultAt = new Map<string, number>(implicitAt);
   nodes.forEach((node, i) => {
+    // Only reachable for a lane naming a directory the project no longer lists,
+    // which has no implicit row to fall back to. Its own row is then the least
+    // wrong home — the alternative is dropping the session.
     if (!defaultAt.has(node.dirKey)) defaultAt.set(node.dirKey, i);
-  });
-  for (const [key, i] of implicitAt) defaultAt.set(key, i);
-  nodes.forEach((node, i) => {
-    if (!node.implicit && !implicitAt.has(node.dirKey)) {
-      const first = defaultAt.get(node.dirKey);
-      if (first === undefined || first > i) defaultAt.set(node.dirKey, i);
-    }
   });
 
   for (const rootId of input.rootIds ?? []) {
@@ -463,10 +472,30 @@ export function buildSubprojects(input: SubprojectInput): SubprojectNode[] {
       cwd = undefined;
     }
     const at = subprojectIndexForCwd(nodes, checkouts, cwd);
-    const home = at < 0 ? 0 : (defaultAt.get(nodes[at].dirKey) ?? at);
+    const home =
+      at < 0
+        ? // The bug-catcher above. The main DIRECTORY's row, which is a row this
+          // session could plausibly be in — not nodes[0], which since lanes exist
+          // may be a name somebody typed for something else entirely.
+          (implicitAt.get(pathKey(dirs[0])) ?? 0)
+        : (defaultAt.get(nodes[at].dirKey) ?? at);
     nodes[home].rootIds.push(rootId);
   }
-  return nodes;
+
+  // A directory that has lanes keeps its own row only while it is HOLDING
+  // something. That is the whole of the empty-row policy: the row exists to be
+  // where the sessions nobody has assigned to a lane already are, so once there
+  // are none it says nothing and goes. File every session into a lane and the
+  // folder row disappears; start one by hand in that folder tomorrow and it comes
+  // back, holding it, rather than that session being guessed into a lane.
+  //
+  // A directory with NO lane always keeps its row, sessions or none — that is the
+  // pre-v7 tree, where a directory you added is a row whether or not you have run
+  // anything in it yet.
+  return nodes.filter(
+    (node) =>
+      !(node.implicit && named.has(node.dirKey) && node.rootIds.length === 0),
+  );
 }
 
 /** `stampOf`, defended. A lookup that throws is a session with no stamp, which is
@@ -1583,6 +1612,12 @@ export interface GroupingInput {
    * rows must not move anybody's sessions.
    */
   branchRows?: boolean;
+  /* There was a second gate onto this list once — the session-line switch, which
+   * needed the branch list without wanting the rows. It is gone with the switch:
+   * the line and the colours are two MODES of one feature now
+   * (`lineage.git.branchDisplay`), and `branchRows` is the single thing that
+   * decides whether any of it is built. One gate, so no caller has to reason
+   * about which half of a feature it just turned on. */
   /**
    * The local branches of the repository at `dir` — every `refs/heads/` entry,
    * not only the checked-out ones. From the cache in src/branchList.ts, and
@@ -1776,6 +1811,10 @@ export function computeGrouping(
   // same two answers.
   const branchRows = input?.branchRows === true;
   const directoryModel = input?.directoryModel === true;
+  // ONE GATE. Both display modes read the same branch list — the colours key off
+  // it, the line under a session names one entry of it — so the question is only
+  // ever "did the user turn the branch feature on", which is `branchRows`.
+  const anyBranchGate = branchRows;
   // The named lanes, bucketed by project ONCE. The store hands them over in
   // project-then-creation order, and that order is the row order, so bucketing
   // preserves it.
@@ -1892,15 +1931,19 @@ export function computeGrouping(
         provider: providerOfProject(p),
         rootIds,
         subprojects,
-        // Empty unless the branch block is switched on — see
-        // GroupingInput.branchRows. Deliberately still built from the same
-        // worktree data when it IS on, so turning the setting on is the only
-        // difference between the two trees.
+        // Empty unless `lineage.git.branches` is on. Deliberately still built
+        // from the same worktree data when it IS on, so turning the setting on
+        // is the only difference between the two trees.
+        //
+        // A non-empty list still does NOT mean branch ROWS: the renderer keeps
+        // its own half of the gate (ViewModelInput.branchBlock), and in inline
+        // mode the block is shut by default — so most of the time this list
+        // exists to be looked up by the line under a session and never drawn.
         //
         // Under the directory model a SPLIT project's branches live on its
         // directory rows instead, so this is empty for exactly the projects whose
         // subprojects now carry them — nothing is drawn twice and nothing is lost.
-        branches: !branchRows
+        branches: !anyBranchGate
           ? []
           : directoryBranches
             ? subprojects.length > 0
@@ -1922,7 +1965,14 @@ export function computeGrouping(
                   input.cwdOf,
                   p,
                 ),
-        branchesCollapsed: p.branchesCollapsed === true,
+        // PASSED THROUGH, tri-state and all. `=== true` here was the bug that
+        // made "shut until you ask" not work: it collapsed *never asked* and
+        // *explicitly opened* into one `false`, and the renderer needs to tell
+        // them apart — absent means the block has never been asked for and stays
+        // shut, `false` is the record **Show Branches** writes.
+        ...(p.branchesShown === undefined
+          ? {}
+          : { branchesShown: p.branchesShown }),
         parentProjectId: node?.parentId ?? null,
         depth: node?.depth ?? 0,
         // Only the children that are themselves on screen. A closed child takes
@@ -1994,7 +2044,7 @@ function reuseUnchanged(
       old.provider === p.provider &&
       sameIds(old.dirs, p.dirs) &&
       sameIds(old.rootIds, p.rootIds) &&
-      old.branchesCollapsed === p.branchesCollapsed &&
+      old.branchesShown === p.branchesShown &&
       sameBranches(old.branches, p.branches) &&
       sameSubprojects(old.subprojects, p.subprojects) &&
       // Everything the row's PLACE in the tree draws. Without these a

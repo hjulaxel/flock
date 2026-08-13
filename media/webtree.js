@@ -473,9 +473,16 @@
     // One custom property, read by the swatch, the label and the count at three
     // different opacities — and one place for a colour index with no variable
     // behind it to fall back, instead of three.
+    //
+    // NO INDEX AT ALL is inline mode (see BranchChip.colorIndex): the row takes
+    // the theme's own foreground, so the branch block reads like the rest of the
+    // tree instead of like a palette nobody asked to learn.
+    const tinted = typeof chip.colorIndex === 'number';
     el.style.setProperty(
       '--chip-color',
-      'var(--lineage-branch-' + (Number(chip.colorIndex) || 0) + ', var(--vscode-foreground))',
+      tinted
+        ? 'var(--lineage-branch-' + (Number(chip.colorIndex) || 0) + ', var(--vscode-foreground))'
+        : 'var(--vscode-foreground)',
     );
 
     // Under branch grouping the row OPENS, so it needs the one thing every
@@ -497,12 +504,17 @@
       el.appendChild(twisty);
     }
 
-    // A small filled square in the icon column, where a session's provider logo
-    // sits. THIS is what ties the row to the coloured session names below it:
-    // the colour needs a solid block of itself somewhere to be read as a key,
-    // and tinted text alone at 11px is not one.
+    // The icon column, where a session's provider logo sits.
+    //
+    // In COLOUR mode it is a small filled square, and that square is what ties
+    // the row to the tinted session names below it: a colour needs a solid block
+    // of itself somewhere to be read as a key, and tinted text alone at 11px is
+    // not one. In INLINE mode there is nothing to key — the sessions say their
+    // branch in words — so the same box carries a git-branch mark instead, which
+    // says what KIND of row this is rather than which group it belongs to.
     const swatch = document.createElement('span');
-    swatch.className = 'branch-swatch';
+    swatch.className = tinted ? 'branch-swatch' : 'branch-swatch glyph';
+    if (!tinted) paintBranchState(swatch, chip.glyph, chip.state);
     swatch.setAttribute('aria-hidden', 'true');
     el.appendChild(swatch);
 
@@ -511,9 +523,16 @@
     name.textContent = row.label;
     el.appendChild(name);
 
+    // The star, against the name, exactly as the line under a session places it.
+    // The NAME here is not a link, unlike there: on this row the name IS the row,
+    // and a click on it already means "start a session on this branch" (or open
+    // the branch, grouped). The `#42` below is the link, because it is the one
+    // token on the row that has nowhere else to point.
+    if (chip.dirty) el.appendChild(renderDirtyMark());
+
     el.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
 
-    // Where the checkout stands: `↑2 ↓1 *`, already composed by the extension
+    // Where the checkout stands: `↑2 ↓1`, already composed by the extension
     // (formatBranchSync) because the native tree has to say the same thing and
     // two formatters would eventually disagree. Absent on a clean, in-sync or
     // never-probed checkout, which is why this reserves no width of its own —
@@ -550,6 +569,7 @@
         ' checks-' +
         (PR_CHECKS.indexOf(chip.pr.checks) >= 0 ? chip.pr.checks : 'none');
       pr.textContent = chip.pr.label;
+      wireLink(pr, row, 'openPullRequest', 'Open pull request ' + chip.pr.label);
       el.appendChild(pr);
     }
 
@@ -584,69 +604,15 @@
     return el;
   }
 
-  /** The "Others (N)" tail row: same band, same indent, one verb. */
-  function renderOthersRow(row) {
-    const el = document.createElement('div');
-    el.className = 'row branch others';
-    applyIndent(el, row);
-    if (row.key === focusKey) el.classList.add('selected', 'focused');
-    el.setAttribute('data-key', row.key);
-    el.setAttribute('role', 'treeitem');
-    el.setAttribute('aria-level', String(row.depth + 1));
-    el.setAttribute('title', row.tooltip || '');
-    el.setAttribute('data-vscode-context', JSON.stringify(row.context));
+  /* renderOthersRow lived here: the "Others (12)" / "Branches (183)" tail of a
+   * branch block. The row kind is gone — the block itself is what folds now, per
+   * project and per display mode — and what it opened is on the project's own
+   * right-click as **Choose Branches to Show…**. */
 
-    // UNDER THE DIRECTORY MODEL THIS ROW OPENS, because the branches behind it
-    // genuinely exist as rows — where the project-level "Others" stood for a
-    // curation decision and could only open a picker. Same twisty as an openable
-    // branch row, for the same reason: an expandable row without one is a control
-    // with no affordance.
-    if (row.expandable) {
-      el.setAttribute('aria-expanded', row.expanded ? 'true' : 'false');
-      const twisty = document.createElement('span');
-      twisty.className = 'branch-twisty' + (row.expanded ? ' expanded' : '');
-      twisty.setAttribute('aria-hidden', 'true');
-      twisty.addEventListener('mousedown', (e) => {
-        // mousedown, and stopped, exactly as every other twisty here: the row's
-        // own click would otherwise toggle it a second time, straight back.
-        e.preventDefault();
-        e.stopPropagation();
-        post('toggle', { key: row.key });
-      });
-      el.appendChild(twisty);
-    }
-
-    // No swatch: this row stands for several branches and has no colour of its
-    // own. The empty box keeps the label in the same column as the branches
-    // above it, which is what makes it read as the tail of that list.
-    el.appendChild(
-      Object.assign(document.createElement('span'), { className: 'branch-swatch blank' }),
-    );
-
-    const name = document.createElement('span');
-    name.className = 'name branch-name';
-    name.textContent = row.label;
-    el.appendChild(name);
-
-    el.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
-
-    const count = document.createElement('span');
-    count.className = 'branch-count';
-    count.textContent = row.description || '';
-    el.appendChild(count);
-
-    el.appendChild(
-      Object.assign(document.createElement('span'), { className: 'badge none' }),
-    );
-
-    wireBranchRow(el, row);
-    return el;
-  }
-
-  /** Click and selection for both branch-block rows. They take the focus ring
-   *  like any other row (there are verbs on them, so the keyboard has to be
-   *  able to reach one) but never join a multi-selection — `selectable` is
-   *  session-only, so applySelectionGesture collapses onto them. */
+  /** Click and selection for a branch row. It takes the focus ring like any
+   *  other row (there are verbs on it, so the keyboard has to be able to reach
+   *  one) but never joins a multi-selection — `selectable` is session-only, so
+   *  applySelectionGesture collapses onto it. */
   function wireBranchRow(el, row) {
     el.addEventListener('mousedown', (e) => {
       if (editing) return;
@@ -665,9 +631,7 @@
         post('toggle', { key: row.key });
         return;
       }
-      post(row.kind === 'branchOthers' ? 'branchOthers' : 'branch', {
-        key: row.key,
-      });
+      post('branch', { key: row.key });
     });
     el.addEventListener('contextmenu', () => {
       // The workbench opens the native menu off `data-vscode-context`, but it
@@ -684,7 +648,6 @@
 
   function renderRow(row) {
     if (row.kind === 'branch') return renderBranchRow(row);
-    if (row.kind === 'branchOthers') return renderOthersRow(row);
 
     const el = document.createElement('div');
     el.className =
@@ -715,6 +678,38 @@
     // the row's geometry is unchanged — see applyIndent.
     applyIndent(el, row);
 
+    // THE ONE ROW THAT IS TWO LINES TALL. `branchDisplay: inline` puts the
+    // session's branch on a line of its own underneath it (ViewRow.branchLine),
+    // and a row that has one becomes a COLUMN of two strips instead of a single
+    // flex line.
+    //
+    // Everything the row already drew goes into `.row-main` unchanged, which is
+    // what keeps this contained: the stylesheet addresses those pieces by
+    // descendant selectors (`.row .name`, `.row:hover .actions`), so a wrapper
+    // between them changes nothing, and no code walks a row's children. `body`
+    // is the row element itself on every other row, so a one-line row's DOM is
+    // byte-identical to the one before this existed.
+    const line =
+      row.kind === 'session' && row.branchLine && typeof row.branchLine.name === 'string'
+        ? row.branchLine
+        : null;
+    let body = el;
+    if (line) {
+      el.classList.add('two-line');
+      // The gutter's width, published so the stylesheet can start the second
+      // line under the session's NAME. It is the one number in that sum the CSS
+      // cannot know: the gutter grows with the spine's depth, and the same
+      // arithmetic lives in renderGutter — RAIL_COL + depth * INDENT — where the
+      // box itself is sized.
+      el.style.setProperty(
+        '--gutter-w',
+        RAIL_COL + (Array.isArray(row.rails) ? row.rails.length : 0) * INDENT + 'px',
+      );
+      body = document.createElement('div');
+      body.className = 'row-main';
+      el.appendChild(body);
+    }
+
     // EVERY row starts at the same 4px (webtree.css's `.row`), and all the
     // indentation that is left lives inside the gutter, which only a session
     // draws. `row.depth` is therefore no longer a paint input — it stays on the
@@ -737,12 +732,12 @@
     // tree's subject. The row still expands and collapses: clicking a header
     // toggles it (wireRow), and ArrowLeft/ArrowRight work off `aria-expanded`.
     if (row.kind === 'session') {
-      el.appendChild(
+      body.appendChild(
         renderGutter(row, Array.isArray(row.rails) ? row.rails : []),
       );
     }
 
-    el.appendChild(renderIcon(row));
+    body.appendChild(renderIcon(row));
 
     const name = document.createElement('span');
     name.className = 'name';
@@ -764,30 +759,30 @@
       );
       name.classList.add('branch-tinted');
     }
-    el.appendChild(name);
+    body.appendChild(name);
 
     // Facts about the row, drawn right of the name: today just the struck-through
     // bell on a session whose notifications are off. Appended only for rows that
     // carry one, so nothing else moves on the rows that do not.
-    if (row.marks && row.marks.length) el.appendChild(renderMarks(row));
+    if (row.marks && row.marks.length) body.appendChild(renderMarks(row));
 
     // Spacer FIRST, so the description and the dot both sit hard against the
     // right edge: "last touched 5m ago, still running" reads as one thing, and
     // the dots line up in a column instead of drifting with the label width.
-    el.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
+    body.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
 
     if (row.description) {
       const desc = document.createElement('span');
       desc.className = 'desc';
       desc.textContent = row.description;
-      el.appendChild(desc);
+      body.appendChild(desc);
     }
 
     // Appended ONLY for rows that carry actions — today just project rows —
     // so a plain session row's geometry, which the dot column's width
     // arithmetic depends on, never shifts to make room for a button no
     // session row has.
-    if (row.actions && row.actions.length) el.appendChild(renderActions(row));
+    if (row.actions && row.actions.length) body.appendChild(renderActions(row));
 
     // Always append the dot's box, lit or not. The stylesheet decides its width
     // per tone — a lit dot holds the column open, an idle, closed or absent one
@@ -804,9 +799,163 @@
     // "black circle" is not a status. The word is in the row's title, which is
     // also the accessible description.
     badge.setAttribute('aria-hidden', 'true');
-    el.appendChild(badge);
+    body.appendChild(badge);
+
+    if (line) el.appendChild(renderBranchLine(line, row));
 
     wireRow(el, row);
+    return el;
+  }
+
+  /**
+   * The state mark that leads a branch, wherever one is drawn.
+   *
+   * The GLYPH IS NAMED BY THE EXTENSION (branchStateIcon) and the class comes
+   * from the state beside it, so this paints and never decides: an unknown state
+   * simply gets no class and keeps the theme's own icon colour, which is the same
+   * answer a branch with no request gets.
+   */
+  function paintBranchState(el, glyph, state) {
+    paintGlyph(el, glyph || 'git-branch');
+    if (PR_STATES.indexOf(state) >= 0) el.classList.add(state);
+  }
+
+  /** The `*` that follows a branch name when the checkout has uncommitted work.
+   *  Its own element rather than a character on the end of the name, because the
+   *  name is the part that gets elided and the star is the part that must not. */
+  function renderDirtyMark() {
+    const star = document.createElement('span');
+    star.className = 'branch-dirty';
+    star.textContent = '*';
+    star.title = 'uncommitted changes';
+    return star;
+  }
+
+  /**
+   * Turn an element into a link that runs one of the branch link actions.
+   *
+   * NOT an `<a href>`, and not focusable: the two links live inside rows that are
+   * already `role="treeitem"`, and a focusable element inside one breaks the
+   * tree's keyboard model (arrow keys move between items, and a tab stop in the
+   * middle of a row is not something a tree item has). They are POINTER
+   * affordances for verbs that are also on the row's right-click menu, which is
+   * where the keyboard and a screen reader reach them.
+   *
+   * The click stops there. Without that, a click on the name would also select
+   * or activate the row underneath it, so opening a branch page would move the
+   * selection as a side effect.
+   */
+  function wireLink(el, row, action, title) {
+    el.classList.add('branch-link');
+    el.title = title;
+    el.addEventListener('mousedown', (e) => {
+      e.stopPropagation();
+    });
+    el.addEventListener('click', (e) => {
+      if (editing) return;
+      e.preventDefault();
+      e.stopPropagation();
+      post('action', { key: row.key, action: action });
+    });
+  }
+
+  /**
+   * The branch, on a second line under the session — `⇡ feat/x *  ↑4  #128 ✓`.
+   *
+   * Everything on it is PRE-FORMATTED by the extension (viewmodel.ts's
+   * sessionBranchLine): this function decides where the pieces sit and what
+   * colour they take, never what they say. The two detail levels differ only in
+   * which pieces arrive, so there is nothing here that reads a setting.
+   *
+   * ARIA-HIDDEN, and deliberately. The line lives INSIDE the session's
+   * `role="treeitem"` element, because a tree item is the thing a user selects
+   * and arrows through and a branch is not separately selectable — but a treeitem
+   * that reports two lines of text reads out as two items. The branch is already
+   * in the row's `title`, which is also its accessible description, so a screen
+   * reader hears it once and in a sentence.
+   *
+   * Two things on it are clickable — the name and the `#42` — and neither takes
+   * focus; see wireLink. Everything else, and every gap between them, still
+   * selects the session, which is what the whole row means.
+   */
+  function renderBranchLine(line, row) {
+    const el = document.createElement('div');
+    el.className = 'row-branch';
+    el.setAttribute('aria-hidden', 'true');
+
+    // Drawn as a CSS mask over the theme's icon colour, the way a row's marks
+    // are — NOT as the `⎇` character. This webview does not ship the codicon
+    // font (see paintCodicon's note), so a glyph on this line would be whatever
+    // the platform's UI font happened to have for U+2387, which on macOS is an
+    // illegible fallback squiggle.
+    //
+    // WHICH mask is the request's business now: an open request leads its branch
+    // with a green arrow and a merged one with a purple merge, which is what
+    // GitHub draws and therefore what a reader already knows. `git-branch`, in
+    // the theme's own colour, is what a branch with no request keeps.
+    // What the mark MEANS is in the row's hover, in sentences, put there by the
+    // extension (branchStatusLines and pullRequestLines) — not in a title here.
+    // One tooltip per row is the rule the rest of this tree follows, and a mark
+    // that explained itself in three words would be the fourth place the same
+    // fact is stated.
+    const mark = document.createElement('span');
+    mark.className = 'branch-glyph';
+    paintBranchState(mark, line.glyph, line.state);
+    el.appendChild(mark);
+
+    const name = document.createElement('span');
+    name.className = 'branch-line-name';
+    name.textContent = line.name;
+    // A link only where the extension said there is a page — a branch nobody has
+    // pushed has none, and the underline is a promise this keeps.
+    if (line.link) wireLink(name, row, 'openBranchOnRemote', 'Open ' + line.name);
+    el.appendChild(name);
+
+    // Uncommitted work, against the name and not out with the arrows: it is a
+    // fact about this checkout, where `↑4 ↓3` is a fact about its upstream.
+    if (line.dirty) el.appendChild(renderDirtyMark());
+
+    // Everything above is the name's half of the line; everything below is the
+    // state column at the right edge. The spacer is what divides them, so the
+    // name can be elided without the tokens moving.
+    el.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
+
+    // Where the checkout stands: `↑4 ↓3`, plus `local` at the detailed level.
+    // `.branch-sync` is the BRANCH ROW's class, reused rather than copied: the
+    // tokens are the same tokens, and the whole argument for the standard level
+    // is that a reader should not have to learn a second dialect inside one
+    // tree. Appended only when there is something to say — an absent `sync` must
+    // cost no width, or every quiet row would reserve a column for a state it
+    // does not have.
+    if (line.sync) {
+      const sync = document.createElement('span');
+      sync.className = 'branch-sync';
+      sync.textContent = line.sync;
+      el.appendChild(sync);
+    }
+
+    // The request, at the detailed level only, wearing the branch row's chip
+    // classes for the same reason. Allowlisted rather than interpolated — see
+    // the note in renderBranchRow, which this is the second reader of.
+    //
+    // `merged` is the one state whose WORD is in the label (the extension spells
+    // it out), because it is the one that means "this worktree can go" and the
+    // point of moving the branch off the session's name is that the row should
+    // not need colour to be read.
+    if (line.pr && line.pr.label) {
+      const pr = document.createElement('span');
+      pr.className =
+        'branch-pr ' +
+        (PR_STATES.indexOf(line.pr.state) >= 0 ? line.pr.state : 'open') +
+        ' checks-' +
+        (PR_CHECKS.indexOf(line.pr.checks) >= 0 ? line.pr.checks : 'none');
+      pr.textContent = line.pr.label;
+      // Always a link when it is drawn at all. The extension re-resolves the url
+      // out of its own cache (openPullRequestFlow), so a chip whose request has
+      // since gone says so rather than opening anything.
+      wireLink(pr, row, 'openPullRequest', 'Open pull request ' + line.pr.label);
+      el.appendChild(pr);
+    }
     return el;
   }
 
@@ -1486,19 +1635,11 @@
       e.preventDefault();
       if (row.kind === 'session') post('activate', { key: row.key });
       // Enter does what a click does, on every row kind that has a click:
-      // starting a session on the branch under the cursor, or opening the
-      // picker behind "Others". Falling through to 'toggle' would send a
-      // collapse message for a row that does not expand.
+      // starting a session on the branch under the cursor. Falling through to
+      // 'toggle' would send a collapse message for a row that does not expand.
       else if (row.kind === 'branch') {
         // Same split as the click: an openable branch row is a container.
         post(row.expandable ? 'toggle' : 'branch', { key: row.key });
-      }
-      else if (row.kind === 'branchOthers') {
-        // Same split as the branch row above, and the same reason: under the
-        // directory model this fold opens onto the branches themselves, so Enter
-        // has to open it rather than send a message for a picker that would be
-        // answering a question the rows already answer.
-        post(row.expandable ? 'toggle' : 'branchOthers', { key: row.key });
       }
       else post('toggle', { key: row.key });
     } else if (e.key === 'F2') {

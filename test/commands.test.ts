@@ -39,7 +39,11 @@ import {
   WRAP_PROMPT,
   isSessionId,
 } from '../src/types';
-import { commands as mockCommands, window as mockWindow } from './mocks/vscode';
+import {
+  commands as mockCommands,
+  env as mockEnv,
+  window as mockWindow,
+} from './mocks/vscode';
 import type {
   AccountProfile,
   BackgroundJob,
@@ -717,7 +721,7 @@ function chatDeps(
     // git anywhere near it.
     getBranches: () => [],
     setBranchShown: async () => undefined,
-    setBranchesCollapsed: async () => undefined,
+    setBranchesShown: async () => undefined,
     upsertProject: async (id, patch) => {
       calls.order.push('upsertProject');
       calls.projectPatches.push({ id, patch });
@@ -736,6 +740,7 @@ function chatDeps(
     notificationsEnabled: () => true,
     setOnlyActiveSessions: async () => undefined,
     setAccountsSection: async () => undefined,
+    setBranchDisplay: async () => undefined,
     selectedSessions: () => [],
     switchWorkspace: async () => undefined,
     activeWorkspace: () => null,
@@ -1138,6 +1143,20 @@ type WarningHost = {
   ) => Promise<string | undefined>;
 };
 
+/** The information toast — how every branch verb says "there is nothing here".
+ *  Distinct from WarningHost above: these carry no buttons and answer nothing. */
+type InfoHost = {
+  showInformationMessage?: (
+    message: string,
+    ...items: string[]
+  ) => Promise<string | undefined>;
+};
+/** The browser hand-off. Scripted so a test can read the url that was built
+ *  rather than the fact that something was opened. */
+type ExternalHost = {
+  openExternal?: (uri: { toString(): string }) => Promise<boolean>;
+};
+
 /** The folder dialog, scripted. Both subproject verbs and the create flow reach
  *  it, and it is the only host member `showOpenDialog` uses. */
 type DialogHost = {
@@ -1236,10 +1255,17 @@ describe('the subproject verbs', () => {
   }
 
 
-  function scriptConfirm(answer: string | undefined): { asked: string[] } {
-    const state = { asked: [] as string[] };
-    (mockWindow as WarningHost).showWarningMessage = async (message) => {
+  function scriptConfirm(answer: string | undefined): {
+    asked: string[];
+    details: string[];
+  } {
+    const state = { asked: [] as string[], details: [] as string[] };
+    (mockWindow as WarningHost).showWarningMessage = async (
+      message: string,
+      opts?: unknown,
+    ) => {
       state.asked.push(message);
+      state.details.push((opts as { detail?: string })?.detail ?? '');
       return answer;
     };
     return state;
@@ -1556,6 +1582,60 @@ describe('the subproject verbs', () => {
     expect(calls.projectPatches).toEqual([
       { id: 'p1', patch: { dirs: ['/code/app/web'] } },
     ]);
+  });
+
+  it('takes the lanes named in a directory away with the directory', async () => {
+    // A lane is a name for work IN a folder. Leaving one behind after the project
+    // stops covering that folder would strand a row nothing can ever be filed
+    // under again — the project no longer claims a session in there to hold.
+    const confirm = scriptConfirm('Remove Subproject');
+    const two = app({ dirs: ['/code/app/api'] });
+    const store = laneStore([
+      lane({ id: 'l1', name: 'Handlers', dir: '/code/app/api' }),
+      lane({ id: 'l2', name: 'Schemas', dir: '/CODE/APP/API' }),
+      lane({ id: 'l3', name: 'Elsewhere', dir: '/code/app' }),
+      lane({ id: 'l4', name: 'Another project', dir: '/code/app/api', projectId: 'p2' }),
+    ]);
+    const { deps, calls } = chatDeps(two, { projects: [two] });
+    Object.assign(deps as object, store.deps);
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.removeSubproject, {
+      type: 'subproject',
+      projectId: 'p1',
+      dir: '/code/app/api',
+      id: 'dir:/code/app/api',
+    });
+
+    // Both of this project's lanes in that directory, matched the way every other
+    // path comparison in Flock matches. Not the one in another directory, and not
+    // another project's.
+    expect(store.removed).toEqual(['l1', 'l2']);
+    expect(calls.projectPatches).toEqual([{ id: 'p1', patch: { dirs: [] } }]);
+    expect(confirm.details[0]).toContain('2 subprojects');
+  });
+
+  it('names the single lane it is about to take with it', async () => {
+    const confirm = scriptConfirm(undefined);
+    const two = app({ dirs: ['/code/app/api'] });
+    const store = laneStore([
+      lane({ id: 'l1', name: 'Handlers', dir: '/code/app/api' }),
+    ]);
+    const { deps, calls } = chatDeps(two, { projects: [two] });
+    Object.assign(deps as object, store.deps);
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.removeSubproject, {
+      type: 'subproject',
+      projectId: 'p1',
+      dir: '/code/app/api',
+      id: 'dir:/code/app/api',
+    });
+
+    // Declined: the dialog said the name would go, and nothing went.
+    expect(confirm.details[0]).toContain('"Handlers"');
+    expect(store.removed).toEqual([]);
+    expect(calls.projectPatches).toEqual([]);
   });
 
   it('says what happens to the rows when the last one goes', async () => {
@@ -3487,5 +3567,277 @@ describe('wrap names the host when there is no terminal to type into', () => {
     const h = wrapHarness('flock');
     await h.run(COMMANDS.wrapSession, SESSION);
     expect(h.warnings[0]).toContain('this window');
+  });
+});
+
+// ------------------------------------------ every git switch, in one verb
+
+describe('Show / Hide Branches and Worktrees', () => {
+  beforeEach(() => {
+    (mockWindow as StatusHost).setStatusBarMessage = () => undefined;
+    (mockWindow as QuickPickHost).showInformationMessage = async () => undefined;
+  });
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockWindow as StatusHost).setStatusBarMessage;
+    delete (mockWindow as QuickPickHost).showInformationMessage;
+  });
+
+  /** Both halves, and what each one said afterwards. */
+  function switchHarness(over: Partial<AccountCommandDeps> = {}): {
+    written: boolean[];
+    messages: string[];
+    status: string[];
+    run: (command: string) => Promise<void>;
+  } {
+    const written: boolean[] = [];
+    const messages: string[] = [];
+    const status: string[] = [];
+    (mockWindow as QuickPickHost).showInformationMessage = async (message) => {
+      messages.push(message);
+      return undefined;
+    };
+    (mockWindow as StatusHost).setStatusBarMessage = (text) => {
+      status.push(text);
+    };
+    const { deps } = chatDeps(undefined);
+    const harness = withRegisteredCommands({
+      ...deps,
+      setBranchAndWorktreeFeatures: async (on: boolean) => {
+        written.push(on);
+      },
+      ...over,
+    });
+    return { written, messages, status, run: (command) => harness.run(command) };
+  }
+
+  it('writes the six on, and back off again, from one call each', async () => {
+    const h = switchHarness();
+    await h.run(COMMANDS.showBranchesAndWorktrees);
+    await h.run(COMMANDS.hideBranchesAndWorktrees);
+    // The pair is an inverse, and neither half reads the current value first:
+    // each knows the value it means, like every other switch in this file.
+    expect(h.written).toEqual([true, false]);
+  });
+
+  it('says out loud that it turned the network one on', async () => {
+    // The receipt is the whole reason ON uses a message where every other
+    // toggle flashes the status bar: `gh pr list` and the fabricated demo
+    // project are things Flock otherwise never does unasked, and a person who
+    // typed "show branches" has not read the settings for either.
+    const h = switchHarness();
+    await h.run(COMMANDS.showBranchesAndWorktrees);
+    expect(h.messages).toHaveLength(1);
+    expect(h.messages[0]).toContain('gh pr list');
+    expect(h.messages[0]).toContain('two lines');
+    // And it names the way back, since six settings is not something anybody
+    // will undo by hand.
+    expect(h.messages[0]).toContain('Hide Branches and Worktrees');
+    expect(h.status).toEqual([]);
+  });
+
+  it('flashes and goes on the way out', async () => {
+    const h = switchHarness();
+    await h.run(COMMANDS.hideBranchesAndWorktrees);
+    expect(h.status).toHaveLength(1);
+    expect(h.messages).toEqual([]);
+  });
+
+  it('stays registered, and silent, on a wiring that cannot write settings', async () => {
+    // The dep is optional (an older host, every unit double). The command must
+    // still exist — "command not found" from the palette is worse than a verb
+    // that does nothing — and must not claim to have changed anything.
+    const h = switchHarness({ setBranchAndWorktreeFeatures: undefined });
+    await h.run(COMMANDS.showBranchesAndWorktrees);
+    await h.run(COMMANDS.hideBranchesAndWorktrees);
+    expect(h.written).toEqual([]);
+    expect(h.messages).toEqual([]);
+    expect(h.status).toEqual([]);
+  });
+});
+
+// ------------------------------------------------ the branch name as a link
+
+describe('opening a branch on its remote', () => {
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockWindow as InfoHost).showInformationMessage;
+    delete (mockEnv as ExternalHost).openExternal;
+  });
+
+  const ARG = {
+    type: 'branch',
+    projectId: 'p1',
+    dir: '/Users/a/code/magma-feat-x',
+    branch: 'feat/x',
+  };
+
+  function harness(
+    over: {
+      upstream?: string;
+      status?: boolean;
+      remoteUrl?: string;
+    } = {},
+  ): {
+    opened: string[];
+    said: string[];
+    asked: Array<{ dir: string; remote: string }>;
+    run: (command: string, arg?: unknown) => Promise<void>;
+  } {
+    const opened: string[] = [];
+    const said: string[] = [];
+    const asked: Array<{ dir: string; remote: string }> = [];
+    (mockWindow as InfoHost).showInformationMessage = async (message: string) => {
+      said.push(message);
+      return undefined;
+    };
+    (mockEnv as ExternalHost).openExternal = async (uri: { toString(): string }) => {
+      opened.push(String(uri));
+      return true;
+    };
+    const { deps } = chatDeps(projectOf());
+    const h = withRegisteredCommands({
+      ...deps,
+      getProject: () => projectOf(),
+      getBranches: () => [
+        {
+          name: 'feat/x',
+          dir: '/Users/a/code/magma-feat-x',
+          colorIndex: 0,
+          rootIds: [],
+          primary: false,
+          shown: true,
+        },
+      ],
+      branchStatusOf: () =>
+        over.status === false
+          ? undefined
+          : {
+              branch: 'feat/x',
+              upstream: over.upstream ?? 'origin/feat/x',
+              ahead: 0,
+              behind: 0,
+              dirty: false,
+              untracked: false,
+            },
+      remoteUrlOf: async (dir, remote) => {
+        asked.push({ dir, remote });
+        return over.remoteUrl ?? 'git@github.com:acme/app.git';
+      },
+    });
+    return { opened, said, asked, run: (command, arg) => h.run(command, arg) };
+  }
+
+  it('builds the page out of the upstream and the remote, and opens it', async () => {
+    const h = harness();
+    await h.run(COMMANDS.openBranchOnRemote, ARG);
+    // The remote is read in the CHECKOUT, and named by the upstream rather than
+    // assumed to be `origin`.
+    expect(h.asked).toEqual([
+      { dir: '/Users/a/code/magma-feat-x', remote: 'origin' },
+    ]);
+    expect(h.opened).toEqual(['https://github.com/acme/app/tree/feat/x']);
+    expect(h.said).toEqual([]);
+  });
+
+  it('follows the upstream when it is not the local name', async () => {
+    // A branch checked out as `feat/x` and pushed as `axel/feat/x` has a page at
+    // the second name only. Guessing the local one would open a 404 that looks
+    // like the extension being wrong about the branch.
+    const h = harness({ upstream: 'fork/axel/feat/x' });
+    await h.run(COMMANDS.openBranchOnRemote, ARG);
+    expect(h.asked[0].remote).toBe('fork');
+    expect(h.opened).toEqual(['https://github.com/acme/app/tree/axel/feat/x']);
+  });
+
+  it('says so, and asks nothing, for a branch that tracks nothing', async () => {
+    const h = harness({ upstream: '' });
+    await h.run(COMMANDS.openBranchOnRemote, ARG);
+    expect(h.opened).toEqual([]);
+    expect(h.asked).toEqual([]);
+    expect(h.said[0]).toContain('no upstream');
+  });
+
+  it('says so for an unprobed branch too, rather than guessing origin', async () => {
+    const h = harness({ status: false });
+    await h.run(COMMANDS.openBranchOnRemote, ARG);
+    expect(h.opened).toEqual([]);
+    expect(h.said).toHaveLength(1);
+  });
+
+  it('opens nothing when the remote is not a url it can turn into a page', async () => {
+    const h = harness({ remoteUrl: '/srv/git/app.git' });
+    await h.run(COMMANDS.openBranchOnRemote, ARG);
+    expect(h.opened).toEqual([]);
+    expect(h.said[0]).toContain('origin');
+  });
+});
+
+// ------------------------------- the + that cuts a worktree, and the ref's +
+
+describe('starting a session on a branch that has no checkout', () => {
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockWindow as WarningHost).showWarningMessage;
+    delete (mockWindow as StatusHost).setStatusBarMessage;
+  });
+
+  const REF = { projectId: 'p1', dir: '', branch: 'feat/y', type: 'branch' };
+
+  /** Records the modal without answering it, which is enough to prove WHICH
+   *  flow the click reached: the worktree one asks before it writes. */
+  function harness(branches: Array<{ name: string; dir: string }>): {
+    asked: string[];
+    run: (command: string, arg?: unknown) => Promise<void>;
+  } {
+    const asked: string[] = [];
+    (mockWindow as WarningHost).showWarningMessage = async (
+      message: string,
+    ) => {
+      asked.push(message);
+      return undefined; // dismissed — nothing is created
+    };
+    (mockWindow as StatusHost).setStatusBarMessage = () => undefined;
+    const { deps } = chatDeps(projectOf());
+    const h = withRegisteredCommands({
+      ...deps,
+      getProject: () => projectOf(),
+      getBranches: () =>
+        branches.map((b) => ({
+          name: b.name,
+          dir: b.dir,
+          colorIndex: 0,
+          rootIds: [],
+          primary: false,
+          shown: true,
+        })),
+      localBranches: async () => ['feat/y'],
+      worktreePathPattern: () => '../${repo}-${branch}',
+      addWorktree: async () => ({ ok: true, output: '' }),
+    });
+    return { asked, run: (command, arg) => h.run(command, arg) };
+  }
+
+  it('asks before it writes, quoting the git command', async () => {
+    const h = harness([
+      { name: 'main', dir: '/Users/a/code/magma' },
+      { name: 'feat/y', dir: '' },
+    ]);
+    await h.run(COMMANDS.newSessionInBranch, REF);
+    // The confirmation is the whole reason this verb can live on a `+`: nothing
+    // is created without the exact command being shown first.
+    expect(h.asked).toHaveLength(1);
+    expect(h.asked[0]).toContain('feat/y');
+  });
+
+  it('refuses a branch the grouping no longer reports', async () => {
+    // The same re-validation the checkout path does, on the field a ref has:
+    // its NAME. A stale row must not be able to name a branch into existence.
+    const h = harness([{ name: 'main', dir: '/Users/a/code/magma' }]);
+    await h.run(COMMANDS.newSessionInBranch, REF);
+    // It says so rather than doing nothing, and what it says is not a
+    // confirmation: no `git worktree add` was ever offered.
+    expect(h.asked).toHaveLength(1);
+    expect(h.asked[0]).toContain('no longer a branch');
   });
 });

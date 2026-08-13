@@ -859,6 +859,97 @@ describe('LineageWebtreeProvider: grouped branch rows', () => {
     });
     expect(calls.runCommand).toEqual([]);
   });
+
+  it('resolves the `#42` link through the same model, on a branch row', async () => {
+    const { provider, calls } = setup();
+    await internals(provider).onMessage({
+      type: 'action',
+      action: 'openPullRequest',
+      key: branchRowKey('p1', 'feat/x'),
+    });
+    // The command gets a CHECKOUT, never a url: it looks its own one up in the
+    // cache the row rendered from. See openPullRequestFlow.
+    expect(calls.runCommand).toEqual([
+      [
+        'openPullRequest',
+        { type: 'branch', projectId: 'p1', dir: '/proj-feat', branch: 'feat/x' },
+      ],
+    ]);
+  });
+
+  it('refuses a link on a row the model does not have', async () => {
+    const { provider, calls } = setup();
+    for (const key of [
+      branchRowKey('p1', 'no-such-branch'),
+      'session:not-a-row',
+      'background',
+      '',
+    ]) {
+      await internals(provider).onMessage({
+        type: 'action',
+        action: 'openBranchOnRemote',
+        key,
+      });
+    }
+    expect(calls.runCommand).toEqual([]);
+  });
+
+  it('runs no command for an action name it was never offered', async () => {
+    // The third allowlist (BRANCH_LINK_ACTIONS). A page that made a name up must
+    // reach nothing at all.
+    const { provider, calls } = setup();
+    await internals(provider).onMessage({
+      type: 'action',
+      action: 'openBranchOnRemoteAndDeleteEverything',
+      key: branchRowKey('p1', 'feat/x'),
+    });
+    expect(calls.runCommand).toEqual([]);
+  });
+});
+
+// -------------------------------------- the links on a session's branch line
+
+describe('LineageWebtreeProvider: the branch line under a session', () => {
+  const WORKTREES: Worktree[] = [
+    { dir: '/proj', branch: 'main', head: 'aaa', detached: false },
+    { dir: '/proj-feat', branch: 'feat/x', head: 'bbb', detached: false },
+  ];
+
+  function setup() {
+    // Two checkouts and a session in each, so the branch line is drawn at all
+    // (BRANCH_CHIPS_MIN) — and NOT grouped, where the branch row above would say
+    // it instead.
+    const forest = forestOf([
+      node(ROOT, { cwd: '/proj' }),
+      node(CHILD, { cwd: '/proj-feat' }),
+    ]);
+    const { deps, calls } = makeDeps(forest, {
+      projects: () => [project('p1', 'P1', '/proj')],
+      worktreesOf: () => WORKTREES,
+      branchRows: () => true,
+    });
+    const provider = new LineageWebtreeProvider(deps, EXT_URI);
+    internals(provider).view = fakeView();
+    return { provider, calls };
+  }
+
+  it('resolves a link on the line through the session row it lives in', async () => {
+    const { provider, calls } = setup();
+    await internals(provider).onMessage({
+      type: 'action',
+      action: 'openBranchOnRemote',
+      key: `session:${CHILD}`,
+    });
+    // The DIRECTORY comes off the line, not off the session's cwd: a session can
+    // be running in a subdirectory of the checkout, and every verb downstream
+    // matches worktrees by path.
+    expect(calls.runCommand).toEqual([
+      [
+        'openBranchOnRemote',
+        { type: 'branch', projectId: 'p1', dir: '/proj-feat', branch: 'feat/x' },
+      ],
+    ]);
+  });
 });
 
 // ------------------------------------------------------- subproject rows
@@ -925,10 +1016,9 @@ describe('LineageWebtreeProvider: subproject rows', () => {
 import {
   branchPalette,
   branchRowParts,
-  othersProjectIdFromKey,
   sanitizeBranchColor,
 } from '../src/webtree';
-import { branchRowKey, othersRowKey } from '../src/viewmodel';
+import { branchRowKey } from '../src/viewmodel';
 import { BRANCH_COLOR_COUNT } from '../src/projects';
 
 describe('branchRowParts', () => {
@@ -958,13 +1048,11 @@ describe('branchRowParts', () => {
   });
 
   it('refuses the other rows that carry the same project id', () => {
-    // The branch row, the Others row and the project header all name the same
-    // project under different prefixes. A parser that took any of them would
-    // let one row's message invoke another row's verb.
+    // A branch row and the project header name the same project under different
+    // prefixes. A parser that took either would let one row's message invoke the
+    // other row's verb.
     expect(branchRowParts(projectRowKey(ROOT))).toBeUndefined();
-    expect(branchRowParts(othersRowKey(ROOT))).toBeUndefined();
     expect(projectIdFromKey(branchRowKey(ROOT, 'main'))).toBeUndefined();
-    expect(othersProjectIdFromKey(branchRowKey(ROOT, 'main'))).toBeUndefined();
   });
 
   it('rejects malformed keys and every non-string', () => {
@@ -979,14 +1067,6 @@ describe('branchRowParts', () => {
   });
 });
 
-describe('othersProjectIdFromKey', () => {
-  it('accepts an others: key and nothing else', () => {
-    expect(othersProjectIdFromKey(othersRowKey(ROOT))).toBe(ROOT);
-    expect(othersProjectIdFromKey('others:')).toBeUndefined();
-    expect(othersProjectIdFromKey(projectRowKey(ROOT))).toBeUndefined();
-    expect(othersProjectIdFromKey(undefined)).toBeUndefined();
-  });
-});
 describe('sanitizeBranchColor', () => {
   // This is a SECURITY boundary, not a validation nicety: the return value is
   // interpolated into an inline <style nonce> block, and the CSP that stops

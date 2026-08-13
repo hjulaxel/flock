@@ -569,6 +569,45 @@ describe('computeGrouping: worktrees', () => {
     expect(out.projects[0].branches).toEqual([]);
   });
 
+  it('builds the branch list off the ONE gate, whichever way it is displayed', () => {
+    // One switch, both display modes. The list feeds the colours and the line
+    // alike, so the question here is only "did the user turn the branch feature
+    // on" — `lineage.git.branchDisplay` decides what is done with the answer,
+    // never whether it is computed. Whether the ROWS are drawn stays the
+    // renderer's half of the gate; see ViewModelInput.branchBlock.
+    const out = computeGrouping({
+      visibleRootIds: ['A', 'B', 'C'],
+      cwdOf: cwds,
+      projects,
+      hiddenFolders: [],
+      groupByFolder: true,
+      onlyProjectSessions: false,
+      worktreesOf: appWorktrees,
+      branchRows: true,
+    });
+    expect((out.projects[0].branches ?? []).map((b) => b.name)).toEqual([
+      'main',
+      '(detached)',
+      'feat/x',
+    ]);
+  });
+
+  it('builds no branch list when the feature is off', () => {
+    const out = computeGrouping({
+      visibleRootIds: ['A', 'B', 'C'],
+      cwdOf: cwds,
+      projects,
+      hiddenFolders: [],
+      groupByFolder: true,
+      onlyProjectSessions: false,
+      worktreesOf: appWorktrees,
+    });
+    expect(out.projects[0].branches).toEqual([]);
+    // Membership is NOT gated: a session in a linked checkout still files under
+    // the project that owns the repository. Hiding rows must not move sessions.
+    expect(out.projects[0].rootIds).toEqual(['A', 'B', 'C']);
+  });
+
   it('builds one chip per worktree, main first then alphabetical', () => {
     const out = computeGrouping({
       visibleRootIds: ['A', 'B', 'C'],
@@ -1232,5 +1271,52 @@ describe('chatsForProject', () => {
   it('survives an empty store', () => {
     expect(chatsForProject(undefined, [API], 'p1')).toEqual([]);
     expect(chatsForProject({}, [], 'p1')).toEqual([]);
+  });
+});
+
+// ------------------------------------- the block is asked for, never assumed
+
+describe('computeGrouping: the branch block is opt-in', () => {
+  const projects = [
+    {
+      id: 'p1',
+      name: 'app',
+      rootDir: '/code/app',
+      dirs: [],
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    },
+  ];
+
+  it('carries the record through as-is, absent included', () => {
+    // REGRESSION. This used to be normalised — `p.branchesCollapsed === true` —
+    // which turned "never asked" into the same value as "explicitly opened", and
+    // the renderer needs those apart: one draws six rows nobody asked for and
+    // the other is somebody's decision. Absent has to stay absent.
+    const out = computeGrouping({
+      visibleRootIds: [],
+      cwdOf: () => undefined,
+      projects,
+      hiddenFolders: [],
+      groupByFolder: true,
+      onlyProjectSessions: false,
+      branchRows: true,
+    });
+    expect(out.projects[0].branchesShown).toBeUndefined();
+  });
+
+  it('keeps an explicit answer, either way', () => {
+    for (const shown of [true, false]) {
+      const out = computeGrouping({
+        visibleRootIds: [],
+        cwdOf: () => undefined,
+        projects: [{ ...projects[0], branchesShown: shown }],
+        hiddenFolders: [],
+        groupByFolder: true,
+        onlyProjectSessions: false,
+        branchRows: true,
+      });
+      expect(out.projects[0].branchesShown).toBe(shown);
+    }
   });
 });

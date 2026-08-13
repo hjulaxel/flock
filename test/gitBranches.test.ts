@@ -27,7 +27,7 @@ import {
   readBranchStatus,
   statusArgv,
 } from '../src/gitBranches';
-import { branchStatusLines, formatBranchSync } from '../src/viewmodel';
+import { branchIsDirty, branchStatusLines, formatBranchSync } from '../src/viewmodel';
 import type { BranchStatus } from '../src/types';
 
 /** Captured verbatim from `git status --porcelain=v2 --branch` in a worktree two
@@ -397,21 +397,33 @@ describe('formatBranchSync', () => {
     expect(formatBranchSync(undefined)).toBe('');
   });
 
-  it('puts ahead before behind, and dirt last', () => {
+  it('puts ahead before behind', () => {
     expect(formatBranchSync(status({ ahead: 2 }))).toBe('↑2');
     expect(formatBranchSync(status({ behind: 1 }))).toBe('↓1');
     expect(formatBranchSync(status({ ahead: 3, behind: 2 }))).toBe('↑3 ↓2');
-    expect(formatBranchSync(status({ dirty: true }))).toBe('*');
+  });
+
+  it('says nothing about uncommitted work, which is not about the upstream', () => {
+    // The `*` used to be the last token of this string and now sits against the
+    // branch NAME instead — see branchIsDirty. This assertion is the whole of
+    // that move: a checkout with changes and nothing to push reports nothing
+    // here, because there is nothing to say about where it stands.
+    expect(formatBranchSync(status({ dirty: true }))).toBe('');
     expect(formatBranchSync(status({ ahead: 3, behind: 2, dirty: true }))).toBe(
-      '↑3 ↓2 *',
+      '↑3 ↓2',
     );
   });
 
   it('draws one mark for dirt, whichever kind it is', () => {
     // A count of changed files is a number nobody acts on; the existence of
     // uncommitted work is the whole of what the row can usefully warn about.
-    expect(formatBranchSync(status({ untracked: true }))).toBe('*');
-    expect(formatBranchSync(status({ dirty: true, untracked: true }))).toBe('*');
+    expect(branchIsDirty(status({ untracked: true }))).toBe(true);
+    expect(branchIsDirty(status({ dirty: true }))).toBe(true);
+    expect(branchIsDirty(status({ dirty: true, untracked: true }))).toBe(true);
+    expect(branchIsDirty(status())).toBe(false);
+    // Never probed is not "clean" — but on a row the two draw the same, and
+    // this is the surface that has to pick one.
+    expect(branchIsDirty(undefined)).toBe(false);
   });
 
   it('ignores a nonsense count rather than drawing it', () => {

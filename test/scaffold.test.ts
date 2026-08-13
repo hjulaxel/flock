@@ -12,7 +12,9 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import {
+  BRANCH_FEATURE_SWITCHES,
   COMMANDS,
+  CONFIG_SECTION,
   EXTENSION_ID,
   PROVIDERS,
   PROVIDER_IDS,
@@ -23,6 +25,8 @@ import {
   isSessionId,
   shortId,
 } from '../src/types';
+import type { PullRequest, PullRequestState } from '../src/types';
+import { branchStateIcon } from '../src/viewmodel';
 
 const ROOT = path.join(__dirname, '..');
 const FIXTURE_DIR = path.join(__dirname, 'fixtures', 'transcripts');
@@ -83,7 +87,7 @@ describe('scaffold: the shared types contract', () => {
     //
     // Bump it in the same commit as the verb, and check the new id reaches a
     // menu: a command nobody can invoke is not a feature.
-    expect(ids).toHaveLength(75);
+    expect(ids).toHaveLength(80);
     // Duplicate values would make one of them unreachable — the later key wins
     // at registration and the earlier verb's menu entry fires the wrong flow.
     expect(new Set(ids).size).toBe(ids.length);
@@ -104,6 +108,33 @@ describe('scaffold: the shared types contract', () => {
     expect(contributed).toEqual([...Object.values(COMMANDS)].sort());
   });
 
+  // `lineage.showBranchesAndWorktrees` writes six settings and its partner writes
+  // the defaults back, which only works while BRANCH_FEATURE_SWITCHES agrees with
+  // the manifest about both halves. A key that is not a real setting is a silent
+  // no-op — `update()` on an undeclared key throws, and the command reports it as
+  // unwritable — and an `off` value that is not the shipped default turns the
+  // Hide half into a verb that leaves the tree somewhere nobody asked for.
+  it('turns the branch feature on and off against settings that exist', () => {
+    const pkg = JSON.parse(
+      fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'),
+    ) as {
+      contributes: {
+        configuration: { properties: Record<string, { default?: unknown }> };
+      };
+    };
+    const properties = pkg.contributes.configuration.properties;
+    expect(BRANCH_FEATURE_SWITCHES.length).toBe(5);
+    for (const { key, on, off } of BRANCH_FEATURE_SWITCHES) {
+      const full = `${CONFIG_SECTION}.${key}`;
+      const declared = properties[full];
+      expect(declared, `${full} is not a contributed setting`).toBeDefined();
+      expect(declared.default, `${full} default`).toEqual(off);
+      // A switch whose two positions are the same value is a row in this table
+      // that does nothing, in either direction.
+      expect(on, full).not.toEqual(off);
+    }
+  });
+
   it('ships an icon file for every provider', () => {
     for (const id of PROVIDER_IDS) {
       const info = PROVIDERS[id];
@@ -118,10 +149,49 @@ describe('scaffold: the shared types contract', () => {
     // They are fetched by uri under the webview's img-src, so a missing file is
     // a silently empty button (or an unmarked row) rather than an error anyone
     // would notice.
-    for (const name of ['chat.svg', 'add.svg', 'bell-slash.svg']) {
+    for (const name of [
+      'chat.svg',
+      'add.svg',
+      'bell-slash.svg',
+      // The mark that leads a branch, in each of the states branchStateIcon
+      // names. A missing one here is a branch line with a gap where its state
+      // should be, on the rows that have the most to say.
+      'git-branch.svg',
+      'git-pull-request.svg',
+      'git-pull-request-draft.svg',
+      'git-pull-request-closed.svg',
+      'git-merge.svg',
+    ]) {
       const file = path.join(ROOT, 'media', 'icons', name);
       expect(fs.existsSync(file), name).toBe(true);
       expect(fs.readFileSync(file, 'utf8')).toContain('<svg');
+    }
+  });
+
+  it('names a shipped file for every mark branchStateIcon can return', () => {
+    // The two halves of one table: the function picks a codicon id, the webview
+    // looks that id up in its own svg allowlist, and the native tree hands it
+    // straight to a ThemeIcon. A state whose glyph is not on disk draws nothing
+    // in the sidebar while looking perfectly correct in the native tree.
+    const pr = (state: PullRequestState): PullRequest => ({
+      number: 1,
+      title: 't',
+      state,
+      checks: 'none',
+      branch: 'b',
+      url: 'u',
+    });
+    const states: PullRequestState[] = ['draft', 'open', 'merged', 'closed'];
+    const named = [
+      branchStateIcon(undefined),
+      ...states.map((s) => branchStateIcon(pr(s))),
+    ];
+    // Five states, five distinct marks — a duplicate would be a state the reader
+    // cannot tell from another.
+    expect(new Set(named).size).toBe(named.length);
+    for (const name of named) {
+      const file = path.join(ROOT, 'media', 'icons', `${name}.svg`);
+      expect(fs.existsSync(file), name).toBe(true);
     }
   });
 

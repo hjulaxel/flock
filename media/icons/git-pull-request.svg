@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" role="img"
+     fill="none" stroke="#000" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+  <title>Pull request</title>
+  <!-- STROKED, like git-branch.svg, and for the same reason: the webview paints
+       this as a CSS mask, which reads ALPHA only, so GitHub's filled octicon
+       would flatten into a blob at 11px.
+       Two columns. The left one is the branch: a ring at each end with the track
+       between them. The right one is where it is going: a ring at the bottom and
+       a line running up into an arrowhead, which is the whole difference between
+       this and git-merge.svg (the same drawing with the arrow pointing the other
+       way, into the trunk).
+       NB. no double hyphen anywhere in this comment. An svg used as a CSS mask
+       is parsed as strict XML, where a comment containing one is a fatal error
+       and the whole file renders as nothing. -->
+  <circle cx="4.6" cy="3.8" r="1.9"/>
+  <circle cx="4.6" cy="12.2" r="1.9"/>
+  <path d="M4.6 5.7v4.6"/>
+  <circle cx="11.4" cy="12.2" r="1.9"/>
+  <path d="M11.4 10.3V5.0"/>
+  <path d="M9.7 6.5 11.4 4.8l1.7 1.7"/>
+</svg>

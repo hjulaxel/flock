@@ -80,8 +80,10 @@ chats, and much more.
   directory. **Add Subproject** makes a named *lane* in a directory — so
   `~/magma-cs-mcp` can hold "the server rewrite" and "the CS tooling" as two rows,
   which nothing on disk could tell apart — or takes on another directory, which gets
-  a row of its own labelled by its basename. Worktree sessions are filed under the
-  directory that owns the repository, so nothing lands in a project-wide leftover
+  a row of its own labelled by its basename. **A new lane starts empty**: sessions
+  that were already running in that folder stay on the folder's own row, which
+  disappears once you have filed the last of them. Worktree sessions are filed under
+  the directory that owns the repository, so nothing lands in a project-wide leftover
   row. A project that has never made a lane draws exactly the rows it always did.
 
 - **Open and close projects.** A project you are not working on this month
@@ -151,6 +153,19 @@ Nothing about it is unfinished: it reads real worktrees, `git worktree add` and
 rules are covered by the same tests they always were. Turn the setting on to get
 all of it back, including its menus.
 
+The feature is six settings by now, so there is one verb for all of them:
+**Flock: Show Branches and Worktrees** in the command palette turns on the rows,
+the pull-request chips, the two previews and the `inline` display mode in one go,
+and **Flock: Hide Branches and Worktrees** puts every one of them back to the
+value it ships with.
+
+Once it is on, `lineage.git.branchDisplay` picks how a session says which
+worktree it is in: `inline` — the default — writes the branch on a line under the
+session, and `color` tints the session's name and uses the branch rows as the key
+(what shipped). Either way the branch rows themselves stay **shut until you ask
+for them**, with **Show Branches** on the project's right-click or the git-branch
+button on its row.
+
 If you were running 0.1.1 and had these rows, Flock offers them back once on the
 first launch after the upgrade, rather than letting them vanish on you. It only
 asks when a repository of yours actually has more than one checkout, and it never
@@ -218,6 +233,12 @@ requests of its own, bundles no API client, and never sees or stores a token. If
 `gh` is missing, not signed in, or the repository has no GitHub remote, the rows
 render exactly as they do with the setting off — one line in the **Flock** output
 channel, no dialog.
+
+A **branch name in the tree is a link** to that branch on the remote it tracks,
+and that is not an exception to the promise above: the url is built from `git
+remote get-url` and the branch's own upstream, both reads of the local
+repository, and the only thing that leaves your machine is the browser your click
+hands the url to.
 
 ## Development
 

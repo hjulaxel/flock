@@ -112,6 +112,7 @@ import {
   worktreePathFor,
   worktreeRemoveArgv,
 } from './worktrees';
+import { branchWebUrl } from './pullRequests';
 import { accountIdOf, usageSummaryOf } from './accountsView';
 import type { AccountDeps } from './accountsView';
 
@@ -555,12 +556,15 @@ export function branchArgOf(
   };
   if (obj.type !== 'branch') return undefined;
   if (typeof obj.projectId !== 'string' || obj.projectId === '') return undefined;
-  if (typeof obj.dir !== 'string' || obj.dir.trim() === '') return undefined;
-  return {
-    projectId: obj.projectId,
-    dir: obj.dir,
-    branch: typeof obj.branch === 'string' ? obj.branch : '',
-  };
+  if (typeof obj.dir !== 'string') return undefined;
+  const branch = typeof obj.branch === 'string' ? obj.branch : '';
+  // AN EMPTY `dir` IS LEGAL, and only since the `+` reached a branch with no
+  // checkout: that row's whole point is that nothing on disk answers to it yet.
+  // What the argument must still do is NAME something — a directory or a branch
+  // — because every verb downstream re-resolves it against the live branch list
+  // and an argument naming neither could not be resolved to a row at all.
+  if (obj.dir.trim() === '' && branch === '') return undefined;
+  return { projectId: obj.projectId, dir: obj.dir, branch };
 }
 
 /** Depth-first over roots, so QuickPicks read in the same order as the tree. */
@@ -1762,6 +1766,11 @@ function liveSessionCwds(deps: CommandDeps): string[] {
 async function newWorktreeFlow(
   deps: CommandDeps,
   projectId: string,
+  /** A branch the caller already knows, which skips the picker: the `+` on a
+   *  branch row names the branch by being on it, so asking again would be asking
+   *  a question the click already answered. Everything after the picker — the
+   *  path, the confirmation, the add, the session — is identical. */
+  preChosen?: { branch: string },
 ): Promise<void> {
   const project = deps.getProject(projectId);
   if (!project) return;
@@ -1784,7 +1793,11 @@ async function newWorktreeFlow(
     return;
   }
 
-  const chosen = await pickBranchForNewWorktree(deps, project, branches, repoDir);
+  const chosen = preChosen
+    ? // `create: false` because a branch row exists only for a ref git already
+      // has, so `-b` would fail on a name that is already taken.
+      { branch: preChosen.branch, create: false }
+    : await pickBranchForNewWorktree(deps, project, branches, repoDir);
   if (!chosen) return;
 
   const dir = worktreePathFor({
@@ -2078,6 +2091,62 @@ async function openPullRequestFlow(
     await vscode.env.openExternal(vscode.Uri.parse(pr.url));
   } catch (err) {
     logError('commands.openPullRequest', err);
+  }
+}
+
+/**
+ * Open the BRANCH's own page on the remote it tracks — what a branch name in the
+ * tree links to.
+ *
+ * NO `gh`, NO SETTING, NO NETWORK CALL. The url is assembled out of two reads of
+ * the local repository: the upstream the status probe already knows
+ * (`origin/feat/x`), which names both the remote and the ref there, and that
+ * remote's url out of .git/config. `openExternal` then hands the finished string
+ * to the browser, and the browser is the only thing here that talks to anybody.
+ *
+ * Which is also why it is not behind `lineage.git.pullRequests`: that setting is
+ * the promise that Flock does not run `gh`, and nothing in this path does.
+ *
+ * THE UPSTREAM IS THE AUTHORITY, not the local branch name. A branch checked out
+ * as `fix` and pushed as `axel/fix` has a page at the second name only, and
+ * guessing `origin/<local name>` would open a 404 that looks like the extension
+ * being wrong about the branch. A branch that tracks nothing gets a sentence
+ * instead — the tree does not draw its name as a link either (see
+ * sessionBranchLine), so this is the palette's path through here, and the answer
+ * has to be a word rather than a dead click.
+ */
+async function openBranchOnRemoteFlow(
+  deps: CommandDeps,
+  branch: BranchInfo,
+): Promise<void> {
+  const status = safeCall('branchStatusOf', () => deps.branchStatusOf?.(branch.dir));
+  const upstream = typeof status?.upstream === 'string' ? status.upstream : '';
+  if (upstream === '') {
+    // Two different nothings, one sentence: the probe said "tracks nothing", or
+    // there was no probe. Neither has a page to open and the difference is not
+    // one the user can act on differently.
+    void vscode.window.showInformationMessage(
+      `Flock: ${branch.name} has no upstream branch, so there is nothing to open.`,
+    );
+    return;
+  }
+  const cut = upstream.indexOf('/');
+  const remote = cut > 0 ? upstream.slice(0, cut) : 'origin';
+  const ref = cut > 0 ? upstream.slice(cut + 1) : branch.name;
+  const remoteUrl = await Promise.resolve(
+    safeCall('remoteUrlOf', () => deps.remoteUrlOf?.(branch.dir, remote)) ?? '',
+  ).catch(() => '');
+  const url = branchWebUrl(remoteUrl, ref);
+  if (url === '') {
+    void vscode.window.showInformationMessage(
+      `Flock: could not work out where ${branch.name} lives — ${remote} is not a url Flock can turn into a page.`,
+    );
+    return;
+  }
+  try {
+    await vscode.env.openExternal(vscode.Uri.parse(url));
+  } catch (err) {
+    logError('commands.openBranchOnRemote', err);
   }
 }
 
@@ -3279,26 +3348,25 @@ async function confirmDeleteProject(
 }
 
 /**
- * ADD A SUBPROJECT: the project gets one more directory.
+ * ADD A SUBPROJECT: a named lane of work, in one directory of the project.
  *
- * A SUBPROJECT IS A DIRECTORY, and there is no second concept and no second word
- * for it. "Sub-folder" does not appear anywhere in Flock.
- *
- * A folder dialog and nothing else. It opens INSIDE the project, because that is
- * where the answer is nine times out of ten — `~/code/app` then `api`, not a walk
- * back up from wherever the last dialog happened to be — but it is a full picker,
- * so a directory somewhere else entirely (a sibling checkout, an infra directory, a
- * notes folder) is exactly as reachable.
+ * A SUBPROJECT IS A NAME AND A DIRECTORY, and there is no second word for it —
+ * "sub-folder" does not appear anywhere in Flock. Two lanes may name the SAME
+ * directory, which is the case the whole of v7 exists for: `magma-cs-mcp` holding
+ * "the server rewrite" and "the CS tooling", which nothing on disk can tell apart.
+ * Picking a directory the project does not cover yet adds it to the project on the
+ * way past, which is how a project comes to span more than one at all.
  *
  * IT CREATES NOTHING. Flock does not make directories: the only writes it makes
  * outside its own storage are the two worktree verbs, both of which show the exact
  * `git` command first. A directory that does not exist yet is one to make in a
  * terminal or a file manager, and then pick here.
  *
- * What happens next is the whole feature: at two directories the project's sessions
- * split into a row each (see projects.buildSubprojects), and at one there are no
- * subproject rows at all. So this is how a project gets its second row, and Remove
- * Subproject is how it gets back to none.
+ * AND IT CLAIMS NOTHING. The lane it makes is EMPTY — a name you have just invented
+ * cannot describe work that was already running, so the sessions in that folder stay
+ * on the folder's own row until you start them in the lane or move them there. See
+ * projects.buildSubprojects, which is where that is decided and where the folder's
+ * row disappears again once it is empty.
  */
 async function newSubprojectFlow(
   deps: CommandDeps,
@@ -3522,6 +3590,15 @@ async function removeSubprojectFlow(
     return;
   }
 
+  // Lanes named in the directory being removed. They go with it: a lane is a name
+  // for work IN a folder, so keeping one after the project stops covering that
+  // folder would leave a row that can never hold a session again — the project no
+  // longer claims anything in there for it to hold. Same reasoning as deleteProject
+  // tombstoning a project's lanes, one level down.
+  const orphaned = (deps.allSubprojects?.() ?? []).filter(
+    (l) => l.projectId === projectId && pathKey(l.dir) === pathKey(dir),
+  );
+
   const remaining = dirs.length - 1;
   const choice = await vscode.window.showWarningMessage(
     `Remove ${baseName(dir)} from "${project.name}"?`,
@@ -3531,6 +3608,13 @@ async function removeSubprojectFlow(
         `${dir}\n\nThe directory stays exactly as it is on disk and nothing ` +
         'running in it stops. Its sessions leave this project — they go back ' +
         'to wherever they sat before it covered them.' +
+        (orphaned.length > 0
+          ? `\n\n${
+              orphaned.length === 1
+                ? `The subproject "${labelOfLane(orphaned[0])}" is named in it, so that name goes too.`
+                : `${orphaned.length} subprojects are named in it, so those names go too.`
+            } The sessions keep their rows either way.`
+          : '') +
         (remaining === 1
           ? `\n\n"${project.name}" is left with one directory, so its ` +
             'subproject rows go away and its sessions sit directly under it ' +
@@ -3550,8 +3634,23 @@ async function removeSubprojectFlow(
       .slice(1)
       .filter((d) => pathKey(d) !== pathKey(dir)),
   });
+  // After the directory, so a failure between the two leaves the lanes pointing at
+  // a directory the project still has rather than the other way round. Re-read for
+  // the same reason the project was: another window may have removed one already.
+  for (const lane of (deps.allSubprojects?.() ?? []).filter(
+    (l) => l.projectId === projectId && pathKey(l.dir) === pathKey(dir),
+  )) {
+    await deps.deleteSubproject?.(lane.id);
+    log('subproject:', lane.id, 'removed with', dir);
+  }
   log('project:', projectId, 'lost directory', dir);
   deps.refresh();
+}
+
+/** What a lane's row says: its name, or its directory's basename while the name is
+ *  blank. The renderers do this too — see buildSubprojects. */
+function labelOfLane(lane: { name: string; dir: string }): string {
+  return lane.name.trim() === '' ? baseName(lane.dir) : lane.name;
 }
 
 /** Additive and idempotent: adding a directory a project already covers is a
@@ -5351,6 +5450,15 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         projectIdFromArg(arg) ??
         (await pickProject(deps, 'Start a session in which project?'));
       if (!id) return;
+      // `lineage.git.newSessionInWorktree` decides what this button MEANS, and
+      // the row already said which of the two it is about to do — the `+`'s
+      // tooltip is written from the same setting (see viewmodel.pushProject).
+      // Both verbs stay on the right-click either way, so this is a default and
+      // never a restriction.
+      if (deps.newSessionInWorktree?.() === true) {
+        await newWorktreeFlow(deps, id);
+        return;
+      }
       await newSessionInProjectFlow(deps, id);
     },
   );
@@ -5425,6 +5533,27 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       if (!parsed) return;
       const project = deps.getProject(parsed.projectId);
       if (!project) return;
+
+      // A BRANCH WITH NO CHECKOUT is the row this verb used to refuse, and the
+      // refusal was the wrong shape: somebody clicking `+` on a branch row wants
+      // a session on that branch, and whether a directory for it exists yet is
+      // Flock's problem. So the ref path cuts the worktree first — through the
+      // same confirmation, quoting the same `git worktree add`, and starting the
+      // session in what it made. Matched by NAME here rather than by directory,
+      // because a ref has no directory to match on.
+      if (parsed.dir === '') {
+        const known = deps
+          .getBranches(parsed.projectId)
+          .find((b) => b.name === parsed.branch && b.dir === '');
+        if (!known) {
+          void vscode.window.showWarningMessage(
+            `Flock: ${parsed.branch || 'that branch'} is no longer a branch of ${project.name}.`,
+          );
+          return;
+        }
+        await newWorktreeFlow(deps, parsed.projectId, { branch: known.name });
+        return;
+      }
 
       // The directory must be one the CURRENT grouping reports for this
       // project. A worktree deleted between render and click, or a path made up
@@ -5516,17 +5645,20 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     deps.refresh();
   });
 
-  register(COMMANDS.foldBranches, 'fold branches', async (arg?: unknown) => {
+  // Hide / Show Branches. The record they write is POSITIVE — `branchesShown`
+  // — because the block does not draw until somebody asks: `foldBranches` is
+  // therefore "stop showing" and writes false, not "collapse" writing true.
+  register(COMMANDS.foldBranches, 'hide branches', async (arg?: unknown) => {
     const id = projectIdFromArg(arg);
     if (!id) return;
-    await deps.setBranchesCollapsed(id, true);
+    await deps.setBranchesShown(id, false);
     deps.refresh();
   });
 
-  register(COMMANDS.unfoldBranches, 'unfold branches', async (arg?: unknown) => {
+  register(COMMANDS.unfoldBranches, 'show branches', async (arg?: unknown) => {
     const id = projectIdFromArg(arg);
     if (!id) return;
-    await deps.setBranchesCollapsed(id, false);
+    await deps.setBranchesShown(id, true);
     deps.refresh();
   });
 
@@ -5583,6 +5715,20 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       );
       if (!target) return;
       await openPullRequestFlow(deps, target.project, target.branch);
+    },
+  );
+
+  register(
+    COMMANDS.openBranchOnRemote,
+    'open branch on remote',
+    async (arg?: unknown) => {
+      const target = await resolveWorktree(
+        deps,
+        arg,
+        'Open which branch on the remote?',
+      );
+      if (!target) return;
+      await openBranchOnRemoteFlow(deps, target.branch);
     },
   );
 
@@ -6088,6 +6234,69 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     vscode.window.setStatusBarMessage('Flock: showing closed sessions too', 4000);
   });
 
+  // ---------------------------------------------------- the two display modes
+  //
+  // The same two-command switch as the filter, on `lineage.git.branchDisplay`.
+  // It lives in the gear rather than only in settings because the choice is
+  // invisible until you know the word for it: somebody looking at a tinted name
+  // and wanting to know WHICH branch it is will not search for "branch display".
+  //
+  // Each message says what the mode COSTS, not what it does — the rows on screen
+  // say what it does the moment they repaint, and the cost is the part that
+  // surprises: height going in, a legend to read going back.
+
+  register(COMMANDS.branchDisplayInline, 'branch display: inline', async () => {
+    await deps.setBranchDisplay('inline');
+    vscode.window.setStatusBarMessage(
+      'Flock: branch shown under each session — every session row is now two lines tall',
+      4000,
+    );
+  });
+
+  register(COMMANDS.branchDisplayColor, 'branch display: colour', async () => {
+    await deps.setBranchDisplay('color');
+    vscode.window.setStatusBarMessage(
+      'Flock: sessions coloured by branch — the project’s branch rows are the key to it',
+      4000,
+    );
+  });
+
+  // ------------------------------------------- every git switch, in one verb
+  //
+  // See COMMANDS.showBranchesAndWorktrees for why the pair exists. What is
+  // decided HERE is what each half says afterwards, and the two halves say it
+  // differently on purpose.
+  //
+  // ON turns on the one setting in Flock that reaches the network and the one
+  // that puts fabricated rows in the tree, so it uses a MESSAGE: a status-bar
+  // flash is missable, and "why is Flock running gh" is a question that should
+  // never have to be answered by reading the source. It is not a confirmation —
+  // running the command is the person's act — it is a receipt.
+  //
+  // OFF took nothing away that a person did not put there, so it flashes and
+  // goes, like every other switch in this file.
+
+  register(COMMANDS.showBranchesAndWorktrees, 'show branches and worktrees', async () => {
+    if (!deps.setBranchAndWorktreeFeatures) return;
+    await deps.setBranchAndWorktreeFeatures(true);
+    void vscode.window.showInformationMessage(
+      'Flock: branches and worktrees on — branch rows with New/Remove Worktree, ' +
+        'a branch line under each session (so every session row is two lines ' +
+        'tall), and the two previews. Pull-request chips are on too, which is ' +
+        'the one thing here that reaches the network: `gh pr list` now runs per ' +
+        'repository. "Flock: Hide Branches and Worktrees" puts all six back.',
+    );
+  });
+
+  register(COMMANDS.hideBranchesAndWorktrees, 'hide branches and worktrees', async () => {
+    if (!deps.setBranchAndWorktreeFeatures) return;
+    await deps.setBranchAndWorktreeFeatures(false);
+    vscode.window.setStatusBarMessage(
+      'Flock: branches and worktrees off — no branch rows, no branch line, no gh, no demo project',
+      5000,
+    );
+  });
+
   // --------------------------------------------------- the Accounts section
   //
   // The same two-command switch as the filter above, on
@@ -6148,6 +6357,24 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         label: '$(filter-filled) Show All Sessions',
         description: 'Closed rows come back',
         command: COMMANDS.showAllSessions,
+      });
+    }
+    // `!== 'inline'` rather than `=== 'color'`: the field is optional, and an
+    // older wiring that does not report it should offer the inline half — which
+    // this spelling does, while still offering only the other half once a wiring
+    // says inline.
+    if (state === undefined || state.branchDisplay !== 'inline') {
+      items.push({
+        label: '$(git-branch) Show Branch Under Session',
+        description: 'A second line per session — which worktree it is running in',
+        command: COMMANDS.branchDisplayInline,
+      });
+    }
+    if (state === undefined || state.branchDisplay === 'inline') {
+      items.push({
+        label: '$(symbol-color) Colour Sessions by Branch',
+        description: 'Back to one line per session, with the branch rows as the key',
+        command: COMMANDS.branchDisplayColor,
       });
     }
     items.push(

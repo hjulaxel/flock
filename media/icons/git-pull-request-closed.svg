@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" role="img"
+     fill="none" stroke="#000" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+  <title>Closed pull request</title>
+  <!-- The pull request, called off: the arrowhead is replaced by a cross. Closed
+       and unmerged is over and it did not land, which is a fact and not a
+       problem, so the mark is dimmed rather than red wherever it is drawn (see
+       .branch-glyph.closed) and the shape carries the rest.
+       NB. no double hyphen anywhere in this comment. An svg used as a CSS mask
+       is parsed as strict XML, where a comment containing one is a fatal error
+       and the whole file renders as nothing. -->
+  <circle cx="4.6" cy="3.8" r="1.9"/>
+  <circle cx="4.6" cy="12.2" r="1.9"/>
+  <path d="M4.6 5.7v4.6"/>
+  <circle cx="11.4" cy="12.2" r="1.9"/>
+  <path d="M11.4 10.3V7.6"/>
+  <path d="M10.0 3.7 12.8 6.5"/>
+  <path d="M12.8 3.7 10.0 6.5"/>
+</svg>

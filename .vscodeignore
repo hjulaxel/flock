@@ -16,6 +16,9 @@ tsconfig.test.json
 vitest.config.ts
 SPEC.md
 STATUS.md
+# Not part of the extension — a standalone CLI + hooks plugin, tested by
+# running it, not by installing the vsix.
+prototype/**
 # The README links into docs/ — those links resolve against the repository on
 # the marketplace page, so the files themselves do not need to ship.
 docs/**

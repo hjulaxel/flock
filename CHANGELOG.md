@@ -4,6 +4,167 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **A session says which worktree it is in, and now you pick how.**
+  `lineage.git.branchDisplay` has two modes, and they are alternatives rather
+  than levels — the branch rows, the worktree verbs and the pull-request lookup
+  are identical in both.
+
+  `color` is what shipped: the session's name is tinted from a per-branch
+  palette, and the project's branch rows are the key to it. It
+  costs no width and answers "are these two on the same thing" down a column at a
+  glance. What it cannot say is *which* thing, so `↑4 ↓3 *` and the request stay
+  in the hover.
+
+  `inline` is the **default**, since the feature is off until somebody turns it
+  on and there is no existing tree to keep identical — meeting it for the first
+  time, a branch said in words beats one said in a colour that needs a legend. It
+  writes the branch under the session, the way a git prompt says it, and puts the
+  name back to the theme's own colour:
+
+  ```
+    ▸ ⧉ Ranking: BM25 vs embeddings                12m ago ●
+         ⇡ feat/search-ranking *      ↑4      #128 ✓
+  ```
+
+  It answers *which*, and carries the tokens where they can be read without
+  hovering. It costs height — twelve sessions become twenty-four rows' worth —
+  and `lineage.git.sessionBranchDetail` decides how much the line says:
+  `standard` is `↑4 ↓3` and nothing else, `detailed` adds the state mark, the
+  pull-request chip and the two words the arrows draw as blank, `local` and
+  `merged`.
+
+  There is deliberately **no "can this be merged" mark**. Ready-to-merge is the
+  absence of tokens; a real one would need `gh pr view` per branch where Flock
+  does one `gh pr list` per repository, and GitHub answers `UNKNOWN` on a first
+  read, so it would flicker on a row that repaints every roster tick.
+
+- **The mark leading a branch is the pull request's, in GitHub's colours.** A
+  green arrow for open, a purple merge for merged, grey ending in a dash for a
+  draft, dimmed and crossed for closed — and the `git-branch` mark it has always
+  had for the branches with no request, which is most of them. GitHub's
+  vocabulary rather than one of our own, because somebody arriving from a browser
+  tab already reads it. The native tree draws the same five marks in the same five
+  colours on its branch rows, named by the same function, so the two surfaces
+  cannot drift.
+
+  It is a `detailed`-level mark: `standard` reaches nothing but the local status
+  cache, and a green arrow in it would be drawn from a source that level does not
+  otherwise consult.
+
+- **The branch name and the `#42` are links.** The name opens that branch's page
+  on the remote it tracks, the number opens the request. The name is a link only
+  where the branch HAS an upstream — work nobody has pushed has no page, and a
+  name that looks clickable has to be. On a branch row only the number links;
+  there the name *is* the row and clicking it already starts a session.
+
+  The branch link needs no `gh` and is not behind `lineage.git.pullRequests`: the
+  url is built from `git remote get-url` and the branch's own upstream, both reads
+  of the local repository, and the only thing that leaves the machine is the
+  browser your click hands the url to. It follows the UPSTREAM rather than the
+  local name, so a branch checked out as `fix` and pushed as `axel/fix` opens the
+  page that exists. Both verbs are on the right-click as well — **Open Branch on
+  GitHub** is new — which is where the keyboard reaches them.
+
+- **The `+` is back on every project and every subproject row**, and
+  `lineage.git.newSessionInWorktree` decides what it means: start a session in
+  that directory, or cut a new worktree first and start it there. The button used
+  to be withdrawn wherever branch or directory rows were on screen, because it
+  had to guess a directory silently. It states its answer now — in its own
+  tooltip, on every row — and a guess you can read is not a guess. Both verbs are
+  on the right-click either way, so the setting picks a default and never limits
+  what is reachable.
+
+- **A branch with no checkout has a `+` too.** It runs the worktree flow for that
+  branch and starts the session in what it made, through the same confirmation
+  quoting the exact `git worktree add`. That row used to refuse the button and
+  send you to a different verb, which was the right rule pointed the wrong way:
+  wanting a session on a branch is not the same as wanting to think about whether
+  a directory for it exists yet.
+
+- **One command turns the whole branch and worktree feature on.** **Flock: Show
+  Branches and Worktrees** in the command palette writes five settings at once —
+  the rows, the detail level, the pull-request chips and the two previews — and
+  **Flock: Hide Branches and Worktrees** writes the shipped defaults back, so the
+  pair is an exact inverse rather than a one-way door. The display mode is
+  deliberately not among them: it is a preference, and putting it back on the way
+  out would discard a choice rather than restore a default. Turning it on says
+  what it turned on, in a message rather than a status-bar flash, since two of
+  the five are things Flock otherwise never does unasked —
+  `lineage.git.pullRequests` reaches the network through `gh` and
+  `lineage.preview.demoProject` puts fabricated rows in the tree.
+
+### Changed
+
+- **The branch block is shut until you ask for it**, in both modes and on every
+  project: a repository with six checkouts is no longer six rows before its first
+  session. **Show Branches** / **Hide Branches** on a project's or a directory's
+  right-click is the ask, remembered per project, and the button on the project
+  row is now marked with a **git-branch glyph rather than a chevron** — the row
+  already has a chevron, which says "this opens" where the mark has to say what
+  opens. The one exception is `lineage.groupSessionsByBranch`, where the branch
+  rows are what the sessions hang off.
+
+  Three things had to change for that to hold, and the last is why it kept not
+  holding. `computeGrouping` normalised the record to `=== true`, folding *never
+  asked* and *explicitly opened* into one value. The fold was read through the
+  project-level branch list, which is **empty by design** for a split project
+  under `lineage.preview.directoryModel` — so exactly the projects the feature
+  is for were the ones it did not reach. And the record itself was
+  `branchesCollapsed`, whose `false` the old always-drawn block had already
+  written on everybody: read as "explicitly opened", it put the rows straight
+  back. It is **`branchesShown`** now — a positive record that only **Show
+  Branches** writes, so every old value simply stops answering, which is the
+  truth: nobody had asked. Existing settings are untouched; the stale key is
+  ignored.
+
+- **The branch rows take no colour in inline mode.** The swatch and the tinted
+  name were drawn whatever the mode, so a tree that said every branch in words
+  also handed you a palette to learn. Inline rows carry a git-branch mark in the
+  swatch's column instead — what kind of row this is, rather than which group it
+  belongs to — and the name takes the theme's own foreground.
+
+- **The "Others (12)" / "Branches (183)" fold row is gone.** A fold inside a fold
+  was one door too many, and it was the row nobody could read: an italic header
+  and a number, standing for rows that had never been asked for. The count moved
+  to the hover of the row the block hangs off, and **Choose Branches to Show…**
+  on the same menu is what the row opened — the curation decision it was really
+  offering, at the cost of a modal instead of a hundred and eighty rows.
+
+- **The `*` for uncommitted work moved to the branch name.** It used to be the
+  last token of `↑3 ↓2 *`, where it read as a third number about the upstream —
+  which it is not: the arrows say where this checkout stands against the branch it
+  tracks, and the star says what is sitting in it uncommitted. `feat/x *` states
+  that, and it is the one Remove Worktree asks a second time over. Every surface
+  places it the same way; in the native tree it leads the description, which is
+  drawn immediately after the label.
+
+- **A session's hover says what its branch line shows in shorthand.** Where the
+  checkout stands, in words, and the request's state, checks and title — the same
+  two sentences the native tree's branch rows have always hovered with. The line
+  is four glyphs and a number; a mark that means something has to be spelled out
+  somewhere, and a row has one tooltip.
+
+- The branch line under a session is **shorter and tighter**: sixteen pixels
+  against a row's twenty-two, lifted two, one size down. Equal heights made the
+  two lines read as two rows; closing the gap to its session and opening one to
+  the next is what makes a pair read as one thing.
+
+### Fixed
+
+- The inline rename's validation message was hung off a row at a **fixed**
+  offset, so on a two-line row it would have landed on top of the branch line.
+  It now hangs off the row's own height, which is the same pixel on every
+  one-line row.
+- The spine's rails are drawn against the gutter, which sits in a row's first
+  line — so a session with a branch line under it would have left a gap in the
+  lineage, and a column of forks would have read as a dashed line. The verticals
+  that continue past a row now cross the second line; the elbow and the node,
+  which belong to the first, are unchanged.
+
 ## [0.1.3] — 2026-08-06
 
 ### Added
@@ -206,6 +367,16 @@ build preserves keys it does not recognise rather than dropping them.
   *name*, leaving the directory, everything running in it, and every session's row
   exactly where they were.
 
+  **A new lane is born empty.** It adopts nothing: the sessions already running in
+  that folder stay on the folder's own row, which keeps drawing — labelled by its
+  basename — for as long as it is holding something, and disappears the moment it
+  is not. A name you have just invented cannot describe work that predates it, and
+  half of what is in that folder is the other lane's; sweeping it all into lane
+  number one would be wrong about half the time and unpickable afterwards. So the
+  folder row is a remainder, not a permanent leftover bucket: file the last session
+  into a lane and it is gone, start one by hand in that folder tomorrow and it comes
+  back to hold it.
+
   Projects that have never made a lane are **byte-identical**. A directory with no
   lane in it still draws the row it always drew, labelled by its basename, and a
   single-directory project still draws no rows at all — so nothing about an existing
@@ -218,8 +389,12 @@ build preserves keys it does not recognise rather than dropping them.
   working directories, so there is nothing to derive from: the lane is stamped at
   launch from the `+` you clicked, and never re-decided. A fork carries its parent's
   lane, a `/clear` carries the conversation's, and a session Flock did not start
-  carries nothing and lands in the first lane of the directory it runs in. A stamp
-  naming a lane you later removed reads as no stamp at all.
+  carries nothing and sits on the row for the directory it runs in. A stamp naming a
+  lane you later removed reads as no stamp at all.
+
+  Removing a **directory** from a project now removes the lanes named in it too, and
+  the dialog says so first — a lane whose folder the project no longer covers could
+  never hold a session again.
 
   A lane is a record of its own rather than a list on the project, and that is
   load-bearing: `projects` merges newest-wins per record, so two windows each adding

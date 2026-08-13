@@ -122,12 +122,33 @@ describe('two lanes in one folder', () => {
     expect(out.every((s) => !s.implicit)).toBe(true);
   });
 
-  it('draws no implicit row for a directory a lane already names', () => {
-    // Otherwise the folder would appear twice — once as a lane and once as
-    // itself — and the second row would be the leftover bucket this model refuses.
+  it('draws no folder row beside the lanes while the folder holds nothing', () => {
+    // With every session in a lane there is nothing left in the folder itself, and
+    // a row saying so would be the permanent leftover bucket this model refuses.
     const out = build();
     expect(out).toHaveLength(2);
     expect(out.some((s) => s.implicit)).toBe(false);
+  });
+
+  it('keeps the folder’s own row while sessions are still sitting in it', () => {
+    // The other half of the same rule, and the one that makes a NEW LANE EMPTY:
+    // sessions that were running in that folder before the name existed stay on the
+    // folder's row. See "which lane a session lands in" below.
+    const out = build({ rootIds: [A], cwdOf: () => ROOT });
+    expect(out.map((s) => s.label)).toEqual([
+      'Server rewrite',
+      'CS tooling',
+      'magma-cs-mcp',
+    ]);
+    expect(out[2].implicit).toBe(true);
+    expect(out[2].rootIds).toEqual([A]);
+  });
+
+  it('keeps `main` on that row, so Remove Subproject still refuses the address', () => {
+    // It stands for the project's own directory whatever else names that directory.
+    const out = build({ rootIds: [A], cwdOf: () => ROOT });
+    expect(out[2].main).toBe(true);
+    expect(out.slice(0, 2).every((s) => s.main === false)).toBe(true);
   });
 
   it('draws ONE lane as a row, even though one node is below the threshold', () => {
@@ -186,26 +207,32 @@ describe('which lane a session lands in', () => {
     expect(out[1].rootIds).toEqual([B]);
   });
 
-  it('sends an unstamped session to the directory’s FIRST lane', () => {
-    // The migration story: pre-existing sessions, and everything started by hand in
-    // a terminal, land in lane number one rather than in a row of their own. That is
-    // what keeps "no leftover row" true after a lane is named.
+  it('A NEW LANE IS BORN EMPTY: no unstamped session is swept into one', () => {
+    // The migration story. Pre-existing sessions, and everything started by hand in
+    // a terminal, stay on the folder's own row — naming "Server rewrite" must not
+    // silently claim three conversations that were running before you typed it, half
+    // of which are plainly the other lane's work.
     const out = build({});
-    expect(out[0].rootIds).toEqual([A, B, C]);
+    expect(out[0].rootIds).toEqual([]);
     expect(out[1].rootIds).toEqual([]);
+    expect(out[2].implicit).toBe(true);
+    expect(out[2].rootIds).toEqual([A, B, C]);
   });
 
   it('treats a stamp naming a lane that is gone as no stamp at all', () => {
     // deleteSubproject deliberately leaves every stamp alone, so dangling stamps
-    // are the ordinary state after removing a lane — not an error.
+    // are the ordinary state after removing a lane — not an error. The session goes
+    // back to being placed by directory, which is where an unstamped one lives.
     const out = build({ [A]: 'deleted-lane', [B]: 'l2' });
-    expect(out[0].rootIds).toEqual([A, C]);
+    expect(out[0].rootIds).toEqual([]);
     expect(out[1].rootIds).toEqual([B]);
+    expect(out[2].rootIds).toEqual([A, C]);
   });
 
   it('ignores a stamp naming another project’s lane', () => {
     const out = build({ [A]: 'l9' }, { lanes: [SERVER, TOOLS] });
-    expect(out[0].rootIds).toContain(A);
+    expect(out[0].rootIds).not.toContain(A);
+    expect(out[2].rootIds).toContain(A);
   });
 
   it('never honours a stamp naming an implicit row', () => {
@@ -233,7 +260,7 @@ describe('which lane a session lands in', () => {
         throw new Error('no records');
       },
     });
-    expect(out[0].rootIds).toEqual([A]);
+    expect(out[2].rootIds).toEqual([A]);
   });
 
   it('loses no session, whatever the stamps say', () => {
@@ -241,6 +268,15 @@ describe('which lane a session lands in', () => {
     expect(out.flatMap((s) => s.rootIds).slice().sort()).toEqual(
       [A, B, C].slice().sort(),
     );
+  });
+
+  it('drops the folder’s row again once the last session leaves it', () => {
+    // Move all three into lanes — with drag, or by closing them and starting the
+    // work again from a lane's `+` — and the remainder row is gone. It is a row
+    // that exists while it has something to say, not a permanent third lane.
+    const out = build({ [A]: 'l1', [B]: 'l2', [C]: 'l2' });
+    expect(out).toHaveLength(2);
+    expect(out.some((s) => s.implicit)).toBe(false);
   });
 });
 
@@ -300,6 +336,27 @@ describe('computeGrouping with lanes', () => {
     expect(rows.map((s) => s.label)).toEqual(['Server rewrite', 'CS tooling']);
     expect(rows[0].rootIds).toEqual([A]);
     expect(rows[1].rootIds).toEqual([B]);
+  });
+
+  it('keeps an unstamped session on the folder’s row, beside the lane', () => {
+    // End to end, because this is what somebody actually sees the moment they name
+    // their first lane: the lane is empty and the work they had is where it was.
+    const result = computeGrouping({
+      visibleRootIds: [A, B],
+      cwdOf: () => ROOT,
+      projects: [project()],
+      hiddenFolders: [],
+      groupByFolder: true,
+      onlyProjectSessions: false,
+      subprojects: [SERVER],
+      stampOf: (id) => (id === A ? 'l1' : undefined),
+    });
+    const rows = result.projects[0].subprojects ?? [];
+    expect(rows.map((s) => s.label)).toEqual(['Server rewrite', 'magma-cs-mcp']);
+    expect(rows[0].rootIds).toEqual([A]);
+    expect(rows[1].rootIds).toEqual([B]);
+    // And the project row itself holds nothing: the rows are where its sessions are.
+    expect(result.projects[0].rootIds).toEqual([A, B]);
   });
 
   it('draws the pre-v7 tree when no lane exists', () => {

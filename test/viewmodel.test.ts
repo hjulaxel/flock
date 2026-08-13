@@ -11,12 +11,17 @@ import {
   buildViewModel,
   folderRowKey,
   projectRowKey,
+  sessionBranchLine,
   sessionRowKey,
 } from '../src/viewmodel';
 import type { ViewModelInput } from '../src/viewmodel';
 import { STATUS_DOT } from '../src/types';
 import type {
+  BranchStatus,
   ProviderId,
+  PullRequest,
+  PullRequestChecks,
+  PullRequestState,
   SessionForest,
   SessionNode,
 } from '../src/types';
@@ -620,7 +625,7 @@ describe('buildViewModel: row content', () => {
     // left to right, and the `+` is specified to sit RIGHT of the chat glyph.
     expect(rows[0].actions).toEqual([
       { id: 'chat', icon: 'chat', title: 'New chat in API' },
-      { id: 'newSession', icon: 'add', title: 'New Session in API' },
+      { id: 'newSession', icon: 'add', title: 'New session in API' },
     ]);
   });
 
@@ -1018,7 +1023,6 @@ describe('attentionCountOf', () => {
 
 import {
   branchRowKey,
-  othersRowKey,
   BRANCH_CHIPS_MIN,
 } from '../src/viewmodel';
 import type { BranchInfo, ProjectGroupNode } from '../src/types';
@@ -1061,9 +1065,29 @@ const forest2 = () =>
     node(B, { cwd: '/code/app-feat-x' }),
   ]);
 
-const rowsFor = (branches: BranchInfo[], over: Partial<ProjectGroupNode> = {}) =>
+/** A project whose branch block has been ASKED FOR, in colour mode.
+ *
+ *  Both defaults are stated rather than inherited, because both changed: the
+ *  block is shut on every project until **Show Branches** writes
+ *  `branchesShown: true`, and the display mode a project meets is `inline`.
+ *  The tests below are about what the block DRAWS and what a colour does, so
+ *  they open it and pick the mode; the ones about the defaults themselves say so
+ *  in their names. */
+const rowsFor = (
+  branches: BranchInfo[],
+  over: Partial<ProjectGroupNode> = {},
+  input2: Partial<ViewModelInput> = {},
+) =>
   buildViewModel(
-    input(forest2(), { projects: [projectNode(branches, [A, B], over)] }),
+    input(
+      forest2(),
+      {
+        projects: [
+          projectNode(branches, [A, B], { branchesShown: true, ...over }),
+        ],
+      },
+      { branchDisplay: 'color', ...input2 },
+    ),
   );
 
 describe('buildViewModel: branch rows', () => {
@@ -1107,57 +1131,108 @@ describe('buildViewModel: branch rows', () => {
       node(B, { cwd: '/code/app-feat-x', status: 'waiting', unseen: true }),
     ]);
     const rows = buildViewModel(
-      input(unseen, { projects: [projectNode([MAIN, FEAT], [A, B])] }),
+      input(
+        unseen,
+        {
+          projects: [
+            projectNode([MAIN, FEAT], [A, B], { branchesShown: true }),
+          ],
+        },
+        { branchDisplay: 'color' },
+      ),
     );
     const branchRows = rows.filter((r) => r.kind === 'branch');
     expect(branchRows.map((r) => r.chip?.count)).toEqual([1, 1]);
     expect(branchRows.map((r) => r.chip?.attention)).toEqual([false, true]);
   });
 
-  it('hides a branch the grouping marked unshown, and counts it under Others', () => {
+  it('hides a branch the grouping marked unshown, and leaves no row behind it', () => {
+    // There was an "Others (1)" row here — a fold at the tail of the block,
+    // standing for the branches not on screen. It is gone: the count is on the
+    // project row's hover and **Choose Branches to Show…** on its menu is what
+    // the row opened. A fold inside a block that is itself folded was one door
+    // too many, and the row nobody could read.
     const hidden = branch('feat/y', '/code/app-y', 2, [], false, false);
     const rows = rowsFor([MAIN, FEAT, hidden]);
     expect(keys(rows)).toEqual([
       projectRowKey('p1'),
       branchRowKey('p1', 'main'),
       branchRowKey('p1', 'feat/x'),
-      othersRowKey('p1'),
       sessionRowKey(A),
       sessionRowKey(B),
     ]);
-    const others = rows.find((r) => r.kind === 'branchOthers');
-    expect(others?.othersCount).toBe(1);
-    expect(others?.description).toBe('1');
-  });
-
-  it('omits Others when everything is shown', () => {
-    expect(rowsFor([MAIN, FEAT]).some((r) => r.kind === 'branchOthers')).toBe(false);
+    expect(rows[0].tooltip).toContain('1 branch not shown');
   });
 
   it('folds the whole block away, leaving the project row to say so', () => {
-    const rows = rowsFor([MAIN, FEAT], { branchesCollapsed: true });
+    const rows = rowsFor([MAIN, FEAT], { branchesShown: false });
     expect(keys(rows)).toEqual([
       projectRowKey('p1'),
       sessionRowKey(A),
       sessionRowKey(B),
     ]);
-    // Folded, the chevron offers the way back and names what is behind it.
+    // Folded, the toggle offers the way back and names what is behind it.
     const fold = rows[0].actions?.find((x) => x.id === 'unfoldBranches');
-    expect(fold?.icon).toBe('chevron-right');
+    expect(fold?.icon).toBe('git-branch');
     expect(fold?.title).toContain('2');
   });
 
-  it('offers the fold chevron only where there is a block to fold', () => {
+  it('offers the fold toggle only where there is a block to fold', () => {
     expect(rowsFor([MAIN, FEAT])[0].actions?.map((x) => x.id)).toEqual([
       'foldBranches',
       'chat',
+      'newSession',
     ]);
-    // Below the threshold: no chevron, and the `+` is back because the branch
-    // rows are not there to replace it.
+    // Below the threshold there is no block, so no toggle.
     expect(rowsFor([MAIN])[0].actions?.map((x) => x.id)).toEqual([
       'chat',
       'newSession',
     ]);
+  });
+
+  it('marks the fold with a BRANCH glyph, in both positions and both modes', () => {
+    // Not a chevron. The row's own twisty is already a chevron and already means
+    // "this opens" — a second one says "more below" where this has to say WHAT
+    // is below. The same glyph open and shut, because the state is the block
+    // itself: six rows on screen, or none.
+    for (const display of ['color', 'inline'] as const) {
+      const open = rowsFor([MAIN, FEAT], {}, { branchDisplay: display });
+      const shut = rowsFor(
+        [MAIN, FEAT],
+        { branchesShown: false },
+        { branchDisplay: display },
+      );
+      expect(open[0].actions?.[0]).toEqual({
+        id: 'foldBranches',
+        icon: 'git-branch',
+        title: 'Hide branches',
+      });
+      expect(shut[0].actions?.[0]).toEqual({
+        id: 'unfoldBranches',
+        icon: 'git-branch',
+        title: 'Show 2 branches',
+      });
+    }
+  });
+
+  it('draws no branch rows until the block has been asked for', () => {
+    // The default, in BOTH modes: a project with six checkouts is not six rows
+    // before its first session on anybody who has never opened the block.
+    for (const display of ['color', 'inline'] as const) {
+      const rows = buildViewModel(
+        input(
+          forest2(),
+          { projects: [projectNode([MAIN, FEAT], [A, B])] },
+          { branchDisplay: display },
+        ),
+      );
+      expect(rows.some((r) => r.kind === 'branch'), display).toBe(false);
+      expect(rows.map((r) => r.key), display).toEqual([
+        projectRowKey('p1'),
+        sessionRowKey(A),
+        sessionRowKey(B),
+      ]);
+    }
   });
 
   it('colours each session name with its own branch', () => {
@@ -1183,7 +1258,9 @@ describe('buildViewModel: branch rows', () => {
       node(B, { parentId: A, cwd: '/code/app-feat-x' }),
     ]);
     const rows = buildViewModel(
-      input(forked, { projects: [projectNode([MAIN, FEAT], [A])] }),
+      input(forked, { projects: [projectNode([MAIN, FEAT], [A])] }, {
+        branchDisplay: 'color',
+      }),
     );
     expect(rows.find((r) => r.sessionId === A)?.branchColor).toBe(0);
     expect(rows.find((r) => r.sessionId === B)?.branchColor).toBe(1);
@@ -1215,16 +1292,17 @@ describe('buildViewModel: branch rows', () => {
     expect(featRow.context.dir).toBe('/code/app-feat-x');
   });
 
-  it('marks the Others row as its own kind, not as a branch', () => {
-    const hidden = branch('feat/y', '/code/app-y', 2, [], false, false);
-    const others = rowsFor([MAIN, FEAT, hidden]).find(
-      (r) => r.kind === 'branchOthers',
+  it('titles the + on a branch with no checkout after what it will do', () => {
+    // The row that used to refuse the button. It cuts the worktree first now,
+    // through New Worktree…'s own confirmation, and the title is what stops that
+    // being a surprise: a `+` that is about to write has to say so before it is
+    // clicked.
+    const ref = branch('feat/y', '', 2, [], false, true);
+    const row = rowsFor([MAIN, FEAT, ref]).find(
+      (r) => r.key === branchRowKey('p1', 'feat/y'),
     );
-    // None of the branch verbs apply — there is no single worktree behind it.
-    expect(others?.context.viewItem).toBe(';branchOthers;');
-    expect(others?.chip).toBeUndefined();
-    expect(others?.canRename).toBe(false);
-    expect(others?.canDrag).toBe(false);
+    expect(row?.actions?.map((a) => a.id)).toEqual(['newSessionInBranch']);
+    expect(row?.actions?.[0].title).toBe('New worktree and session on feat/y');
   });
 
   it('hides the whole block with the project collapsed', () => {
@@ -1266,5 +1344,571 @@ describe('buildViewModel: branch rows', () => {
     const odd = branch('feat:thing', '/code/w', 1, []);
     const rows = rowsFor([MAIN, odd]);
     expect(rows.some((r) => r.key === 'branch:p1:feat:thing')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The branch, on a second line under the session (`lineage.git.sessionBranch`).
+//
+// Two things are under test and they are worth naming separately: the FORMATTER,
+// which decides what a line says at each detail level, and the RULE, which
+// decides which rows get one at all. The rule is the half that can quietly go
+// wrong — a line on every row is a tree twice as tall for no new information.
+
+describe('sessionBranchLine', () => {
+  const status = (over: Partial<BranchStatus> = {}): BranchStatus => ({
+    upstream: 'origin/feat/x',
+    ahead: 0,
+    behind: 0,
+    dirty: false,
+    untracked: false,
+    ...over,
+  });
+  const pr = (over: Partial<PullRequest> = {}): PullRequest => ({
+    number: 128,
+    title: 'Rank by BM25',
+    state: 'open' as PullRequestState,
+    checks: 'pass' as PullRequestChecks,
+    branch: 'feat/x',
+    url: 'https://github.com/acme/app/pull/128',
+    ...over,
+  });
+
+  it('says the branch and where the checkout stands, and nothing else', () => {
+    expect(
+      sessionBranchLine('feat/x', status({ ahead: 4, dirty: true }), undefined, 'standard'),
+    ).toEqual({
+      name: 'feat/x',
+      glyph: 'git-branch',
+      // Against the NAME, not out with the arrows: `↑4` is where this checkout
+      // stands against its upstream and the star is what is in it.
+      dirty: true,
+      link: true,
+      sync: '↑4',
+    });
+  });
+
+  it('makes the name a link only where there is a page to open', () => {
+    // `upstream` non-empty is the probe saying this branch tracks a remote one,
+    // which is the only case where a branch page can exist. A branch nobody has
+    // pushed and a branch nobody has looked at both draw plain text — a name
+    // that looks clickable has to be.
+    expect(sessionBranchLine('feat/x', status(), undefined, 'standard').link).toBe(true);
+    expect(
+      sessionBranchLine('spike/x', status({ upstream: '' }), undefined, 'standard').link,
+    ).toBeUndefined();
+    expect(sessionBranchLine('spike/x', undefined, undefined, 'standard').link).toBeUndefined();
+  });
+
+  it('carries the checkout back for the link to resolve through, undrawn', () => {
+    expect(
+      sessionBranchLine('feat/x', status(), undefined, 'standard', '/code/app-feat-x').dir,
+    ).toBe('/code/app-feat-x');
+    // Absent rather than '', so a line with no directory behind it costs the
+    // same as one that never had the field.
+    expect(sessionBranchLine('feat/x', status(), undefined, 'standard').dir).toBeUndefined();
+  });
+
+  it('reserves no width when there is nothing to report', () => {
+    // Absent, not '' — the rule every other optional row field follows, and what
+    // stops a column of clean branches from holding a gap open.
+    expect(sessionBranchLine('main', status(), undefined, 'standard')).toEqual({
+      name: 'main',
+      glyph: 'git-branch',
+      link: true,
+    });
+    expect(sessionBranchLine('main', undefined, undefined, 'standard')).toEqual({
+      name: 'main',
+      glyph: 'git-branch',
+    });
+  });
+
+  it('withholds the request at the standard level, even when there is one', () => {
+    // The standard level is the vocabulary a git prompt already speaks. A chip
+    // in it would be the second dialect the whole level exists to avoid.
+    expect(
+      sessionBranchLine('feat/x', status({ behind: 3 }), pr(), 'standard'),
+    ).toEqual({ name: 'feat/x', glyph: 'git-branch', link: true, sync: '↓3' });
+  });
+
+  it('withholds the request MARK at the standard level too', () => {
+    // The shape and colour of the mark are the request's, and the standard level
+    // does not consult it — so a green arrow here would be the same second
+    // dialect a chip would be, drawn from a source this level otherwise ignores.
+    const line = sessionBranchLine('feat/x', status(), pr(), 'standard');
+    expect(line.glyph).toBe('git-branch');
+    expect(line.state).toBeUndefined();
+  });
+
+  it('adds the request at the detailed level, chip and all', () => {
+    expect(
+      sessionBranchLine('feat/x', status({ ahead: 4, dirty: true }), pr(), 'detailed'),
+    ).toEqual({
+      name: 'feat/x',
+      // GitHub's own vocabulary: an open request leads its branch with the
+      // pull-request mark, and the state travels as the class both that mark and
+      // the chip take their colour from.
+      glyph: 'git-pull-request',
+      state: 'open',
+      dirty: true,
+      link: true,
+      sync: '↑4',
+      pr: { label: '#128 ✓', state: 'open', checks: 'pass' },
+    });
+  });
+
+  it('gives each request state its own mark', () => {
+    const glyphFor = (state: PullRequestState): string | undefined =>
+      sessionBranchLine('feat/x', status(), pr({ state }), 'detailed').glyph;
+    expect(glyphFor('open' as PullRequestState)).toBe('git-pull-request');
+    expect(glyphFor('draft' as PullRequestState)).toBe('git-pull-request-draft');
+    expect(glyphFor('merged' as PullRequestState)).toBe('git-merge');
+    expect(glyphFor('closed' as PullRequestState)).toBe('git-pull-request-closed');
+    // No request at all keeps the mark this line has always had.
+    expect(sessionBranchLine('feat/x', status(), undefined, 'detailed').glyph).toBe(
+      'git-branch',
+    );
+  });
+
+  it('spells `merged` as a word rather than leaving it to the chip colour', () => {
+    // The whole point of moving the branch off the session's NAME is that a row
+    // should not need colour to be read — and merged is the one state that says
+    // the worktree can go.
+    const line = sessionBranchLine(
+      'fix/csv',
+      status({ upstream: 'origin/fix/csv' }),
+      pr({ number: 124, state: 'merged' as PullRequestState, checks: 'none' as PullRequestChecks }),
+      'detailed',
+    );
+    expect(line.pr?.label).toBe('#124 merged');
+    expect(line.pr?.state).toBe('merged');
+  });
+
+  it('says `local` for a branch that tracks nothing, which the arrows draw blank', () => {
+    const line = sessionBranchLine(
+      'spike/cache',
+      status({ upstream: '', dirty: true }),
+      undefined,
+      'detailed',
+    );
+    expect(line.sync).toBe('local');
+    expect(line.dirty).toBe(true);
+  });
+
+  it('says `local` alone on a clean never-pushed branch', () => {
+    expect(
+      sessionBranchLine('spike/cache', status({ upstream: '' }), undefined, 'detailed').sync,
+    ).toBe('local');
+  });
+
+  it('does not call an unprobed branch local', () => {
+    // "never pushed" and "not looked at yet" are different claims, and only one
+    // of them is ours to make.
+    expect(
+      sessionBranchLine('spike/cache', undefined, undefined, 'detailed'),
+    ).toEqual({ name: 'spike/cache', glyph: 'git-branch' });
+  });
+
+  it('withholds `local` at the standard level', () => {
+    const line = sessionBranchLine(
+      'spike/cache',
+      status({ upstream: '', dirty: true }),
+      undefined,
+      'standard',
+    );
+    expect(line.sync).toBeUndefined();
+    // The star is not part of that word and does not go with it: it is a fact
+    // about the checkout, which the standard level reports.
+    expect(line.dirty).toBe(true);
+  });
+});
+
+describe('buildViewModel: the branch under a session', () => {
+  const on = (over: Partial<ViewModelInput> = {}) =>
+    buildViewModel(
+      input(forest2(), { projects: [projectNode([MAIN, FEAT], [A, B])] }, {
+        branchDisplay: 'inline',
+        ...over,
+      }),
+    );
+  const lineOn = (rows: ReturnType<typeof buildViewModel>, id: string) =>
+    rows.find((r) => r.sessionId === id)?.branchLine;
+
+  it('gives each session the branch of its own checkout', () => {
+    const rows = on();
+    expect(lineOn(rows, A)?.name).toBe('main');
+    expect(lineOn(rows, B)?.name).toBe('feat/x');
+  });
+
+  it('draws no line at all in colour mode', () => {
+    const rows = buildViewModel(
+      input(forest2(), { projects: [projectNode([MAIN, FEAT], [A, B])] }, {
+        branchDisplay: 'color',
+      }),
+    );
+    expect(lineOn(rows, A)).toBeUndefined();
+    expect(lineOn(rows, B)).toBeUndefined();
+  });
+
+  it('takes the tint off the name when the line goes on', () => {
+    // Mutually exclusive: two things saying "this is on feat/x" is one too many,
+    // and the tint is the one that competes with the status dot.
+    const rows = on();
+    expect(rows.find((r) => r.sessionId === A)?.branchColor).toBeUndefined();
+    expect(rows.find((r) => r.sessionId === B)?.branchColor).toBeUndefined();
+    // The NAME survives — the hover still answers "which branch is this".
+    expect(rows.find((r) => r.sessionId === A)?.branch).toBe('main');
+  });
+
+  it('says nothing on a fork that stayed in its parent’s worktree', () => {
+    // A repeated branch name down a spine is noise, and the spine is drawn.
+    const forked = forestOf([
+      node(A, { cwd: '/code/app/src', visibleChildren: [C] }),
+      node(C, { parentId: A, cwd: '/code/app/src' }),
+    ]);
+    const rows = buildViewModel(
+      input(forked, { projects: [projectNode([MAIN, FEAT], [A])] }, { branchDisplay: 'inline' }),
+    );
+    expect(lineOn(rows, A)?.name).toBe('main');
+    expect(lineOn(rows, C)).toBeUndefined();
+  });
+
+  it('speaks up on a fork that moved to another checkout', () => {
+    const forked = forestOf([
+      node(A, { cwd: '/code/app/src', visibleChildren: [B] }),
+      node(B, { parentId: A, cwd: '/code/app-feat-x' }),
+    ]);
+    const rows = buildViewModel(
+      input(forked, { projects: [projectNode([MAIN, FEAT], [A])] }, { branchDisplay: 'inline' }),
+    );
+    expect(lineOn(rows, B)?.name).toBe('feat/x');
+  });
+
+  it('speaks again where a grandchild moves back', () => {
+    // parentBranchAt is THIS row's checkout, not the one the walk started at.
+    const forked = forestOf([
+      node(A, { cwd: '/code/app/src', visibleChildren: [B] }),
+      node(B, { parentId: A, cwd: '/code/app-feat-x', visibleChildren: [C] }),
+      node(C, { parentId: B, cwd: '/code/app/src' }),
+    ]);
+    const rows = buildViewModel(
+      input(forked, { projects: [projectNode([MAIN, FEAT], [A])] }, { branchDisplay: 'inline' }),
+    );
+    expect(lineOn(rows, C)?.name).toBe('main');
+  });
+
+  it('stays quiet in a project with one checkout, where it distinguishes nothing', () => {
+    const rows = buildViewModel(
+      input(forest2(), { projects: [projectNode([MAIN], [A, B])] }, { branchDisplay: 'inline' }),
+    );
+    expect(lineOn(rows, A)).toBeUndefined();
+  });
+
+  it('stays quiet under branch grouping, where the row above already says it', () => {
+    const rows = on({ groupByBranch: true });
+    expect(lineOn(rows, A)).toBeUndefined();
+    expect(lineOn(rows, B)).toBeUndefined();
+  });
+
+  it('draws no branch ROWS for the session line alone', () => {
+    // The two gates are separate on purpose: the grouping builds the branch list
+    // for either switch, and this is what stops the light half of the feature
+    // from dragging a row per branch in behind it.
+    const rows = on({ branchBlock: false });
+    expect(rows.some((r) => r.kind === 'branch')).toBe(false);
+    expect(lineOn(rows, B)?.name).toBe('feat/x');
+  });
+
+  it('still draws the branch rows in inline mode once they are unfolded', () => {
+    // Inline mode shuts the block by default, so the rows come back the way the
+    // user asks for them: `branchesShown: true` is the record **Show
+    // Branches** writes.
+    const rows = buildViewModel(
+      input(
+        forest2(),
+        {
+          projects: [
+            projectNode([MAIN, FEAT], [A, B], { branchesShown: true }),
+          ],
+        },
+        { branchDisplay: 'inline', branchBlock: true },
+      ),
+    );
+    expect(rows.filter((r) => r.kind === 'branch')).toHaveLength(2);
+    expect(lineOn(rows, B)?.name).toBe('feat/x');
+  });
+
+  it('carries the checkout’s status onto the line', () => {
+    const rows = on({
+      branchStatusOf: (dir) =>
+        dir === '/code/app-feat-x'
+          ? {
+              branch: 'feat/x',
+              upstream: 'origin/feat/x',
+              ahead: 4,
+              behind: 0,
+              dirty: true,
+              untracked: false,
+            }
+          : undefined,
+    });
+    expect(lineOn(rows, B)?.sync).toBe('↑4');
+    // The star travels separately now, next to the name it is about.
+    expect(lineOn(rows, B)?.dirty).toBe(true);
+    expect(lineOn(rows, A)?.sync).toBeUndefined();
+    expect(lineOn(rows, A)?.dirty).toBeUndefined();
+  });
+
+  it('says in the hover what the marks on the line say in shorthand', () => {
+    // A green mark and `↑4 *` are exactly the kind of shorthand that has to be
+    // spelled out somewhere, and a row has one tooltip. Same two functions the
+    // native tree's branch row hovers with, so the words do not differ by
+    // surface.
+    const rows = on({
+      sessionBranchDetail: 'detailed',
+      branchStatusOf: (dir) =>
+        dir === '/code/app-feat-x'
+          ? {
+              branch: 'feat/x',
+              upstream: 'origin/feat/x',
+              ahead: 4,
+              behind: 0,
+              dirty: true,
+              untracked: false,
+            }
+          : undefined,
+      pullRequestFor: (_repoDir, branchName) =>
+        branchName === 'feat/x'
+          ? {
+              number: 128,
+              title: 'Rank by BM25',
+              state: 'open' as PullRequestState,
+              checks: 'pass' as PullRequestChecks,
+              branch: 'feat/x',
+              url: 'https://github.com/acme/app/pull/128',
+            }
+          : undefined,
+    });
+    const tooltip = rows.find((r) => r.sessionId === B)?.tooltip ?? '';
+    expect(tooltip).toContain('branch: feat/x');
+    expect(tooltip).toContain('4 ahead origin/feat/x');
+    expect(tooltip).toContain('uncommitted changes');
+    expect(tooltip).toContain('pull request #128 — open, checks passing');
+  });
+
+  it('leaves the hover alone when there is nothing to add to it', () => {
+    const tooltip = on().find((r) => r.sessionId === B)?.tooltip ?? '';
+    expect(tooltip).toContain('branch: feat/x');
+    expect(tooltip).not.toContain('pull request');
+  });
+
+  it('hands the line its own checkout, for the link to resolve through', () => {
+    // Never drawn. It is what lets a click on the name name a ROW and have the
+    // extension read the directory off the model it posted.
+    const rows = on();
+    expect(lineOn(rows, B)?.dir).toBe('/code/app-feat-x');
+    // And the project the branch belongs to, on the session row itself — a
+    // session row carries one only when it drew a line.
+    expect(rows.find((r) => r.sessionId === B)?.projectId).toBe('p1');
+  });
+
+  it('asks for a pull request only at the detailed level', () => {
+    // `branchBlock: false` so the only lookups counted are the LINE's — a branch
+    // row draws its own chip and asks for its own request either way.
+    const asked: string[] = [];
+    const pullRequestFor = (_repoDir: string, branchName: string) => {
+      asked.push(branchName);
+      return undefined;
+    };
+    on({ pullRequestFor, branchBlock: false });
+    expect(asked).toEqual([]);
+    on({ pullRequestFor, branchBlock: false, sessionBranchDetail: 'detailed' });
+    expect(asked).toEqual(['main', 'feat/x']);
+  });
+
+  it('anchors the request lookup on the repository’s main worktree', () => {
+    // One directory per repository, so six checkouts ask `gh` once for an answer
+    // that is the same from any of them.
+    const anchors: string[] = [];
+    on({
+      branchBlock: false,
+      sessionBranchDetail: 'detailed',
+      pullRequestFor: (repoDir) => {
+        anchors.push(repoDir);
+        return undefined;
+      },
+    });
+    expect(new Set(anchors)).toEqual(new Set(['/code/app']));
+  });
+
+  it('survives a status lookup that throws', () => {
+    // A lookup that throws is a lookup that answered nothing — a row with no
+    // numbers is a valid row, and a paint must not be the thing that fails.
+    const rows = on({
+      branchStatusOf: () => {
+        throw new Error('cache exploded');
+      },
+    });
+    expect(lineOn(rows, B)).toEqual({
+      name: 'feat/x',
+      glyph: 'git-branch',
+      dir: '/code/app-feat-x',
+    });
+  });
+});
+
+// ------------------------------------------- what the `+` on a project means
+
+describe('buildViewModel: the + and lineage.git.newSessionInWorktree', () => {
+  const projectRow = (over: Partial<ViewModelInput> = {}) =>
+    buildViewModel(
+      input(
+        forestOf([node(A)]),
+        {
+          projects: [
+            {
+              type: 'project',
+              projectId: 'p1',
+              label: 'API',
+              rootDir: '/code/api',
+              dirs: ['/code/api'],
+              provider: 'claude' as ProviderId,
+              rootIds: [],
+            },
+          ],
+        },
+        over,
+      ),
+    )[0];
+
+  it('says "in API" while the setting is off', () => {
+    const plus = projectRow().actions?.find((a) => a.id === 'newSession');
+    expect(plus?.title).toBe('New session in API');
+  });
+
+  it('says a worktree is coming, when that is what the button will do', () => {
+    // The whole justification for putting the `+` back on a row that has to pick
+    // a directory: the button states its answer before it is clicked. A guess
+    // you can read is not a guess.
+    const plus = projectRow({ newSessionInWorktree: true }).actions?.find(
+      (a) => a.id === 'newSession',
+    );
+    expect(plus?.title).toBe('New session in a new worktree of API');
+  });
+
+  it('is on the row in both modes and at every branch count', () => {
+    // It used to be withdrawn wherever branch rows were on screen. Nothing
+    // withdraws it now — a project rows always has one, which is where people
+    // went looking for it.
+    for (const display of ['color', 'inline'] as const) {
+      const rows = rowsFor([MAIN, FEAT], {}, { branchDisplay: display });
+      expect(
+        rows[0].actions?.some((a) => a.id === 'newSession'),
+        display,
+      ).toBe(true);
+    }
+  });
+});
+
+// ------------------------------------------ colours belong to one mode only
+
+describe('buildViewModel: the branch rows take no colour in inline mode', () => {
+  const shown = (display: 'color' | 'inline') =>
+    buildViewModel(
+      input(
+        forest2(),
+        {
+          projects: [
+            projectNode([MAIN, FEAT], [A, B], { branchesShown: true }),
+          ],
+        },
+        { branchDisplay: display },
+      ),
+    ).filter((r) => r.kind === 'branch');
+
+  it('hands the client a colour index in colour mode, and none in inline', () => {
+    // The client's whole test for which treatment to draw: a chip with an index
+    // gets the coloured square and a tinted name, one without gets the
+    // git-branch mark and the theme's own foreground. Two marks saying "this is
+    // on feat/x" is one too many, and in inline mode the words already said it.
+    expect(shown('color').map((r) => r.chip?.colorIndex)).toEqual([0, 1]);
+    expect(shown('inline').map((r) => r.chip?.colorIndex)).toEqual([
+      undefined,
+      undefined,
+    ]);
+  });
+
+  it('names a mark for the chip in BOTH modes, so the state is never lost', () => {
+    // In inline mode the mark stands where the swatch went; in colour mode the
+    // swatch is the key and the client does not draw it. It travels either way
+    // because which of those is true is the client's decision, not this one.
+    for (const display of ['color', 'inline'] as const) {
+      expect(shown(display).map((r) => r.chip?.glyph), display).toEqual([
+        'git-branch',
+        'git-branch',
+      ]);
+    }
+  });
+
+  it('gives the chip the request’s mark and the checkout’s star', () => {
+    const rows = buildViewModel(
+      input(
+        forest2(),
+        {
+          projects: [
+            projectNode([MAIN, FEAT], [A, B], { branchesShown: true }),
+          ],
+        },
+        {
+          branchDisplay: 'inline',
+          branchStatusOf: (dir) =>
+            dir === '/code/app-feat-x'
+              ? {
+                  branch: 'feat/x',
+                  upstream: 'origin/feat/x',
+                  ahead: 0,
+                  behind: 0,
+                  dirty: false,
+                  untracked: true,
+                }
+              : undefined,
+          pullRequestFor: (_repoDir, branchName) =>
+            branchName === 'feat/x'
+              ? {
+                  number: 128,
+                  title: 'Rank by BM25',
+                  state: 'draft' as PullRequestState,
+                  checks: 'none' as PullRequestChecks,
+                  branch: 'feat/x',
+                  url: 'https://github.com/acme/app/pull/128',
+                }
+              : undefined,
+        },
+      ),
+    ).filter((r) => r.kind === 'branch');
+    const feat = rows.find((r) => r.chip?.full === 'feat/x')?.chip;
+    expect(feat?.glyph).toBe('git-pull-request-draft');
+    expect(feat?.state).toBe('draft');
+    // Untracked files count as dirt: the row warns that there is uncommitted
+    // work, not how much of it there is.
+    expect(feat?.dirty).toBe(true);
+    const main = rows.find((r) => r.chip?.full === 'main')?.chip;
+    expect(main?.glyph).toBe('git-branch');
+    expect(main?.dirty).toBeUndefined();
+  });
+
+  it('still colours the session names in colour mode only', () => {
+    const tinted = buildViewModel(
+      input(forest2(), { projects: [projectNode([MAIN, FEAT], [A, B])] }, {
+        branchDisplay: 'color',
+      }),
+    );
+    const plain = buildViewModel(
+      input(forest2(), { projects: [projectNode([MAIN, FEAT], [A, B])] }, {
+        branchDisplay: 'inline',
+      }),
+    );
+    expect(tinted.find((r) => r.sessionId === A)?.branchColor).toBe(0);
+    expect(plain.find((r) => r.sessionId === A)?.branchColor).toBeUndefined();
   });
 });

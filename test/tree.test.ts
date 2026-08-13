@@ -1392,4 +1392,65 @@ describe('LineageTreeProvider: branch grouping', () => {
     expect(featItem.collapsibleState).toBe(TreeItemCollapsibleState.None);
     expect(featItem.command?.command).toBe(COMMANDS.newSessionInBranch);
   });
+
+  it('puts the star against the label and the request mark in the icon', () => {
+    // The two moves the inline row made, followed here so the surfaces say the
+    // same thing in the same place. A description is drawn immediately after the
+    // label, so the `*` leading it IS "against the name" — the label itself is
+    // the row's identity and the star does not belong in it.
+    const h = harness(forestOf([node(A, { cwd: '/code/app' })]));
+    h.setProjects([APP]);
+    const provider = new LineageTreeProvider({
+      ...h.deps,
+      worktreesOf: () => WORKTREES,
+      branchRows: () => true,
+      groupSessionsByBranch: () => true,
+      branchStatusOf: (dir) =>
+        dir === '/code/app'
+          ? {
+              branch: 'main',
+              upstream: 'origin/main',
+              ahead: 2,
+              behind: 0,
+              dirty: true,
+              untracked: false,
+            }
+          : undefined,
+      pullRequestFor: (_repoDir, branch) =>
+        branch === 'main'
+          ? {
+              number: 42,
+              title: 'Rank by BM25',
+              state: 'merged',
+              checks: 'none',
+              branch: 'main',
+              url: 'https://github.com/acme/app/pull/42',
+            }
+          : undefined,
+    });
+    const app = provider.getChildren()[0] as ProjectGroupNode;
+    const mainItem = provider.getTreeItem(provider.getChildren(app)[0]);
+    expect(mainItem.description).toBe('* ↑2 #42 1');
+    // Merged: git's merge mark, in GitHub's purple. Made by the same function
+    // the webview's mask is named from, so the two cannot drift.
+    expect((mainItem.iconPath as { id?: string }).id).toBe('git-merge');
+    expect((mainItem.iconPath as { color?: { id?: string } }).color?.id).toBe(
+      'charts.purple',
+    );
+  });
+
+  it('leaves a branch with no request the icon it always had', () => {
+    const h = harness(forestOf([node(A, { cwd: '/code/app' })]));
+    h.setProjects([APP]);
+    const provider = new LineageTreeProvider({
+      ...h.deps,
+      worktreesOf: () => WORKTREES,
+      branchRows: () => true,
+      groupSessionsByBranch: () => true,
+    });
+    const app = provider.getChildren()[0] as ProjectGroupNode;
+    const mainItem = provider.getTreeItem(provider.getChildren(app)[0]);
+    expect((mainItem.iconPath as { id?: string }).id).toBe('git-branch');
+    expect((mainItem.iconPath as { color?: unknown }).color).toBeUndefined();
+  });
 });

@@ -25,10 +25,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   PullRequestCache,
   createPullRequestArgv,
+  branchWebUrl,
   openPullRequestCreatePage,
   parsePullRequests,
   pullRequestArgv,
   readPullRequests,
+  readRemoteUrl,
+  remoteWebRoot,
 } from '../src/pullRequests';
 import { formatPullRequestChip, pullRequestLines } from '../src/viewmodel';
 import { setLogSink } from '../src/log';
@@ -363,6 +366,115 @@ describe('openPullRequestCreatePage', () => {
     expect(result.ok).toBe(false);
     expect(result.output).toContain('ENOENT');
     expect((await openPullRequestCreatePage('')).ok).toBe(false);
+  });
+});
+
+describe('readRemoteUrl', () => {
+  it('runs `git remote get-url` in the checkout and returns the one line', async () => {
+    const run = vi.fn(
+      async (_f: string, _a: string[], _cwd: string, _t: number) =>
+        ok('git@github.com:acme/app.git\n'),
+    );
+    expect(await readRemoteUrl('/c/app-feat-x', 'origin', { run })).toBe(
+      'git@github.com:acme/app.git',
+    );
+    expect(run.mock.calls[0][0]).toBe('git');
+    expect(run.mock.calls[0][1]).toEqual(['remote', 'get-url', 'origin']);
+    expect(run.mock.calls[0][2]).toBe('/c/app-feat-x');
+  });
+
+  it('refuses a remote name that is not one, before it reaches argv', async () => {
+    // `execFile` takes an array and there is no shell, so nothing here could be
+    // talked into running a second command — but a name beginning with `-` is an
+    // OPTION to git, and refusing is cheaper than reasoning about what git would
+    // do with it.
+    const run = vi.fn(async () => ok('git@github.com:acme/app.git'));
+    expect(await readRemoteUrl('/c/app', '--upload-pack=touch /tmp/x', { run })).toBe('');
+    expect(await readRemoteUrl('/c/app', '', { run })).toBe('');
+    expect(await readRemoteUrl('', 'origin', { run })).toBe('');
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('answers "" for every kind of failure rather than throwing', async () => {
+    expect(
+      await readRemoteUrl('/c/app', 'origin', {
+        run: async () => failed('no such remote'),
+      }),
+    ).toBe('');
+    expect(
+      await readRemoteUrl('/c/app', 'origin', {
+        run: async () => {
+          throw new Error('spawn git ENOENT');
+        },
+      }),
+    ).toBe('');
+  });
+});
+
+describe('remoteWebRoot and branchWebUrl', () => {
+  it('reads both spellings git actually hands out', () => {
+    expect(remoteWebRoot('git@github.com:acme/app.git')).toBe(
+      'https://github.com/acme/app',
+    );
+    expect(remoteWebRoot('ssh://git@github.com/acme/app.git')).toBe(
+      'https://github.com/acme/app',
+    );
+    expect(remoteWebRoot('https://github.com/acme/app.git')).toBe(
+      'https://github.com/acme/app',
+    );
+    // Already a page, and a user in the url: both come out the same.
+    expect(remoteWebRoot('https://axel@github.com/acme/app')).toBe(
+      'https://github.com/acme/app',
+    );
+  });
+
+  it('keeps an Enterprise host, because that is where the branches are', () => {
+    expect(remoteWebRoot('git@git.acme-corp.com:platform/api.git')).toBe(
+      'https://git.acme-corp.com/platform/api',
+    );
+    expect(remoteWebRoot('ssh://git@git.acme.com:2222/platform/api.git')).toBe(
+      'https://git.acme.com/platform/api',
+    );
+  });
+
+  it('always comes out as https, whatever went in', () => {
+    // The url is BUILT, never passed through: the scheme is ours, the host has to
+    // look like a host, and every segment is re-encoded. That is the difference
+    // between opening a url made of pieces of the user's own remote and opening
+    // a string that was in a config file.
+    expect(remoteWebRoot('git://github.com/acme/app.git')).toBe(
+      'https://github.com/acme/app',
+    );
+    expect(remoteWebRoot('http://github.com/acme/app.git')).toBe(
+      'https://github.com/acme/app',
+    );
+  });
+
+  it('refuses anything it does not recognise', () => {
+    expect(remoteWebRoot('/srv/git/app.git')).toBe('');
+    expect(remoteWebRoot('file:///srv/git/app.git')).toBe('');
+    expect(remoteWebRoot('git@github.com:app.git')).toBe('');
+    expect(remoteWebRoot('https://github.com/acme/../../etc')).toBe('');
+    expect(remoteWebRoot('')).toBe('');
+    expect(remoteWebRoot(undefined)).toBe('');
+    expect(remoteWebRoot(42)).toBe('');
+  });
+
+  it('puts the branch under /tree, with its slashes intact', () => {
+    expect(branchWebUrl('git@github.com:acme/app.git', 'feat/search-ranking')).toBe(
+      'https://github.com/acme/app/tree/feat/search-ranking',
+    );
+    // A slash is part of the ref; anything else in it is escaped.
+    expect(branchWebUrl('git@github.com:acme/app.git', 'fix/a b&c')).toBe(
+      'https://github.com/acme/app/tree/fix/a%20b%26c',
+    );
+  });
+
+  it('refuses a ref that is not one', () => {
+    expect(branchWebUrl('git@github.com:acme/app.git', '')).toBe('');
+    expect(branchWebUrl('git@github.com:acme/app.git', '../../settings')).toBe('');
+    expect(branchWebUrl('git@github.com:acme/app.git', 'feat//x')).toBe('');
+    expect(branchWebUrl('/srv/git/app.git', 'main')).toBe('');
   });
 });
 

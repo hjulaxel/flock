@@ -680,11 +680,14 @@ describe('buildViewModel: directory subproject rows', () => {
     expect(out[2].depth).toBe(2);
   });
 
-  it('withdraws the project row’s + and keeps its chat button', () => {
-    // A `+` on the project would have to pick a directory, and the rows that ARE
-    // the directories each carry one that says where it starts.
+  it('keeps the project row’s + beside its chat button, split or not', () => {
+    // The `+` used to be withdrawn here, on the argument that a project with
+    // directory rows under it cannot say which directory a session would start
+    // in. It says so now — in the button's own title, written from
+    // `lineage.git.newSessionInWorktree` — so the button is back on every
+    // project and every subproject, which is where people went looking for it.
     const ids = (rows()[0].actions ?? []).map((a) => a.id);
-    expect(ids).toEqual(['chat']);
+    expect(ids).toEqual(['chat', 'newSession']);
     expect(rows()[1].actions?.map((a) => a.id)).toEqual([
       'newSessionInSubproject',
     ]);
@@ -824,9 +827,11 @@ describe('buildViewModel: directory subproject rows', () => {
       ],
     });
     const out = buildViewModel(
-      input(forestOf([node(A), node(B)]), { projects: [withBranches] }, {
-        groupByBranch: true,
-      }),
+      input(
+        forestOf([node(A), node(B)]),
+        { projects: [{ ...withBranches, branchesShown: true }] },
+        { groupByBranch: true },
+      ),
     );
     // The branch rows are still drawn (they are the flat annotation block), but
     // the sessions hang off the DIRECTORIES, and every one of them is drawn once.
@@ -856,9 +861,14 @@ function branch(
   };
 }
 
-function branchProject(branches: BranchInfo[], rootIds: string[]) {
+function branchProject(
+  branches: BranchInfo[],
+  rootIds: string[],
+  over: Partial<{ branchesShown: boolean }> = {},
+) {
   return {
     type: 'project' as const,
+    ...over,
     projectId: 'app',
     label: 'app',
     rootDir: '/code/app',
@@ -889,9 +899,14 @@ describe('buildViewModel: branch grouping', () => {
   ];
 
   it('is off by default: branches and sessions stay two flat blocks', () => {
+    // `branchesShown: true` because the BLOCK is now shut until asked for,
+    // on every project and in both display modes. What this test is about is the
+    // shape of an unfolded block without grouping: two flat lists, not a nest.
     const out = buildViewModel(
       input(forestOf([node(A), node(B)]), {
-        projects: [branchProject(branches, [A, B])],
+        projects: [
+          branchProject(branches, [A, B], { branchesShown: true }),
+        ],
       }),
     );
     expect(keys(out)).toEqual([
@@ -963,11 +978,12 @@ describe('buildViewModel: branch grouping', () => {
       projectRowKey('app'),
       branchRowKey('app', 'main'),
       sessionRowKey(A),
-      // feat/x is folded away into "Others" — its session still has a row.
-      'others:app',
+      // feat/x is not shown, and no longer leaves an "Others" row behind it —
+      // the count is on the project's hover and the picker is on its menu. Its
+      // session still has a row, directly under the project.
       sessionRowKey(B),
     ]);
-    expect(out[4].indent ?? 0).toBe(0);
+    expect(out[3].indent ?? 0).toBe(0);
   });
 
   it('folding the block brings every session back under the project', () => {
@@ -979,7 +995,7 @@ describe('buildViewModel: branch grouping', () => {
         forestOf([node(A), node(B)]),
         {
           projects: [
-            { ...branchProject(branches, [A, B]), branchesCollapsed: true },
+            { ...branchProject(branches, [A, B]), branchesShown: false },
           ],
         },
         { groupByBranch: true },
@@ -992,7 +1008,7 @@ describe('buildViewModel: branch grouping', () => {
     ]);
   });
 
-  it('leaves an EMPTY branch as a click-to-start row', () => {
+  it('leaves an EMPTY branch as a click-to-start row, with a + of its own', () => {
     const empty = [
       branch('main', '/code/app', [A]),
       branch('feat/x', '/code/app-feat', []),
@@ -1006,7 +1022,10 @@ describe('buildViewModel: branch grouping', () => {
     );
     const feat = out.find((r) => r.key === branchRowKey('app', 'feat/x'));
     expect(feat?.expandable).toBe(false);
-    expect(feat?.actions).toBeUndefined();
+    // Every branch row carries the `+` now — the row is the one place a branch
+    // can be acted on, and an empty worktree is exactly what you reach for one
+    // to use.
+    expect(feat?.actions?.map((a) => a.id)).toEqual(['newSessionInBranch']);
   });
 
   it('gives a grouped branch row the + that its click used to be', () => {

@@ -26,6 +26,7 @@ import {
   ATTENTION_BADGE_ENABLED,
   BRAND_COLOR_ID,
   COMMANDS,
+  DEFAULT_BRANCH_DISPLAY,
   DONE_COLOR_ID,
   PROVIDERS,
   PROVIDER_IDS,
@@ -52,7 +53,6 @@ import {
   branchRowKey,
   buildViewModel,
   folderRowKey,
-  othersRowKey,
   projectRowKey,
   sessionRowKey,
   subprojectRowKey,
@@ -101,9 +101,26 @@ const ROW_GLYPH_FILES: Record<string, string> = {
   chat: 'chat.svg',
   add: 'add.svg',
   'bell-slash': 'bell-slash.svg',
-  // The branch block's fold, in its two states.
-  'chevron-down': 'chevron-down.svg',
-  'chevron-right': 'chevron-right.svg',
+  // Leads the second line under a session (`branchDisplay: inline`) AND labels
+  // the branch block's fold on a project row, which used to carry a chevron: a
+  // chevron says "this opens", which the row's own twisty already says, where
+  // this says what opens. An svg
+  // rather than the obvious `⎇` (U+2387): the webview does not ship the codicon
+  // font, so a glyph here is whatever the platform's UI font happens to have,
+  // and on macOS that character falls back to an illegible squiggle. A mask is
+  // the same shape everywhere and takes the theme's icon colour, which is what
+  // the marks beside a name already do.
+  'git-branch': 'git-branch.svg',
+  // The same mark in the four states GitHub gives a request, chosen by
+  // branchStateIcon and named here by its CODICON ID — which is what lets the
+  // native tree hand the identical string to a ThemeIcon while this side looks
+  // it up in the allowlist. Drawn in the state's colour (see .branch-glyph in
+  // webtree.css), because green-for-open and purple-for-merged is a convention
+  // somebody arriving from a browser tab already reads.
+  'git-pull-request': 'git-pull-request.svg',
+  'git-pull-request-draft': 'git-pull-request-draft.svg',
+  'git-pull-request-closed': 'git-pull-request-closed.svg',
+  'git-merge': 'git-merge.svg',
 };
 
 /** Row-action id -> the verb it runs. The SECOND allowlist (ROW_GLYPH_FILES
@@ -120,6 +137,16 @@ const PROJECT_ROW_ACTIONS: Record<string, keyof typeof COMMANDS | undefined> = {
   // active-only filter already use.
   foldBranches: 'foldBranches',
   unfoldBranches: 'unfoldBranches',
+};
+
+/** The links on a branch — its name, and its `#42` — and the verbs they run. A
+ *  THIRD allowlist, separate from PROJECT_ROW_ACTIONS above because these resolve
+ *  through a checkout rather than a project (see linkTargetFor) and hand the
+ *  command a `{type:'branch', …}` argument. Same rule as the other two: the page
+ *  names an action, this table decides which command that is. */
+const BRANCH_LINK_ACTIONS: Record<string, keyof typeof COMMANDS | undefined> = {
+  openPullRequest: 'openPullRequest',
+  openBranchOnRemote: 'openBranchOnRemote',
 };
 
 /**
@@ -376,10 +403,6 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
    *  one announcement and is cleared for every fresh page. */
   private clientReady = false;
   private readonly collapsed = new Set<string>();
-  /** Row keys the user has OPENED, for the one row kind whose default is shut:
-   *  the branch fold. A second set rather than a second meaning for the one above
-   *  — see ViewModelInput.opened. */
-  private readonly opened = new Set<string>();
 
   private lastForest: SessionForest = EMPTY_FOREST;
   private groupCacheForest: SessionForest | null = null;
@@ -508,6 +531,46 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  /**
+   * The checkout a LINK on a row points at: `{projectId, dir, branch}`, or
+   * undefined.
+   *
+   * Two kinds of row can carry one and they hold the fact in different places —
+   * a branch row IS a branch (`chip`), a session row merely says which one it is
+   * running in (`branchLine`) — so this is the one place that knows both. What it
+   * returns is exactly the shape branchArgOf() reads, so the commands on the far
+   * side cannot tell a link from a native context-menu invocation.
+   *
+   * THE PAGE NAMES A ROW, NEVER A PATH, which is the rule every message in here
+   * follows: the directory comes out of the model this view just posted, so the
+   * only checkouts a click can reach are the ones the user was looking at.
+   */
+  private linkTargetFor(
+    key: unknown,
+  ): { projectId: string; dir: string; branch: string } | undefined {
+    if (typeof key !== 'string' || key === '') return undefined;
+    try {
+      const row = this.rows().find((r) => r.key === key);
+      if (!row?.projectId) return undefined;
+      if (row.kind === 'branch') {
+        return row.chip
+          ? { projectId: row.projectId, dir: row.chip.dir, branch: row.chip.full }
+          : undefined;
+      }
+      if (row.kind === 'session' && row.branchLine) {
+        return {
+          projectId: row.projectId,
+          dir: row.branchLine.dir ?? '',
+          branch: row.branchLine.name,
+        };
+      }
+      return undefined;
+    } catch (err) {
+      logError('webtree.linkTargetFor', err);
+      return undefined;
+    }
+  }
+
   /** The branches currently on screen for a project — what the chip-click verb
    *  re-resolves against. Reads the SAME grouping the rows were built from, so
    *  there is no window in which the tree shows one set of worktrees and the
@@ -534,9 +597,6 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
       forest,
       grouping: this.grouping(forest),
       collapsed: this.collapsed,
-      // The rows whose default is SHUT — only the branch fold. Kept apart from
-      // `collapsed` so neither set has two meanings; see ViewModelInput.opened.
-      opened: this.opened,
       providerFor: (id) => this.deps.providerFor(id),
       isBoundHere: (id) => this.deps.isBoundHere(id),
       // Optional all the way down: an unwired dep leaves every row 'hosted',
@@ -553,6 +613,26 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
         'groupSessionsByBranch',
         () => this.deps.groupSessionsByBranch?.(),
         false,
+      ),
+      // The renderer's half of the branch gate: the grouping above builds the
+      // list, this decides whether a row per branch is drawn from it.
+      branchBlock: this.safe('branchRows', () => this.deps.branchRows?.(), false),
+      // Which mode the rows read in — see BranchDisplay. Anything that is not
+      // 'inline' is colour, so a mistyped setting renders what shipped.
+      branchDisplay: this.safe(
+        'branchDisplay',
+        () => this.deps.branchDisplay?.(),
+        DEFAULT_BRANCH_DISPLAY,
+      ),
+      newSessionInWorktree: this.safe(
+        'newSessionInWorktree',
+        () => this.deps.newSessionInWorktree?.(),
+        false,
+      ),
+      sessionBranchDetail: this.safe(
+        'sessionBranchDetail',
+        () => this.deps.sessionBranchDetail?.(),
+        'standard',
       ),
       // Synchronous by contract, like `worktreesOf` above: the cache behind it
       // answers from memory and refreshes in the background, so this cannot be
@@ -805,7 +885,7 @@ ${branchPaletteCss()}  }
   }
 
   private pruneCollapsed(): void {
-    if (this.collapsed.size === 0 && this.opened.size === 0) return;
+    if (this.collapsed.size === 0) return;
     const forest = this.forest();
     const grouping = this.grouping(forest);
     // Every row kind that can be collapsed, not just sessions: pruning only
@@ -826,14 +906,11 @@ ${branchPaletteCss()}  }
       for (const b of p.branches ?? []) {
         live.add(branchRowKey(p.projectId, b.name));
       }
-      live.add(othersRowKey(p.projectId));
-      // And the same again per SUBPROJECT ROW under the directory model, where the
-      // branches and the fold belong to a row and their keys carry its id. Without
-      // these every fold a user opens would be pruned on the next tick and shut
-      // itself.
+      // And the same again per SUBPROJECT ROW under the directory model, where
+      // the branches belong to a row and their keys carry its id. Without these
+      // every branch row a user collapses would be pruned on the next tick.
       for (const sub of p.subprojects ?? []) {
         live.add(subprojectRowKey(p.projectId, sub.id));
-        live.add(othersRowKey(p.projectId, sub.id));
         for (const b of sub.branches ?? []) {
           live.add(branchRowKey(p.projectId, b.name, sub.id));
         }
@@ -842,9 +919,6 @@ ${branchPaletteCss()}  }
     for (const g of grouping.folders) live.add(folderRowKey(g.key));
     for (const key of Array.from(this.collapsed)) {
       if (!live.has(key)) this.collapsed.delete(key);
-    }
-    for (const key of Array.from(this.opened)) {
-      if (!live.has(key)) this.opened.delete(key);
     }
   }
 
@@ -1078,12 +1152,11 @@ ${branchPaletteCss()}  }
         case 'toggle': {
           const key = typeof msg.key === 'string' ? msg.key : '';
           if (key === '') return;
-          // Which SET a key lives in follows from what its default is, not from
-          // what the click was: the branch fold starts shut, so its key records
-          // having been opened, and every other row starts open and records having
-          // been closed. One flip either way — the alternative is a set whose
-          // membership means two different things depending on the prefix.
-          const set = key.startsWith('others:') ? this.opened : this.collapsed;
+          // ONE SET, one meaning: "the user closed this". Every row in the tree
+          // starts open now — the branch fold, the one kind whose default was
+          // shut, is gone, and what replaced it (the whole block, shut in inline
+          // mode) is remembered on the project record instead of here.
+          const set = this.collapsed;
           if (set.has(key)) set.delete(key);
           else {
             if (set.size > CACHE_SOFT_LIMIT) set.clear();
@@ -1176,6 +1249,19 @@ ${branchPaletteCss()}  }
             });
             return;
           }
+          // THE TWO LINKS ON A BRANCH — its name and its `#42` — resolved the
+          // same way everything else in here is: the page names a row, this side
+          // reads the checkout off the model it posted. Neither command is handed
+          // a url; `openPullRequest` looks its own one up in the cache the row
+          // rendered from (see openPullRequestFlow for why that is a hard rule)
+          // and `openBranchOnRemote` builds one from the repository's own remote.
+          const linkCommand = BRANCH_LINK_ACTIONS[String(msg.action)];
+          if (linkCommand !== undefined) {
+            const target = this.linkTargetFor(msg.key);
+            if (!target) return;
+            await this.deps.runCommand(linkCommand, { type: 'branch', ...target });
+            return;
+          }
           // A SUBPROJECT row's `+`, resolved the same way: the page names the
           // row, this side reads the directory off the model it posted. The
           // project row's `+` is withdrawn while these exist precisely so that
@@ -1210,25 +1296,16 @@ ${branchPaletteCss()}  }
           // the directory out of the model it just rendered, so the only
           // directories reachable from this view are the ones git reported for
           // a project the user created.
+          // A ref with no checkout is allowed through now: newSessionInBranch
+          // cuts the worktree for it, behind its own confirmation. What is still
+          // refused is a key naming no row at all.
           const row = this.branchRowFor(msg.key);
-          if (!row?.chip || row.chip.dir === '') return;
+          if (!row?.chip) return;
           await this.deps.runCommand('newSessionInBranch', {
             type: 'branch',
             projectId: row.projectId,
             dir: row.chip.dir,
             branch: row.chip.full,
-          });
-          return;
-        }
-
-        case 'branchOthers': {
-          // The "Others (N)" row. Takes only a project id — the picker it opens
-          // resolves the hidden branches itself, from the same grouping.
-          const projectId = othersProjectIdFromKey(msg.key);
-          if (!projectId) return;
-          await this.deps.runCommand('showBranches', {
-            type: 'project',
-            projectId,
           });
           return;
         }
@@ -1344,7 +1421,6 @@ ${branchPaletteCss()}  }
       }
     }
     this.collapsed.clear();
-    this.opened.clear();
     this.view = undefined;
     this.clientReady = false;
   }
@@ -1402,9 +1478,9 @@ export function projectIdFromKey(key: unknown): string | undefined {
  * cannot contain one, so the first two are always the delimiters.
  *
  * Its own reader rather than a generalised one, for the same reason
- * projectIdFromKey is: a branch row, the "Others" row and the project header
- * all carry the SAME project id under different key prefixes, and a parser that
- * accepted any of them would let one row's message invoke another row's verb.
+ * projectIdFromKey is: a branch row and the project header carry the SAME
+ * project id under different key prefixes, and a parser that accepted either
+ * would let one row's message invoke another row's verb.
  */
 export function branchRowParts(
   key: unknown,
@@ -1417,13 +1493,6 @@ export function branchRowParts(
   return branch === ''
     ? undefined
     : { projectId: rest.slice(0, at), branch };
-}
-
-/** `others:<projectId>` -> id. */
-export function othersProjectIdFromKey(key: unknown): string | undefined {
-  if (typeof key !== 'string' || !key.startsWith('others:')) return undefined;
-  const id = key.slice('others:'.length);
-  return id === '' ? undefined : id;
 }
 
 export interface WebtreeController extends DisposableLike {

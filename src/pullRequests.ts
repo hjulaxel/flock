@@ -277,6 +277,9 @@ function preferPullRequest(candidate: PullRequest, existing: PullRequest): boole
 export interface PullRequestProbeOptions {
   /** Full path to the `gh` binary, or 'gh' to search PATH. */
   ghBinary?: string;
+  /** Full path to the `git` binary, or 'git' to search PATH. Used by
+   *  readRemoteUrl, which is the one read in this file that is not `gh`. */
+  gitBinary?: string;
   timeoutMs?: number;
   /** Injected in tests. Real callers leave it alone and get execFile. */
   run?: (
@@ -390,6 +393,114 @@ export function openPullRequestCreatePage(
   } catch (err) {
     return Promise.resolve({ ok: false, output: String(err) });
   }
+}
+
+// ------------------------------------------------- where the repo lives
+//
+// The three things below answer "and where is this branch on the web", which is
+// what makes a branch name in the tree a link. They live in this file because the
+// URL they build is GITHUB-SHAPED — `/tree/<ref>` is github.com's and GitHub
+// Enterprise's spelling of a branch page — and this is the module that owns what
+// Flock knows about GitHub.
+//
+// They are NOT a network call, and that distinction matters here more than
+// anywhere: `git remote get-url` reads .git/config on the local disk, and the
+// only thing that ever leaves the machine is the browser the user's own click
+// hands the url to. The promise `lineage.git.pullRequests` makes is about `gh`,
+// and this is not `gh`.
+
+/** Budget for one `git remote get-url`. A config read behind a click somebody
+ *  just made — generous enough for a cold binary, short enough that a hung git
+ *  is a message rather than a wait. */
+const REMOTE_TIMEOUT_MS = 4000;
+
+/**
+ * `git remote get-url <remote>` in `dir`, or '' for every kind of nothing.
+ *
+ * `remote` is CHECKED against a charset before it reaches argv, not because
+ * `execFile` could be talked into a shell — it takes an array and there is no
+ * shell — but because a name with a leading `-` is an OPTION to git, and the only
+ * names that reach here come from a `branch.upstream` string this extension
+ * parsed. A remote is a git refname; anything outside `[A-Za-z0-9._-]` is not
+ * one, and refusing is cheaper than reasoning about what git would do with it.
+ */
+export async function readRemoteUrl(
+  dir: string,
+  remote: string,
+  opts?: PullRequestProbeOptions,
+): Promise<string> {
+  if (typeof dir !== 'string' || dir.trim() === '') return '';
+  if (typeof remote !== 'string' || !/^[A-Za-z0-9._-]+$/.test(remote)) return '';
+  const run = opts?.run ?? execGh;
+  try {
+    const result = await run(
+      opts?.gitBinary ?? 'git',
+      ['remote', 'get-url', remote],
+      dir,
+      opts?.timeoutMs ?? REMOTE_TIMEOUT_MS,
+    ).catch(() => ({ ok: false, output: '' }));
+    if (!result.ok) return '';
+    return (result.output.split(/\r?\n/)[0] ?? '').trim();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * A git remote url, as the https page it corresponds to: '' for anything this
+ * does not recognise.
+ *
+ * Both spellings git actually hands out, and no others:
+ *
+ *     git@github.com:owner/repo.git          -> https://github.com/owner/repo
+ *     ssh://git@github.com/owner/repo.git    -> https://github.com/owner/repo
+ *     https://github.com/owner/repo.git      -> https://github.com/owner/repo
+ *
+ * THE URL IS BUILT, NEVER PASSED THROUGH, and that is the whole safety of this
+ * function: the scheme is always `https`, the host has to look like a host, and
+ * every path segment is re-encoded. What comes out is a url made of pieces of
+ * the user's own remote, which is a very different thing from opening a string
+ * that was in a config file. A `file://` remote, a path with `..` in it, or
+ * anything with fewer than two segments comes back '' and the caller says so.
+ *
+ * The host is NOT checked against github.com. A GitHub Enterprise install is on
+ * the company's own domain, and refusing those would refuse exactly the users who
+ * have the most branches — while the `/tree/` shape below is GitHub's, so a
+ * remote pointing somewhere else may produce a url that host does not serve. That
+ * is a 404 in a browser tab, which is the recoverable end of the two.
+ */
+export function remoteWebRoot(remoteUrl: unknown): string {
+  if (typeof remoteUrl !== 'string') return '';
+  const raw = remoteUrl.trim();
+  if (raw === '') return '';
+  // Tried in this order on purpose: `https://host/path` also looks like the scp
+  // form with a host of `https`, and only the scheme test tells them apart. The
+  // `(?!\/)` in the scp pattern is the same guard from the other side.
+  const scheme = /^(?:ssh|git|https?):\/\/(?:[^/@]*@)?([A-Za-z0-9.-]+)(?::\d+)?\/(.+)$/.exec(
+    raw,
+  );
+  const scp = /^(?:[A-Za-z0-9._-]+@)?([A-Za-z0-9.-]+):(?!\/)(.+)$/.exec(raw);
+  const match = scheme ?? scp;
+  if (!match) return '';
+  const host = match[1] ?? '';
+  const segments = (match[2] ?? '')
+    .replace(/\.git\/*$/i, '')
+    .split('/')
+    .filter((s) => s !== '');
+  if (host === '' || segments.length < 2) return '';
+  if (segments.some((s) => s === '.' || s === '..')) return '';
+  return `https://${host}/${segments.map(encodeURIComponent).join('/')}`;
+}
+
+/** The branch's page under that root: `…/tree/feat/x`. '' when the root is ''
+ *  or the ref is not one — the slashes inside a ref are part of it, so the
+ *  segments are encoded one at a time rather than the whole string at once. */
+export function branchWebUrl(remoteUrl: unknown, branch: unknown): string {
+  const root = remoteWebRoot(remoteUrl);
+  if (root === '' || typeof branch !== 'string') return '';
+  const segments = branch.trim().split('/');
+  if (segments.some((s) => s === '' || s === '.' || s === '..')) return '';
+  return `${root}/tree/${segments.map(encodeURIComponent).join('/')}`;
 }
 
 interface CacheEntry {

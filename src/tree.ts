@@ -40,6 +40,7 @@ import type {
 import { log, logError } from './log';
 import { projectUri, sessionUri } from './decorations';
 import {
+  branchIndexForCwd,
   computeGrouping,
   projectBranchList,
   unbranchedRoots,
@@ -75,6 +76,8 @@ const EMPTY_FOREST: SessionForest = {
 // change. Re-exported so importers and tests keep their existing entry point.
 import {
   BRANCH_CHIPS_MIN,
+  branchIsDirty,
+  branchStateIcon,
   branchStatusLines,
   branchTokens,
   formatAge,
@@ -223,6 +226,8 @@ export class LineageTreeProvider
 
   private groupCacheForest: SessionForest | null = null;
   private groupCacheSignature: string | null = null;
+  /** Cleared whenever the grouping is rebuilt — see sessionBranchNamesFor. */
+  private sessionBranchNames: Map<string, string> | null = null;
   private groupCache: GroupingResult = EMPTY_GROUPING;
 
   private parentIndexForest: SessionForest | null = null;
@@ -300,7 +305,6 @@ export class LineageTreeProvider
     );
     const branchRows =
       this.safe('branchRows', () => this.deps.branchRows?.(), false) === true;
-
     const lanes = this.safe('subprojects', () => this.deps.subprojects?.(), []);
 
     const signature = groupingSignature(
@@ -308,6 +312,10 @@ export class LineageTreeProvider
       hiddenFolders,
       groupByFolder,
       onlyProjectSessions,
+      // In the signature for the reason the comment on `branchRows` below
+      // gives: flipping it has to invalidate the cached grouping, or the tree
+      // would keep the old branch list until an unrelated roster tick happened
+      // to change the forest.
       branchRows,
       lanes,
     );
@@ -353,7 +361,60 @@ export class LineageTreeProvider
     );
     this.groupCacheForest = forest;
     this.groupCacheSignature = signature;
+    this.sessionBranchNames = null;
     return this.groupCache;
+  }
+
+  /**
+   * session id → the branch to say in its description, for the rows that get one.
+   *
+   * THE NATIVE TREE'S HALF OF `branchDisplay: inline`. A TreeItem has one
+   * label and one description and no second line to put a branch on — the same
+   * concession `branchItem` already makes about the branch colours — so what
+   * survives here is the name, in the description, left of the age.
+   *
+   * The rules are the inline surface's rules, deliberately: a row is answered the
+   * same way by both renderers or neither is trustworthy. Scoped per PROJECT
+   * (the same directory can be a worktree of one project and a plain
+   * subdirectory of another), withheld below BRANCH_CHIPS_MIN, and withheld on a
+   * fork that stayed in its parent's checkout.
+   *
+   * Built once per grouping and thrown away with it, because it is derived from
+   * exactly two things — the grouping's branch lists and the forest's cwds — and
+   * both of those change together.
+   */
+  private sessionBranchNamesFor(forest: SessionForest): Map<string, string> {
+    if (this.sessionBranchNames) return this.sessionBranchNames;
+    const map = new Map<string, string>();
+    const walk = (
+      id: string,
+      branches: readonly BranchInfo[],
+      parentAt: number,
+    ): void => {
+      const node = forest.nodes.get(id);
+      if (!node) return;
+      const at = branchIndexForCwd(branches, node.cwd);
+      if (at >= 0 && at !== parentAt) map.set(id, branches[at].name);
+      for (const kid of node.visibleChildren) walk(kid, branches, at);
+    };
+    const scope = (
+      branches: readonly BranchInfo[],
+      rootIds: readonly string[],
+    ): void => {
+      if (branches.length < BRANCH_CHIPS_MIN) return;
+      for (const id of rootIds) walk(id, branches, -1);
+    };
+    for (const project of this.groupCache.projects) {
+      scope(project.branches ?? [], project.rootIds);
+      // A split project's branches live on its directory rows (the preview
+      // directory model), and each directory is its own repository — so each one
+      // is its own scope, exactly as it is in the inline renderer.
+      for (const sub of project.subprojects ?? []) {
+        scope(sub.branches ?? [], sub.rootIds);
+      }
+    }
+    this.sessionBranchNames = map;
+    return map;
   }
 
   /**
@@ -566,12 +627,13 @@ export class LineageTreeProvider
     const branches = el.branches ?? [];
     const grouped =
       branches.length >= BRANCH_CHIPS_MIN &&
-      // Folded (the project's own `branchesCollapsed`) means the block is not
-      // on screen, and under grouping the sessions hang off that block — so a
-      // fold has to put them back under the project rather than take them with
-      // it. Same rule as the inline sidebar's; the two views must not disagree
-      // about which rows a project contains.
-      el.branchesCollapsed !== true &&
+      // `!== false`, not `=== true`, and ONLY here. The block is shut until
+      // asked for everywhere else, but turning `groupSessionsByBranch` on IS the
+      // ask: the sessions hang off the branch rows under it, so defaulting them
+      // away would silently undo the setting. Hiding them explicitly still puts
+      // every session back under the project. Same rule as the inline sidebar's
+      // — the two views must not disagree about which rows a project contains.
+      el.branchesShown !== false &&
       this.safe('groupSessionsByBranch', () => this.deps.groupSessionsByBranch?.(), false) === true;
     if (!grouped) {
       out.push(...el.rootIds.map((id) => this.sessionRef(id)));
@@ -766,6 +828,33 @@ export class LineageTreeProvider
   }
 
   /**
+   * The colour a branch's mark takes, in GitHub's vocabulary — the native tree's
+   * half of what .branch-glyph does in the webview.
+   *
+   * `charts.*` and never a literal, for the reason webtree.css gives at length:
+   * those are the palette VS Code publishes for small categorical marks, every
+   * theme defines them, and a hex here would be a colour that survives one theme.
+   * Closed takes the description grey rather than a red, because closed-unmerged
+   * is over and did not land, which is a fact and not a problem.
+   *
+   * `undefined` for a branch with no request, which leaves the icon the theme's
+   * own — exactly what this row drew before any of this existed.
+   */
+  private static branchStateColor(
+    pr: PullRequest | undefined,
+  ): vscode.ThemeColor | undefined {
+    if (!pr) return undefined;
+    switch (pr.state) {
+      case 'open':
+        return new vscode.ThemeColor('charts.green');
+      case 'merged':
+        return new vscode.ThemeColor('charts.purple');
+      default:
+        return new vscode.ThemeColor('descriptionForeground');
+    }
+  }
+
+  /**
    * A branch CONTAINER row (`lineage.groupSessionsByBranch` only).
    *
    * Deliberately plain next to the inline sidebar's version: a TreeItem has one
@@ -800,12 +889,19 @@ export class LineageTreeProvider
       () => this.deps.pullRequestFor?.(el.repoDir, el.branch),
       undefined,
     );
-    // Same order as the inline row draws them in — where the checkout stands, the
-    // request, then how many sessions are on it — so somebody switching renderers
-    // reads the same line in the same place. Joined by a space rather than a
-    // separator: a TreeItem description is already dim, small and right-aligned,
-    // and ' · ' in it reads as a third field.
+    // Same order as the inline row draws them in — the star against the name,
+    // then where the checkout stands, then the request, then how many sessions
+    // are on it — so somebody switching renderers reads the same line in the same
+    // place. Joined by a space rather than a separator: a TreeItem description is
+    // already dim, small and right-aligned, and ' · ' in it reads as a third
+    // field.
+    //
+    // The `*` leads the description because a description is drawn immediately
+    // after the label, which puts it exactly where the webview puts it: against
+    // the branch name. This is the whole of how the native tree follows that
+    // move — a TreeItem label is its identity and the star does not belong in it.
     const description = [
+      branchIsDirty(status) ? '*' : '',
       formatBranchSync(status),
       pr ? formatPullRequestChip(pr) : '',
       String(el.rootIds.length || ''),
@@ -813,7 +909,13 @@ export class LineageTreeProvider
       .filter((part) => part !== '')
       .join(' ');
     item.description = description === '' ? undefined : description;
-    item.iconPath = new vscode.ThemeIcon('git-branch');
+    // The request's own mark, in the request's own colour — the same pairing the
+    // webview draws, made from the same function so the two cannot drift. A
+    // branch with no request keeps the git-branch icon this row has always had.
+    item.iconPath = new vscode.ThemeIcon(
+      branchStateIcon(pr),
+      LineageTreeProvider.branchStateColor(pr),
+    );
     // The native tree had no hover on a branch row at all, because the label and
     // the description said everything there was. The status changes that: `↑2 ↓1
     // *` needs somewhere to say what it is ahead OF, and `#42` needs somewhere to
@@ -973,7 +1075,19 @@ export class LineageTreeProvider
     // 'elsewhere' — see the same marker in viewmodel.pushSession. Both surfaces
     // read a row through one function, so neither is allowed its own opinion
     // about where the word goes or when it appears.
+    // The branch, where this renderer can put it: FIRST in the description, so
+    // it sits left of the age exactly as the inline surface's second line sits
+    // left of everything on it. No state tokens beside it — `↑4 *` next to a
+    // name in a field that is already dim, small and elided at the first squeeze
+    // would cost the age its place to say something the hover already says in
+    // words. See sessionBranchNamesFor for which rows get one.
+    const branchName =
+      this.safe('branchDisplay', () => this.deps.branchDisplay?.(), 'color') ===
+      'inline'
+        ? this.sessionBranchNamesFor(forest).get(node.id)
+        : undefined;
     item.description = [
+      branchName ?? '',
       tokens,
       age,
       status,
@@ -1078,7 +1192,7 @@ export class LineageTreeProvider
         const branches = project.branches ?? [];
         const grouped =
           branches.length >= BRANCH_CHIPS_MIN &&
-          project.branchesCollapsed !== true &&
+          project.branchesShown !== false &&
           this.safe(
             'groupSessionsByBranch',
             () => this.deps.groupSessionsByBranch?.(),

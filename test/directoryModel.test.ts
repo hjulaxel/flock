@@ -31,7 +31,6 @@ import {
   branchRowKey,
   buildViewModel,
   formatBranchAge,
-  othersRowKey,
   subprojectRowKey,
 } from '../src/viewmodel';
 import type { ViewModelInput, ViewRow } from '../src/viewmodel';
@@ -447,24 +446,33 @@ describe('computeGrouping under the directory model', () => {
 // ------------------------------------------------------------- the rows
 
 describe('the rows the directory model draws', () => {
-  const split = project({ dirs: ['/code/app/api'] });
+  // `branchesShown: true` is the record **Show Branches** writes, and every test
+  // below needs it: the block is shut on any project nobody has asked, which is
+  // what BOTH an absent value and a `false` mean. The default is tested last.
+  const split = project({ dirs: ['/code/app/api'], branchesShown: true });
 
   const rowsFor = (
     over: {
       collapsed?: Set<string>;
-      opened?: Set<string>;
       directoryModel?: boolean;
       cwdOf?: (id: string) => string | undefined;
       visibleRootIds?: string[];
       projects?: ProjectRecord[];
       nodes?: SessionNode[];
+      /** Branch names the user pinned onto the block — what **Choose Branches to
+       *  Show…** writes, and now the only way a ref becomes a row. */
+      shownBranches?: string[];
     } = {},
   ): ViewRow[] => {
     const forest = forestOf(over.nodes ?? []);
     const grouping = computeGrouping({
       visibleRootIds: over.visibleRootIds ?? [],
       cwdOf: over.cwdOf ?? (() => undefined),
-      projects: over.projects ?? [split],
+      projects: over.projects ?? [
+        over.shownBranches
+          ? { ...split, shownBranches: over.shownBranches }
+          : split,
+      ],
       hiddenFolders: [],
       groupByFolder: true,
       onlyProjectSessions: false,
@@ -479,63 +487,35 @@ describe('the rows the directory model draws', () => {
       viewInput(forest, grouping, {
         directoryModel: over.directoryModel ?? true,
         ...(over.collapsed ? { collapsed: over.collapsed } : {}),
-        ...(over.opened ? { opened: over.opened } : {}),
       }),
     );
   };
 
-  it('hangs the promoted rows and the fold under each directory', () => {
+  it('hangs the promoted rows under each directory, and nothing else', () => {
+    // There was a "Branches (5)" fold at the tail of each of these blocks. It is
+    // gone: the promotion policy decides what is on screen, and the rest of the
+    // repository is reached through **Choose Branches to Show…** on the row's
+    // own menu rather than through a fold inside a fold.
     const rows = rowsFor();
     const kinds = rows.map((r) => `${r.kind}:${r.label}`);
     expect(kinds).toEqual([
       'project:app',
       'subproject:app',
       'branch:main',
-      'branchOthers:Branches',
       'subproject:api',
       'branch:main',
-      'branchOthers:Branches',
     ]);
   });
 
-  it('shuts the fold by default, and says how many are behind it', () => {
-    const fold = rowsFor().find((r) => r.kind === 'branchOthers');
-    expect(fold?.expandable).toBe(true);
-    expect(fold?.expanded).toBe(false);
-    // Five: six branches, one promoted.
-    expect(fold?.description).toBe('5');
-  });
-
-  it('opens onto every branch in the repository, newest first', () => {
-    const rows = rowsFor({
-      opened: new Set([othersRowKey('p1', 'dir:/code/app')]),
-    });
-    // Only the FIRST directory's fold is open, so the slice has to stop at the
-    // next directory row — otherwise it picks up api's own `main` too.
-    const from = rows.findIndex((r) => r.kind === 'branchOthers') + 1;
-    const rest = rows.slice(from);
-    const to = rest.findIndex((r) => r.kind === 'subproject');
-    const under = (to < 0 ? rest : rest.slice(0, to))
-      .filter((r) => r.kind === 'branch')
-      .map((r) => r.label);
-    expect(under).toEqual([
-      'feat/x',
-      'fix/login',
-      'spike/auth',
-      'release/1.4',
-      'chore/deps',
-    ]);
-  });
-
-  it('gives each directory its own fold key, so one does not open the other', () => {
-    const rows = rowsFor({
-      opened: new Set([othersRowKey('p1', 'dir:/code/app')]),
-    });
-    const folds = rows.filter((r) => r.kind === 'branchOthers');
-    expect(folds).toHaveLength(2);
-    expect(folds[0].expanded).toBe(true);
-    expect(folds[1].expanded).toBe(false);
-    expect(folds[0].key).not.toBe(folds[1].key);
+  it('says how many branches are not shown, on the row that holds them', () => {
+    // The count was the fold row's whole content, and losing the row must not
+    // lose the fact — it is what tells you there is anything to go looking for.
+    // On the DIRECTORY row, because under this model that is the row the block
+    // hangs off, and the two directories are counted separately.
+    const dir = rowsFor().find(
+      (r) => r.kind === 'subproject' && r.label === 'app',
+    );
+    expect(dir?.tooltip).toContain('5 branches not shown');
   });
 
   it('scopes a branch row’s key to its directory', () => {
@@ -547,18 +527,19 @@ describe('the rows the directory model draws', () => {
     expect(mains[1].key).toBe(branchRowKey('p1', 'main', 'dir:/code/app/api'));
   });
 
-  it('offers no `+` and no checkout token on a branch with no worktree', () => {
-    const rows = rowsFor({
-      opened: new Set([othersRowKey('p1', 'dir:/code/app')]),
-    });
+  it('keeps a branch with no worktree marked as one, and gives it the + anyway', () => {
+    // No checkout token — the verbs that need a directory still refuse it — but
+    // the `+` is there and says what it will do: cut the worktree, then start
+    // the session in it.
+    const rows = rowsFor({ shownBranches: ['fix/login'] });
     const ref = rows.find((r) => r.kind === 'branch' && r.label === 'fix/login');
-    expect(ref?.actions ?? []).toEqual([]);
     expect(ref?.context.viewItem).toBe(';branch;');
     expect(ref?.cwd).toBe('');
     expect(ref?.muted).toBe(true);
     // The age, in the column a checkout uses for its session count.
     expect(ref?.description).toBe('2d');
-    expect(ref?.tooltip).toContain('New Worktree');
+    expect(ref?.actions?.map((a) => a.id)).toEqual(['newSessionInBranch']);
+    expect(ref?.actions?.[0].title).toBe('New worktree and session on fix/login');
   });
 
   it('keeps the checkout token on a branch that has one', () => {
@@ -579,7 +560,7 @@ describe('the rows the directory model draws', () => {
     expect(at).toBeGreaterThan(-1);
     // Under the `app` directory row, not under a branch row.
     const before = rows.slice(0, at).map((r) => r.kind);
-    expect(before[before.length - 1]).toBe('branchOthers');
+    expect(before[before.length - 1]).toBe('branch');
     expect(rows[at].depth).toBe(2);
   });
 
@@ -626,15 +607,34 @@ describe('the rows the directory model draws', () => {
       collapsed: new Set([subprojectRowKey('p1', 'dir:/code/app')]),
     });
     const kinds = rows.map((r) => `${r.kind}:${r.label}`);
-    // The `app` directory is shut, so its branches and fold are gone; `api` is
-    // untouched.
+    // The `app` directory is shut, so its branches are gone; `api` is untouched.
     expect(kinds).toEqual([
       'project:app',
       'subproject:app',
       'subproject:api',
       'branch:main',
-      'branchOthers:Branches',
     ]);
+  });
+
+  it('draws no branch rows at all until the project has been asked', () => {
+    // THE REGRESSION THIS FILE EXISTS TO CATCH NOW. `computeGrouping` used to
+    // normalise `branchesShown` to `p.branchesShown === true`, which
+    // folded "never asked" and "explicitly opened" into one `false` — so every
+    // directory block drew its rows on a project nobody had ever asked, which is
+    // the one thing the fold exists to stop.
+    const rows = rowsFor({ projects: [project({ dirs: ['/code/app/api'] })] });
+    expect(rows.map((r) => `${r.kind}:${r.label}`)).toEqual([
+      'project:app',
+      'subproject:app',
+      'subproject:api',
+    ]);
+    // And the way in is on the project row, marked with a branch rather than a
+    // chevron, naming what is behind it.
+    expect(rows[0].actions?.[0]).toEqual({
+      id: 'unfoldBranches',
+      icon: 'git-branch',
+      title: 'Show 12 branches',
+    });
   });
 
   it('is the old tree with the preview off', () => {

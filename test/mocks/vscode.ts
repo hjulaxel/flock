@@ -252,3 +252,8 @@ export class Uri implements UriParts {
 
 export const window = {};
 export const commands = {};
+/** `env.openExternal` is the browser hand-off, and the only member of this
+ *  namespace anything under test reaches for. Empty like the two above: a call
+ *  through it throws, every caller wraps one in a try, and a test that wants to
+ *  SEE the url hangs its own stub here for its duration. */
+export const env = {};

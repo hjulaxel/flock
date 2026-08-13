@@ -150,6 +150,240 @@ body {
   position: relative;
 }
 
+/* ------------------------------------------------- the branch under a session
+
+ * `lineage.git.branchDisplay: inline` puts a session's branch on a line of its
+ * own underneath it, and a row that has one is THE ONLY ROW IN THIS TREE THAT IS
+ * NOT `--row-height` TALL. Everything below is scoped to `.two-line`, so a tree
+ * in colour mode is unchanged to the pixel.
+ *
+ * The row becomes a COLUMN of two strips. `.row-main` holds everything the row
+ * already drew, at exactly the height and alignment it had, so every rule
+ * addressing a piece of it (`.row .name`, `.row:hover .actions`, `.row.closed
+ * .icon img`) keeps matching — they are all descendant selectors, and a wrapper
+ * between them changes nothing. */
+.row.two-line {
+  height: auto;
+  flex-direction: column;
+  /* `stretch`, not the inherited `center`: both strips are full-width bands, and
+   * centring them would hang a short second line in mid-air. */
+  align-items: stretch;
+  /* THE SECOND STRIP IS SHORTER THAN A ROW, and pulled up under its own session.
+   *
+   * A full `--row-height` under every session made the two lines read as two
+   * rows: equal heights, equal spacing, nothing saying which one was the subject
+   * and which one the annotation. Sixteen against twenty-two, lifted two, closes
+   * the gap between a session and its branch and opens one to the next session —
+   * so a pair reads as one thing before a word of it is read.
+   *
+   * Both numbers are variables because the SPINE has to know them: the rails
+   * that continue past this row run exactly as far as the strip they cross. */
+  --branch-line-h: 16px;
+  --branch-line-lift: 2px;
+}
+
+.row-main {
+  display: flex;
+  align-items: center;
+  height: var(--row-height);
+  /* A flex item will not shrink below its content by default, which on a narrow
+   * sidebar is what lets a long session name push the age and the status dot off
+   * the right edge. */
+  min-width: 0;
+}
+
+/* The second strip. Indented to start under the session's NAME rather than at
+ * the row's left edge: the line is about the row above it, and a fact that
+ * starts left of its own subject reads as a new row.
+ *
+ * The sum mirrors the geometry rather than restating a measured number — the
+ * gutter (whose width is `--gutter-w`, set per row by the client, because it
+ * grows with the spine's depth) plus the icon box and its margin. Same argument
+ * as `.row.branch`'s padding above, and the same reason: when the gutter moves,
+ * this moves with it. */
+.row-branch {
+  display: flex;
+  align-items: center;
+  height: var(--branch-line-h);
+  /* Up, into the space the 22px strip was leaving under the name. */
+  margin-top: calc(-1 * var(--branch-line-lift));
+  min-width: 0;
+  gap: 5px;
+  padding-left: calc(var(--gutter-w, 0px) + 16px + 6px);
+  color: var(--vscode-descriptionForeground);
+  /* SMALLER, so the line reads as a sub-thing and not as a second row. Relative
+   * rather than a pixel size: the sidebar's font scales with the workbench's,
+   * and a line pinned at 11px would grow into the row above it on anybody who
+   * turned their editor font down. */
+  font-size: 0.9em;
+}
+
+/* The branch mark. A masked svg, like `.mark` — same ink, one notch dimmer,
+ * because this one leads a line that is already secondary to the row above it,
+ * and a size down with the text it leads. */
+.branch-glyph {
+  flex: 0 0 auto;
+  width: 11px;
+  height: 11px;
+  background-color: var(--vscode-icon-foreground);
+  opacity: 0.55;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+}
+
+/* THE FOUR STATES, in GitHub's own colours, on whichever mark is drawn.
+ *
+ * This is the one place the branch line spends colour, and it buys the thing a
+ * reader coming from a browser tab already knows: green means somebody can merge
+ * it, purple means somebody did. The shapes differ too (see the svgs), but at
+ * 11px the colour is what carries across a column of rows.
+ *
+ * `charts.*` and never a literal, for the reason .branch-pr gives at length: a
+ * hex here is a colour that survives one theme. The opacity comes UP from the
+ * unstated 0.55 as well — a mark dimmed to a fifth of the way to the background
+ * has no colour left to read.
+ *
+ * A branch with no request gets no class at all and keeps the theme's icon
+ * colour, which is what this mark has always been. */
+.branch-glyph.open,
+.branch-swatch.glyph.open {
+  background-color: var(--vscode-charts-green, var(--vscode-icon-foreground));
+  opacity: 0.9;
+}
+
+/* Merged: the one state that means the worktree beside it can go. */
+.branch-glyph.merged,
+.branch-swatch.glyph.merged {
+  background-color: var(--vscode-charts-purple, var(--vscode-icon-foreground));
+  opacity: 0.9;
+}
+
+/* Draft: the description grey. A draft is a request that is not asking anything
+ * of anybody yet, which is what "no colour" says — the same reading
+ * `.branch-pr.draft` gives the number beside it. */
+.branch-glyph.draft,
+.branch-swatch.glyph.draft {
+  background-color: var(--vscode-descriptionForeground);
+  opacity: 0.8;
+}
+
+/* Closed and unmerged: dimmer still, and never red. It is over and it did not
+ * land, which is a fact and not a problem. */
+.branch-glyph.closed,
+.branch-swatch.glyph.closed {
+  background-color: var(--vscode-descriptionForeground);
+  opacity: 0.55;
+}
+
+/* The `*` for uncommitted work, hard against the name it is about.
+ *
+ * `flex: 0 0 auto` and a fixed margin: this is two pixels of text that must never
+ * be the thing that gives way, and it sits between the name (which is elided) and
+ * the spacer (which takes the slack), so it stays touching the name at every
+ * width. Slightly heavier than the line around it, because at 11px a light
+ * asterisk is a speck. */
+.branch-dirty {
+  flex: 0 0 auto;
+  margin-left: 4px;
+  color: var(--vscode-descriptionForeground);
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+/* A LINK: the branch name, and the `#42` beside it.
+ *
+ * Underlined on hover and never at rest. A permanent underline down a column of
+ * rows would turn the quietest line in the tree into the loudest, and there is
+ * nothing to discover here that a pointer does not find in the width of the
+ * word — every one of these verbs is also on the row's right-click menu, which
+ * is where the keyboard reaches them.
+ *
+ * No colour change either. These take the colour they already had — the state's,
+ * for a request; the line's, for a name — because a link that recoloured itself
+ * would be saying something about the branch that is not true. */
+.branch-link {
+  cursor: pointer;
+}
+
+.branch-link:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* The name takes the width that is going and gives it back first: the tokens to
+ * its right are three or four characters that must not be the thing that gets
+ * cut, because they are the part that says what to DO.
+ *
+ * Elided at the END, not the middle. A middle elision keeps the tail — which is
+ * the half that identifies `feat/…/ranking` — but CSS has no such property, and
+ * every way of faking it (bidi overrides, a two-span split measured in JS) either
+ * reorders punctuation on names containing `/` or puts a measurement loop on a
+ * path that repaints every roster tick. The full name is one hover away: it is in
+ * the row's title, which is also its accessible description.
+ *
+ * What pushes the state tokens into their column at the right edge is `.spacer`,
+ * appended after this by the client — NOT `margin-right: auto` here, which is
+ * what it used to be. The difference is the star: an auto margin on the name
+ * throws everything after it to the right, and the `*` has to stay touching the
+ * name it is about. The slack therefore lives in an element of its own, between
+ * the two halves of the line, exactly as it does on a branch row. */
+.branch-line-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The branch line's own tokens reuse `.branch-sync` and `.branch-pr` from the
+ * branch rows — the same classes, the same colours, the same vocabulary. A
+ * reader should not have to learn a second dialect inside one tree, which is
+ * also the argument the `standard` detail level is built on. */
+.row.two-line .branch-sync,
+.row.two-line .branch-pr {
+  flex: 0 0 auto;
+}
+
+/* THE SPINE HAS TO CROSS THE SECOND LINE.
+ *
+ * The gutter lives inside `.row-main`, and that is deliberate: every mark in it
+ * is positioned against the gutter's own height, and `50%` has to keep meaning
+ * "the middle of the strip holding the icon and the name". Move the gutter out
+ * to span both strips and the elbow's horizontal, and the node's ring with it,
+ * slide down to the middle of a 44px row — off the row they are about.
+ *
+ * But the two marks that CONTINUE — a rail passing through on an ancestor's
+ * column, and this row's own stem — end at the gutter's bottom edge, which is
+ * now half way down the row. The next row's elbow picks up at its own top, so
+ * the spine would read as a column of dashes with a gap under every branch line.
+ *
+ * So the verticals, and only the verticals, run one extra strip. The elbow and
+ * the node keep the geometry above untouched, because they belong to the first
+ * line the way the name does. Nothing clips them on the way down: neither
+ * `.gutter` nor `.row-main` sets `overflow`. */
+.row.two-line .rail,
+.row.two-line .stem {
+  /* Exactly the strip's contribution to the row's height — its own height less
+   * the lift that pulled it up. Off by those two pixels and the spine either
+   * stops short of the next row's elbow or overshoots into it. */
+  bottom: calc(-1 * (var(--branch-line-h) - var(--branch-line-lift)));
+}
+
+/* A muted or closed session takes its branch line down with it, for the reason
+ * the tint rules below give at length: "this is over" outranks "this is on
+ * feat/x", and a line left at full strength under a grey name would read as the
+ * live half of a dead row. */
+.row.muted .row-branch,
+.row.closed .row-branch {
+  color: var(--vscode-disabledForeground);
+  opacity: 0.75;
+}
+
 /* Root rows (projects and folders) read as section headers, the way the
  * Explorer treats a workspace folder: a band and a bold label, so the eye can
  * find "where does this group start" before reading anything under it.
@@ -821,11 +1055,25 @@ body {
   background: var(--chip-color, var(--vscode-foreground));
 }
 
-/* "Others" has no colour of its own — it stands for several branches. The box
- * still occupies the column, which is what keeps its label in line with the
- * branches above and makes it read as the tail of that list. */
-.branch-swatch.blank {
-  background: none;
+/* INLINE MODE has no palette, so the same box carries a git-branch mask instead
+ * of a colour — the row says what it IS rather than which group it is in. Bigger
+ * than the 8px square (a glyph shrunk to a square's size is a smudge) and pulled
+ * back out of the margin so the label stays in the one column the block shares
+ * with the swatch it replaces. */
+.branch-swatch.glyph {
+  flex: 0 0 12px;
+  width: 12px;
+  height: 12px;
+  margin-right: 10px;
+  border-radius: 0;
+  background: var(--vscode-icon-foreground);
+  opacity: 0.7;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
 }
 
 /* Not bold, unlike the project label above it: these are contents, and a block
@@ -860,11 +1108,6 @@ body {
   opacity: 0.65;
 }
 
-.row.branch.others .branch-name {
-  color: var(--vscode-descriptionForeground);
-  font-style: italic;
-}
-
 /* Right-aligned, in the branch's own colour at a lower weight: the count
  * belongs to the row, and a neutral grey number would read as a separate fact
  * sitting next to it. Same column as a session's age, so the two line up. */
@@ -874,16 +1117,6 @@ body {
   font-size: 0.9em;
   font-variant-numeric: tabular-nums;
   margin-right: 6px;
-}
-
-.row.branch.others .branch-count {
-  color: var(--vscode-descriptionForeground);
-}
-
-/* The fold's own twisty is grey like its label. The row stands for branches
- * rather than being one, so it has no colour of its own to point with. */
-.row.branch.others .branch-twisty::before {
-  border-left-color: var(--vscode-descriptionForeground);
 }
 
 /* A BRANCH WITH NO CHECKOUT: a ref, and nothing on disk. Most of what the fold
@@ -898,6 +1131,33 @@ body {
   background: transparent;
   box-shadow: inset 0 0 0 1px var(--vscode-descriptionForeground);
   opacity: 0.5;
+}
+
+/* The glyph half of the same rule. A mask has no fill to hollow out, so what
+ * says "nothing on disk yet" here is the ink going down to the description
+ * colour's weight — the same distance the outlined square travels. */
+.row.branch.ref .branch-swatch.glyph {
+  background: var(--vscode-descriptionForeground);
+  box-shadow: none;
+  opacity: 0.5;
+}
+
+/* A ref keeps its state's HUE while staying dimmed. Both facts are true at once
+ * — there is nothing on disk for this branch, and the request on it is open —
+ * and the rule above says the first by going dim, which leaves the colour free
+ * to say the second. A merged branch with no checkout is the commonest ref there
+ * is, and purple is exactly what makes it recognisable.
+ *
+ * Only the two coloured states need restating: draft and closed already resolve
+ * to the description colour above sets. And this is a SPECIFICITY fix, not an
+ * ordering one — `.row.branch.ref .branch-swatch.glyph` is four classes and wins
+ * over `.branch-swatch.glyph.merged` wherever the two are written. */
+.row.branch.ref .branch-swatch.glyph.open {
+  background-color: var(--vscode-charts-green, var(--vscode-descriptionForeground));
+}
+
+.row.branch.ref .branch-swatch.glyph.merged {
+  background-color: var(--vscode-charts-purple, var(--vscode-descriptionForeground));
 }
 
 .row.branch.ref .branch-name {
@@ -1091,12 +1351,18 @@ body {
 }
 
 /* Hung off the row, below it by default — the quick input does the same thing
- * under its own box. */
+ * under its own box.
+ *
+ * `100%`, not `--row-height`: a session with a branch line under it is two
+ * strips tall, and the fixed offset would drop this box ON TOP of the second
+ * line — sessions do rename, and the message would have covered the branch it
+ * was being renamed away from. `100%` is the row's own height whichever it is,
+ * and on every one-line row it resolves to exactly the value it replaced. */
 .validation {
   position: absolute;
   left: 0;
   right: 0;
-  top: var(--row-height);
+  top: 100%;
   z-index: 10;
   padding: 2px 6px;
   font-size: 0.9em;
@@ -1115,7 +1381,9 @@ body {
  * Specificity (0,2,0) over .validation's (0,1,0), so it wins on weight. */
 .validation.above {
   top: auto;
-  bottom: var(--row-height);
+  /* `100%` for the same reason as `top` above: the offset has to be the row's
+   * own height, which is two strips on a session carrying a branch line. */
+  bottom: 100%;
   border-top: 1px solid var(--vscode-inputValidation-errorBorder);
   border-bottom: none;
 }

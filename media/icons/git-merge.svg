@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" role="img"
+     fill="none" stroke="#000" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+  <title>Merged</title>
+  <!-- git-branch.svg, upside down, and that is exactly the fact it states: the
+       side ring rejoins the trunk instead of leaving it. Same rings in the same
+       places, same curve radius, the arc sweeping the other way.
+       Kept as its own file rather than a CSS transform on the branch mark,
+       because the mask is set from JS by NAME and a rotation would have to be
+       carried by a second class that means the same thing.
+       NB. no double hyphen anywhere in this comment. An svg used as a CSS mask
+       is parsed as strict XML, where a comment containing one is a fatal error
+       and the whole file renders as nothing. -->
+  <circle cx="4.6" cy="3.8" r="1.9"/>
+  <circle cx="4.6" cy="12.2" r="1.9"/>
+  <circle cx="11.4" cy="12.2" r="1.9"/>
+  <path d="M4.6 5.7v4.6"/>
+  <path d="M9.5 12.2H8.2a3.6 3.6 0 0 1-3.6-3.6V7.4"/>
+</svg>

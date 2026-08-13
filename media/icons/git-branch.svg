@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" role="img"
+     fill="none" stroke="#000" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+  <title>Branch</title>
+  <!-- STROKED like bell-slash, and for the same reason: the webview paints this
+       as a CSS mask, which reads ALPHA only, so a filled fork and its rings
+       would flatten into one blob. Two rings and a track between them is the
+       shape every git client draws, reduced to what survives at 13px.
+       The lower ring is the trunk, the upper right one the branch that left it;
+       the curve is the departure. Nothing at the top of the trunk, because a
+       third ring at this size is a smudge.
+       NB. no double hyphen anywhere in this comment. An svg used as a CSS mask
+       is parsed as strict XML, where a comment containing one is a fatal error
+       and the whole file renders as nothing. -->
+  <circle cx="4.6" cy="12.2" r="1.9"/>
+  <circle cx="4.6" cy="3.8" r="1.9"/>
+  <circle cx="11.4" cy="3.8" r="1.9"/>
+  <path d="M4.6 5.7v4.6"/>
+  <path d="M9.5 3.8H8.2a3.6 3.6 0 0 0-3.6 3.6v1.2"/>
+</svg>

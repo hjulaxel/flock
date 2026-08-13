@@ -249,7 +249,7 @@ export function buildDemoProject(now: number): ProjectGroupNode {
     // Empty for the same reason a real split project's is: the directories carry
     // the branches, and drawing them here as well would draw them twice.
     branches: [],
-    branchesCollapsed: false,
+    branchesShown: true,
     parentProjectId: null,
     depth: 0,
     childProjectIds: [],
