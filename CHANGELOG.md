@@ -4,7 +4,36 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.5] — 2026-08-14
+
+### Upgrading from 0.1.4
+
+Nothing you have is lost, and there is nothing to run. One thing moves on its
+own, and this is it.
+
+- **Sessions Flock did not start are no longer in the tree.** The roster Flock
+  reads is machine-wide, and until now the tree drew all of it: a `claude`
+  typed into the bottom panel, a conversation the official Claude Code
+  extension started, a script's session — each got a row here and rang the
+  bell. The noise was the visible half. The other half is that the finish-stamp
+  behind the bell writes an editorial record, and a record is tree membership,
+  so Flock was quietly **importing** every session anyone ever ran on this
+  machine, permanently.
+
+  **Rows you already have are untouched.** Anything with a record keeps its
+  place, exactly as before, so nothing you have been working on disappears —
+  what stops appearing is what Flock never owned. Three doors bring those back:
+  **Add Existing Session…** on a project's right-click for one at a time,
+  **Import Previous Sessions…** for everything at once, and
+  `lineage.showForeignSessions`, which restores 0.1.4's behaviour wholesale,
+  notifications included.
+
+Everything else here is additive or opt-in. No existing default changed, and
+all four new settings start off (`lineage.showForeignSessions`,
+`lineage.verbs.enabled`, `lineage.accounts.offerSwitchAtLimit`) or empty
+(`lineage.codexBinary`) — including the in-session verbs, which write nothing
+until you run **Install In-Session Verbs…** and accept the modal that names
+both files first.
 
 ### Added
 
