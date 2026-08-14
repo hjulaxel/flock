@@ -1414,3 +1414,14 @@ body {
 .empty button:hover {
   background: var(--vscode-button-hoverBackground);
 }
+
+/* The welcome's second and third doors. Same geometry, quieter colour: one
+   primary action per empty view, the way the workbench's own welcomes do it. */
+.empty button.secondary {
+  color: var(--vscode-button-secondaryForeground);
+  background: var(--vscode-button-secondaryBackground);
+}
+
+.empty button.secondary:hover {
+  background: var(--vscode-button-secondaryHoverBackground);
+}

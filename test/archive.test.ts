@@ -18,12 +18,14 @@ import {
   keptArchived,
   memberKeepIds,
   readHeadFacts,
+  unlistedPool,
 } from '../src/archive';
 import { buildForest } from '../src/lineage';
 import type {
   ArchivedSession,
   EditorialRecord,
   ParentResolution,
+  RosterEntry,
 } from '../src/types';
 
 const A = '0f00000a-0000-4000-8000-00000000000a';
@@ -308,6 +310,153 @@ describe('archive: helpers', () => {
       );
       expect(keep).toEqual(new Set([C]));
     });
+  });
+});
+
+// What the Add Session / Import pickers offer: everything this machine knows
+// that the tree is not showing — the other half of keptArchived.
+describe('unlistedPool', () => {
+  const D = '0f00000d-0000-4000-8000-00000000000d';
+  const mk = (id: string, over: Partial<ArchivedSession> = {}): ArchivedSession => ({
+    sessionId: id,
+    transcriptPath: `/tmp/${id}.jsonl`,
+    endedAt: 1000,
+    bytes: 10,
+    ...over,
+  });
+  const rec = (id: string, over: Partial<EditorialRecord> = {}): EditorialRecord => ({
+    id,
+    createdAt: '2026-08-14T00:00:00.000Z',
+    updatedAt: '2026-08-14T00:00:00.000Z',
+    ...over,
+  });
+  const entry = (id: string, over: Partial<RosterEntry> = {}): RosterEntry => ({
+    sessionId: id,
+    ...over,
+  });
+  const self = (id: string): string => id;
+  const none = new Set<string>();
+
+  it('lists a foreign live row once, with what the roster knew', () => {
+    const out = unlistedPool({
+      entries: [entry(A, { cwd: '/w', name: 'ranking' })],
+      archived: [],
+      records: {},
+      tipOf: self,
+      shownIds: none,
+    });
+    expect(out).toEqual([
+      { sessionId: A, live: true, cwd: '/w', label: 'ranking' },
+    ]);
+  });
+
+  it('skips anything the forest is already rendering', () => {
+    const out = unlistedPool({
+      entries: [entry(A)],
+      archived: [mk(B)],
+      records: {},
+      tipOf: self,
+      shownIds: new Set([A, B]),
+    });
+    expect(out).toEqual([]);
+  });
+
+  it('skips deleted and chat records — Restore and the chat picker own those doors', () => {
+    const out = unlistedPool({
+      entries: [entry(A)],
+      archived: [mk(B), mk(C)],
+      records: {
+        [A]: rec(A, { deleted: true }),
+        [B]: rec(B, { chat: true }),
+      },
+      tipOf: self,
+      shownIds: none,
+    });
+    expect(out.map((s) => s.sessionId)).toEqual([C]);
+  });
+
+  it('asks deleted/chat of the chain tip too, not only the physical id', () => {
+    // The record sits on the TIP (B); the transcript on disk is the old id (A).
+    const out = unlistedPool({
+      entries: [],
+      archived: [mk(B)],
+      records: { [B]: rec(B, { deleted: true }) },
+      tipOf: (id) => (id === A ? B : id),
+      shownIds: none,
+    });
+    expect(out).toEqual([]);
+  });
+
+  it('collapses a chain to one entry: superseded generations never list', () => {
+    // A's transcript is a superseded generation of B. Only B may appear —
+    // importing A would mint a row the next rebuild collapses away.
+    const tip = (id: string): string => (id === A ? B : id);
+    const out = unlistedPool({
+      entries: [],
+      archived: [mk(A), mk(B)],
+      records: {},
+      tipOf: tip,
+      shownIds: none,
+    });
+    expect(out.map((s) => s.sessionId)).toEqual([B]);
+  });
+
+  it('a live row swallows its own archived twin', () => {
+    // The archive indexes live transcripts too; the pool must not offer the
+    // same conversation twice.
+    const out = unlistedPool({
+      entries: [entry(A, { cwd: '/w' })],
+      archived: [mk(A, { cwd: '/w' })],
+      records: {},
+      tipOf: self,
+      shownIds: none,
+    });
+    expect(out).toEqual([{ sessionId: A, live: true, cwd: '/w' }]);
+  });
+
+  it('a SHOWN live row keeps its archived twin out as well', () => {
+    const out = unlistedPool({
+      entries: [entry(A)],
+      archived: [mk(A)],
+      records: {},
+      tipOf: self,
+      shownIds: new Set([A]),
+    });
+    expect(out).toEqual([]);
+  });
+
+  it('orders live first, then newest activity first', () => {
+    const out = unlistedPool({
+      entries: [entry(D)],
+      archived: [
+        mk(A, { endedAt: 100 }),
+        mk(B, { endedAt: 300 }),
+        mk(C, { endedAt: 200 }),
+      ],
+      records: {},
+      tipOf: self,
+      shownIds: none,
+    });
+    expect(out.map((s) => s.sessionId)).toEqual([D, B, C, A]);
+  });
+
+  it('carries the archived head facts the picker renders', () => {
+    const out = unlistedPool({
+      entries: [],
+      archived: [mk(A, { cwd: '/w/api', label: 'the rewrite', endedAt: 42 })],
+      records: {},
+      tipOf: self,
+      shownIds: none,
+    });
+    expect(out).toEqual([
+      {
+        sessionId: A,
+        live: false,
+        cwd: '/w/api',
+        label: 'the rewrite',
+        endedAt: 42,
+      },
+    ]);
   });
 });
 

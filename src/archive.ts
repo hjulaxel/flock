@@ -29,6 +29,7 @@ import {
   type DisposableLike,
   type EditorialRecord,
   type RosterEntry,
+  type UnlistedSession,
   isSessionId,
   shortId,
 } from './types';
@@ -528,4 +529,83 @@ export function archivedAsEntries(
 /** Best-effort human label for an archived session. */
 export function archivedLabel(s: ArchivedSession): string {
   return s.label ?? shortId(s.sessionId);
+}
+
+/**
+ * Every session this machine knows about that the tree is NOT showing — the
+ * pool the Add Session and Import pickers offer. The other half of
+ * `keptArchived`: that function decides what reaches the tree on its own, this
+ * one lists what did not, so the user can bring it in by hand.
+ *
+ * Chain-collapsed to one entry per CONVERSATION, exactly as the tree is: a
+ * live row lists under its tip, and a transcript that is merely a superseded
+ * generation of some other file is skipped outright — importing it would mint
+ * a row the next rebuild collapses away.
+ *
+ * Three exclusions, each a fact the caller already holds:
+ *
+ *   shown    `shownIds.has(tip)` — it has a row; there is nothing to add.
+ *   deleted  the user took its row OFF on purpose; Restore Deleted Session…
+ *            is the door back, and a second door that silently un-deletes
+ *            would make Delete mean nothing.
+ *   chat     a chat has no row by design, and offering to give it one would
+ *            un-design that.
+ *
+ * Order: live rows first (they are the ones the user can see running
+ * somewhere), then newest activity first — which is the order a person scans
+ * "what was I doing" in.
+ */
+export function unlistedPool(input: {
+  entries: readonly RosterEntry[];
+  archived: readonly ArchivedSession[];
+  records: Record<string, EditorialRecord>;
+  tipOf(id: string): string;
+  /** Every id the forest currently renders — live, archived and ghost alike. */
+  shownIds: ReadonlySet<string>;
+}): UnlistedSession[] {
+  const { entries, archived, records, tipOf, shownIds } = input;
+  // Deleted/chat is asked of both the physical id and its tip: a record can
+  // sit on either end of a chain, and missing it on one would resurrect a
+  // deleted conversation under its other name.
+  const excluded = (id: string, tip: string): boolean => {
+    for (const key of id === tip ? [id] : [id, tip]) {
+      const record = records[key];
+      if (record?.deleted === true || record?.chat === true) return true;
+    }
+    return false;
+  };
+  const seen = new Set<string>();
+  const live: UnlistedSession[] = [];
+  for (const e of entries) {
+    const tip = tipOf(e.sessionId);
+    if (seen.has(tip)) continue;
+    seen.add(tip); // shown or excluded, the conversation is accounted for
+    if (shownIds.has(tip) || shownIds.has(e.sessionId)) continue;
+    if (excluded(e.sessionId, tip)) continue;
+    const item: UnlistedSession = { sessionId: tip, live: true };
+    if (e.cwd !== undefined) item.cwd = e.cwd;
+    if (e.name !== undefined) item.label = e.name;
+    live.push(item);
+  }
+  const gone: UnlistedSession[] = [];
+  for (const a of archived) {
+    const tip = tipOf(a.sessionId);
+    // A superseded generation is not a conversation — its tip's own file (or
+    // live row) represents the whole chain, and will be met on its own turn.
+    if (tip !== a.sessionId) continue;
+    if (seen.has(tip)) continue;
+    seen.add(tip);
+    if (shownIds.has(tip)) continue;
+    if (excluded(a.sessionId, tip)) continue;
+    const item: UnlistedSession = {
+      sessionId: tip,
+      live: false,
+      endedAt: a.endedAt,
+    };
+    if (a.cwd !== undefined) item.cwd = a.cwd;
+    if (a.label !== undefined) item.label = a.label;
+    gone.push(item);
+  }
+  gone.sort((x, y) => (y.endedAt ?? 0) - (x.endedAt ?? 0));
+  return [...live, ...gone];
 }

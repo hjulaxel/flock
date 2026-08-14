@@ -10,8 +10,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
+  addSessionToProjectFlow,
   adoptBackgroundJob,
   chatFlow,
+  importSessionsFlow,
   chatSystemPrompt,
   configureProjectFlow,
   defaultForkTitle,
@@ -44,6 +46,7 @@ import {
   env as mockEnv,
   window as mockWindow,
 } from './mocks/vscode';
+import * as vscodeMock from './mocks/vscode';
 import type {
   AccountProfile,
   BackgroundJob,
@@ -55,6 +58,7 @@ import type {
   SessionForest,
   SessionNode,
   SubprojectRecord,
+  UnlistedSession,
 } from '../src/types';
 
 const VALID = 'ff2c0a73-26c4-46f1-bb6e-fe331fcb0ecf';
@@ -2601,11 +2605,11 @@ describe('a new session (newSessionInBranch) is routed and its pin recorded', ()
   });
 });
 
-// The launcher execs the Claude CLI and nothing else. An account whose
-// isolation lives in another tool's variable (`CODEX_HOME`) would launch
-// `claude` on the machine's DEFAULT login while the pin, the row and the
-// status line all named the other account — so the verbs refuse it out loud
-// instead, and the router never offers it in the first place.
+// The launcher execs the CLI the account's provider names — `claude` for a
+// Claude or API-key account, `codex` for a Codex one. A provider whose CLI it
+// does NOT exec (Gemini) would launch `claude` on the machine's DEFAULT login
+// while the pin, the row and the status line all named the other account, so
+// the verbs refuse that out loud and the router never offers it.
 describe('a session never starts on an account no session can run on', () => {
   afterEach(() => {
     delete (mockCommands as { registerCommand?: unknown }).registerCommand;
@@ -2623,45 +2627,45 @@ describe('a session never starts on an account no session can run on', () => {
     return seen;
   }
 
-  it('"New Session on this account" on a Codex row refuses instead of launching', async () => {
+  it('"New Session on this account" on a Gemini row refuses instead of launching', async () => {
     const warnings = captureWarnings();
-    const CODEX = accountProfile('codex-default', {
-      provider: 'codex',
-      label: 'Codex — default',
+    const GEMINI = accountProfile('gemini-default', {
+      provider: 'gemini',
+      label: 'Gemini — default',
     });
-    const { accounts, calls: acctCalls } = fakeAccountDeps([CODEX]);
+    const { accounts, calls: acctCalls } = fakeAccountDeps([GEMINI]);
     const { deps, calls } = chatDeps(undefined);
     const withAccounts: AccountCommandDeps = { ...deps, accounts };
 
     const harness = withRegisteredCommands(withAccounts);
-    await harness.run(COMMANDS.newSessionFromAccount, CODEX.id);
+    await harness.run(COMMANDS.newSessionFromAccount, GEMINI.id);
 
     expect(calls.launches).toEqual([]);
     expect(acctCalls.pinned).toEqual([]);
-    expect(warnings.join(' ')).toContain('Codex');
+    expect(warnings.join(' ')).toContain('Gemini');
   });
 
   it('it cannot be made the default for new sessions either', async () => {
     captureWarnings();
-    const CODEX = accountProfile('codex-default', { provider: 'codex' });
-    const { accounts, calls: acctCalls } = fakeAccountDeps([CODEX]);
+    const GEMINI = accountProfile('gemini-default', { provider: 'gemini' });
+    const { accounts, calls: acctCalls } = fakeAccountDeps([GEMINI]);
     const { deps } = chatDeps(undefined);
     const withAccounts: AccountCommandDeps = { ...deps, accounts };
 
     const harness = withRegisteredCommands(withAccounts);
-    await harness.run(COMMANDS.setDefaultAccount, CODEX.id);
+    await harness.run(COMMANDS.setDefaultAccount, GEMINI.id);
 
     expect(acctCalls.defaultRoutingSet).toEqual([]);
   });
 
-  it('a pin left on such an account resumes with no environment, not with CODEX_HOME', async () => {
+  it('a pin left on such an account resumes with no environment at all', async () => {
     const PARENT = uuid(1);
-    const CODEX = accountProfile('codex-default', {
-      provider: 'codex',
-      configDir: '/codex/home',
+    const GEMINI = accountProfile('gemini-default', {
+      provider: 'gemini',
+      configDir: '/gemini/home',
     });
-    const { accounts, calls: acctCalls } = fakeAccountDeps([CODEX], {
-      sessionProfileId: () => CODEX.id,
+    const { accounts, calls: acctCalls } = fakeAccountDeps([GEMINI], {
+      sessionProfileId: () => GEMINI.id,
     });
     const { deps, calls } = chatDeps(undefined, {
       hasTranscript: () => true,
@@ -2689,6 +2693,194 @@ describe('a session never starts on an account no session can run on', () => {
     expect(calls.launches[0].env).toBeUndefined();
     expect(calls.launches[0].profileId).toBeUndefined();
     expect(acctCalls.pinned).toEqual([]);
+  });
+});
+
+// The other half of the same rule, and the one this feature exists for: a
+// Codex account IS a place a session starts, and the launch has to say so on
+// the way out. `provider: 'codex'` is what makes TerminalRegistry.launch exec
+// `codex` rather than `claude`, so a launch carrying CODEX_HOME WITHOUT it
+// would be precisely the credential-sharing failure the old refusal existed to
+// prevent — the account's variable set on a CLI that ignores it.
+describe('a session on a Codex account launches the Codex CLI', () => {
+  // The flow reads `vscode.workspace.workspaceFolders` to decide where a
+  // no-project launch runs. The shared mock exports no `workspace` at all, so
+  // these tests hang one off it for their own duration — the same trick
+  // test/topbar.test.ts documents — rather than widening a mock every other
+  // test is happy without.
+  beforeEach(() => {
+    (vscodeMock as unknown as { workspace: unknown }).workspace = {
+      workspaceFolders: [{ uri: { fsPath: '/code/api' }, name: 'api' }],
+    };
+  });
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (vscodeMock as unknown as { workspace?: unknown }).workspace;
+  });
+
+  function launchDeps(profiles: AccountProfile[]): {
+    withAccounts: AccountCommandDeps;
+    calls: ChatCalls;
+    acctCalls: ReturnType<typeof fakeAccountDeps>['calls'];
+  } {
+    const { accounts, calls: acctCalls } = fakeAccountDeps(profiles);
+    const { deps, calls } = chatDeps(undefined, { beginInlineRename: () => true });
+    const withAccounts: AccountCommandDeps = {
+      ...deps,
+      launchSession: async (opts) => {
+        calls.launches.push(opts);
+        return {
+          nodeId: opts.sessionId,
+          sessionId: opts.sessionId,
+          terminalName: 'codex',
+          createdAt: 0,
+        };
+      },
+      accounts,
+    };
+    return { withAccounts, calls, acctCalls };
+  }
+
+  it('"New Session on this account" launches, pins, and marks the launch codex', async () => {
+    const CODEX = accountProfile('codex-default', {
+      provider: 'codex',
+      label: 'Codex — default',
+      configDir: '/codex/home',
+    });
+    const { withAccounts, calls, acctCalls } = launchDeps([CODEX]);
+
+    const harness = withRegisteredCommands(withAccounts);
+    await harness.run(COMMANDS.newSessionFromAccount, CODEX.id);
+
+    expect(calls.launches).toHaveLength(1);
+    expect(calls.launches[0].provider).toBe('codex');
+    // The isolation the row claims is the isolation the process gets: the
+    // account's own CODEX_HOME, reaching a CLI that actually reads it.
+    expect(calls.launches[0].env).toEqual({ CODEX_HOME: '/codex/home' });
+    expect(acctCalls.pinned).toEqual([
+      { sessionId: calls.launches[0].sessionId, profileId: CODEX.id },
+    ]);
+  });
+
+  it('an API-key account launches CLAUDE, never a binary named after its provider', async () => {
+    const KEY = accountProfile('api-key', {
+      provider: 'generic',
+      extraEnv: { ANTHROPIC_API_KEY: 'sk-test' },
+    });
+    const { withAccounts, calls } = launchDeps([KEY]);
+
+    const harness = withRegisteredCommands(withAccounts);
+    await harness.run(COMMANDS.newSessionFromAccount, KEY.id);
+
+    expect(calls.launches).toHaveLength(1);
+    // Absent, not 'generic': `generic` is a Claude launch authenticated by a
+    // variable, and naming it here would send the launcher looking for a
+    // binary called `generic`.
+    expect(calls.launches[0].provider).toBeUndefined();
+  });
+});
+
+// Which CLI a RESUME or a FORK execs is a fact about the conversation, and the
+// three tests below are the three ways that fact can be learned — and the one
+// way it must NOT be. Getting this wrong hands `codex resume` a Claude session
+// id, or `claude --resume` a Codex one; both fail against a store that has
+// never heard of the id.
+describe('an existing conversation keeps its own CLI', () => {
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+  });
+
+  function forkDeps(over: {
+    records?: Record<string, EditorialRecord>;
+    sessionProvider?: (id: string) => 'codex' | undefined;
+    profiles?: AccountProfile[];
+    sessionProfileId?: (id: string) => string | undefined;
+  }): { withAccounts: AccountCommandDeps; calls: ChatCalls; parent: string } {
+    const PARENT = uuid(1);
+    const { accounts } = fakeAccountDeps(over.profiles ?? [], {
+      sessionProfileId: over.sessionProfileId ?? (() => undefined),
+    });
+    const { deps, calls } = chatDeps(undefined, {
+      hasTranscript: () => true,
+      beginInlineRename: () => true,
+      ...(over.records !== undefined ? { records: over.records } : {}),
+    });
+    const withAccounts: AccountCommandDeps = {
+      ...deps,
+      ...(over.sessionProvider !== undefined
+        ? { sessionProvider: over.sessionProvider }
+        : {}),
+      getForest: () => forestOf([node(PARENT, { cwd: '/code/api' })]),
+      launchSession: async (opts) => {
+        calls.launches.push(opts);
+        return {
+          nodeId: opts.sessionId,
+          sessionId: opts.sessionId,
+          terminalName: 'codex',
+          createdAt: 0,
+        };
+      },
+      accounts,
+    };
+    return { withAccounts, calls, parent: PARENT };
+  }
+
+  it('a fork of a Codex session is a Codex fork — from the record', () => {
+    const PARENT = uuid(1);
+    const { withAccounts, calls } = forkDeps({
+      records: {
+        [PARENT]: {
+          id: PARENT,
+          provider: 'codex',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        } as EditorialRecord,
+      },
+    });
+    const harness = withRegisteredCommands(withAccounts);
+    return harness.run(COMMANDS.forkSession, PARENT).then(() => {
+      expect(calls.launches).toHaveLength(1);
+      expect(calls.launches[0].provider).toBe('codex');
+      expect(calls.launches[0].parentId).toBe(PARENT);
+    });
+  });
+
+  it('a fork of a FOREIGN Codex session works too — from which store holds it', async () => {
+    // No record at all: a codex session started in a terminal. The only thing
+    // that knows is the wiring, which holds both history indexes.
+    const { withAccounts, calls, parent } = forkDeps({
+      sessionProvider: (id) => (id === uuid(1) ? 'codex' : undefined),
+    });
+    const harness = withRegisteredCommands(withAccounts);
+    await harness.run(COMMANDS.forkSession, parent);
+
+    expect(calls.launches).toHaveLength(1);
+    expect(calls.launches[0].provider).toBe('codex');
+    // No account, and that is correct rather than a gap: `codex fork <id>` on
+    // the machine's own login is exactly where that conversation lives.
+    expect(calls.launches[0].profileId).toBeUndefined();
+  });
+
+  it('a CLAUDE session re-pinned onto a Codex account still forks under claude', async () => {
+    // The pin and the conversation disagree, and the conversation wins: the
+    // transcript is a Claude one, so `codex fork` would be handed an id Codex
+    // has never seen. This is the case a naive "read the account's provider"
+    // implementation gets wrong.
+    const PARENT = uuid(1);
+    const CODEX = accountProfile('codex-acct', {
+      provider: 'codex',
+      configDir: '/codex/home',
+    });
+    const { withAccounts, calls } = forkDeps({
+      profiles: [CODEX],
+      sessionProfileId: (id) => (id === PARENT ? CODEX.id : undefined),
+      // No record provider and no store evidence — it is a Claude session.
+    });
+    const harness = withRegisteredCommands(withAccounts);
+    await harness.run(COMMANDS.forkSession, PARENT);
+
+    expect(calls.launches).toHaveLength(1);
+    expect(calls.launches[0].provider).toBeUndefined();
   });
 });
 
@@ -3839,5 +4031,356 @@ describe('starting a session on a branch that has no checkout', () => {
     // confirmation: no `git worktree add` was ever offered.
     expect(h.asked).toHaveLength(1);
     expect(h.asked[0]).toContain('no longer a branch');
+  });
+});
+
+// --------------------------------------------------- add / import sessions
+//
+// The two doors of the clean-slate default: with `lineage.showForeignSessions`
+// off nothing reaches the tree until the user launches it in Flock or names it
+// here, and these flows are the naming. Both write records — presence IS
+// membership (archive.memberKeepIds) — and neither ever writes a filing:
+// where a row lands stays derived from its own cwd.
+describe('the add / import flows', () => {
+  const S1 = '0a00000 1-0000-4000-8000-000000000001'.replace(' ', '');
+  const S2 = '0a000002-0000-4000-8000-000000000002';
+  const S3 = '0a000003-0000-4000-8000-000000000003';
+
+  interface PoolCalls {
+    upserts: { id: string; patch: Partial<EditorialRecord> }[];
+    refreshes: number;
+    reveals: string[];
+    infos: string[];
+    warnings: string[];
+  }
+
+  function poolDeps(over: {
+    pool?: UnlistedSession[];
+    projects?: ProjectRecord[];
+    forest?: SessionForest;
+    hasTranscript?: (id: string) => boolean;
+    tipOf?: (id: string) => string;
+  } = {}): { deps: CommandDeps; calls: PoolCalls } {
+    const calls: PoolCalls = {
+      upserts: [],
+      refreshes: 0,
+      reveals: [],
+      infos: [],
+      warnings: [],
+    };
+    const nope = (): never => {
+      throw new Error('not used by the add/import flows');
+    };
+    const projects = over.projects ?? [];
+    const deps: CommandDeps = {
+      getForest: () => over.forest ?? forestOf([]),
+      refresh: () => {
+        calls.refreshes += 1;
+      },
+      hasTranscript: over.hasTranscript ?? (() => false),
+      tipOf: over.tipOf ?? ((id) => id),
+      beginInlineRename: async () => false,
+      beginInlineRenameProject: async () => false,
+      revealSession: async (id) => {
+        calls.reveals.push(id);
+      },
+      revealProject: async (id) => {
+        calls.reveals.push(id);
+      },
+      getRecord: () => undefined,
+      allRecords: () => ({}),
+      upsertRecord: async (id, patch) => {
+        calls.upserts.push({ id, patch });
+      },
+      recordLaunch: nope,
+      launchSession: nope,
+      focusSession: () => false,
+      renameTerminal: async () => false,
+      sendTextToSession: () => false,
+      closeTerminal: () => false,
+      focusWindowFor: async () => false,
+      openProject: async () => undefined,
+      installHooks: nope,
+      removeHooks: nope,
+      getHookState: () => ({ installed: false }),
+      setHooksEnabled: async () => undefined,
+      allProjects: () => projects,
+      getProject: (id) => projects.find((p) => p.id === id),
+      getBranches: () => [],
+      setBranchShown: async () => undefined,
+      setBranchesShown: async () => undefined,
+      upsertProject: async () => undefined,
+      setProjectParent: async () => true,
+      deleteProject: async () => undefined,
+      hiddenFolders: () => [],
+      hideFolder: async () => undefined,
+      unhideFolder: async () => undefined,
+      staleAfterHours: () => 48,
+      unlistedSessions: () => over.pool ?? [],
+      markSeen: async () => undefined,
+      notificationsEnabled: () => true,
+      setOnlyActiveSessions: async () => undefined,
+      setAccountsSection: async () => undefined,
+      setBranchDisplay: async () => undefined,
+      selectedSessions: () => [],
+      switchWorkspace: async () => undefined,
+      activeWorkspace: () => null,
+    };
+    return { deps, calls };
+  }
+
+  function project(id: string, rootDir: string, name = 'api'): ProjectRecord {
+    return {
+      id,
+      name,
+      rootDir,
+      dirs: [],
+      createdAt: '2026-08-14T00:00:00.000Z',
+      updatedAt: '2026-08-14T00:00:00.000Z',
+    };
+  }
+
+  type Host = {
+    showQuickPick?: (items: unknown, opts?: unknown) => Promise<unknown>;
+    showInputBox?: (opts?: unknown) => Promise<string | undefined>;
+    showInformationMessage?: (
+      message: string,
+      ...rest: unknown[]
+    ) => Promise<string | undefined>;
+    showWarningMessage?: (
+      message: string,
+      ...rest: unknown[]
+    ) => Promise<string | undefined>;
+  };
+  const host = mockWindow as Host;
+
+  /** Answers each quick pick in turn: by label, by index, or — for the
+   *  multi-pick — with a label array. undefined cancels. Also records what was
+   *  offered, because "the picker only offered the project's own sessions" is
+   *  half of what these tests assert. */
+  function scriptPicks(...answers: (string | string[] | undefined)[]): {
+    offered: string[][];
+    many: boolean[];
+  } {
+    const state = { offered: [] as string[][], many: [] as boolean[] };
+    let at = 0;
+    host.showQuickPick = async (items: unknown, opts?: unknown) => {
+      const list = (Array.isArray(items) ? items : []) as {
+        label?: string;
+        kind?: number;
+      }[];
+      const rows = list.filter((i) => i.kind === undefined);
+      state.offered.push(rows.map((i) => i.label ?? ''));
+      state.many.push(
+        (opts as { canPickMany?: boolean } | undefined)?.canPickMany === true,
+      );
+      const want = answers[at];
+      at += 1;
+      if (want === undefined) return undefined;
+      if (Array.isArray(want)) {
+        return rows.filter((i) => want.includes(i.label ?? ''));
+      }
+      return rows.find((i) => i.label === want);
+    };
+    return state;
+  }
+
+  function scriptInput(value: string | undefined): void {
+    host.showInputBox = async () => value;
+  }
+
+  let saidInfo: string[];
+  let saidWarning: string[];
+  let warningAnswer: string | undefined;
+
+  beforeEach(() => {
+    saidInfo = [];
+    saidWarning = [];
+    warningAnswer = undefined;
+    host.showInformationMessage = async (message) => {
+      saidInfo.push(message);
+      return undefined;
+    };
+    host.showWarningMessage = async (message) => {
+      saidWarning.push(message);
+      return warningAnswer;
+    };
+  });
+
+  afterEach(() => {
+    delete host.showQuickPick;
+    delete host.showInputBox;
+    delete host.showInformationMessage;
+    delete host.showWarningMessage;
+  });
+
+  const pooled = (
+    id: string,
+    over: Partial<UnlistedSession> = {},
+  ): UnlistedSession => ({ sessionId: id, live: false, ...over });
+
+  describe('addSessionToProjectFlow', () => {
+    it('offers only the sessions this project claims, and adopting one writes cwd', async () => {
+      const p = project('p1', '/w/api');
+      const { deps, calls } = poolDeps({
+        pool: [
+          pooled(S1, { cwd: '/w/api/sub', label: 'the rewrite', endedAt: 1 }),
+          pooled(S2, { cwd: '/elsewhere', label: 'not ours' }),
+        ],
+        projects: [p],
+      });
+      const picks = scriptPicks('$(archive) the rewrite');
+      await addSessionToProjectFlow(deps, 'p1');
+      // The out-of-project session was never offered — the picker's promise
+      // and the grouping's answer are the same matchProject call.
+      expect(picks.offered[0]!.join('|')).toContain('the rewrite');
+      expect(picks.offered[0]!.join('|')).not.toContain('not ours');
+      expect(calls.upserts).toEqual([
+        { id: S1, patch: { deleted: false, cwd: '/w/api/sub' } },
+      ]);
+      expect(calls.refreshes).toBe(1);
+      expect(calls.reveals).toEqual([S1]);
+    });
+
+    it('a nested project owns its directory — the longest match wins here too', async () => {
+      const outer = project('p1', '/w', 'code');
+      const inner = project('p2', '/w/api');
+      const { deps, calls } = poolDeps({
+        pool: [pooled(S1, { cwd: '/w/api/x', label: 'inner session' })],
+        projects: [outer, inner],
+      });
+      scriptPicks(undefined);
+      scriptInput(undefined); // the empty-list fallback is the id input box
+      await addSessionToProjectFlow(deps, 'p1');
+      // Offered nothing for the OUTER project (its only candidate belongs to
+      // the inner one), so the flow fell through to the id box, was cancelled,
+      // and wrote nothing.
+      expect(calls.upserts).toEqual([]);
+    });
+
+    it('Add all adopts every candidate and says how many', async () => {
+      const p = project('p1', '/w/api');
+      const { deps, calls } = poolDeps({
+        pool: [
+          pooled(S1, { cwd: '/w/api/a', endedAt: 2 }),
+          pooled(S2, { cwd: '/w/api/b', endedAt: 1 }),
+        ],
+        projects: [p],
+      });
+      scriptPicks('$(cloud-download) Add all 2 sessions');
+      await addSessionToProjectFlow(deps, 'p1');
+      expect(calls.upserts.map((u) => u.id).sort()).toEqual([S1, S2]);
+      expect(calls.reveals).toEqual(['p1']);
+      expect(saidInfo.join(' ')).toContain('added 2 sessions');
+    });
+
+    it('a typed id that is already in the tree reveals instead of duplicating', async () => {
+      const p = project('p1', '/w/api');
+      const { deps, calls } = poolDeps({
+        pool: [],
+        projects: [p],
+        forest: forestOf([node(S3)]),
+      });
+      scriptInput(S3);
+      await addSessionToProjectFlow(deps, 'p1');
+      expect(calls.upserts).toEqual([]);
+      expect(calls.reveals).toEqual([S3]);
+      expect(saidInfo.join(' ')).toContain('already in the tree');
+    });
+
+    it('a typed id nothing backs warns, and only Add Anyway proceeds', async () => {
+      const p = project('p1', '/w/api');
+      const first = poolDeps({ pool: [], projects: [p] });
+      scriptInput(S3);
+      warningAnswer = undefined; // dismissed
+      await addSessionToProjectFlow(first.deps, 'p1');
+      expect(saidWarning.join(' ')).toContain('nothing on this machine');
+      expect(first.calls.upserts).toEqual([]);
+
+      const second = poolDeps({ pool: [], projects: [p] });
+      warningAnswer = 'Add Anyway';
+      await addSessionToProjectFlow(second.deps, 'p1');
+      expect(second.calls.upserts).toEqual([
+        { id: S3, patch: { deleted: false } },
+      ]);
+    });
+
+    it('a typed id whose directory files elsewhere says so', async () => {
+      const home = project('p1', '/w/api');
+      const other = project('p2', '/w/web', 'web');
+      const { deps, calls } = poolDeps({
+        pool: [pooled(S3, { cwd: '/w/web/x', label: 'webby' })],
+        projects: [home, other],
+      });
+      // Nothing of p1's in the pool -> straight to the id box.
+      scriptInput(S3);
+      await addSessionToProjectFlow(deps, 'p1');
+      expect(calls.upserts).toEqual([
+        { id: S3, patch: { deleted: false, cwd: '/w/web/x' } },
+      ]);
+      // Membership is derived; the flow must not pretend the click filed it.
+      expect(saidInfo.join(' ')).toContain('"web"');
+    });
+  });
+
+  describe('importSessionsFlow', () => {
+    it('says when there is nothing to import, and writes nothing', async () => {
+      const { deps, calls } = poolDeps({ pool: [] });
+      await importSessionsFlow(deps);
+      expect(saidInfo.join(' ')).toContain('nothing to import');
+      expect(calls.upserts).toEqual([]);
+      expect(calls.refreshes).toBe(0);
+    });
+
+    it('Import all adopts the whole pool, cwd and all', async () => {
+      const { deps, calls } = poolDeps({
+        pool: [
+          pooled(S1, { cwd: '/w/api', endedAt: 2 }),
+          pooled(S2, { cwd: '/w/web', endedAt: 1 }),
+        ],
+      });
+      scriptPicks('$(cloud-download) Import all 2 sessions');
+      await importSessionsFlow(deps);
+      expect(calls.upserts).toEqual([
+        { id: S1, patch: { deleted: false, cwd: '/w/api' } },
+        { id: S2, patch: { deleted: false, cwd: '/w/web' } },
+      ]);
+      expect(calls.refreshes).toBe(1);
+      expect(saidInfo.join(' ')).toContain('imported 2 sessions');
+    });
+
+    it('Choose imports exactly what was ticked', async () => {
+      const { deps, calls } = poolDeps({
+        pool: [
+          pooled(S1, { cwd: '/w/api', label: 'keep me', endedAt: 2 }),
+          pooled(S2, { cwd: '/w/web', label: 'leave me', endedAt: 1 }),
+        ],
+      });
+      const picks = scriptPicks(
+        '$(checklist) Choose which sessions to import…',
+        ['$(archive) keep me'],
+      );
+      await importSessionsFlow(deps);
+      // The second pick was the multi-select.
+      expect(picks.many).toEqual([false, true]);
+      expect(calls.upserts).toEqual([
+        { id: S1, patch: { deleted: false, cwd: '/w/api' } },
+      ]);
+      expect(saidInfo.join(' ')).toContain('imported 1 session');
+    });
+
+    it('cancelling either step imports nothing', async () => {
+      const { deps, calls } = poolDeps({
+        pool: [pooled(S1, { cwd: '/w/api' })],
+      });
+      scriptPicks(undefined);
+      await importSessionsFlow(deps);
+      expect(calls.upserts).toEqual([]);
+
+      scriptPicks('$(checklist) Choose which sessions to import…', []);
+      await importSessionsFlow(deps);
+      expect(calls.upserts).toEqual([]);
+      expect(calls.refreshes).toBe(0);
+    });
   });
 });

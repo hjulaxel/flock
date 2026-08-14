@@ -40,13 +40,21 @@
 // thing `now` is for.
 //
 // Every tier picks from the same candidate set: the live accounts a session can
-// actually be launched on (`accounts.canHostSession`). The launcher execs one
-// binary, the Claude CLI, so routing a launch to a Codex account would run
-// `claude` under `CODEX_HOME`, land on the machine's DEFAULT Claude login, and
-// pin the conversation for life to an account it was never on — while the row,
-// the pin and the status line all said otherwise. A tier that names such an
-// account degrades and says why, exactly like a tier naming a deleted one: the
-// account is real, it is just not a place a session can start.
+// actually be launched on (`accounts.canHostSession`). That set now includes
+// Codex — the launcher picks its binary per provider, so a Codex account runs
+// `codex` under its own `CODEX_HOME` — and excludes only providers whose CLI
+// this extension does not exec. A tier that names such an account degrades and
+// says why, exactly like a tier naming a deleted one: the account is real, it
+// is just not a place a session can start.
+//
+// WORTH KNOWING about the auto-pick below, now that two providers compete in
+// it: the `auto` tier ranks Claude and Codex accounts against each other on
+// usage alone, because that is the only axis it has numbers for. Codex usage
+// currently reads as UNKNOWN (see limits.ts), which the ranking treats as
+// `idle` — better than a known-exhausted account, worse than a known-open one.
+// That is the intended behaviour and not an accident: no data is not evidence
+// of exhaustion. A user who does not want the two pools mixed says so with the
+// `provider` tier, which is exactly the answer it exists to give.
 
 import { PROVIDERS } from './types';
 import type {

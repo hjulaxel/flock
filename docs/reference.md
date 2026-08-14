@@ -505,6 +505,14 @@ nothing happened. The menu offers whichever half applies rather than a toggle
 you have to guess the direction of. Muting follows the conversation across
 re-minted session ids.
 
+**The bell stops at the tree's edge.** Only a session with a row can dot, ring
+or toast. The roster and the hook stream are both machine-wide, so without that
+rule a `claude` run in some other app's terminal would notify here — and, worse,
+the finish-stamp would quietly import it into your tree for good. A session
+running elsewhere stays silent until you add it (or turn
+`lineage.showForeignSessions` on), and from the moment it has a row it notifies
+like any other.
+
 ## Workspaces
 
 A **workspace** scopes a window to one project. By default it **follows your
@@ -585,16 +593,27 @@ while workspaces are on. It never asks twice.
 ## Using Flock alongside the Claude Code extension
 
 Flock does not need to be the only way you run Claude. The session list comes
-from `claude agents --json`, which is **machine-wide**, so a conversation shows
-up in the tree whoever started it. What changes between setups is not whether
-you get a row — you always do — but how much Flock is allowed to *do* with it.
+from `claude agents --json`, which is **machine-wide**, so Flock can see a
+conversation whoever started it.
+
+**Whether a foreign session gets a row is now yours to decide.**
+`lineage.showForeignSessions` is **off** by default: the tree holds what you
+told Flock about — sessions launched here, bound to one of its terminals, or
+added by hand — and a `claude` running in some other terminal neither draws a
+row nor rings the bell. The two doors in are **Add Existing Session…** on a
+project's right-click (its folders' sessions, live and finished, plus a
+paste-an-id box) and **Import Previous Sessions…** (everything on the machine,
+all at once or picked one by one, in the gear menu and on the empty view).
+Turn the setting on and every foreign session is back in the tree the way
+Flock originally worked — the table below then applies to all three columns
+with no adding required.
 
 There are three setups, and the difference between them is one thing: whether
 Flock owns the process.
 
 | | **Flock-launched** | **Claude Code extension** | **`claude` in a terminal** |
 | --- | --- | --- | --- |
-| A row in the tree, in its project | yes | yes | yes |
+| A row in the tree, in its project | yes | once added, or with `showForeignSessions` | once added, or with `showForeignSessions` |
 | Age, token count, status dot | yes | yes | yes |
 | Fork tree — who forked from whom | exact | inferred | inferred |
 | Notifications: dot, bell, toast | yes | yes | yes |
@@ -829,12 +848,58 @@ Changing it takes effect on the next window reload.
 > rename, so `inline` draws its own rows. `native` is kept because the built-in
 > widget's accessibility is better than anything re-implemented in HTML.
 
+## In-session verbs
+
+"Fork this session", typed **to Claude** instead of clicked in the sidebar.
+Off until you run **Flock: Install In-Session Verbs…**, which shows the exact
+two files it writes before writing them:
+
+- `~/.claude/skills/flock/SKILL.md` — a Claude Code skill, so Claude knows the
+  verb exists. Skills are shared into every account profile by symlink, so one
+  install covers all of your accounts.
+- `~/.lineage/flock-verbs.mjs` — the small CLI the skill tells Claude to run:
+  `node ~/.lineage/flock-verbs.mjs fork --count 3`.
+
+The CLI does not fork anything itself. It works out which session it is in —
+the `LINEAGE_NODE_ID` stamp Flock launches terminals with, `CLAUDE_SESSION_ID`
+where the CLI provides it, or the `lineage-<uuid>` tmux session name — writes a
+one-line request into `~/.lineage/requests/`, and waits up to 30 seconds for a
+reply, which it prints for Claude to relay: the names of the new branches, or
+exactly why nothing was forked.
+
+On the other side, every Flock window watches that directory, and a request
+runs **exactly once**: a window claims it with an atomic rename, and the window
+whose terminal actually hosts the session gets a head start, so the forks open
+beside the conversation they branched from — the same `--fork-session --resume`
+launch, the same lineage edge, the same naming (`auth 2`, `auth 3`, `auth 4`)
+that clicking **Fork Session** produces. "Do three forks here" is three of
+them, titled past each other.
+
+The guardrails, since the requester is a model:
+
+- **Fork is the only verb.** A request may carry a count (capped at 8) and an
+  opening prompt (capped at 4000 characters); nothing else.
+- **A request expires.** One older than two minutes is answered "expired"
+  rather than executed — a fork nobody is waiting for must not fire when a
+  window finally opens. The CLI withdraws its own request if no window answers
+  in 30 seconds.
+- **Nothing new is reachable.** The request can only fork sessions the sidebar
+  could already fork, in the window you already trusted with them. Any local
+  process could write a request file — and any local process could already run
+  `claude --fork-session` itself, so the channel adds no capability.
+- **The reader has an off switch**, `lineage.verbs.enabled`, separate from the
+  files on disk. `rm -rf ~/.claude/skills/flock` is also a complete uninstall,
+  exactly like the hooks plugin.
+
 ## Privacy
 
 Nothing leaves your machine unless you turn on `lineage.git.pullRequests`, which
 is off by default. Flock reads the local session roster and local transcript
 files, and writes only to its own extension storage — plus, if you explicitly opt
-in, the hooks plugin directory and `~/.lineage/events.ndjson`.
+in, the hooks plugin directory and `~/.lineage/events.ndjson`, and the
+[in-session verbs](#in-session-verbs) files: `~/.claude/skills/flock/`,
+`~/.lineage/flock-verbs.mjs` and the transient request/reply files under
+`~/.lineage/requests/`.
 
 The complete list of processes Flock ever starts:
 

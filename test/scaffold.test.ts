@@ -87,7 +87,7 @@ describe('scaffold: the shared types contract', () => {
     //
     // Bump it in the same commit as the verb, and check the new id reaches a
     // menu: a command nobody can invoke is not a feature.
-    expect(ids).toHaveLength(81);
+    expect(ids).toHaveLength(85);
     // Duplicate values would make one of them unreachable — the later key wins
     // at registration and the earlier verb's menu entry fires the wrong flow.
     expect(new Set(ids).size).toBe(ids.length);
@@ -133,6 +133,31 @@ describe('scaffold: the shared types contract', () => {
       // that does nothing, in either direction.
       expect(on, full).not.toEqual(off);
     }
+  });
+
+  // docs/settings.md opens with "All N settings" over a table with one row per
+  // setting. Both drifted from the manifest silently — the table was two rows
+  // short and the header three behind the table — because nothing tied either
+  // to `contributes.configuration`. This asserts the SETS match (so a missing
+  // or stale row is named, not counted) and that the header's N is the real
+  // count. Deliberately no pinned number: two branches adding settings then
+  // merge without this test being a third count to resolve.
+  it('documents every contributed setting in docs/settings.md, and counts them right', () => {
+    const pkg = JSON.parse(
+      fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'),
+    ) as {
+      contributes: { configuration: { properties: Record<string, unknown> } };
+    };
+    const contributed = Object.keys(pkg.contributes.configuration.properties);
+    const doc = fs.readFileSync(path.join(ROOT, 'docs', 'settings.md'), 'utf8');
+    const documented = [...doc.matchAll(/^\| `(lineage\.[^`]+)` \|/gm)].map(
+      (m) => m[1] as string,
+    );
+    expect(documented.filter((k) => !contributed.includes(k))).toEqual([]);
+    expect(contributed.filter((k) => !documented.includes(k))).toEqual([]);
+    const header = doc.match(/^All (\d+) settings, as contributed\./m);
+    expect(header, 'the "All N settings" opening line').not.toBeNull();
+    expect(Number(header?.[1])).toBe(contributed.length);
   });
 
   it('ships an icon file for every provider', () => {

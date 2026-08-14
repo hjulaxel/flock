@@ -60,6 +60,7 @@ import type {
   RoutingChoice,
   SessionForest,
   SessionNode,
+  UnlistedSession,
 } from './types';
 import {
   buildProjectTree,
@@ -82,6 +83,7 @@ import {
   isEnvVarName,
   moveDown,
   moveUp,
+  cliOfProfile,
   slugify,
   switchRefusal,
   uniqueAccountId,
@@ -96,6 +98,8 @@ import {
 // Pure, like projects/accounts/routing above — node builtins only, no vscode.
 // Just the name composer: every tmux CALL still goes through CommandDeps.
 import { tmuxSessionName } from './tmux';
+import { MAX_AGENT_FORKS } from './agentVerbs';
+import type { AgentForkOutcome } from './agentVerbs';
 // Pure as well. The single answer to "who is running this", so a verb's refusal
 // and the row's marker cannot disagree about it.
 import { canEndSession, hostSentence } from './hosts';
@@ -1315,6 +1319,310 @@ async function pickProjectDirectory(
     ignoreFocusOut: true,
   });
   return chosen?.folder;
+}
+
+// ------------------------------------------------- add / import sessions
+
+/** One row of the Add Session / Import pickers. `sessionId` set on a session
+ *  row; the two flags mark the picker's own verbs. */
+interface UnlistedPick extends vscode.QuickPickItem {
+  sessionId?: string;
+  all?: boolean;
+  manual?: boolean;
+}
+
+/**
+ * Write the records that ARE membership, and nothing else.
+ *
+ * A record with no facts in it is already a row (see archive.memberKeepIds):
+ * presence is the whole claim. `deleted: false` is written deliberately — the
+ * only ids that can reach here with a deleted record are ones the user typed,
+ * and typing the id of something you deleted is as explicit as Restore gets.
+ * `cwd` is copied in when the pool knew it, because an archived transcript's
+ * head read already answered it and the grouping pass would otherwise have to
+ * re-derive it from the same file.
+ *
+ * Fired together, awaited together: the store batches queued mutations into
+ * one write, and an import of two hundred sessions must not be two hundred
+ * lock-write-rename passes.
+ */
+async function adoptSessions(
+  deps: CommandDeps,
+  picks: readonly { sessionId: string; cwd?: string }[],
+): Promise<void> {
+  await Promise.all(
+    picks.map((p) =>
+      deps.upsertRecord(p.sessionId, {
+        deleted: false,
+        ...(p.cwd === undefined ? {} : { cwd: p.cwd }),
+      }),
+    ),
+  );
+}
+
+/** The picker line for one unlisted session. Live ones say so — that is the
+ *  one fact that changes what adding it means (a row that is already running
+ *  somewhere, not a resumable transcript). */
+function unlistedItem(s: UnlistedSession, now: number): UnlistedPick {
+  return {
+    label: `${s.live ? '$(circle-filled) ' : '$(archive) '}${
+      s.label ?? shortId(s.sessionId)
+    }`,
+    description: [
+      shortId(s.sessionId),
+      s.live
+        ? 'running elsewhere'
+        : s.endedAt !== undefined
+          ? ageLabel(now - s.endedAt)
+          : '',
+    ]
+      .filter((part) => part !== '')
+      .join(' · '),
+    detail: s.cwd,
+    sessionId: s.sessionId,
+  };
+}
+
+/** Type-a-session-id fallback, shared by both flows: validate the shape, warn
+ *  when nothing on this machine backs the id, reveal instead of duplicating
+ *  when the row already exists. Returns what was adopted — id plus the cwd
+ *  the pool knew, which the caller's "where did it file" sentence needs — or
+ *  undefined when nothing was. */
+async function addSessionById(
+  deps: CommandDeps,
+  pool: readonly UnlistedSession[],
+): Promise<{ sessionId: string; cwd?: string } | undefined> {
+  const raw = await vscode.window.showInputBox({
+    prompt: 'Add which session?',
+    placeHolder: 'Session id — the uuid Copy Session ID or `claude --resume` shows',
+    validateInput: (v) =>
+      v.trim() === '' || isSessionId(v.trim())
+        ? undefined
+        : 'A session id is a uuid: 8-4-4-4-12 hex characters.',
+    ignoreFocusOut: true,
+  });
+  const sid = raw?.trim();
+  if (!sid || !isSessionId(sid)) return undefined;
+  // Routed through the chain: the id on somebody's clipboard may be a
+  // superseded generation of a conversation whose row (or row-to-be) is its tip.
+  const tip = deps.tipOf(sid);
+  const forest = deps.getForest();
+  if (forest.nodes.has(tip) || forest.nodes.has(sid)) {
+    void vscode.window.showInformationMessage(
+      'Flock: that session is already in the tree.',
+    );
+    void deps.revealSession(forest.nodes.has(tip) ? tip : sid);
+    return undefined;
+  }
+  const known = pool.find((p) => p.sessionId === tip || p.sessionId === sid);
+  if (known === undefined && !deps.hasTranscript(sid)) {
+    // Nothing here backs the id — no roster row, no transcript. The row would
+    // have nothing to resume, which is worth a warning and not a refusal: the
+    // transcript may be an account profile's, or about to sync in.
+    const ADD = 'Add Anyway';
+    const choice = await vscode.window.showWarningMessage(
+      'Flock: nothing on this machine answers to that id — no transcript, ' +
+        'no running session. Its row would have nothing to resume.',
+      { modal: true },
+      ADD,
+    );
+    if (choice !== ADD) return undefined;
+  }
+  const adopted = { sessionId: known?.sessionId ?? tip, cwd: known?.cwd };
+  await adoptSessions(deps, [adopted]);
+  return adopted;
+}
+
+/**
+ * Add an EXISTING session to the tree, asked from a project row.
+ *
+ * The picker is scoped to sessions whose directory this project would claim —
+ * scoped by the same `matchProject` the grouping runs, so what the picker
+ * promises and where the row lands cannot disagree. An id from anywhere else
+ * comes in through Enter a Session ID…, and if its directory files it under a
+ * different project the flow says so instead of pretending the click decided
+ * membership. Membership stays derived from cwd; this writes no filing.
+ */
+export async function addSessionToProjectFlow(
+  deps: CommandDeps,
+  projectId: string,
+): Promise<void> {
+  const project = deps.getProject(projectId);
+  if (!project) return;
+  const pool = deps.unlistedSessions?.() ?? [];
+  const projects = deps.allProjects();
+  const inProject = pool.filter(
+    (s) =>
+      s.cwd !== undefined &&
+      matchProject(projects, s.cwd)?.project.id === projectId,
+  );
+
+  let adopted: readonly { sessionId: string; cwd?: string }[] = [];
+  if (inProject.length === 0) {
+    // Nothing to list — the fallback IS the flow. The input box's prompt says
+    // why there was no list, or an empty picker would read as a bug.
+    const added = await addSessionById(deps, pool);
+    if (added === undefined) return;
+    adopted = [added];
+  } else {
+    const now = Date.now();
+    const separator = vscode.QuickPickItemKind?.Separator;
+    const items: UnlistedPick[] = [];
+    if (inProject.length > 1) {
+      items.push({
+        label: `$(cloud-download) Add all ${inProject.length} sessions`,
+        description: 'Everything below',
+        all: true,
+      });
+    }
+    if (separator !== undefined) {
+      items.push({ label: 'Ran in this project’s folders', kind: separator });
+    }
+    for (const s of inProject) items.push(unlistedItem(s, now));
+    if (separator !== undefined) items.push({ label: '', kind: separator });
+    items.push({
+      label: '$(edit) Enter a Session ID…',
+      description: 'Paste an id from anywhere',
+      manual: true,
+    });
+    const chosen = await vscode.window.showQuickPick(items, {
+      placeHolder: `Add which session to ${project.name}?`,
+      matchOnDescription: true,
+      matchOnDetail: true,
+      ignoreFocusOut: true,
+    });
+    if (!chosen) return;
+    if (chosen.manual === true) {
+      const added = await addSessionById(deps, pool);
+      if (added === undefined) return;
+      adopted = [added];
+    } else if (chosen.all === true) {
+      adopted = inProject.map((s) => ({ sessionId: s.sessionId, cwd: s.cwd }));
+      await adoptSessions(deps, adopted);
+    } else if (chosen.sessionId !== undefined) {
+      const s = inProject.find((x) => x.sessionId === chosen.sessionId);
+      adopted = [{ sessionId: chosen.sessionId, cwd: s?.cwd }];
+      await adoptSessions(deps, adopted);
+    } else {
+      return;
+    }
+  }
+
+  deps.refresh();
+  log('addSession:', adopted.length, 'to project', shortId(projectId));
+  if (adopted.length === 1) {
+    // Membership is derived, so say where the row actually went when that is
+    // not the project the click was on — a row appearing somewhere else with
+    // no sentence about it reads as a lost session.
+    const one = adopted[0] as { sessionId: string; cwd?: string };
+    const cwd = one.cwd ?? deps.getRecord(one.sessionId)?.cwd;
+    const owner =
+      cwd !== undefined ? matchProject(projects, cwd)?.project : undefined;
+    if (owner !== undefined && owner.id !== projectId) {
+      void vscode.window.showInformationMessage(
+        `Flock: added — it files under "${owner.name}", following its own directory.`,
+      );
+    } else if (cwd !== undefined && owner === undefined) {
+      void vscode.window.showInformationMessage(
+        `Flock: added — no project covers ${cwd}, so it files under that folder.`,
+      );
+    }
+    void deps.revealSession(one.sessionId);
+  } else {
+    void vscode.window.showInformationMessage(
+      `Flock: added ${adopted.length} sessions to "${project.name}".`,
+    );
+    void deps.revealProject(projectId);
+  }
+}
+
+/**
+ * The bulk door for pre-Flock history — every session this machine knows about
+ * that has no row, offered once, grouped by folder, imported only when picked.
+ *
+ * Two steps on purpose. "Import all N" has to exist (it is the whole ask for
+ * somebody arriving with two years of transcripts), and a multi-pick where
+ * all-of-them is the common answer would make the common answer two hundred
+ * clicks. But it must never be the DEFAULT: the clean slate is the feature,
+ * and an import is something the user says, not something a picker's Enter
+ * key falls into. So the first question is which door, and only the second is
+ * the list.
+ */
+export async function importSessionsFlow(deps: CommandDeps): Promise<void> {
+  const pool = deps.unlistedSessions?.() ?? [];
+  if (pool.length === 0) {
+    void vscode.window.showInformationMessage(
+      'Flock: nothing to import — every session this machine knows about ' +
+        'already has a row, or was deleted from one.',
+    );
+    return;
+  }
+  const ALL = `$(cloud-download) Import all ${pool.length} session${
+    pool.length === 1 ? '' : 's'
+  }`;
+  const CHOOSE = '$(checklist) Choose which sessions to import…';
+  const door = await vscode.window.showQuickPick(
+    [
+      { label: ALL, description: 'Everything on this machine with no row yet' },
+      { label: CHOOSE, description: 'A checkbox per session, grouped by folder' },
+    ],
+    {
+      placeHolder: 'Import sessions from before Flock (they stay put until you ask)',
+      ignoreFocusOut: true,
+    },
+  );
+  if (!door) return;
+
+  let picks: readonly UnlistedSession[];
+  if (door.label === ALL) {
+    picks = pool;
+  } else {
+    // Grouped by folder, newest folder first — the order a person scans
+    // "what was I doing" in. The separator is read defensively for the same
+    // reason settingsMenu reads it so: unit doubles have no QuickPickItemKind.
+    const byDir = new Map<string, UnlistedSession[]>();
+    for (const s of pool) {
+      const key = s.cwd ?? '(no directory)';
+      const list = byDir.get(key);
+      if (list) list.push(s);
+      else byDir.set(key, [s]);
+    }
+    const freshest = (list: readonly UnlistedSession[]): number =>
+      Math.max(...list.map((s) => (s.live ? Number.MAX_SAFE_INTEGER : s.endedAt ?? 0)));
+    const dirs = [...byDir.keys()].sort(
+      (a, b) => freshest(byDir.get(b)!) - freshest(byDir.get(a)!),
+    );
+    const separator = vscode.QuickPickItemKind?.Separator;
+    const now = Date.now();
+    const items: UnlistedPick[] = [];
+    for (const dir of dirs) {
+      if (separator !== undefined) items.push({ label: dir, kind: separator });
+      for (const s of byDir.get(dir)!) items.push(unlistedItem(s, now));
+    }
+    const chosen = await vscode.window.showQuickPick(items, {
+      placeHolder: 'Import which sessions? (nothing is imported until you confirm)',
+      canPickMany: true,
+      matchOnDescription: true,
+      matchOnDetail: true,
+      ignoreFocusOut: true,
+    });
+    if (!chosen || chosen.length === 0) return;
+    const wanted = new Set(
+      chosen.map((c) => c.sessionId).filter((id): id is string => id !== undefined),
+    );
+    picks = pool.filter((s) => wanted.has(s.sessionId));
+    if (picks.length === 0) return;
+  }
+
+  await adoptSessions(
+    deps,
+    picks.map((s) => ({ sessionId: s.sessionId, cwd: s.cwd })),
+  );
+  deps.refresh();
+  log('import:', picks.length, 'sessions');
+  void vscode.window.showInformationMessage(
+    `Flock: imported ${picks.length} session${picks.length === 1 ? '' : 's'}.`,
+  );
 }
 
 /**
@@ -2585,6 +2893,77 @@ async function forkFlow(
   // editor on its row.
   if (!titleGiven) await nameJustCreatedSession(deps, childId);
   return childId;
+}
+
+/**
+ * The fork verb as a SESSION asks for it — "fork this session", typed to
+ * Claude, arriving through agentVerbs.ts's request watcher rather than a
+ * click. The same `forkFlow` underneath, with the two differences the caller
+ * being a model forces:
+ *
+ *  * Every fork gets an EXPLICIT title, computed up front. Passing none would
+ *    open forkFlow's inline rename editor — on a user who is mid-sentence in a
+ *    terminal, N times — and would also name three forks of one request
+ *    identically, because the forest does not learn a child's label until a
+ *    roster tick after its launch. Threading the titles through `taken` here
+ *    is what makes "do three forks" come out `auth 2, auth 3, auth 4`.
+ *
+ *  * Failures come back as a VALUE, never a dialog: the reply file is the
+ *    channel, and the model relays it. (forkFlow may still toast on its own
+ *    internal failures; that is the same toast a click would have shown.)
+ *
+ * A partial launch reports what it managed AND what it did not — three asked,
+ * one landed, is an answer, not a success.
+ */
+export async function forkForAgent(
+  deps: AccountCommandDeps,
+  nodeId: string,
+  opts: { count: number; prompt?: string },
+): Promise<AgentForkOutcome> {
+  // The same tip resolution forkFlow itself performs, done early so the
+  // refusal for an unstarted (or unknown) conversation is a sentence in the
+  // reply instead of a warning toast in a window the user is not looking at.
+  const tip = deps.tipOf(nodeId);
+  if (forkableAncestor(deps, tip) === undefined) {
+    return {
+      forked: [],
+      titles: [],
+      error:
+        'this session has no transcript to fork yet — send one message first',
+    };
+  }
+
+  const forest = deps.getForest();
+  const node = forest.nodes.get(tip);
+  const parentLabel = node?.label ?? labelFor(deps, tip);
+  const taken = (node?.children ?? [])
+    .map((id) => forest.nodes.get(id)?.label)
+    .filter((l): l is string => typeof l === 'string');
+
+  const count = Math.max(1, Math.min(MAX_AGENT_FORKS, Math.trunc(opts.count)));
+  const forked: string[] = [];
+  const titles: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const title = defaultForkTitle(parentLabel, taken);
+    taken.push(title);
+    const childId = await forkFlow(deps, nodeId, {
+      title,
+      ...(opts.prompt !== undefined ? { prompt: opts.prompt } : {}),
+    });
+    if (childId === undefined) {
+      return {
+        forked,
+        titles,
+        error:
+          forked.length === 0
+            ? 'the fork did not launch — see the Flock output channel'
+            : `only ${forked.length} of ${count} forks launched — see the Flock output channel`,
+      };
+    }
+    forked.push(childId);
+    titles.push(title);
+  }
+  return { forked, titles };
 }
 
 /**
@@ -4019,18 +4398,40 @@ async function closeFlow(
 interface RoutedLaunch {
   env?: Readonly<Record<string, string>>;
   profileId?: string;
+  /** Which CLI the resolved account runs. See launchProviderOf — absent means
+   *  claude, which is what every account except a Codex one resolves to. */
+  provider?: ProviderId;
   announce?: () => void;
+}
+
+/**
+ * The CLI an account launches, which is NOT simply its provider.
+ *
+ * `generic` is the API-key profile: a CLAUDE launch authenticated by an
+ * environment variable rather than by a login, so it maps to claude like every
+ * other non-Codex account. Returning its provider verbatim would have the
+ * launcher look for a binary called `generic`.
+ *
+ * Undefined rather than `'claude'` for the common case, so `launchAccountOptions`
+ * adds no key at all and a Claude launch is byte-for-byte the one this file
+ * made before Codex sessions existed.
+ */
+function launchProviderOf(profile: AccountProfile): ProviderId | undefined {
+  return profile.provider === 'codex' ? 'codex' : undefined;
 }
 
 /** The LaunchOptions fragment. Spread, so an empty resolution adds no keys at
  *  all and a launch on a machine with no accounts is byte-for-byte the launch
  *  this file made before accounts existed. */
-function launchAccountOptions(
-  routed: RoutedLaunch,
-): { env?: Readonly<Record<string, string>>; profileId?: string } {
+function launchAccountOptions(routed: RoutedLaunch): {
+  env?: Readonly<Record<string, string>>;
+  profileId?: string;
+  provider?: ProviderId;
+} {
   return {
     ...(routed.env !== undefined ? { env: routed.env } : {}),
     ...(routed.profileId !== undefined ? { profileId: routed.profileId } : {}),
+    ...(routed.provider !== undefined ? { provider: routed.provider } : {}),
   };
 }
 
@@ -4082,7 +4483,13 @@ function routeNewSession(
         log('accounts: refusing to launch on', forced.id, '- provider cannot host sessions');
         return {};
       }
-      return { env: envForProfile(forced), profileId: forced.id };
+      return {
+        env: envForProfile(forced),
+        profileId: forced.id,
+        ...(launchProviderOf(forced) !== undefined
+          ? { provider: launchProviderOf(forced) }
+          : {}),
+      };
     }
     const profiles = accts.accounts();
     if (profiles.length === 0) return {};
@@ -4107,6 +4514,9 @@ function routeNewSession(
     return {
       env: envForProfile(profile),
       profileId: profile.id,
+      ...(launchProviderOf(profile) !== undefined
+        ? { provider: launchProviderOf(profile) }
+        : {}),
       ...(gotWhatTheyNamed || isDefaultAccount(profile)
         ? {}
         : { announce: () => announceAccount(profile, reason) }),
@@ -4114,6 +4524,38 @@ function routeNewSession(
   } catch (err) {
     logError('commands.routeNewSession', err);
     return {};
+  }
+}
+
+/**
+ * Which CLI an EXISTING conversation belongs to.
+ *
+ * The session's OWN record, and nothing else. Not the pinned account's
+ * provider, and emphatically not `providerFor` — that one falls back to the
+ * owning PROJECT's provider so a row can wear the right glyph, which is a
+ * presentation guess and would here decide which binary to exec. A project
+ * flipped to Codex would then resume every Claude conversation in it with
+ * `codex resume <uuid>`, against a transcript Codex has never heard of.
+ *
+ * Undefined — i.e. claude — for every session that predates this field, which
+ * is the correct answer for all of them: nothing but a Codex launch has ever
+ * written it.
+ */
+function sessionLaunchProvider(
+  deps: AccountCommandDeps,
+  sessionId: string,
+): ProviderId | undefined {
+  try {
+    if (deps.getRecord(sessionId)?.provider === 'codex') return 'codex';
+    // The second source covers the conversation Flock never launched: a Codex
+    // session started in a terminal has no record at all, so the only thing
+    // that knows which CLI owns it is which STORE its transcript sits in —
+    // and that is a question only the wiring, which holds both indexes, can
+    // answer. Optional so every unit double keeps working without it.
+    return deps.sessionProvider?.(sessionId) === 'codex' ? 'codex' : undefined;
+  } catch (err) {
+    logError('commands.sessionLaunchProvider', err);
+    return undefined;
   }
 }
 
@@ -4132,18 +4574,39 @@ function pinnedLaunch(
   deps: AccountCommandDeps,
   sessionId: string,
 ): RoutedLaunch {
+  // The CLI is resolved FIRST and independently of the account, because the
+  // two questions are independent: a Codex session started in a terminal has
+  // no pin at all, and resuming it under `claude` because nothing was pinned
+  // would hand the Claude CLI a session id it has never seen. An account-less
+  // Codex resume is a real and correct outcome — `codex resume <id>` on the
+  // machine's own login, which is exactly where that conversation lives.
+  const provider = sessionLaunchProvider(deps, sessionId);
+  const providerOnly: RoutedLaunch =
+    provider !== undefined ? { provider } : {};
+
   const accts = deps.accounts;
-  if (!accts) return {};
+  if (!accts) return providerOnly;
   try {
     const profile = pinnedLaunchProfile(
       accts.sessionProfileId(sessionId),
       accts.accounts(),
     );
-    if (!profile) return {};
-    return { env: envForProfile(profile), profileId: profile.id };
+    if (!profile) return providerOnly;
+    // Note which half of this the CONVERSATION decides: the binary, resolved
+    // above from the session's own record, and NOT from the account. Re-pinning
+    // is a user-facing verb (`state.moveSessionProfile`), so the two can
+    // legitimately disagree — and when they do, the transcript is the fact that
+    // matters. A Claude conversation re-pinned onto a Codex account still has
+    // to resume under `claude`, or it resumes under a CLI that never heard of
+    // it.
+    return {
+      ...providerOnly,
+      env: envForProfile(profile),
+      profileId: profile.id,
+    };
   } catch (err) {
     logError('commands.pinnedLaunch', err);
-    return {};
+    return providerOnly;
   }
 }
 
@@ -4209,18 +4672,23 @@ function accountPickDescription(
 /**
  * Say no, out loud, to starting a session on an account no session can run on.
  *
- * Out loud because the row is right there and looks like every other row: the
- * user picked a Codex account, and the alternatives to this message are a
- * launch on the wrong subscription (what happens if nobody checks) or a verb
- * that appears to do nothing. Returns true when the launch must NOT proceed.
+ * Out loud because the row is right there and looks like every other row, and
+ * the alternatives to this message are a launch on the wrong subscription
+ * (what happens if nobody checks) or a verb that appears to do nothing.
+ * Returns true when the launch must NOT proceed.
+ *
+ * The set this fires for has SHRUNK to Gemini — Claude, Codex and API-key
+ * accounts all start sessions now (see accounts.SESSION_PROVIDERS) — so the
+ * wording no longer says "Flock starts Claude Code sessions". It says which
+ * CLI Flock does not launch, because that is the part that is still true and
+ * the part the user can act on.
  */
 function refuseUnlaunchable(profile: AccountProfile): boolean {
   if (canHostSession(profile)) return false;
   const provider = PROVIDERS[profile.provider]?.label ?? profile.provider;
   void vscode.window.showWarningMessage(
-    `Flock: "${profile.label}" is a ${provider} account. Flock starts ` +
-      'Claude Code sessions, so it cannot start one there — sign in from ' +
-      'that row and use the CLI directly.',
+    `Flock: "${profile.label}" is a ${provider} account, and Flock does not ` +
+      'launch that CLI — sign in from that row and use it directly.',
   );
   return true;
 }
@@ -4471,7 +4939,22 @@ async function loginAccountFlow(
     // hand the CLI a slash command at start-up.
     command = `${shellQuote(binary)} /login`;
   } else if (profile.provider === 'codex') {
-    command = 'codex login';
+    // Resolved, never the bare word. `codex` is installed by npm and therefore
+    // usually lives under the ACTIVE node version, which the extension host
+    // inherits only when VS Code was itself started from a shell that had
+    // selected it. A bare `codex login` typed into the pty is why signing a
+    // Codex account in appeared to do nothing: the terminal opened, the line
+    // ran, and the shell said "command not found" to a user who had already
+    // looked away.
+    const binary = accts.codexBinary?.() ?? null;
+    if (!binary) {
+      void vscode.window.showErrorMessage(
+        'Codex CLI not found — set lineage.codexBinary to the full path of ' +
+          'your codex executable.',
+      );
+      return;
+    }
+    command = `${shellQuote(binary)} login`;
   } else {
     void vscode.window.showInformationMessage(
       `Flock: Flock does not know how to sign "${profile.label}" in — ` +
@@ -4726,6 +5209,27 @@ async function switchAccountFlow(
     );
     return;
   }
+  const profiles = accts.accounts();
+  const current = pinnedProfile(accts.sessionProfileId(sessionId), profiles);
+
+  // WHICH CLI WROTE THIS. Checked before the transcript test, because
+  // `hasTranscript` only knows how to look for a CLAUDE transcript
+  // (`<configDir>/projects/<slug>/<id>.jsonl`) — so a Codex conversation with a
+  // hundred turns behind it would fail that test and be told it had never taken
+  // one, which is the most confusing sentence this verb could say.
+  //
+  // Flock can move a conversation between two logins of the SAME CLI, and only
+  // Claude's layout is one it knows how to move. Sessions on other CLIs get an
+  // honest "not yet" rather than a refusal about the wrong thing.
+  if (cliOfProfile(current) !== 'claude') {
+    const cli = current ? (PROVIDERS[current.provider]?.label ?? 'that') : 'that';
+    void vscode.window.showWarningMessage(
+      `Flock: "${label}" is a ${cli} conversation, and Flock only knows how to ` +
+        'move Claude ones between accounts — it would have to find and relocate ' +
+        "that CLI's own transcript, which it does not read.",
+    );
+    return;
+  }
   if (!deps.hasTranscript(sessionId)) {
     void vscode.window.showWarningMessage(
       `Flock: "${label}" has not taken a turn yet, so there is nothing to ` +
@@ -4746,9 +5250,6 @@ async function switchAccountFlow(
     );
     return;
   }
-
-  const profiles = accts.accounts();
-  const current = pinnedProfile(accts.sessionProfileId(sessionId), profiles);
 
   // Only accounts this conversation could actually run on: same CLI, able to
   // host, not the one it is already on. Building the list from the rule means
@@ -5096,6 +5597,15 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
    * The compaction runs in the child and only in the child, which is the whole
    * point of doing it here rather than typing `/compact` in the parent: the
    * parent keeps its full history, on disk and in the tree, exactly as it was.
+   *
+   * CLAUDE ONLY, and it says so rather than half-doing it. The whole verb rests
+   * on one property of the Claude CLI: a positional prompt beginning with `/`
+   * is INTERPRETED as a slash command, which is what makes `/compact` an
+   * instruction rather than a message. Codex takes a positional prompt too, but
+   * as ordinary user text — so the same launch would open the branch by saying
+   * the literal words "/compact" to the model and compact nothing. A fork that
+   * silently skipped the half the user asked for is worse than a verb that
+   * declines, so a Codex session gets the plain fork offered by name instead.
    */
   register(
     COMMANDS.forkAndCompact,
@@ -5108,6 +5618,18 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         { liveOnly: false },
       );
       if (!parentId) return;
+      if (sessionLaunchProvider(deps, parentId) === 'codex') {
+        const FORK = 'Fork Without Compacting';
+        const answer = await vscode.window.showWarningMessage(
+          'Flock: this is a Codex session, and the Codex CLI has no compaction ' +
+            'command Flock can hand it at start-up.',
+          { modal: true, detail: 'The plain fork is available and unaffected.' },
+          FORK,
+        );
+        if (answer !== FORK) return;
+        await forkFlow(deps, parentId);
+        return;
+      }
       await forkFlow(deps, parentId, { prompt: COMPACT_PROMPT });
     },
   );
@@ -5670,6 +6192,27 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       await newSessionInProjectFlow(deps, id);
     },
   );
+
+  // Adding is not launching: this one puts a row on a session that already
+  // exists — a transcript from before Flock, or a live one running elsewhere.
+  // On a subproject row it resolves to the project, because membership is
+  // derived from the session's own directory and a lane cannot change that.
+  register(
+    COMMANDS.addSessionToProject,
+    'add session to project',
+    async (arg?: unknown) => {
+      const id =
+        subprojectArgOf(arg)?.projectId ??
+        projectIdFromArg(arg) ??
+        (await pickProject(deps, 'Add a session to which project?'));
+      if (!id) return;
+      await addSessionToProjectFlow(deps, id);
+    },
+  );
+
+  register(COMMANDS.importSessions, 'import sessions', async () => {
+    await importSessionsFlow(deps);
+  });
 
   // A session in one named DIRECTORY of a project — a subproject row's `+`.
   //
@@ -6599,6 +7142,11 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         command: COMMANDS.restoreSession,
       },
       {
+        label: '$(cloud-download) Import Previous Sessions...',
+        description: 'Sessions from before Flock, or running elsewhere',
+        command: COMMANDS.importSessions,
+      },
+      {
         label: '$(trash) Delete Stale Sessions...',
         command: COMMANDS.deleteStale,
       },
@@ -6644,6 +7192,24 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       items.push({
         label: '$(debug-disconnect) Remove Session Hooks',
         command: COMMANDS.removeHooks,
+      });
+    }
+
+    group('In-Session Verbs');
+    if (!hooksKnown || state?.verbsInstalled !== true) {
+      items.push({
+        label: '$(git-branch) Install In-Session Verbs',
+        description: 'Ask Claude to "fork this session" and it happens here',
+        command: COMMANDS.installAgentVerbs,
+      });
+    }
+    // `!== false` / `!== true` rather than the equality pair: a wiring whose
+    // menuState predates the field reports undefined, and undefined must offer
+    // BOTH halves — the same rule the branchDisplay entries follow.
+    if (!hooksKnown || state?.verbsInstalled !== false) {
+      items.push({
+        label: '$(debug-disconnect) Remove In-Session Verbs',
+        command: COMMANDS.removeAgentVerbs,
       });
     }
 
@@ -6862,6 +7428,44 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     if (state.installed !== true) await deps.setHooksEnabled(false);
     await syncHookContext(state.installed === true);
     log('hooks: remove ->', state.installed ? 'still installed' : 'removed');
+  });
+
+  // ------------------------------------------------------ in-session verbs
+  //
+  // The hooks pair's shape, verb for verb: install is consent-gated by one
+  // modal inside the manager, and installing IS the opt-in — so the reader
+  // gate (`lineage.verbs.enabled`) is flipped here, exactly as installHooks
+  // flips `lineage.hooks.enabled` and for the same reason: a skill that
+  // writes request files nothing reads is the feature staying silently inert.
+
+  register(COMMANDS.installAgentVerbs, 'install in-session verbs', async () => {
+    if (!deps.installAgentVerbs) {
+      void vscode.window.showInformationMessage(
+        'Flock: in-session verbs are not available in this window.',
+      );
+      return;
+    }
+    const state = await deps.installAgentVerbs();
+    if (state.installed === true) await deps.setAgentVerbsEnabled?.(true);
+    log('verbs: install ->', state.installed ? 'installed' : 'not installed');
+  });
+
+  register(COMMANDS.removeAgentVerbs, 'remove in-session verbs', async () => {
+    if (!deps.removeAgentVerbs || !deps.getAgentVerbsState) {
+      void vscode.window.showInformationMessage(
+        'Flock: in-session verbs are not available in this window.',
+      );
+      return;
+    }
+    if (!deps.getAgentVerbsState().installed) {
+      void vscode.window.showInformationMessage(
+        'Flock: in-session verbs are not installed.',
+      );
+      return;
+    }
+    const state = await deps.removeAgentVerbs();
+    if (state.installed !== true) await deps.setAgentVerbsEnabled?.(false);
+    log('verbs: remove ->', state.installed ? 'still installed' : 'removed');
   });
 
   // ------------------------------------------------------------ accounts

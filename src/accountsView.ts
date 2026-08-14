@@ -163,6 +163,10 @@ export interface AccountDeps {
   createProfileDir(id: string): Promise<string | undefined>;
   /** The claude CLI the extension located, for the sign-in terminal. */
   claudeBinary(): string | null;
+  /** The codex CLI, same job. Optional: a wiring without it falls back to the
+   *  bare word `codex`, which works whenever the terminal's PATH happens to
+   *  carry it — the behaviour sign-in had before the resolver existed. */
+  codexBinary?(): string | null;
   /** Absolute path of a file inside the install (provider logos). */
   mediaPath(relative: string): string | undefined;
   /** Repaint the accounts view. */

@@ -57,6 +57,7 @@ import { ENV_NODE_ID, isSessionId, shortId } from './types';
 import type {
   DisposableLike,
   LaunchOptions,
+  ProviderId,
   RosterEntry,
   TerminalBinding,
   TerminalDeps,
@@ -64,6 +65,7 @@ import type {
   TmuxSpawn,
 } from './types';
 import { isEnvVarName } from './accounts';
+import { buildCodexArgs } from './codex';
 import {
   buildTmuxArgs,
   sessionIdOfTmuxName,
@@ -119,6 +121,9 @@ const ACTIVE_POLL_MS = 30;
 const MISSING_BINARY_MESSAGE =
   'Claude CLI not found — set lineage.claudeBinary to the full path of your ' +
   'claude executable.';
+const MISSING_CODEX_BINARY_MESSAGE =
+  'Codex CLI not found — set lineage.codexBinary to the full path of your ' +
+  'codex executable.';
 const RESTRICTED_MESSAGE =
   'Flock cannot start a Claude session here: VS Code blocks terminals in ' +
   'Restricted Mode. Trust this workspace and try again.';
@@ -347,9 +352,15 @@ export function nodeIdOfTerminal(terminal: {
   return isSessionId(raw) ? raw : null;
 }
 
-/** Default terminal name for a session. */
-export function defaultTerminalName(sessionId: string): string {
-  return `claude · ${shortId(sessionId)}`;
+/** Default terminal name for a session: the CLI that is running in it, then
+ *  the short id. Provider-aware because the tab is the one place a user reads
+ *  what a terminal IS, and every Codex tab calling itself `claude` would be a
+ *  lie told several times per window. */
+export function defaultTerminalName(
+  sessionId: string,
+  provider?: ProviderId,
+): string {
+  return `${provider === 'codex' ? 'codex' : 'claude'} · ${shortId(sessionId)}`;
 }
 
 /**
@@ -606,9 +617,16 @@ export class TerminalRegistry implements DisposableLike {
       return null;
     }
 
-    const binary = this.deps.claudeBinary();
+    // WHICH CLI. The one branch that makes a Codex account a place a session
+    // can start: everything below this point is binary-agnostic, so the whole
+    // difference between the two providers is this pair of lookups plus the
+    // argv builder they select.
+    const isCodex = opts.provider === 'codex';
+    const binary = isCodex
+      ? (this.deps.codexBinary?.() ?? null)
+      : this.deps.claudeBinary();
     if (!binary) {
-      showError(MISSING_BINARY_MESSAGE);
+      showError(isCodex ? MISSING_CODEX_BINARY_MESSAGE : MISSING_BINARY_MESSAGE);
       return null;
     }
 
@@ -621,7 +639,7 @@ export class TerminalRegistry implements DisposableLike {
     const name =
       typeof opts.title === 'string' && opts.title.trim().length > 0
         ? opts.title
-        : defaultTerminalName(sessionId);
+        : defaultTerminalName(sessionId, opts.provider);
 
     const pref = this.locationPref();
 
@@ -652,7 +670,7 @@ export class TerminalRegistry implements DisposableLike {
     // this launch verb unchanged to RE-ATTACH a still-running session.
     const tmux = this.tmuxSpawnOf();
     let shellPath = binary;
-    let shellArgs = buildShellArgs(opts);
+    let shellArgs = isCodex ? buildCodexArgs(opts) : buildShellArgs(opts);
     let tmuxName: string | undefined;
     if (tmux) {
       tmuxName =
@@ -709,7 +727,7 @@ export class TerminalRegistry implements DisposableLike {
       this.claiming.delete(sessionId);
       logError('terminals.launch', err);
       showError(
-        `Could not start Claude: ${
+        `Could not start ${isCodex ? 'Codex' : 'Claude'}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );

@@ -54,13 +54,23 @@ chats, and much more.
   sidebar that has to stay readable, not because it is unfinished. See
   [Branches and worktrees are parked](#branches-and-worktrees-are-parked).
 
-- **Use several accounts.** A row per subscription, whether it's a work plan, a
-  personal plan, or an API key. Each account shows its current usage. An account
-  also keeps its own config directory, so you only need to sign in **once per
-  account**. New sessions are routed automatically, and a session is then pinned
-  to its account. Run out of window mid-conversation? **Move to Account...**
-  moves that conversation to another subscription and carries on where it was —
-  with tmux, without even moving the tab.
+- **Use several accounts, on either CLI.** A row per subscription — a work plan,
+  a personal plan, a **ChatGPT / Codex** plan, or an API key. Each account shows
+  its current usage. An account also keeps its own config directory, so you only
+  need to sign in **once per account**. New sessions are routed automatically,
+  and a session is then pinned to its account — until you move it. Run out of
+  window mid-conversation? **Move to Account…** carries that conversation over
+  to another subscription and picks up where it was; with tmux, without even
+  moving the tab. Between accounts on the same CLI: a Claude conversation's
+  transcript means nothing to `codex`, so those are never offered.
+
+  A session on a Codex account runs the `codex` CLI under that account's own
+  `CODEX_HOME`, and gets the same tree row, age, attention dot, fork and resume
+  as a Claude one. Two differences worth knowing: Codex has no start-time naming
+  flag, so those tabs wear Flock's own title, and **Fork and Compact** offers a
+  plain fork instead — the Codex CLI has no compaction command to hand it. If
+  the row cannot find your CLI (common with a node version manager, whose PATH
+  VS Code often does not inherit), set `lineage.codexBinary`.
 
 - **Project workspaces.** Scope a window to one project. Switching saves the tab
   layout you leave and restores the target's. With tmux installed, other
@@ -73,6 +83,13 @@ chats, and much more.
   session in the project you are working in, and fork branches off the
   conversation you are looking at. A gear beside them holds the housekeeping and
   the closed-sessions filter.
+
+- **Ask Claude itself.** With the opt-in in-session verbs installed, "fork this
+  session" — or "do three forks here" — typed to Claude runs the same fork the
+  sidebar button runs: same lineage edge, same naming, opened beside the
+  conversation it branched from, and Claude reports back the names of the new
+  branches. One consent modal installs a skill and a small local CLI; nothing
+  reaches the network. [Details →](docs/reference.md#in-session-verbs)
 
 - **Temporary chats.** The chat button on a project row opens a scratch
   conversation about that project. Right-click the project and **Old Chats…** for
@@ -97,13 +114,23 @@ chats, and much more.
   stays one click from resuming. Only **Delete** removes a row, and that is also
   undoable.
 
-- **It works with the Claude you already run.** The session list is
-  machine-wide, so `claude` typed into the bottom panel, or a conversation
-  started by the official Claude Code extension, is in the tree too — with its
-  age, its status dot and its place in the fork tree. Click one and Flock reveals
-  the terminal it is already running in rather than opening a second copy. Rows
-  Flock does not own say **elsewhere** and are never offered a verb that would
-  lie about them. [Full table →](docs/reference.md#using-flock-alongside-the-claude-code-extension)
+- **A clean slate, and two doors in.** Flock starts empty: nothing you ran
+  before it, and nothing running in some other terminal, appears — or rings the
+  bell — until you say so. Right-click a project for **Add Existing Session…**
+  (its folders' previous sessions, live ones running elsewhere, or a pasted
+  session id), or run **Import Previous Sessions…** to bring in pre-Flock
+  history all at once or one folder at a time. Nothing is imported for you.
+
+- **It still works with the Claude you already run — when you ask it to.** The
+  session list is machine-wide, so a `claude` typed into the bottom panel, or a
+  conversation started by the official Claude Code extension, is one Add away
+  from a full row — age, status dot, its place in the fork tree — and
+  `lineage.showForeignSessions` puts every one of them in the tree
+  automatically, the way Flock originally behaved. Click such a row and Flock
+  reveals the terminal it is already running in rather than opening a second
+  copy. Rows Flock does not own say **elsewhere** and are never offered a verb
+  that would lie about them.
+  [Full table →](docs/reference.md#using-flock-alongside-the-claude-code-extension)
 
 ## Requirements
 
@@ -207,7 +234,7 @@ this release.
 
 ## Documentation
 
-- **[Settings](docs/settings.md)** — all 32, with defaults.
+- **[Settings](docs/settings.md)** — all 34, with defaults.
 - **[Reference](docs/reference.md)** — how it works, projects, subprojects,
   notifications, workspaces, close vs delete, naming, the sidebar rendering
   modes, and what you get alongside the Claude Code extension.
@@ -217,7 +244,8 @@ this release.
 Nothing leaves your machine unless you turn on one setting, named below. Flock
 reads the local session roster and local transcript files, and writes only to its
 own extension storage — plus, if you explicitly opt in, the hooks plugin
-directory and `~/.lineage/events.ndjson`.
+directory and `~/.lineage/events.ndjson`, and the in-session verbs files
+(`~/.claude/skills/flock/`, `~/.lineage/flock-verbs.mjs`, `~/.lineage/requests/`).
 
 **Your repositories are read on a timer and changed only when you ask.** By
 itself Flock runs `git worktree list --porcelain` and `git status

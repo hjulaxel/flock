@@ -122,13 +122,15 @@ describe('envForProfile', () => {
     expect(envForProfile(p)).toEqual({ GEMINI_API_KEY: 'x' });
   });
 
-  it('canHostSession: claude and generic yes, codex and gemini no', () => {
-    // The launcher execs the Claude CLI and only that, so an account whose
-    // isolation is expressed in ANOTHER tool's variable would run on the
-    // machine's default Claude login while claiming to be someone else.
+  it('canHostSession: claude, codex and generic yes, gemini no', () => {
+    // The rule is "Flock execs THIS provider's CLI", so that the config root
+    // envForProfile relocates is the one the running process actually reads.
+    // Codex passes it now that the launcher picks its binary per provider
+    // (src/codex.ts); Gemini still fails it, because nothing launches that CLI
+    // and no CONFIG_DIR_ENV entry exists to isolate it if anything did.
     expect(canHostSession(profile('c', { provider: 'claude' }))).toBe(true);
     expect(canHostSession(profile('k', { provider: 'generic' }))).toBe(true);
-    expect(canHostSession(profile('x', { provider: 'codex' }))).toBe(false);
+    expect(canHostSession(profile('x', { provider: 'codex' }))).toBe(true);
     expect(canHostSession(profile('g', { provider: 'gemini' }))).toBe(false);
   });
 
@@ -741,6 +743,23 @@ describe('accounts: switchRefusal', () => {
     expect(switchRefusal(work, acct({ id: 'cdx', provider: 'codex' }))).toBe(
       'different-cli',
     );
+  });
+
+  it('refuses moving a Codex conversation ANYWHERE, now that codex can host', () => {
+    // The interaction the onboarding/codex merge created. `codex` is in
+    // SESSION_PROVIDERS now, so canHostSession no longer refuses it and the CLI
+    // test is the only thing standing between a Codex conversation and a move
+    // whose byte-mover only knows Claude's `<dir>/projects/<slug>/<id>.jsonl`.
+    const codexFrom = acct({ id: 'cdx1', provider: 'codex' });
+    // This rule alone would call two Codex logins a legal pair — same CLI, both
+    // hostable — and it is right to: the pair is legal, the MOVER is what has
+    // not been written. switchAccountFlow therefore refuses a non-Claude
+    // conversation before it ever consults this, and says so in those words.
+    expect(switchRefusal(codexFrom, acct({ id: 'cdx2', provider: 'codex' })))
+      .toBeNull();
+    // What this rule is load-bearing for is the crossing, in both directions.
+    expect(switchRefusal(codexFrom, work)).toBe('different-cli');
+    expect(switchRefusal(work, codexFrom)).toBe('different-cli');
   });
 
   it('refuses a Gemini account for the CLI reason, not the capability one', () => {
