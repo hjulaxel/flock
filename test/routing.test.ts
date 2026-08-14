@@ -229,10 +229,18 @@ describe('resolveRouting: provider tier', () => {
     expect(result.profile?.id).toBe('k1');
   });
 
-  it('a provider whose CLI Flock does not launch degrades — never a Codex account', () => {
-    const result = resolveRouting({ kind: 'provider', provider: 'codex' }, undefined, profiles, NO_USAGE, NOW);
+  it('a provider whose CLI Flock does not launch degrades — never a Gemini account', () => {
+    const withGemini = [...profiles, profile('g1', { provider: 'gemini', order: 9 })];
+    const result = resolveRouting({ kind: 'provider', provider: 'gemini' }, undefined, withGemini, NO_USAGE, NOW);
     expect(result.profile?.id).toBe('c1'); // fell through to auto
-    expect(result.reason).toContain('Codex / OpenAI accounts cannot run sessions');
+    expect(result.reason).toContain('Gemini accounts cannot run sessions');
+  });
+
+  it('the Codex tier no longer degrades — it picks a Codex account', () => {
+    const withCodex = [...profiles, profile('x1', { provider: 'codex', order: 9 })];
+    const result = resolveRouting({ kind: 'provider', provider: 'codex' }, undefined, withCodex, NO_USAGE, NOW);
+    expect(result.profile?.id).toBe('x1');
+    expect(result.reason).not.toContain('cannot run sessions');
   });
 
   it('auto-picks among that provider\'s accounts by the same usage rules', () => {
@@ -353,27 +361,28 @@ describe('resolveRouting: auto tier scoring', () => {
 
 // ------------------------------------------ only accounts that can run a session
 //
-// The launcher execs ONE binary, the Claude CLI. Routing a launch to a Codex
-// account would run `claude` under `CODEX_HOME`, land on the machine's default
-// Claude login, and pin the conversation for life to an account it was never
-// on — isolated in the UI, shared in reality. Every tier picks from the
-// launchable accounts only, and a tier that named one of the others says so.
+// The rule is unchanged and the membership is not: every tier picks from the
+// accounts whose CLI Flock actually execs, so that the config root the account
+// relocates is the one the running process reads. Codex JOINED that set when
+// the launcher learned to pick its binary per provider (src/codex.ts); Gemini
+// did not, because nothing launches that CLI. A tier that names an account
+// outside the set degrades and says which provider, never "gone".
 
 describe('resolveRouting: never picks an account no session can run on', () => {
-  it('the auto tier skips a Codex account even when it scores best', () => {
+  it('the auto tier ranks a Codex account against the Claude ones, and it can win', () => {
     const profiles = [
       profile('claude-full', { provider: 'claude', order: 0 }),
       profile('codex-idle', { provider: 'codex', order: 1 }),
     ];
-    // Codex has no usage surface, so its snapshot is null → 'idle', which
-    // outranks the exhausted Claude account. It must still lose.
+    // Codex has no usage surface yet, so its snapshot is null → 'idle', which
+    // outranks an exhausted Claude account. It now WINS on that — no data is
+    // not evidence of exhaustion (see the auto-pick rules in routing.ts).
     const usage = usageMap([['claude-full', snap({ fiveHour: win(100) })]]);
     const result = resolveRouting(undefined, undefined, profiles, usage, NOW);
-    expect(result.profile?.id).toBe('claude-full');
-    expect(result.reason).toContain('5h window is full');
+    expect(result.profile?.id).toBe('codex-idle');
   });
 
-  it('a gemini account is skipped too — its configDir is ignored, so it is the default login wearing a name', () => {
+  it('a gemini account is still skipped — its configDir is ignored, so it is the default login wearing a name', () => {
     const profiles = [
       profile('gem', { provider: 'gemini', order: 0, configDir: '/g' }),
       profile('cl', { provider: 'claude', order: 1 }),
@@ -388,21 +397,31 @@ describe('resolveRouting: never picks an account no session can run on', () => {
     expect(resolveRouting(undefined, undefined, profiles, NO_USAGE, NOW).profile?.id).toBe('key');
   });
 
-  it('an account tier naming a Codex account degrades and names the PROVIDER, not "gone"', () => {
+  it('an account tier naming a Codex account is honoured now, not degraded', () => {
     const profiles = [
       profile('cx', { provider: 'codex', order: 0 }),
       profile('cl', { provider: 'claude', order: 1 }),
     ];
     const result = resolveRouting({ kind: 'account', id: 'cx' }, undefined, profiles, NO_USAGE, NOW);
+    expect(result.profile?.id).toBe('cx');
+    expect(result.reason).not.toContain('cannot run sessions');
+  });
+
+  it('an account tier naming a Gemini account degrades and names the PROVIDER, not "gone"', () => {
+    const profiles = [
+      profile('gem', { provider: 'gemini', order: 0 }),
+      profile('cl', { provider: 'claude', order: 1 }),
+    ];
+    const result = resolveRouting({ kind: 'account', id: 'gem' }, undefined, profiles, NO_USAGE, NOW);
     expect(result.profile?.id).toBe('cl');
-    expect(result.reason).toContain('Codex / OpenAI accounts cannot run sessions');
+    expect(result.reason).toContain('Gemini accounts cannot run sessions');
     expect(result.reason).not.toContain('gone');
   });
 
   it('a roster of nothing BUT unlaunchable accounts resolves to null, not to the first row', () => {
     const profiles = [
-      profile('cx', { provider: 'codex', order: 0 }),
-      profile('gem', { provider: 'gemini', order: 1 }),
+      profile('gem', { provider: 'gemini', order: 0 }),
+      profile('gem2', { provider: 'gemini', order: 1 }),
     ];
     const result = resolveRouting(undefined, undefined, profiles, NO_USAGE, NOW);
     // null = launch with no environment at all, i.e. the machine's own login —
@@ -469,6 +488,7 @@ describe('pinnedLaunchProfile', () => {
   const profiles = [
     profile('cl', { provider: 'claude' }),
     profile('cx', { provider: 'codex' }),
+    profile('gem', { provider: 'gemini' }),
     profile('dead', { deleted: true }),
   ];
 
@@ -476,13 +496,17 @@ describe('pinnedLaunchProfile', () => {
     expect(pinnedLaunchProfile('cl', profiles)?.id).toBe('cl');
   });
 
+  it('a Codex pin is launchable now — the resume runs `codex` under its CODEX_HOME', () => {
+    expect(pinnedLaunchProfile('cx', profiles)?.id).toBe('cx');
+  });
+
   it('a pin left behind on an account no session can run on resolves to null', () => {
-    // The conversation's transcript is in the DEFAULT config dir — `claude`
-    // ignored CODEX_HOME all along — so an empty env is where it actually is.
-    expect(pinnedLaunchProfile('cx', profiles)).toBeNull();
+    // Nothing launches the Gemini CLI, so an empty env — the machine's own
+    // login — is the only place such a resume can actually work.
+    expect(pinnedLaunchProfile('gem', profiles)).toBeNull();
     // …while the pin itself still reads as that account, which is what the
     // view and describeRouting render.
-    expect(pinnedProfile('cx', profiles)?.id).toBe('cx');
+    expect(pinnedProfile('gem', profiles)?.id).toBe('gem');
   });
 
   it('still refuses a dangling and a deleted pin, like pinnedProfile', () => {

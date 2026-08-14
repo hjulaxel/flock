@@ -419,12 +419,22 @@
     // sessions they know they have.
     p.textContent = filtered
       ? 'No active sessions. Closed ones are hidden — use the filter in the title bar to show them again.'
-      : 'No Claude sessions yet. Start one and its forks will appear here as a tree.';
+      : 'No Claude sessions here yet. Start one and its forks will appear as a tree.';
     box.appendChild(p);
-    const btn = document.createElement('button');
-    btn.textContent = 'New Claude Session';
-    btn.addEventListener('click', () => post('command', { command: 'newSession' }));
-    box.appendChild(btn);
+    const button = (label, command, secondary) => {
+      const btn = document.createElement('button');
+      if (secondary) btn.className = 'secondary';
+      btn.textContent = label;
+      btn.addEventListener('click', () => post('command', { command }));
+      box.appendChild(btn);
+    };
+    button('New Claude Session', 'newSession');
+    if (!filtered) {
+      button('New Project…', 'newProject', true);
+      // The clean slate is deliberate — sessions from before Flock, or running
+      // in some other terminal, wait behind this door instead of pouring in.
+      button('Import Previous Sessions…', 'importSessions', true);
+    }
     return box;
   }
 

@@ -969,6 +969,10 @@ export function migrateState(raw: unknown): LineageState {
   if (hook) out.hookInstall = hook;
   else delete out.hookInstall;
 
+  const verbs = sanitizeHookState(working.verbsInstall);
+  if (verbs) out.verbsInstall = verbs;
+  else delete out.verbsInstall;
+
   out.version = STATE_SCHEMA_VERSION;
   return out as unknown as LineageState;
 }
@@ -1119,6 +1123,10 @@ export function mergeStates(
   const hook = mem.hookInstall ?? disk.hookInstall;
   if (hook) out.hookInstall = hook;
   else delete out.hookInstall;
+
+  const verbs = mem.verbsInstall ?? disk.verbsInstall;
+  if (verbs) out.verbsInstall = verbs;
+  else delete out.verbsInstall;
 
   out.version = STATE_SCHEMA_VERSION;
   return out as unknown as LineageState;
@@ -1338,6 +1346,13 @@ export class StateStore implements DisposableLike {
   getHookState(): HookInstallState {
     const h = this.memory.hookInstall;
     return h ? { ...h } : { installed: false };
+  }
+
+  /** The in-session verbs' install record — hookInstall's twin, and stored
+   *  under its own key so installing one never claims the other. */
+  getVerbsState(): HookInstallState {
+    const v = this.memory.verbsInstall;
+    return v ? { ...v } : { installed: false };
   }
 
   /** Every project, name-sorted. Hidden ones are INCLUDED — the tree filters,
@@ -1800,6 +1815,13 @@ export class StateStore implements DisposableLike {
     const clean = sanitizeHookState(s) ?? { installed: false };
     return this.enqueue((state) => {
       state.hookInstall = clean;
+    });
+  }
+
+  setVerbsState(s: HookInstallState): Promise<void> {
+    const clean = sanitizeHookState(s) ?? { installed: false };
+    return this.enqueue((state) => {
+      state.verbsInstall = clean;
     });
   }
 

@@ -672,11 +672,21 @@ describe('AccountsViewProvider tooltip — never a credential VALUE, only names'
   });
 
   it('says so when no session can start on the account', () => {
+    // Gemini, not Codex: Codex accounts host sessions now, and this note is
+    // for the providers whose CLI Flock still does not launch.
+    const p = new AccountsViewProvider(
+      fakeDeps({ accounts: () => [profile('x', { provider: 'gemini' })] }),
+    );
+    const tooltip = p.getTreeItem(p.getChildren()[0]).tooltip as { value: string };
+    expect(tooltip.value).toContain('New sessions cannot start on this account');
+  });
+
+  it('a Codex account says nothing of the kind — sessions start there now', () => {
     const p = new AccountsViewProvider(
       fakeDeps({ accounts: () => [profile('x', { provider: 'codex' })] }),
     );
     const tooltip = p.getTreeItem(p.getChildren()[0]).tooltip as { value: string };
-    expect(tooltip.value).toContain('New sessions cannot start on this account');
+    expect(tooltip.value).not.toContain('New sessions cannot start');
   });
 
   it('a launchable account says nothing of the kind', () => {

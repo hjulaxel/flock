@@ -1220,10 +1220,14 @@ ${branchPaletteCss()}  }
         }
 
         case 'command': {
-          // Only the welcome button, and only a known id — never an arbitrary
+          // Only the welcome buttons, and only these ids — never an arbitrary
           // string from the webview.
           if (msg.command === 'newSession') {
             await this.deps.runCommand('newSession');
+          } else if (msg.command === 'newProject') {
+            await this.deps.runCommand('newProject');
+          } else if (msg.command === 'importSessions') {
+            await this.deps.runCommand('importSessions');
           }
           return;
         }

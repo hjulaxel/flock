@@ -119,13 +119,15 @@ describe('envForProfile', () => {
     expect(envForProfile(p)).toEqual({ GEMINI_API_KEY: 'x' });
   });
 
-  it('canHostSession: claude and generic yes, codex and gemini no', () => {
-    // The launcher execs the Claude CLI and only that, so an account whose
-    // isolation is expressed in ANOTHER tool's variable would run on the
-    // machine's default Claude login while claiming to be someone else.
+  it('canHostSession: claude, codex and generic yes, gemini no', () => {
+    // The rule is "Flock execs THIS provider's CLI", so that the config root
+    // envForProfile relocates is the one the running process actually reads.
+    // Codex passes it now that the launcher picks its binary per provider
+    // (src/codex.ts); Gemini still fails it, because nothing launches that CLI
+    // and no CONFIG_DIR_ENV entry exists to isolate it if anything did.
     expect(canHostSession(profile('c', { provider: 'claude' }))).toBe(true);
     expect(canHostSession(profile('k', { provider: 'generic' }))).toBe(true);
-    expect(canHostSession(profile('x', { provider: 'codex' }))).toBe(false);
+    expect(canHostSession(profile('x', { provider: 'codex' }))).toBe(true);
     expect(canHostSession(profile('g', { provider: 'gemini' }))).toBe(false);
   });
 

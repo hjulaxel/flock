@@ -56,6 +56,7 @@ import type {
   DecorationDeps,
   EditorialRecord,
   HookEvent,
+  LaunchOptions,
   ProjectRecord,
   ProviderId,
   RosterEntry,
@@ -96,6 +97,21 @@ import {
   sameRoster,
 } from './roster';
 import {
+  codexSessionsDir,
+  findCodexBinary,
+  matchRollout,
+  scanRollouts,
+} from './codex';
+import { CODEX_HOME_ENV } from './accounts';
+
+/** Codex id discovery (see adoptCodexSession): how often to look for the
+ *  rollout a launch produced, and how long to keep looking. The CLI opens its
+ *  rollout within a second of starting, so this is generous by an order of
+ *  magnitude — the cost of waiting is one late re-key, and the cost of giving
+ *  up early is a row stuck on an id nothing else will ever mention. */
+const CODEX_ADOPT_POLL_MS = 400;
+const CODEX_ADOPT_WINDOW_MS = 30_000;
+import {
   forkParentFromTranscript,
   hasTranscript,
   readTranscriptHeader,
@@ -109,6 +125,7 @@ import {
   archivedAsEntries,
   keptArchived,
   memberKeepIds,
+  unlistedPool,
 } from './archive';
 import {
   buildChainIndex,
@@ -178,6 +195,7 @@ import { TerminalRegistry } from './terminals';
 import { TerminalMatcher, terminalPid } from './terminalMatch';
 import {
   adoptBackgroundJob,
+  forkForAgent,
   hasForkableRow,
   notificationItems,
   registerCommands,
@@ -187,6 +205,7 @@ import type { AccountCommandDeps } from './commands';
 import { registerFocusIntegration } from './windows';
 import { openProject } from './surfaces';
 import { HooksManager } from './hooks';
+import { AgentVerbsManager } from './agentVerbs';
 
 const DEFAULT_POLL_INTERVAL_MS = 3000;
 const STATE_FILE_NAME = 'state.json';
@@ -259,6 +278,8 @@ export async function activate(
   // the poller or the terminal registry.
   const claudeBin = (): string | null =>
     findClaudeBinary(cfg().get<string>(CONFIG_KEYS.claudeBinary));
+  const codexBin = (): string | null =>
+    findCodexBinary(cfg().get<string>(CONFIG_KEYS.codexBinary));
 
   const terminalLocation = (): TerminalLocationPref => {
     const v = cfg().get<string>(CONFIG_KEYS.terminalLocation);
@@ -661,6 +682,106 @@ export async function activate(
     claudeProfileConfigDirs().map((dir) => path.join(dir, 'projects'));
 
   /**
+   * Every Codex session store to index: the machine's own `~/.codex/sessions`
+   * plus one per Codex account that has its own `CODEX_HOME`.
+   *
+   * The default root is ALWAYS included, even when every account relocates its
+   * own — it is where a Codex session started outside Flock lands, and those
+   * are exactly the rows the history index exists to rescue.
+   */
+  const codexSessionsDirs = (): string[] => {
+    const out = [codexSessionsDir()];
+    try {
+      for (const profile of store.getAccounts()) {
+        if (profile.provider !== 'codex') continue;
+        const dir =
+          typeof profile.configDir === 'string' ? profile.configDir.trim() : '';
+        if (dir !== '') out.push(codexSessionsDir(dir));
+      }
+    } catch (err) {
+      logError('extension.codexSessionsDirs', err);
+    }
+    return out;
+  };
+
+  /**
+   * The Codex half of the history index.
+   *
+   * archive.ts indexes `~/.claude/projects/**\/<id>.jsonl` and cannot be
+   * pointed at a Codex store: the layout is a `YYYY/MM/DD` tree, the id is in
+   * the FILENAME rather than in the records, and the first line is a
+   * `session_meta` blob tens of kilobytes long that no Claude-shaped head
+   * parser will read. So the walk lives in codex.ts and the result is
+   * translated to `ArchivedSession` here, which is the type the whole tree
+   * already speaks — the forest, the filters and `keptArchived` then treat a
+   * closed Codex session exactly as they treat a closed Claude one, and none
+   * of them learns a second shape.
+   *
+   * Throttled on the same interval as the Claude scan and cached between
+   * ticks, because this runs on the roster cadence.
+   */
+  let codexArchiveCache: ArchivedSession[] = [];
+  let lastCodexScan = 0;
+  const codexArchived = (): ArchivedSession[] => {
+    const now = Date.now();
+    if (lastCodexScan !== 0 && now - lastCodexScan < ARCHIVE_RESCAN_MIN_MS) {
+      return codexArchiveCache;
+    }
+    lastCodexScan = now;
+    try {
+      codexArchiveCache = scanRollouts({
+        sessionsDirs: codexSessionsDirs(),
+      }).map((meta) => {
+        const session: ArchivedSession = {
+          sessionId: meta.sessionId,
+          transcriptPath: meta.path,
+          endedAt: meta.endedAt,
+          bytes: meta.bytes,
+        };
+        if (meta.startedAt !== undefined) session.startedAt = meta.startedAt;
+        if (meta.cwd !== undefined) session.cwd = meta.cwd;
+        // No `label` and no `continuesId`, deliberately. A Codex rollout has
+        // no custom-title record to read a name from, and no continuation
+        // marker — so rather than guess at either, the row wears its id and
+        // stands alone, which is what both fields being absent already means
+        // everywhere else in the tree.
+        return session;
+      });
+    } catch (err) {
+      logError('extension.codexArchived', err);
+    }
+    return codexArchiveCache;
+  };
+
+  /**
+   * Which CLI owns a conversation, for the launch paths that have to exec one
+   * (`CommandDeps.sessionProvider`). Two sources, in order of how much they
+   * prove:
+   *
+   *   1. the session's own record, written at launch by Flock itself;
+   *   2. which history STORE its transcript was found in — the only thing that
+   *      knows for a session Flock never launched, since a Codex session
+   *      started in a terminal leaves no record at all.
+   *
+   * Deliberately NOT `providerFor`, the glyph resolver, which falls back to
+   * the owning project's provider. That fallback is right for an icon and
+   * catastrophic here: a project switched to Codex would make this claim every
+   * Claude conversation in it, and each resume would hand `codex` a session id
+   * it has never seen.
+   */
+  const sessionProviderFor = (id: string): ProviderId | undefined => {
+    try {
+      if (store.get(id)?.provider === 'codex') return 'codex';
+      return codexArchived().some((s) => s.sessionId === id)
+        ? 'codex'
+        : undefined;
+    } catch (err) {
+      logError('extension.sessionProviderFor', err);
+      return undefined;
+    }
+  };
+
+  /**
    * Throttled scan of ~/.claude/projects. Runs on schedule even when every
    * archived ROW is currently gated off: chain detection reads the
    * index — a live session that continues an older transcript is only
@@ -705,10 +826,15 @@ export async function activate(
       ? new Set<string>()
       : memberKeepIds(records, (id) => chainIndex.tipOf(id));
     if (!showArchived && keepIds.size === 0) return [];
-    return keptArchived(archiveIndexer.current(), liveIds, {
-      showArchived,
-      keepIds,
-    });
+    // Both stores, one filter. A closed Codex session is kept or hidden by
+    // exactly the rule that keeps or hides a closed Claude one — it has a
+    // record, or `showArchived` is on — so the setting means the same thing
+    // whichever CLI wrote the history.
+    return keptArchived(
+      [...archiveIndexer.current(), ...codexArchived()],
+      liveIds,
+      { showArchived, keepIds },
+    );
   };
 
   // What the transcript TAIL says about a session: when the user last
@@ -929,8 +1055,35 @@ export async function activate(
     // or its re-keys would never be learned and the row it must not have
     // would be exactly what comes back.
     const isChat = (id: string): boolean => collapsed.records[id]?.chat === true;
-    const entries2 = collapsed.entries.filter((e) => !isChat(e.sessionId));
+    const entriesNoChat = collapsed.entries.filter((e) => !isChat(e.sessionId));
     const archived2 = archived.filter((a) => !isChat(a.sessionId));
+
+    // FOREIGN live sessions — `claude` running somewhere Flock does not own.
+    // With `lineage.showForeignSessions` off (the default), they never reach
+    // the forest: no row, no folder group minted for their directory, and —
+    // because detectTurnTransitions and noteSessionDone both stop at the
+    // forest's edge — no doneAt stamp and no bell. The stamp is the part that
+    // matters most: it writes an editorial record, and a record is tree
+    // membership, so the old behaviour quietly IMPORTED every session anyone
+    // ever ran on the machine. What stays regardless: anything with a record
+    // on its chain (launched here, added, imported, titled, parked), anything
+    // bound to a terminal in THIS window, and this window's own launches still
+    // in their pending gap. The filter sits HERE, after the collapse, for the
+    // chat filter's reason — membership must be asked of the chain, not of one
+    // physical id — and `liveIds`/`prevLiveIds` above keep the raw entries so
+    // the chain index and archive scan still learn foreign re-keys.
+    let entries2 = entriesNoChat;
+    if (!boolCfg(CONFIG_KEYS.showForeignSessions, false)) {
+      const keep = memberKeepIds(collapsed.records, (id) =>
+        chainIndex.tipOf(id),
+      );
+      for (const id of registry.boundSessionIds()) {
+        keep.add(id);
+        keep.add(chainIndex.tipOf(id));
+      }
+      for (const e of pending) keep.add(e.sessionId);
+      entries2 = entriesNoChat.filter((e) => keep.has(e.sessionId));
+    }
 
     // Archived sessions go through resolveAll too: it resolves their forkedFrom
     // edges AND registers them as known ids, which stops a live child from
@@ -1214,6 +1367,7 @@ export async function activate(
 
   const registry = new TerminalRegistry({
     claudeBinary: () => claudeBin(),
+    codexBinary: () => codexBin(),
     terminalLocation,
     tmux: tmuxSpawn,
     // Claude's REAL pid inside a wrapped session (the terminal's own pid is
@@ -1428,6 +1582,21 @@ export async function activate(
     // `notify: true` opt-in works even with the default off — the same rule
     // deriveUnseen applies.
     if (!notifyFor(sessionId)) return;
+    // THE BELL STOPS AT THE FOREST'S EDGE. A session with no row cannot light
+    // it: the roster and the hook stream are both machine-wide, so without
+    // this gate a `claude` run in some other app's terminal would toast here —
+    // and worse, the doneAt stamp below would write an editorial record, which
+    // is tree membership, silently importing a session nobody asked Flock to
+    // watch. The poll-side detector already iterates the forest and cannot
+    // reach this for a foreign session; this is the same rule for the hook
+    // path. Asked of the id AND its chain tip, because a Stop event names the
+    // physical id while the collapse may have re-keyed the row.
+    if (
+      !forest.nodes.has(sessionId) &&
+      !forest.nodes.has(chainIndex.tipOf(sessionId))
+    ) {
+      return;
+    }
     const nowMs = Date.now();
     if (nowMs - (recentlyDoneAt.get(sessionId) ?? 0) < DONE_DEDUPE_MS) return;
     recentlyDoneAt.set(sessionId, nowMs);
@@ -1650,6 +1819,12 @@ export async function activate(
   const providerFor = (sessionId: string): ProviderId => {
     const record = store.get(sessionId);
     if (isProviderId(record?.provider)) return record.provider;
+    // A Codex session Flock never launched has no record to read, so the store
+    // its transcript lives in is what earns it the OpenAI mark. Asked BEFORE
+    // the project fallback, because it is evidence rather than inheritance:
+    // this session really is a Codex one, whatever the project it sits in is
+    // set to.
+    if (sessionProviderFor(sessionId) === 'codex') return 'codex';
     const cwd = forest.nodes.get(sessionId)?.cwd ?? record?.cwd;
     const match = matchProject(allProjects(), cwd);
     return match ? providerOfProject(match.project) : DEFAULT_PROVIDER;
@@ -1984,6 +2159,47 @@ export async function activate(
     }
   };
 
+  // ------------------------------------------------- 7b. in-session verbs
+
+  const verbsManager = new AgentVerbsManager({
+    getStored: () => store.getVerbsState(),
+    setStored: (s) => store.setVerbsState(s),
+  });
+  context.subscriptions.push(verbsManager);
+  try {
+    await verbsManager.selfHeal();
+  } catch (err) {
+    logError('extension.verbs.selfHeal', err);
+  }
+
+  /** The verbs twin of syncHookWatcher. Its executor closes over
+   *  `commandDeps`, declared in section 8 below — legal because the closure
+   *  only runs from calls that all happen after activation reaches it, and
+   *  deliberate: the executor must run THE command wiring, not a parallel
+   *  one that could drift from what the sidebar button does. */
+  const syncVerbsWatcher = (): void => {
+    try {
+      if (
+        boolCfg(CONFIG_KEYS.verbsEnabled, false) &&
+        verbsManager.getState().installed
+      ) {
+        verbsManager.startWatcher({
+          isBoundHere: (id) => registry.isBoundHere(id),
+          tipOf: (id) => chainIndex.tipOf(id),
+          runFork: (node, count, prompt) =>
+            forkForAgent(commandDeps, node, {
+              count,
+              ...(prompt !== undefined ? { prompt } : {}),
+            }),
+        });
+      } else {
+        verbsManager.stopWatcher();
+      }
+    } catch (err) {
+      logError('extension.verbs.watcher', err);
+    }
+  };
+
   // ---------------------------------------------------------- 8. commands
 
   /**
@@ -2290,14 +2506,28 @@ export async function activate(
    *  default login rather than on somebody else's subscription. */
   const accountLaunchFor = (
     sessionId: string,
-  ): { env?: Readonly<Record<string, string>>; profileId?: string } | undefined => {
+  ):
+    | {
+        env?: Readonly<Record<string, string>>;
+        profileId?: string;
+        provider?: ProviderId;
+      }
+    | undefined => {
     try {
       const profile = pinnedLaunchProfile(
         store.getSessionProfile(sessionId),
         store.getAccounts(),
       );
       if (!profile) return undefined;
-      return { env: envForProfile(profile), profileId: profile.id };
+      // From the SESSION's own record, never from the pinned account — see
+      // commands.sessionLaunchProvider for why the two are allowed to differ
+      // and why the conversation wins when they do.
+      const provider = store.get(sessionId)?.provider === 'codex' ? 'codex' : undefined;
+      return {
+        env: envForProfile(profile),
+        profileId: profile.id,
+        ...(provider !== undefined ? { provider } : {}),
+      };
     } catch (err) {
       logError('extension.accountLaunchFor', err);
       return undefined;
@@ -2347,6 +2577,7 @@ export async function activate(
       }
     },
     claudeBinary: () => claudeBin(),
+    codexBinary: () => codexBin(),
     mediaPath,
     refreshAccounts: () => accountsViewController?.refresh(),
     // The limits module's own wording, so the meter reads identically wherever
@@ -2826,6 +3057,7 @@ export async function activate(
     },
 
     getRecord: (id) => store.get(id),
+    sessionProvider: (id) => sessionProviderFor(id),
     allRecords: () => store.all(),
     upsertRecord: (id, patch) => store.upsert(id, patch),
     recordLaunch: async (childId, parentId, cwd) => {
@@ -2894,6 +3126,11 @@ export async function activate(
           launchOpts = { ...launchOpts, subprojectId: parentLane };
         }
       }
+      // Read BEFORE the spawn, not after: adoptCodexSession rejects any
+      // rollout older than this, and a reading taken after the terminal came
+      // up would be later than the header stamp of the very file it is looking
+      // for.
+      const spawnedAt = Date.now();
       const binding = await registry.launch(launchOpts);
       // A launch that never started must not leave an optimistic row standing
       // for the whole TTL: the terminal failed loudly, and a row for a session
@@ -2911,6 +3148,28 @@ export async function activate(
       // no-op rather than a re-file.
       if (binding && launchOpts.subprojectId !== undefined) {
         void store.setSessionSubproject(opts.sessionId, launchOpts.subprojectId);
+      }
+      // WHICH CLI THIS CONVERSATION IS, written down once, at the only moment
+      // it is known for certain. Every later resume reads it back (see
+      // commands.sessionLaunchProvider) instead of re-deriving it from the
+      // account, which can be re-pinned, or from the project, which is a glyph
+      // heuristic. Claude launches write nothing: absent already means claude,
+      // and stamping every row would make the field's presence meaningless.
+      if (binding && launchOpts.provider === 'codex') {
+        void store.upsert(opts.sessionId, { provider: 'codex' });
+        // Codex mints its own session id, so the binding above is under a
+        // PROVISIONAL one. Hand it to the watcher that finds the real id and
+        // re-keys the row onto it.
+        //
+        // Run for EVERY Codex launch, resumes included, and the asymmetry is
+        // the point: a resume that appends to the rollout it was given writes
+        // no new file, so the watcher matches nothing and the row keeps the id
+        // it already had — the correct outcome, reached by finding nothing. A
+        // resume that instead re-mints (which `fork` certainly does, and which
+        // a future `resume` might) writes one, and the watcher re-keys onto it.
+        // Exempting resumes would get the first case right by luck and the
+        // second wrong for good.
+        adoptCodexSession(opts.sessionId, launchOpts, spawnedAt);
       }
       return binding;
     },
@@ -3048,6 +3307,30 @@ export async function activate(
       syncHookWatcher();
     },
 
+    installAgentVerbs: async () => {
+      const state = await verbsManager.install();
+      syncVerbsWatcher();
+      return state;
+    },
+    removeAgentVerbs: async () => {
+      const state = await verbsManager.remove();
+      syncVerbsWatcher();
+      return state;
+    },
+    getAgentVerbsState: () => verbsManager.getState(),
+    setAgentVerbsEnabled: async (enabled) => {
+      try {
+        await cfg().update(
+          CONFIG_KEYS.verbsEnabled,
+          enabled,
+          vscode.ConfigurationTarget.Global,
+        );
+      } catch (err) {
+        logError('extension.setAgentVerbsEnabled', err);
+      }
+      syncVerbsWatcher();
+    },
+
     allProjects: () => store.getProjects(),
     getProject: (id) => store.getProject(id),
     // Answered by the view that DREW the chips, not by a fresh grouping:
@@ -3156,6 +3439,18 @@ export async function activate(
     unhideFolder: (dir) => store.unhideFolder(dir),
     staleAfterHours: () =>
       numCfg(CONFIG_KEYS.staleAfterHours, DEFAULT_STALE_AFTER_HOURS),
+    // The Add Session / Import pool: what this machine knows that the tree is
+    // not showing. Snapshots of caches the rebuild already maintains — the
+    // last roster tick and the archive index — so opening a picker costs no
+    // scan and no subprocess.
+    unlistedSessions: () =>
+      unlistedPool({
+        entries: lastEntries,
+        archived: archiveIndexer.current(),
+        records: store.all(),
+        tipOf: (id) => chainIndex.tipOf(id),
+        shownIds: new Set(forest.nodes.keys()),
+      }),
 
     // Notifications
     markSeen: (sessionId) => markSeen(sessionId),
@@ -3276,6 +3571,7 @@ export async function activate(
     // disagree about whether hooks are installed.
     menuState: () => ({
       hooksInstalled: store.getHookState().installed === true,
+      verbsInstalled: store.getVerbsState().installed === true,
       onlyActive: boolCfg(CONFIG_KEYS.onlyActiveSessions, false),
       accountsSection: boolCfg(CONFIG_KEYS.accountsSection, true),
       branchDisplay: isBranchDisplay(
@@ -3485,13 +3781,191 @@ export async function activate(
     }
   };
 
-  const onResult = (r: RosterResult): void => {
-    if (!r.ok) {
+  // ------------------------------------------------------------- codex rows
+  //
+  // `claude agents --json` is the roster, and it is a CLAUDE registry: it will
+  // never list a Codex session, because Codex has no equivalent command to ask.
+  // So the roster this window renders is the fetched one PLUS the Codex rows
+  // Flock can vouch for itself, merged before change detection so that every
+  // consumer downstream — the forest, the dots, the ages, the workspace
+  // manager — treats the two identically and none of them has to know.
+  //
+  // WHAT COUNTS AS LIVE, and why it is these three facts and no others. There
+  // is no process to poll, so liveness is what Flock recorded when it acted:
+  //
+  //   bound here     a terminal in THIS window is holding it. Direct
+  //                  observation, and the only fact needing no record.
+  //   boundWindowId  SOME live window is holding it. Machine-wide and
+  //                  self-cleaning: window pruning nulls this field on every
+  //                  session bound to a window that has gone (state.ts), which
+  //                  is what stops a crashed window's rows from being live
+  //                  forever.
+  //   tmux           a workspace switch parked it into the private tmux
+  //                  server, so it is running detached.
+  //
+  // `launchedByUs` is deliberately NOT in that list, though hostOf uses it for
+  // OWNERSHIP. It is written once and never cleared, so a session that ended
+  // months ago still carries it; believing it here would make every Codex
+  // session Flock ever started immortal in the tree. Ownership is a permanent
+  // fact and liveness is not, and this is the seam where they part company.
+  //
+  // A Codex session that is NOT live by this test is not lost — the rollout
+  // index gives it an archived row, exactly as a closed Claude session gets
+  // one from its transcript.
+  const codexLiveEntries = (): RosterEntry[] => {
+    const out: RosterEntry[] = [];
+    let records: Record<string, EditorialRecord>;
+    try {
+      records = store.all();
+    } catch (err) {
+      logError('extension.codexLiveEntries', err);
+      return out;
+    }
+    for (const [id, rec] of Object.entries(records)) {
+      if (!rec || rec.provider !== 'codex') continue;
+      if (!isSessionId(id)) continue;
+      const held =
+        registry.isBoundHere(id) ||
+        (typeof rec.boundWindowId === 'string' && rec.boundWindowId !== '') ||
+        (typeof rec.tmux === 'string' && rec.tmux !== '');
+      if (!held) continue;
+      const entry: RosterEntry = { sessionId: id, kind: 'interactive' };
+      if (typeof rec.cwd === 'string' && rec.cwd !== '') entry.cwd = rec.cwd;
+      out.push(entry);
+    }
+    return out;
+  };
+
+  /** The fetched roster with this window's Codex rows folded in. A Codex id
+   *  the fetch somehow already carries wins, so the merge can never double a
+   *  row. */
+  const withCodexRows = (entries: RosterEntry[]): RosterEntry[] => {
+    const extra = codexLiveEntries();
+    if (extra.length === 0) return entries;
+    const seen = new Set(entries.map((e) => e.sessionId));
+    return [...entries, ...extra.filter((e) => !seen.has(e.sessionId))];
+  };
+
+  /**
+   * Find the session id a just-launched Codex process minted, and move the row
+   * onto it.
+   *
+   * THE PROBLEM. `claude` takes `--session-id`, so Flock pre-mints the id and
+   * the binding is exact from the first instant. `codex` has no such flag: it
+   * mints its own id internally and the first place that id becomes visible is
+   * the name of the rollout file it opens. So a Codex launch is bound under a
+   * PROVISIONAL id and has to be moved onto the real one a moment later.
+   *
+   * THE MOVE is the same one a Claude `/fork` or `/clear` already performs when
+   * the CLI re-keys itself mid-session (see detectPidRekeys): `rebind` moves
+   * the terminal, `appendChainMember` records that the two ids are generations
+   * of one conversation, and the collapse in generations.ts renders them as a
+   * single row. Reusing that path rather than inventing one is what keeps the
+   * provisional id from ever surfacing as a second row.
+   *
+   * NEVER GUESSES. Every poll re-reads the store, so ids already claimed by
+   * another row are excluded, and matchRollout additionally demands the same
+   * cwd and a start inside the window. When nothing matches for the whole
+   * window the launch is left on its provisional id and a line goes to the log
+   * — the session is still bound, still closable and still in the tree; it
+   * simply does not get its archived twin. That is a worse row, not a wrong
+   * one, which is the correct direction to fail in.
+   */
+  const adoptCodexSession = (
+    provisionalId: string,
+    opts: LaunchOptions,
+    spawnedAt: number,
+  ): void => {
+    const sessionsDir = codexSessionsDir(
+      opts.env?.[CODEX_HOME_ENV] ?? undefined,
+    );
+    const deadline = spawnedAt + CODEX_ADOPT_WINDOW_MS;
+
+    const attempt = (): void => {
+      if (Date.now() > deadline) {
+        log(
+          'codex: no rollout matched the launch of',
+          shortId(provisionalId),
+          '— the row keeps its provisional id',
+        );
+        return;
+      }
+      let hit: ReturnType<typeof matchRollout> = null;
+      try {
+        // Re-read the claimed set every attempt: another window may have
+        // adopted a rollout since the last one.
+        const taken = new Set<string>();
+        for (const [id, rec] of Object.entries(store.all())) {
+          if (rec?.provider === 'codex' && id !== provisionalId) taken.add(id);
+        }
+        hit = matchRollout(
+          scanRollouts({ sessionsDirs: [sessionsDir], maxAgeDays: 1 }),
+          {
+            spawnedAt,
+            taken,
+            windowMs: CODEX_ADOPT_WINDOW_MS,
+            ...(typeof opts.cwd === 'string' && opts.cwd !== ''
+              ? { cwd: opts.cwd }
+              : {}),
+          },
+        );
+      } catch (err) {
+        logError('extension.adoptCodexSession', err);
+        hit = null;
+      }
+
+      if (hit === null) {
+        const timer = setTimeout(attempt, CODEX_ADOPT_POLL_MS);
+        (timer as unknown as { unref?: () => void }).unref?.();
+        return;
+      }
+
+      const realId = hit.sessionId;
+      log(
+        'codex: adopting',
+        shortId(realId),
+        'for the launch bound as',
+        shortId(provisionalId),
+      );
+      // The record FIRST, so the row that appears under the real id already
+      // knows it is a Codex session, which account it is on and where it runs
+      // — otherwise the next rebuild draws it with a Claude glyph and no pin.
+      const patch: Record<string, unknown> = {
+        provider: 'codex',
+        launchedByUs: true,
+      };
+      if (typeof opts.cwd === 'string' && opts.cwd !== '') patch.cwd = opts.cwd;
+      void store.upsert(realId, patch);
+      if (opts.profileId !== undefined) {
+        void store.setSessionProfile(realId, opts.profileId);
+      }
+      if (opts.subprojectId !== undefined) {
+        void store.setSessionSubproject(realId, opts.subprojectId);
+      }
+      void store.appendChainMember(provisionalId, realId);
+      registry.rebind(provisionalId, realId);
+      if (haveRoster) void scheduleRebuild(lastEntries);
+    };
+
+    const timer = setTimeout(attempt, CODEX_ADOPT_POLL_MS);
+    (timer as unknown as { unref?: () => void }).unref?.();
+  };
+
+  const onResult = (rawResult: RosterResult): void => {
+    if (!rawResult.ok) {
       // Keep the last good forest — the tree must not flash empty because the
       // CLI was briefly unavailable.
-      log('roster: fetch failed —', r.error ?? 'unknown error');
+      log('roster: fetch failed —', rawResult.error ?? 'unknown error');
       return;
     }
+
+    // Codex rows join HERE, before anything reads the entries, so change
+    // detection, re-association, the forest and every consumer past this point
+    // see one roster rather than two. See codexLiveEntries.
+    const r: RosterResult = {
+      ...rawResult,
+      entries: withCodexRows(rawResult.entries),
+    };
 
     detectPidRekeys(r.entries);
     // Before `lastEntries` moves: the claim's baseline is the roster as it was
@@ -3588,6 +4062,7 @@ export async function activate(
 
   // The watcher callback closes over the poller, so it starts last.
   syncHookWatcher();
+  syncVerbsWatcher();
 
   // ---------------------------------------------------- 10. config changes
 
@@ -3596,6 +4071,7 @@ export async function activate(
       if (!e.affectsConfiguration(CONFIG_SECTION)) return;
       poller?.setIntervalMs(numCfg(CONFIG_KEYS.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS));
       syncHookWatcher();
+      syncVerbsWatcher();
       // Flipping showArchived on must populate the index immediately rather
       // than at the next 30 s window, or the setting looks broken.
       if (e.affectsConfiguration(`${CONFIG_SECTION}.${CONFIG_KEYS.showArchived}`)) {

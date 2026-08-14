@@ -4,6 +4,78 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Flock stops watching what it doesn't own.** The roster Flock reads is
+  machine-wide, and until now the tree drew every session on it — so first
+  launch opened onto folder rows full of other terminals' history, and a
+  `claude` run in a plain terminal would pop a row here and ring the bell.
+  Worse than the noise: the finish-stamp behind the bell writes an editorial
+  record, and a record is tree membership, so Flock was quietly **importing**
+  every session anyone ever ran on the machine, permanently.
+
+  Now the tree holds what you told Flock about: sessions launched here, bound
+  to one of its terminals, or added by hand — and a session with no row cannot
+  light the bell, toast, or write itself into your tree, whether the report
+  came from the roster poll or the hook stream. A fresh install opens onto an
+  empty view with three doors — **New Claude Session**, **New Project…**,
+  **Import Previous Sessions…** — instead of onto somebody's history.
+
+  The old behaviour is one switch away: `lineage.showForeignSessions` puts
+  every foreign live session back in the tree, notifications included. Rows
+  already in your tree are untouched either way — anything with a record keeps
+  its place, exactly as before.
+
+### Added
+
+- **Add Existing Session… on a project's right-click.** The by-hand door the
+  clean slate needs: a picker over the sessions that already ran in the
+  project's directories — finished transcripts and live ones running elsewhere
+  alike, chain-collapsed to one entry per conversation — plus **Add all N**
+  when there are several, and **Enter a Session ID…** for an id pasted from
+  anywhere. Adding writes an editorial record and nothing else; where the row
+  files stays derived from the session's own directory, and the flow says so
+  when that is not the project you clicked (membership is derived, and a row
+  landing elsewhere with no sentence about it would read as a lost session).
+  An id nothing on this machine backs gets a warning before it gets a row.
+
+- **Import Previous Sessions…** — the bulk door, in the gear menu, the palette
+  and on the empty view. Everything this machine knows that has no row —
+  pre-Flock transcripts under `~/.claude/projects`, account profiles' projects
+  dirs included — offered once, grouped by folder, newest first. **Import all
+  N** for somebody arriving with two years of history, or a checkbox per
+  session; deleted rows and project chats are never offered (Restore and the
+  chat picker own those doors). Imports are batched into one state write, not
+  one per session.
+
+- **Ask Claude to fork its own session.** With the new opt-in in-session verbs
+  installed (**Flock: Install In-Session Verbs…**), "fork this session" — or
+  "do three forks here" — typed to Claude runs the same `forkFlow` the sidebar
+  button runs: the same `--fork-session --resume` launch, the same exact
+  lineage edge recorded before launch, the same naming (`auth 2`, `auth 3`,
+  `auth 4` — each fork titled past the parent *and* its new siblings), opened
+  in the window that hosts the conversation.
+
+  One consent modal writes two files, both `rm -rf`-uninstallable and neither
+  touching `~/.claude/settings.json`: a Claude Code skill at
+  `~/.claude/skills/flock/SKILL.md`, so Claude knows the verb exists, and the
+  small CLI it invokes at `~/.lineage/flock-verbs.mjs`. The CLI resolves which
+  session it is in (the `LINEAGE_NODE_ID` launch stamp, `CLAUDE_SESSION_ID`,
+  or the `lineage-<uuid>` tmux name), drops a one-line request into
+  `~/.lineage/requests/`, and prints the reply — branch names, or exactly why
+  nothing was forked — for Claude to relay.
+
+  Every open window watches that directory, and a request runs **exactly
+  once**: claims go through an atomic rename, and the window whose terminal
+  hosts the session gets a head start so the forks open beside their parent.
+  A request expires after two minutes rather than firing when a window
+  finally opens; the count is capped at 8, an opening prompt at 4000
+  characters; fork is the only verb. The reader is gated on
+  `lineage.verbs.enabled` (default off; the install command flips it), and
+  nothing about the channel reaches the network.
+
 ## [0.1.4] — 2026-08-14
 
 ### Added

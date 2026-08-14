@@ -161,6 +161,18 @@
         "icon": "$(add)"
       },
       {
+        "command": "lineage.addSessionToProject",
+        "title": "Add Existing Session...",
+        "category": "Flock",
+        "icon": "$(insert)"
+      },
+      {
+        "command": "lineage.importSessions",
+        "title": "Import Previous Sessions...",
+        "category": "Flock",
+        "icon": "$(cloud-download)"
+      },
+      {
         "command": "lineage.newSessionInSubproject",
         "title": "New Session",
         "category": "Flock",
@@ -308,6 +320,16 @@
       {
         "command": "lineage.removeHooks",
         "title": "Remove Instant-Update Hooks",
+        "category": "Flock"
+      },
+      {
+        "command": "lineage.installAgentVerbs",
+        "title": "Install In-Session Verbs...",
+        "category": "Flock"
+      },
+      {
+        "command": "lineage.removeAgentVerbs",
+        "title": "Remove In-Session Verbs",
         "category": "Flock"
       },
       {
@@ -839,6 +861,16 @@
           "when": "view == lineageSessions && viewItem =~ /;project;/"
         },
         {
+          "command": "lineage.addSessionToProject",
+          "group": "0_open@4",
+          "when": "view == lineageSessions && viewItem =~ /;project;/"
+        },
+        {
+          "command": "lineage.addSessionToProject",
+          "group": "0_open@2",
+          "when": "view == lineageSessions && viewItem =~ /;subproject;/"
+        },
+        {
           "command": "lineage.newSubproject",
           "group": "1_manage@1",
           "when": "view == lineageSessions && viewItem =~ /;project;/"
@@ -1244,6 +1276,16 @@
           "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/"
         },
         {
+          "command": "lineage.addSessionToProject",
+          "group": "0_open@4",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/"
+        },
+        {
+          "command": "lineage.addSessionToProject",
+          "group": "0_open@2",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;subproject;/"
+        },
+        {
           "command": "lineage.newSubproject",
           "group": "1_manage@1",
           "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/"
@@ -1371,7 +1413,7 @@
       {
         "view": "lineageSessions",
         "when": "!lineage.onlyActive",
-        "contents": "No live Claude Code sessions found.\n[New Claude Session](command:lineage.newSession)\n[New Project](command:lineage.newProject)\nA project is a name and a directory; every session running in it groups under it. Add a second directory later and each one gets a row of its own.\nFlock reads `claude agents --json` every few seconds. If sessions are running but none appear, set `lineage.claudeBinary` to the full path of your claude CLI."
+        "contents": "No Claude Code sessions here yet — Flock starts with a clean slate.\n[New Project](command:lineage.newProject)\n[New Claude Session](command:lineage.newSession)\nA project is a name and a directory; every session running in it groups under it. Add a second directory later and each one gets a row of its own.\n[Import Previous Sessions...](command:lineage.importSessions)\nSessions from before Flock — or running in some other terminal — stay off the tree until you import them, all at once or one folder at a time.\nIf sessions you started here are missing, set `lineage.claudeBinary` to the full path of your claude CLI."
       },
       {
         "view": "lineageSessions",
@@ -1397,6 +1439,11 @@
           "type": "string",
           "default": "",
           "description": "Full path to the claude CLI. Empty = search PATH."
+        },
+        "lineage.codexBinary": {
+          "type": "string",
+          "default": "",
+          "description": "Full path to the codex CLI, used by sessions on a Codex / OpenAI account. Empty = search PATH, then the usual install roots (~/.codex/bin, the active nvm node version, ~/.local/bin, Homebrew). Worth setting explicitly if you use a node version manager, since VS Code often does not inherit its PATH."
         },
         "lineage.tmux": {
           "type": "string",
@@ -1449,6 +1496,11 @@
           "default": false,
           "description": "Show only sessions that belong to one of your projects. The roster is machine-wide, so this is the fastest way to stop seeing every directory anyone ever ran claude in. Ignored while you have no projects."
         },
+        "lineage.showForeignSessions": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Show live sessions Flock does not own — `claude` running in some other terminal, another editor, a script. Off (the default), the tree holds only what you told Flock about: sessions launched here, bound to one of its terminals, or added with **Add Existing Session…** / **Import Previous Sessions…** — and a session with no row can never light the bell or write itself into your tree. Turn it on to watch everything on the machine, the way Flock used to; finished turns then stamp those sessions into the tree as they always did."
+        },
         "lineage.onlyActiveSessions": {
           "type": "boolean",
           "default": false,
@@ -1485,6 +1537,11 @@
           "type": "boolean",
           "default": false,
           "description": "Read the Claude Code hook event stream for instant updates. \"Install Instant-Update Hooks…\" sets this for you — installing the plugin only makes Claude write the events, this is the switch that makes Flock read them. The plugin lives in a skills directory and never edits ~/.claude/settings.json."
+        },
+        "lineage.verbs.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Read fork requests written by Claude sessions, so \"fork this session\" typed to Claude runs the same fork the sidebar button runs. \"Install In-Session Verbs…\" sets this for you — installing the skill only lets Claude write a request into ~/.lineage/requests, this is the switch that makes Flock windows act on one. Nothing leaves your machine."
         },
         "lineage.notifications.enabled": {
           "type": "boolean",

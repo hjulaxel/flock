@@ -687,6 +687,12 @@ export const COMMANDS = {
   openProject: 'lineage.openProject',
   installHooks: 'lineage.installHooks',
   removeHooks: 'lineage.removeHooks',
+  /** The in-session verbs: a skill plus a tiny CLI that let the user say
+   *  "fork this session" TO CLAUDE, which then asks a Flock window to run the
+   *  same forkFlow the sidebar button runs. Install/remove mirror the hooks
+   *  pair — one consent modal, `rm -rf` also uninstalls. See agentVerbs.ts. */
+  installAgentVerbs: 'lineage.installAgentVerbs',
+  removeAgentVerbs: 'lineage.removeAgentVerbs',
   resumeSession: 'lineage.resumeSession',
   // Projects and visibility
   newProject: 'lineage.newProject',
@@ -745,6 +751,22 @@ export const COMMANDS = {
    *  directory now (see `newSubproject`), so there is no parent to pick. The id
    *  is recorded here, not resurrected: nothing may re-use the string. */
   newSessionInProject: 'lineage.newSessionInProject',
+  /** Put an EXISTING session on the tree, by hand: pick from the sessions that
+   *  already ran in the project's directories — live ones running elsewhere and
+   *  finished transcripts alike — or paste a session id. The verb behind the
+   *  clean-slate default: with `lineage.showForeignSessions` off, nothing
+   *  reaches the tree until the user launches it here or names it here, and
+   *  this is how it gets named. Writes an editorial record and nothing else;
+   *  membership stays derived from the session's own cwd, so an id whose
+   *  directory belongs to another project files THERE, and the verb says so
+   *  rather than pretending otherwise. */
+  addSessionToProject: 'lineage.addSessionToProject',
+  /** The bulk door for pre-Flock history: every session on this machine that
+   *  has no row — old transcripts under ~/.claude/projects, foreign live ones —
+   *  offered once, grouped by folder, imported only when picked. Deliberately a
+   *  VERB and not a scan-on-activate: an import nobody asked for is exactly the
+   *  first-run mess this replaces. */
+  importSessions: 'lineage.importSessions',
   /** A session in one specific DIRECTORY of a project — what a subproject row's
    *  `+` and its first menu entry run. Its own verb rather than
    *  `newSessionInProject` with an extra argument because that one ASKS which
@@ -967,6 +989,12 @@ export const CONFIG_SECTION = 'lineage';
 export const CONFIG_KEYS = {
   pollIntervalMs: 'pollIntervalMs',
   claudeBinary: 'claudeBinary',
+  /** The Codex CLI, for sessions launched on a Codex/OpenAI account. Its own
+   *  key rather than a per-provider map because the two binaries are found by
+   *  genuinely different rules: `claude` is a PATH scan, while `codex` usually
+   *  lives under whichever node version is active (see codex.findCodexBinary),
+   *  which an extension host frequently does not inherit. */
+  codexBinary: 'codexBinary',
   /** Detach tier: 'auto' (wrap launches in the private tmux server when tmux
    *  is on PATH) or 'off'. */
   tmux: 'tmux',
@@ -979,12 +1007,25 @@ export const CONFIG_KEYS = {
    *  a session you closed keeps its place in the tree. */
   onlyActiveSessions: 'onlyActiveSessions',
   hooksEnabled: 'hooks.enabled',
+  /** The in-session verbs' reader gate, the same shape as `hooks.enabled`:
+   *  installing the skill only makes CLAUDE write request files, and this is
+   *  the half that makes windows read them. Defaults false; set true by the
+   *  install command, whose modal is the consent. */
+  verbsEnabled: 'verbs.enabled',
   terminalLocation: 'terminalLocation',
   /** Who OPENS a new conversation: Flock's own tmux-backed terminal, or another
    *  extension's command (see src/hosts.ts's delegate table). Only ever consulted
    *  for a NEW conversation — a fork has nothing to hand over. */
   launchMode: 'launch.mode',
   onlyProjectSessions: 'onlyProjectSessions',
+  /** Show live sessions Flock does not own — `claude` running in some other
+   *  terminal, another editor, a script. OFF by default: the roster is
+   *  machine-wide, and a tree that fills itself with every session anyone ever
+   *  starts is a tree nobody curated. Off also gates the bell: a session with
+   *  no row must not be able to light it (see extension.noteSessionDone). What
+   *  stays visible either way is everything the user ever told Flock about —
+   *  launched here, bound to one of its terminals, added or imported by hand. */
+  showForeignSessions: 'showForeignSessions',
   // Staleness
   showPhantomRows: 'showPhantomRows',
   viewStyle: 'viewStyle',
@@ -1245,6 +1286,30 @@ export interface ArchivedSession {
    *  lets one logical conversation, re-minted across several session ids, be
    *  collapsed to a single row (see generations.ts). */
   continuesId?: string;
+}
+
+/**
+ * A session this machine knows about that the tree is NOT currently showing —
+ * what the Add Session and Import pickers list. Chain-collapsed: one entry per
+ * conversation, keyed by its tip, never one per superseded generation.
+ *
+ * Two sources, one shape: a live roster row Flock does not own (`live: true`,
+ * facts from `claude agents --json`), or a finished transcript with no
+ * editorial record (`live: false`, facts from the archive index). Both are
+ * facts ABOUT the pool, not a claim of ownership — adding one is what writes
+ * the record.
+ */
+export interface UnlistedSession {
+  sessionId: string;
+  /** Running right now, somewhere Flock does not own. */
+  live: boolean;
+  cwd?: string;
+  /** Roster `name` / transcript `custom-title` — best available, may be absent. */
+  label?: string;
+  /** Transcript mtimeMs — last activity. Absent for a live row (its answer is
+   *  "now", and pretending to know it more precisely would just be a lie the
+   *  picker sorts by). */
+  endedAt?: number;
 }
 
 // ------------------------------------------------------------------ lineage results
@@ -2185,6 +2250,11 @@ export interface LineageState {
    *  whole. See AccountSettings. */
   accountSettings?: AccountSettings;
   hookInstall?: HookInstallState;
+  /** The in-session verbs install record (agentVerbs.ts). The same SHAPE as
+   *  `hookInstall` on purpose: both persist "which version of two generated
+   *  files did the user consent to", and giving that idea two types would
+   *  invite them to drift. */
+  verbsInstall?: HookInstallState;
 }
 
 // ------------------------------------------------------------------ hooks
@@ -2210,7 +2280,29 @@ export interface HookEvent {
 // ------------------------------------------------------------------ terminals
 
 export interface LaunchOptions {
-  sessionId: string;   // pre-minted uuid (crypto.randomUUID())
+  /**
+   * WHICH CLI this launch execs. Absent means `claude`, so every existing call
+   * site and every unit double keeps its old meaning exactly.
+   *
+   * It is carried on the launch rather than derived from the account, even
+   * though the account is where it comes from, because the two answers must be
+   * allowed to differ in one direction: an API-key (`generic`) profile is a
+   * CLAUDE launch authenticated by an environment variable, and deriving the
+   * binary from its provider would exec a CLI called `generic`.
+   */
+  provider?: ProviderId;
+  /**
+   * Pre-minted uuid (crypto.randomUUID()).
+   *
+   * EXACT for Claude, which takes `--session-id` and adopts this value.
+   * PROVISIONAL for Codex, which has no such flag and mints its own id
+   * internally: the binding starts under this id and is re-keyed onto the real
+   * one once the rollout file naming it appears (see codex.matchRollout and
+   * TerminalRegistry.rebind). Everything downstream — the stamp, the record,
+   * the pin — is written against whichever id is current, which is what makes
+   * the re-key a rename rather than a migration.
+   */
+  sessionId: string;
   parentId?: string;   // when set: --fork-session --resume <parentId>
   /** Reopen an existing closed session: `--resume <resumeId>`. No
    *  `--session-id` is passed and `sessionId` MUST equal `resumeId`. NOTE:
@@ -2489,6 +2581,11 @@ export interface DecorationDeps {
 export interface TerminalDeps {
   /** Resolved claude binary (config override or PATH scan), or null. */
   claudeBinary(): string | null;
+  /** Resolved codex binary, or null. OPTIONAL so every existing unit double
+   *  keeps compiling: a wiring without it can launch Claude sessions exactly
+   *  as before and refuses Codex ones with the same "CLI not found" sentence a
+   *  missing binary earns. */
+  codexBinary?(): string | null;
   /** Where a launched terminal goes. Absent = 'editor'. */
   terminalLocation?(): TerminalLocationPref;
   /** Detach tier (src/tmux.ts): how to wrap a launch in the private tmux
@@ -2756,6 +2853,21 @@ export interface CommandDeps {
   revealProject(projectId: string): Promise<void>;
   // state (B)
   getRecord(id: string): EditorialRecord | undefined;
+  /**
+   * Which CLI owns this conversation, when anything knows — `'codex'` or
+   * undefined for the Claude default.
+   *
+   * Distinct from `viewmodel`'s `providerFor`, which answers the GLYPH
+   * question and falls back to the owning project's provider. This one may
+   * only return an answer it can prove, because it chooses which binary a
+   * resume execs: the session's own record, else which history store its
+   * transcript was found in. A guess here resumes a conversation under a CLI
+   * that has never heard of it.
+   *
+   * Optional: a wiring without it falls back to the record alone, which is
+   * correct for every session Flock launched itself.
+   */
+  sessionProvider?(id: string): ProviderId | undefined;
   allRecords(): Record<string, EditorialRecord>;
   upsertRecord(id: string, patch: Partial<EditorialRecord>): Promise<void>;
   recordLaunch(
@@ -2806,6 +2918,15 @@ export interface CommandDeps {
   /** Write `lineage.hooks.enabled`. Installing the plugin is only half the
    *  switch — this is the half that starts the events reader. */
   setHooksEnabled(enabled: boolean): Promise<void>;
+  // in-session verbs (G) — all four OPTIONAL, unlike the hooks quartet, so no
+  // existing unit double has to learn them: a wiring without them has the two
+  // commands registered and refusing, never half-performing.
+  installAgentVerbs?(): Promise<HookInstallState>;
+  removeAgentVerbs?(): Promise<HookInstallState>;
+  getAgentVerbsState?(): HookInstallState;
+  /** Write `lineage.verbs.enabled` — the request-reader gate, the same
+   *  install-is-the-opt-in contract as `setHooksEnabled`. */
+  setAgentVerbsEnabled?(enabled: boolean): Promise<void>;
   // projects + visibility
   allProjects(): ProjectRecord[];
   getProject(id: string): ProjectRecord | undefined;
@@ -2916,6 +3037,15 @@ export interface CommandDeps {
   unhideFolder(dir: string): Promise<void>;
   /** `lineage.staleAfterHours` — only ever pre-ticks a checkbox. */
   staleAfterHours(): number;
+  /** The pool the Add Session and Import pickers draw from: every session this
+   *  machine knows about that has no row right now — live foreign ones and
+   *  recordless transcripts alike, chain-collapsed to one entry per
+   *  conversation. A SNAPSHOT of the extension's existing caches (last roster
+   *  tick + archive index), never a fresh scan: a picker must open instantly,
+   *  and the caches are at most one poll interval stale. Optional — a wiring
+   *  without it (and every unit double that does not care) has the two verbs
+   *  registered and reporting an empty pool rather than throwing. */
+  unlistedSessions?(): readonly UnlistedSession[];
   // ---- notifications ------------------------------------------------------
   /** Stamp `seenAt` now — the user looked at this session. Idempotent. */
   markSeen(sessionId: string): Promise<void>;
@@ -2984,6 +3114,9 @@ export interface CommandDeps {
     /** `lineage.git.branchDisplay`. Optional so a wiring that predates the two
      *  modes offers both halves rather than claiming one of them. */
     branchDisplay?: BranchDisplay;
+    /** In-session verbs installed? Optional for the same reason as
+     *  `branchDisplay`: absent offers both halves of the pair. */
+    verbsInstalled?: boolean;
   };
   // ---- multi-select -------------------------------------------------------
   /** The session ids selected in whichever view is on screen, top to bottom, or

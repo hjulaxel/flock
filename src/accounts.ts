@@ -59,23 +59,32 @@ export const CONFIG_DIR_ENV: Readonly<Partial<Record<ProviderId, string>>> = {
 /**
  * The providers a Flock SESSION can actually be launched on.
  *
- * PARTIAL for the same reason CONFIG_DIR_ENV is, and it is the other half of
- * the same fact: the launcher execs exactly ONE binary — the Claude CLI — so
- * an environment that relocates some OTHER tool's config root does nothing to
- * it. A launch on a Codex account would run `claude` with `CODEX_HOME` set,
- * land on the machine's default Claude login, and pin that conversation for
- * life to an account it was never on: a session that looks isolated in the UI
- * and shares credentials in reality, which is the single worst outcome this
- * feature can produce.
+ * STILL PARTIAL, and the rule that decides membership has not moved: a
+ * provider belongs here when Flock execs ITS CLI, so that the config root
+ * `envForProfile` relocates is the one the running process actually reads.
+ * What changed is the answer, not the test. The launcher used to exec exactly
+ * one binary, and a launch on a Codex account would have run `claude` with
+ * `CODEX_HOME` set, landed on the machine's default Claude login, and pinned
+ * that conversation for life to an account it was never on — a session that
+ * looks isolated in the UI and shares credentials in reality. Now
+ * `TerminalRegistry.launch` picks its binary and its argv from
+ * `LaunchOptions.provider` (see src/codex.ts for the Codex half), so a Codex
+ * account launches `codex` under its own `CODEX_HOME` and the isolation the
+ * row claims is the isolation the process gets.
  *
  * `generic` is IN the list because it makes no isolation claim at all — it is
  * the API-key profile, a Claude launch authenticated by an environment
- * variable, whose configDir `envForProfile` already ignores. `codex` and
- * `gemini` are OUT until this extension launches those CLIs, which it does
- * not. Their rows still exist, still sign in from their own verb and still
- * carry their meters; they are simply not somewhere a session starts.
+ * variable, whose configDir `envForProfile` already ignores. `gemini` is OUT,
+ * unchanged and for the original reason: this extension does not launch that
+ * CLI, and no `CONFIG_DIR_ENV` entry exists to isolate it if it did. Its rows
+ * still exist, still sign in from their own verb and still carry their meters;
+ * they are simply not somewhere a session starts.
  */
-export const SESSION_PROVIDERS: readonly ProviderId[] = ['claude', 'generic'];
+export const SESSION_PROVIDERS: readonly ProviderId[] = [
+  'claude',
+  'codex',
+  'generic',
+];
 
 /**
  * Can a session run on this account at all? See SESSION_PROVIDERS.
