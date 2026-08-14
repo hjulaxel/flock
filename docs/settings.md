@@ -1,6 +1,6 @@
 # Settings
 
-All 33 settings, as contributed. The keys keep the `lineage.` prefix — Flock
+All 35 settings, as contributed. The keys keep the `lineage.` prefix — Flock
 was named Lineage before 0.1.0, and renaming settings keys would silently
 discard everyone's existing configuration.
 
