@@ -55,8 +55,9 @@ chats, and much more.
   [Branches and worktrees are parked](#branches-and-worktrees-are-parked).
 
 - **Use several accounts, on either CLI.** A row per subscription — a work plan,
-  a personal plan, a **ChatGPT / Codex** plan, or an API key. Each account shows
-  its current usage. An account also keeps its own config directory, so you only
+  a personal plan, a **ChatGPT / Codex** plan, or an API key. Claude plan
+  accounts show their current usage; Codex and API-key rows have no meter to
+  read. An account also keeps its own config directory, so you only
   need to sign in **once per account**. New sessions are routed automatically,
   and a session is then pinned to its account — until you move it. Run out of
   window mid-conversation? **Move to Account…** carries that conversation over
@@ -234,7 +235,7 @@ this release.
 
 ## Documentation
 
-- **[Settings](docs/settings.md)** — all 34, with defaults.
+- **[Settings](docs/settings.md)** — all 39, with defaults.
 - **[Reference](docs/reference.md)** — how it works, projects, subprojects,
   notifications, workspaces, close vs delete, naming, the sidebar rendering
   modes, and what you get alongside the Claude Code extension.

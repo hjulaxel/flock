@@ -142,6 +142,12 @@ describe('scaffold: the shared types contract', () => {
   // or stale row is named, not counted) and that the header's N is the real
   // count. Deliberately no pinned number: two branches adding settings then
   // merge without this test being a third count to resolve.
+  //
+  // The README's own "all N" is checked here too, and that is the whole reason
+  // it is: settings.md was tied to the manifest and the README was not, so a
+  // branch that counted its own settings correctly still shipped a README three
+  // behind after a merge brought the other branch's in. Two documents claiming a
+  // count means two documents to hold to it.
   it('documents every contributed setting in docs/settings.md, and counts them right', () => {
     const pkg = JSON.parse(
       fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'),
@@ -158,6 +164,11 @@ describe('scaffold: the shared types contract', () => {
     const header = doc.match(/^All (\d+) settings, as contributed\./m);
     expect(header, 'the "All N settings" opening line').not.toBeNull();
     expect(Number(header?.[1])).toBe(contributed.length);
+
+    const readme = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
+    const pointer = readme.match(/all (\d+), with defaults\./);
+    expect(pointer, "the README's Settings pointer").not.toBeNull();
+    expect(Number(pointer?.[1])).toBe(contributed.length);
   });
 
   it('ships an icon file for every provider', () => {

@@ -54,6 +54,41 @@ All notable changes to Flock are recorded here. The format follows
   `lineage.verbs.enabled` (default off; the install command flips it), and
   nothing about the channel reaches the network.
 
+- **Two CLIs: a session can run on Codex.** An account's provider can now be
+  **ChatGPT / Codex**, and a session routed to one launches the `codex` CLI
+  under that account's own `CODEX_HOME` — its own login, signed into once,
+  sitting beside the Claude accounts. The session row is a Flock row like any
+  other: age, status dot, attention bell, its place in the fork tree, resume,
+  park and restore, a project and a lane.
+
+  Codex mints its own session id, so a launch binds under a provisional one and
+  Flock re-keys the row onto the real id as soon as the rollout file naming it
+  appears. The match is made on the launch's own facts — same directory after
+  `realpath` (so `/tmp` and `/private/tmp` are one place), started at or after
+  the spawn less a second of clock skew, inside a one-minute belief window,
+  earliest start wins — and never on "the newest file in the store". A launch
+  that failed therefore claims nothing, instead of adopting whatever session
+  the user started by hand a minute later.
+
+  Three differences worth knowing. Codex has no start-time naming flag, so
+  those tabs wear Flock's own title instead of one the CLI agreed to;
+  **Fork and Compact** offers a plain fork, there being no compaction command
+  to hand it; and a Codex account row carries **no usage meter**. That last one
+  is a deliberate absence rather than a gap: five-hour numbers are read from a
+  documented Claude surface, Codex keeps its own somewhere else, and inventing
+  a reading would put a number on screen where the honest answer is that Flock
+  does not know. Auto-routing reads the absence as "nothing sunk yet", which
+  loses to any account with an open five-hour window and beats one that is
+  full — so a missing meter never makes an account look like the roomiest.
+
+  `lineage.codexBinary` names the executable when `PATH` does not, which is
+  more often than it sounds: `codex` installs per node version, and the
+  environment VS Code hands an extension is frequently the one from before a
+  version manager selected one — the reason a Codex row's **Sign in** could
+  appear to do nothing. A `PATH` miss now falls back to `~/.codex/bin`, each
+  installed nvm version newest first, `~/.local/bin`, and both Homebrew
+  prefixes before giving up.
+
 - **Move a conversation to another account, mid-conversation.** Right-click a
   session → **Move to Account...**, pick from your accounts with their meters
   beside them, and the conversation carries on where it was — on the other
