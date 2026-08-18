@@ -713,6 +713,50 @@ describe('manifest: the view title contributions', () => {
   });
 });
 
+describe('manifest: the session row context menus', () => {
+  // The row menus cannot be mirrored wholesale the way the title bars are:
+  // the two views genuinely differ there (rename is a different command
+  // inline, because owning the row markup is the whole reason inline exists).
+  // So each shared verb is a separate chance to contribute to one menu and
+  // forget the other — and since exactly one view is ever on screen, the
+  // author testing in one mode cannot see the hole in the other. Move to
+  // Account… shipped that way: contributed to the native tree only, while the
+  // DEFAULT view is inline, so on a default install the verb was reachable
+  // from nowhere but the palette. This pins the verb on BOTH menus with the
+  // same gate and the same slot, normalizing only the token that names the
+  // view, so the halves cannot drift apart again.
+  it('offers Move to Account… from both views, gated and placed the same', () => {
+    const entryFor = (menu: string): MenuEntry => {
+      const entries = pkg.contributes.menus[menu].filter(
+        (e) => e.command === 'lineage.switchSessionAccount',
+      );
+      expect(entries, menu).toHaveLength(1);
+      return entries[0] as MenuEntry;
+    };
+    const native = entryFor('view/item/context');
+    const inline = entryFor('webview/context');
+
+    // One placeholder for the two spellings of "this menu's own view", so the
+    // comparison below is about everything BUT which view it is.
+    const shape = (e: MenuEntry): string =>
+      (e.when ?? '')
+        .replace(`view == ${SESSIONS}`, 'THIS-VIEW')
+        .replace(`webviewId == '${INLINE}'`, 'THIS-VIEW');
+
+    // Any session row, but only while a second account exists to move to — a
+    // menu offering the verb with nowhere to go would be a question with no
+    // answer.
+    expect(shape(native)).toBe(
+      'THIS-VIEW && viewItem =~ /;session;/ && lineage.manyAccounts',
+    );
+    expect(shape(inline)).toBe(shape(native));
+    // Same slot in both menus: right under rename, whichever rename the view
+    // spells.
+    expect(native.group).toBe('1_actions@3');
+    expect(inline.group).toBe(native.group);
+  });
+});
+
 describe('manifest: the Accounts section, and the row it costs', () => {
   // The bell only reaches the container header while the container has ONE
   // visible view, so this when-clause is load-bearing for the whole top bar.

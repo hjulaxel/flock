@@ -1183,6 +1183,11 @@
           "group": "1_actions@2"
         },
         {
+          "command": "lineage.switchSessionAccount",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;session;/ && lineage.manyAccounts",
+          "group": "1_actions@3"
+        },
+        {
           "command": "lineage.closeSession",
           "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;hosted;/",
           "group": "2_close@1"

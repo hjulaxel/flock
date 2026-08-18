@@ -4,6 +4,17 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Move to Account… is on the session row's right-click in the default view
+  too.** The verb was contributed to the native tree's menu only, and the
+  default `lineage.viewStyle` is `inline` — so on a default install the row
+  menu never offered it and the only way to a move was the Command Palette.
+  The inline view now carries the same entry, gated the same way: any session
+  row, whenever a second account could run it.
+
 ## [0.1.6] — 2026-08-18
 
 ### Added
