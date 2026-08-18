@@ -153,7 +153,9 @@ import {
 } from './pullRequests';
 import {
   DEFAULT_WORKTREE_PATH_PATTERN,
+  readAheadCount,
   readLocalBranches,
+  runBranchDelete,
   runWorktreeAdd,
   runWorktreeRemove,
 } from './worktrees';
@@ -1939,7 +1941,7 @@ export async function activate(
     },
     // What the `+` on a project or subproject row does.
     newSessionInWorktree: () =>
-      boolCfg(CONFIG_KEYS.gitNewSessionInWorktree, false),
+      boolCfg(CONFIG_KEYS.gitNewSessionInWorktree, true),
     // Anything that is not 'detailed' reads as 'standard' — a mistyped setting
     // should show the quieter line, not no line and not a crash.
     sessionBranchDetail: () =>
@@ -3790,6 +3792,20 @@ export async function activate(
     localBranches: (dir) => readLocalBranches(dir),
     addWorktree: (opts) => runWorktreeAdd(opts),
     removeWorktree: (opts) => runWorktreeRemove(opts),
+    deleteBranch: (opts) => runBranchDelete(opts),
+    aheadCount: (repoDir, mainName, branch) =>
+      readAheadCount(repoDir, mainName, branch),
+    branchPrefix: () => cfg().get<string>(CONFIG_KEYS.gitBranchPrefix, '') ?? '',
+    // The minted-branch ledger, straight through to the store — the same
+    // window-shared file every other record lives in, because the delete
+    // offer has to survive the window that minted the ref.
+    isMintedBranch: (repoDir, branch) => store.isMintedBranch(repoDir, branch),
+    recordMintedBranch: (repoDir, branch) =>
+      store.recordMintedBranch(repoDir, branch),
+    forgetMintedBranch: (repoDir, branch) =>
+      store.forgetMintedBranch(repoDir, branch),
+    pruneMintedBranches: (repoDir, existing) =>
+      store.pruneMintedBranches(repoDir, existing),
     pullRequestFor: (repoDir, branch) => pullRequests.get(repoDir, branch),
     // Gated on the SETTING and not on view visibility, unlike the cache's own
     // refresh: this is a verb somebody just picked, and refusing it because the

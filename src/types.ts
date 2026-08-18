@@ -172,8 +172,12 @@ export const CONTEXT_EXPLORER_FOLLOW = 'lineage.explorerFollow';
  *  and state.migrateV5ToV6 for the write. Sessions are not touched and do not
  *  need to be: membership has always been derived from the cwd, so a session
  *  that was under the child's row is under the child's DIRECTORY row afterwards.
+ *
+ *  v8 adds the MINTED-BRANCH records — which refs Flock itself created via
+ *  `git worktree add -b`. Purely additive: an older file yields the empty
+ *  map, and a branch with no record simply never gets a delete offer.
  */
-export const STATE_SCHEMA_VERSION = 7;
+export const STATE_SCHEMA_VERSION = 8;
 
 /** The first schema version written by a build in which branch rows are OFF by
  *  default. 0.1.1 and earlier drew a row per checkout unconditionally and wrote
@@ -429,6 +433,19 @@ export const PROJECT_TOMBSTONE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 export interface HiddenFolder {
   path: string;
   hiddenAt: string; // ISO; merge key
+}
+
+/** A branch Flock itself created (`git worktree add -b` — the `+`'s auto
+ *  flow, or New Worktree…'s new-branch half). The record is what earns the
+ *  ref a delete OFFER when its worktree is removed; the field's rule: you
+ *  only delete what you minted. Keyed by state.mintedBranchKey(repo, branch)
+ *  — refs cannot contain a newline, which is what makes that key
+ *  unambiguous. */
+export interface MintedBranchRecord {
+  /** pathKey of the repository's MAIN worktree. */
+  repo: string;
+  branch: string;
+  mintedAt: string; // ISO; merge key
 }
 
 export const MAX_PROJECT_NAME_LEN = 60;
@@ -1103,6 +1120,7 @@ export const CONFIG_KEYS = {
    * quotes the exact `git worktree add`.
    */
   gitNewSessionInWorktree: 'git.newSessionInWorktree',
+  gitBranchPrefix: 'git.branchPrefix',
   /** Override the branch palette used by `branchDisplay: color`. Empty = the
    *  built-in muted one. Read only in that mode: inline mode tints nothing. */
   branchColors: 'branchColors',
@@ -2257,6 +2275,10 @@ export interface LineageState {
   subprojects?: Record<string, SubprojectRecord>;
   /** v2. Keyed by normalized directory path. */
   hiddenFolders: Record<string, HiddenFolder>;
+  /** v8. Keyed by state.mintedBranchKey(repo, branch) — the refs Flock
+   *  created. Optional for the reason `subprojects` is: hand-built literals
+   *  predate it, and migrateState materialises the map on every load. */
+  mintedBranches?: Record<string, MintedBranchRecord>;
   /** v3. Keyed by chain root id. */
   chains: Record<string, ChainRecord>;
   /** v4. Keyed by project id. */
@@ -3016,6 +3038,36 @@ export interface CommandDeps {
     path: string;
     force: boolean;
   }): Promise<GitCommandResult>;
+  /** `git branch -d`. Runs ONLY after a successful worktree removal, from the
+   *  delete offer planBranchFate put on the dialog. Lowercase `-d` always:
+   *  git's own merged-only gate stays in front of every deletion, so a wrong
+   *  probe can cost a dialog, never commits. */
+  deleteBranch?(opts: {
+    repoDir: string;
+    branch: string;
+  }): Promise<GitCommandResult>;
+  /** `git rev-list --count main..branch` — the merged probe behind the delete
+   *  offer. Undefined for every kind of failure, which planBranchFate reads
+   *  as "keep the branch". */
+  aheadCount?(
+    repoDir: string,
+    mainName: string,
+    branch: string,
+  ): Promise<number | undefined>;
+  /** `lineage.git.branchPrefix` — what minted branch names start with.
+   *  Absent or '' contributes nothing. */
+  branchPrefix?(): string;
+  /** The minted-branch ledger (state.ts): which refs Flock itself created.
+   *  All four optional, all four absent from the unit doubles — and absent
+   *  means nothing is minted, so nothing is offered for deletion, which is
+   *  the same conservative shape every other missing member takes. */
+  isMintedBranch?(repoDir: string, branch: string): boolean;
+  recordMintedBranch?(repoDir: string, branch: string): Promise<void>;
+  forgetMintedBranch?(repoDir: string, branch: string): Promise<void>;
+  pruneMintedBranches?(
+    repoDir: string,
+    existing: readonly string[],
+  ): Promise<void>;
   /** Drop every cached git answer for the repository at `dir` and repaint. For
    *  the two verbs that KNOW the answer changed, so the new row appears at once
    *  instead of at the end of a TTL. */

@@ -925,6 +925,18 @@
     // fact about this checkout, where `↑4 ↓3` is a fact about its upstream.
     if (line.dirty) el.appendChild(renderDirtyMark());
 
+    // The shared-floor token: two or more ROOT sessions in this one checkout.
+    // Amber like the working dot and not red like a failure — sharing is
+    // legal, it is just the state in which one `git checkout` moves every one
+    // of them. The sentence version is in the row's hover, per the
+    // one-tooltip rule the rest of this line follows.
+    if (typeof line.shared === 'number' && line.shared >= 2) {
+      const shared = document.createElement('span');
+      shared.className = 'branch-shared';
+      shared.textContent = 'shared ×' + line.shared;
+      el.appendChild(shared);
+    }
+
     // Everything above is the name's half of the line; everything below is the
     // state column at the right edge. The spacer is what divides them, so the
     // name can be elided without the tokens moving.

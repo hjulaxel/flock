@@ -4384,3 +4384,350 @@ describe('the add / import flows', () => {
     });
   });
 });
+
+// ---------------------- the + that IS a worktree, and the ref's retirement
+
+/** The error modal — the auto flow's one loud ending. */
+type ErrorHost = {
+  showErrorMessage?: (
+    message: string,
+    opts?: unknown,
+    ...items: string[]
+  ) => Promise<string | undefined>;
+};
+
+describe('the + cuts a worktree per root session', () => {
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockWindow as WarningHost).showWarningMessage;
+    delete (mockWindow as ErrorHost).showErrorMessage;
+    delete (mockWindow as StatusHost).setStatusBarMessage;
+  });
+
+  const REPO = '/Users/a/code/magma';
+  const PROJECT_ARG = { type: 'project', projectId: 'p1' };
+
+  interface AutoCalls {
+    added: Array<{ repoDir: string; path: string; branch: string; create: boolean }>;
+    minted: Array<{ repoDir: string; branch: string }>;
+    pruned: Array<{ repoDir: string; existing: readonly string[] }>;
+    launches: Array<{ cwd: string; title: string }>;
+    warnings: string[];
+    errors: string[];
+  }
+
+  function autoHarness(over: Partial<AccountCommandDeps> = {}): {
+    calls: AutoCalls;
+    run: (command: string, arg?: unknown) => Promise<void>;
+  } {
+    const calls: AutoCalls = {
+      added: [],
+      minted: [],
+      pruned: [],
+      launches: [],
+      warnings: [],
+      errors: [],
+    };
+    (mockWindow as WarningHost).showWarningMessage = async (message) => {
+      calls.warnings.push(message);
+      return undefined;
+    };
+    (mockWindow as ErrorHost).showErrorMessage = async (message) => {
+      calls.errors.push(message);
+      return undefined;
+    };
+    (mockWindow as StatusHost).setStatusBarMessage = () => undefined;
+
+    const project = projectOf();
+    const { deps } = chatDeps(project);
+    const h = withRegisteredCommands({
+      ...deps,
+      getProject: () => project,
+      newSessionInWorktree: () => true,
+      getBranches: () => [
+        {
+          name: 'main',
+          dir: REPO,
+          colorIndex: 0,
+          rootIds: [],
+          primary: true,
+          shown: true,
+        },
+      ],
+      localBranches: async () => ['main'],
+      worktreePathPattern: () => '../${repo}-${branch}',
+      branchPrefix: () => 'axel/',
+      addWorktree: async (opts) => {
+        calls.added.push(opts);
+        return { ok: true, output: '' };
+      },
+      recordMintedBranch: async (repoDir: string, branch: string) => {
+        calls.minted.push({ repoDir, branch });
+      },
+      pruneMintedBranches: async (repoDir: string, existing: readonly string[]) => {
+        calls.pruned.push({ repoDir, existing });
+      },
+      launchSession: async (opts) => {
+        calls.launches.push({ cwd: opts.cwd ?? '', title: opts.title ?? '' });
+        return {
+          nodeId: opts.sessionId,
+          sessionId: opts.sessionId,
+          terminalName: 'claude',
+          createdAt: 0,
+        };
+      },
+      ...over,
+    });
+    return { calls, run: (command, arg) => h.run(command, arg) };
+  }
+
+  it('mints the branch from the session name and launches in the new checkout', async () => {
+    const h = autoHarness();
+    await h.run(COMMANDS.newSessionInProject, PROJECT_ARG);
+    // No dialog: nothing was asked, something was DONE, and each half of it is
+    // asserted exactly — this is the one write in Flock behind no modal.
+    expect(h.calls.warnings).toEqual([]);
+    expect(h.calls.added).toEqual([
+      {
+        repoDir: REPO,
+        path: '/Users/a/code/magma-axel-magma-os',
+        branch: 'axel/magma-os',
+        create: true,
+      },
+    ]);
+    // The ledger entry that later earns the ref its delete offer.
+    expect(h.calls.minted).toEqual([{ repoDir: REPO, branch: 'axel/magma-os' }]);
+    // The read the flow needed anyway swept the ledger against live refs.
+    expect(h.calls.pruned).toEqual([{ repoDir: REPO, existing: ['main'] }]);
+    // The session runs on the new floor, named the way every `+` names.
+    expect(h.calls.launches).toEqual([
+      { cwd: '/Users/a/code/magma-axel-magma-os', title: 'magma-os' },
+    ]);
+  });
+
+  it('falls back to a plain session when the project has no repository', async () => {
+    const h = autoHarness({ getBranches: () => [] });
+    await h.run(COMMANDS.newSessionInProject, PROJECT_ARG);
+    expect(h.calls.added).toEqual([]);
+    expect(h.calls.launches).toHaveLength(1);
+    expect(h.calls.launches[0].cwd).toBe(REPO);
+  });
+
+  it('keeps the old + when the setting is off', async () => {
+    const h = autoHarness({ newSessionInWorktree: () => false });
+    await h.run(COMMANDS.newSessionInProject, PROJECT_ARG);
+    expect(h.calls.added).toEqual([]);
+    expect(h.calls.launches).toHaveLength(1);
+    expect(h.calls.launches[0].cwd).toBe(REPO);
+  });
+
+  it("stops and shows git's own words when the add fails — no session", async () => {
+    const h = autoHarness({
+      addWorktree: async () => ({ ok: false, output: 'fatal: boom' }),
+    });
+    await h.run(COMMANDS.newSessionInProject, PROJECT_ARG);
+    expect(h.calls.launches).toEqual([]);
+    expect(h.calls.minted).toEqual([]);
+    expect(h.calls.errors).toHaveLength(1);
+    expect(h.calls.errors[0]).toContain('fatal: boom');
+  });
+
+  it('bumps past a branch name the repository already holds', async () => {
+    const h = autoHarness({
+      localBranches: async () => ['main', 'axel/magma-os'],
+    });
+    await h.run(COMMANDS.newSessionInProject, PROJECT_ARG);
+    expect(h.calls.added[0].branch).toBe('axel/magma-os-2');
+  });
+});
+
+describe('Remove Worktree decides the branch fate', () => {
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockWindow as WarningHost).showWarningMessage;
+  });
+
+  const REPO = '/Users/a/code/magma';
+  const WT = '/Users/a/code/magma-axel-x';
+  const ARG = { type: 'branch', projectId: 'p1', dir: WT, branch: 'axel/x' };
+
+  interface FateCalls {
+    dialogs: Array<{ message: string; detail: string; items: string[] }>;
+    order: string[];
+    deleted: Array<{ repoDir: string; branch: string }>;
+    forgotten: Array<{ repoDir: string; branch: string }>;
+  }
+
+  function fateHarness(over: {
+    minted?: boolean;
+    ahead?: number | undefined;
+    answer?: string;
+  } = {}): {
+    calls: FateCalls;
+    run: (command: string, arg?: unknown) => Promise<void>;
+  } {
+    const calls: FateCalls = { dialogs: [], order: [], deleted: [], forgotten: [] };
+    (mockWindow as WarningHost).showWarningMessage = async (
+      message,
+      opts,
+      ...items
+    ) => {
+      calls.dialogs.push({
+        message,
+        detail:
+          typeof (opts as { detail?: unknown })?.detail === 'string'
+            ? ((opts as { detail: string }).detail)
+            : '',
+        items,
+      });
+      return over.answer;
+    };
+    const project = projectOf();
+    const { deps } = chatDeps(project);
+    const h = withRegisteredCommands({
+      ...deps,
+      getProject: () => project,
+      getBranches: () => [
+        { name: 'main', dir: REPO, colorIndex: 0, rootIds: [], primary: true, shown: true },
+        { name: 'axel/x', dir: WT, colorIndex: 1, rootIds: [], primary: false, shown: true },
+      ],
+      removeWorktree: async () => {
+        calls.order.push('removeWorktree');
+        return { ok: true, output: '' };
+      },
+      deleteBranch: async (opts) => {
+        calls.order.push('deleteBranch');
+        calls.deleted.push(opts);
+        return { ok: true, output: '' };
+      },
+      forgetMintedBranch: async (repoDir: string, branch: string) => {
+        calls.forgotten.push({ repoDir, branch });
+      },
+      isMintedBranch: () => over.minted === true,
+      aheadCount: async () => over.ahead,
+    });
+    return { calls, run: (command, arg) => h.run(command, arg) };
+  }
+
+  it('offers Remove and Delete Branch only for a minted, fully-merged ref — and quotes both commands', async () => {
+    const h = fateHarness({ minted: true, ahead: 0, answer: undefined });
+    await h.run(COMMANDS.removeWorktree, ARG);
+    expect(h.calls.dialogs).toHaveLength(1);
+    const d = h.calls.dialogs[0];
+    expect(d.items).toEqual(['Remove and Delete Branch', 'Remove Worktree Only']);
+    // The confirmation's worth is that it says exactly what will run — BOTH
+    // commands, the second included because a button carries it.
+    expect(d.detail).toContain('worktree remove');
+    expect(d.detail).toContain("branch -d -- axel/x");
+    expect(d.detail).toContain('everything on it is on main');
+    // Dismissed: nothing ran.
+    expect(h.calls.order).toEqual([]);
+  });
+
+  it('runs remove THEN delete when the second button is taken, and forgets the mint', async () => {
+    const h = fateHarness({ minted: true, ahead: 0, answer: 'Remove and Delete Branch' });
+    await h.run(COMMANDS.removeWorktree, ARG);
+    expect(h.calls.order).toEqual(['removeWorktree', 'deleteBranch']);
+    expect(h.calls.deleted).toEqual([{ repoDir: REPO, branch: 'axel/x' }]);
+    expect(h.calls.forgotten).toEqual([{ repoDir: REPO, branch: 'axel/x' }]);
+  });
+
+  it('keeps a minted ref with commits main does not have, and counts them', async () => {
+    const h = fateHarness({ minted: true, ahead: 3 });
+    await h.run(COMMANDS.removeWorktree, ARG);
+    const d = h.calls.dialogs[0];
+    expect(d.items).toEqual(['Remove Worktree']);
+    expect(d.detail).toContain('3 commits');
+    expect(d.detail).not.toContain('branch -d');
+  });
+
+  it('never offers deletion for a ref Flock did not mint', async () => {
+    const h = fateHarness({ minted: false, ahead: 0 });
+    await h.run(COMMANDS.removeWorktree, ARG);
+    const d = h.calls.dialogs[0];
+    expect(d.items).toEqual(['Remove Worktree']);
+    expect(d.detail).toContain('is kept');
+  });
+});
+
+describe('deleting the last session in a minted worktree offers the cleanup', () => {
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockWindow as InfoHost).showInformationMessage;
+    delete (mockWindow as ErrorHost).showErrorMessage;
+  });
+
+  const REPO = '/Users/a/code/magma';
+  const WT = '/Users/a/code/magma-axel-x';
+  const S1 = uuid(7);
+  const S2 = uuid(8);
+
+  function offerHarness(over: {
+    minted?: boolean;
+    secondSession?: boolean;
+  } = {}): {
+    infos: string[];
+    errors: string[];
+    run: (command: string, arg?: unknown) => Promise<void>;
+  } {
+    const infos: string[] = [];
+    const errors: string[] = [];
+    (mockWindow as InfoHost).showInformationMessage = async (message) => {
+      infos.push(message);
+      return undefined; // the undo toast expires; the offer is declined
+    };
+    (mockWindow as ErrorHost).showErrorMessage = async (message) => {
+      errors.push(message);
+      return undefined;
+    };
+    const project = projectOf();
+    const { deps } = chatDeps(project);
+    const deletedIds = new Set<string>();
+    const nodes = () => {
+      const out = [
+        node(S1, { cwd: WT, label: 'magma-os 2', deleted: deletedIds.has(S1) }),
+      ];
+      if (over.secondSession === true) {
+        out.push(node(S2, { cwd: WT, label: 'magma-os 3', deleted: deletedIds.has(S2) }));
+      }
+      return out;
+    };
+    const h = withRegisteredCommands({
+      ...deps,
+      getForest: () => forestOf(nodes()),
+      allProjects: () => [project],
+      getProject: () => project,
+      upsertRecord: async (id, patch) => {
+        if (patch.deleted === true) deletedIds.add(id);
+        if (patch.deleted === false) deletedIds.delete(id);
+      },
+      getBranches: () => [
+        { name: 'main', dir: REPO, colorIndex: 0, rootIds: [], primary: true, shown: true },
+        { name: 'axel/x', dir: WT, colorIndex: 1, rootIds: [], primary: false, shown: true },
+      ],
+      isMintedBranch: () => over.minted !== false,
+    });
+    return { infos, errors, run: (command, arg) => h.run(command, arg) };
+  }
+
+  it('offers once, after the undo window, naming the branch', async () => {
+    const h = offerHarness();
+    await h.run(COMMANDS.deleteSession, S1);
+    expect(h.errors).toEqual([]);
+    expect(h.infos).toHaveLength(2);
+    expect(h.infos[0]).toContain('Removed');
+    expect(h.infos[1]).toContain('"axel/x" has no sessions left');
+  });
+
+  it('stays quiet while any session still lives there — closed ones included', async () => {
+    const h = offerHarness({ secondSession: true });
+    await h.run(COMMANDS.deleteSession, S1);
+    expect(h.infos).toHaveLength(1);
+  });
+
+  it('stays quiet for a worktree Flock did not mint', async () => {
+    const h = offerHarness({ minted: false });
+    await h.run(COMMANDS.deleteSession, S1);
+    expect(h.infos).toHaveLength(1);
+  });
+});

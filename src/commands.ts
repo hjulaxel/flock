@@ -109,11 +109,14 @@ import type { SessionHost } from './hosts';
 // and imported here, where the modals are. The two `git worktree` calls
 // themselves go through CommandDeps like every other side effect in this file.
 import {
+  branchDeleteArgv,
   describeGitCommand,
   isCheckedOut,
   isExistingWorktree,
+  planBranchFate,
   planWorktreeRemoval,
   slugifyBranch,
+  suggestBranchName,
   worktreeAddArgv,
   worktreePathFor,
   worktreeRemoveArgv,
@@ -1854,6 +1857,134 @@ async function newSessionInProjectFlow(
 }
 
 /**
+ * The `+` under `lineage.git.newSessionInWorktree` — the default: EVERY ROOT
+ * SESSION STARTS IN ITS OWN WORKTREE, on a branch minted from the session's
+ * name. One session, one checkout is the invariant that makes "all my
+ * sessions switched branch at once" impossible: no two roots share a floor,
+ * so nobody's `git checkout` moves anybody else. Forks stay in their root's
+ * checkout — the tree they belong to IS that worktree's work.
+ *
+ * NO DIALOG, and the exemption is argued at the top of src/worktrees.ts:
+ * `worktree add -b` creates a directory and a fresh ref and touches nothing
+ * that already exists, so the click is the consent. What stands in for the
+ * modal is the receipt — a status-bar flash naming the branch and the path —
+ * and the log line either can be checked against.
+ *
+ * A project with no readable repository falls back to the plain in-place
+ * launch: the click means "give me a session", and a directory that cannot
+ * have worktrees still deserves one. Every OTHER refusal — a path pattern
+ * that builds nothing, a name that cannot be minted, git saying no — is
+ * shown and STOPS the flow. Those are problems the user has to see once, not
+ * route around forever.
+ */
+async function newWorktreeSessionFlow(
+  deps: AccountCommandDeps,
+  projectId: string,
+): Promise<void> {
+  const project = deps.getProject(projectId);
+  if (!project) return;
+  const { branches, repoDir } = branchesOfProject(deps, projectId);
+  if (repoDir === '' || !deps.addWorktree) {
+    await newSessionInProjectFlow(deps, projectId);
+    return;
+  }
+
+  // The session's name first, because the branch is named AFTER it — computed
+  // with the same helpers the launch itself uses, so the row and the ref
+  // agree: "flock 3" runs on axel/flock-3.
+  const title = nextFreeName(
+    project.name,
+    namesUnder(deps, projectDirs(project)),
+  );
+
+  const locals = await safeAsync(
+    'localBranches',
+    () => deps.localBranches?.(repoDir) ?? Promise.resolve([]),
+    [] as readonly string[],
+  );
+  // The read this flow needed anyway doubles as the minted ledger's sweep:
+  // records for refs deleted outside Flock leave with it. Verb-driven, like
+  // every write to that ledger — there is no timer behind it.
+  await safeAsync(
+    'pruneMintedBranches',
+    () => deps.pruneMintedBranches?.(repoDir, locals) ?? Promise.resolve(),
+    undefined,
+  );
+
+  const branch = suggestBranchName({
+    prefix: safeCall('branchPrefix', () => deps.branchPrefix?.()) ?? '',
+    title,
+    taken: [...locals, ...branches.map((b) => b.name)],
+  });
+  if (branch === '') {
+    void vscode.window.showWarningMessage(
+      `Flock cannot mint a branch name from "${title}" — ` +
+        'use New Worktree… to type one.',
+    );
+    return;
+  }
+
+  const dir = worktreePathFor({
+    pattern: safeCall('worktreePathPattern', () => deps.worktreePathPattern?.()),
+    repoDir,
+    branch,
+  });
+  if (dir === '') {
+    void vscode.window.showWarningMessage(
+      'Flock: lineage.git.worktreePath does not produce a usable path for ' +
+        `"${branch}". It must contain \${branch}.`,
+    );
+    return;
+  }
+  if (isExistingWorktree(dir, branches)) {
+    void vscode.window.showWarningMessage(
+      `Flock: ${dir} is already a worktree of this repository.`,
+    );
+    return;
+  }
+
+  log('worktree: auto add', branch, '->', dir);
+  const result = await deps.addWorktree({
+    repoDir,
+    path: dir,
+    branch,
+    create: true,
+  });
+  if (!result.ok) {
+    // git's own words, exactly as the picker flow shows them: the reasons an
+    // add fails are reasons only git can state.
+    log('worktree: auto add failed:', result.output);
+    void vscode.window.showErrorMessage(
+      `Flock could not cut a worktree for this session.\n\n${result.output}`,
+      { modal: true },
+    );
+    return;
+  }
+
+  // The ledger entry is what later earns this ref the delete offer in Remove
+  // Worktree — written here, at the moment of minting, and nowhere else.
+  await safeAsync(
+    'recordMintedBranch',
+    () => deps.recordMintedBranch?.(repoDir, branch) ?? Promise.resolve(),
+    undefined,
+  );
+  deps.worktreesChanged?.(repoDir);
+  deps.refresh();
+  // The receipt, where the modal is not: which ref, which floor.
+  vscode.window.setStatusBarMessage(
+    `Flock: new worktree on ${branch} — ${dir}`,
+    7000,
+  );
+  await startSessionInProjectDir(
+    deps,
+    project,
+    dir,
+    title,
+    `on new branch ${branch}`,
+  );
+}
+
+/**
  * A session in one specific WORKTREE of a project.
  *
  * Extracted from `newSessionInBranch`'s handler because New Worktree… ends here
@@ -2287,9 +2418,13 @@ function branchNameProblem(
  * the uncommitted work. A single dialog that quietly carried `--force` would be a
  * delete verb wearing a remove verb's wording.
  *
- * The BRANCH survives either way — `git worktree remove` takes the checkout, not
- * the ref — which is what keeps this a two-dialog verb rather than a four-dialog
- * one, and is said out loud in the first dialog.
+ * The BRANCH's fate is the dialog's second question, decided by planBranchFate
+ * (src/worktrees.ts) before anything is asked: a ref Flock minted whose every
+ * commit is already on the main branch earns a "Remove and Delete Branch"
+ * button; every other case keeps the ref, and the dialog says which case this
+ * was rather than leaving "did it delete my branch?" to be answered by running
+ * git. The delete itself is `git branch -d` — lowercase, git's own merged-only
+ * gate — so a stale probe can cost a refused button, never commits.
  */
 async function removeWorktreeFlow(
   deps: CommandDeps,
@@ -2302,7 +2437,7 @@ async function removeWorktreeFlow(
     );
     return;
   }
-  const { repoDir } = branchesOfProject(deps, project.id);
+  const { branches, repoDir } = branchesOfProject(deps, project.id);
   if (repoDir === '') return;
 
   const plan = planWorktreeRemoval({
@@ -2317,21 +2452,53 @@ async function removeWorktreeFlow(
     return;
   }
 
+  // The branch's fate, decided BEFORE the dialog so the dialog can say it.
+  // The probe runs only when it could change the answer — a ref Flock never
+  // minted needs no rev-list to be kept.
+  const mainName = branches.find((b) => b.primary)?.name ?? '';
+  const minted =
+    safeCall('isMintedBranch', () =>
+      deps.isMintedBranch?.(repoDir, branch.name),
+    ) === true;
+  const ahead =
+    minted && !branch.primary && mainName !== '' && deps.aheadCount
+      ? await safeAsync(
+          'aheadCount',
+          () => deps.aheadCount!(repoDir, mainName, branch.name),
+          undefined,
+        )
+      : undefined;
+  const fate = planBranchFate({
+    branch: branch.name,
+    minted,
+    aheadOfMain: ahead,
+    mainName,
+    primary: branch.primary,
+  });
+
   const argv = worktreeRemoveArgv({ path: branch.dir, force: plan.force });
+  const DELETE_TOO = 'Remove and Delete Branch';
+  const REMOVE_ONLY = fate.offerDelete ? 'Remove Worktree Only' : 'Remove Worktree';
   const first = await vscode.window.showWarningMessage(
     `Remove the worktree for "${branch.name}"?`,
     {
       modal: true,
+      // BOTH commands when both are offered — the confirmation's worth is
+      // that it says exactly what will run, and a button that added a second
+      // command the detail never showed would break that.
       detail: [
         describeGitCommand(repoDir, argv),
+        ...(fate.offerDelete
+          ? [describeGitCommand(repoDir, branchDeleteArgv(branch.name))]
+          : []),
         ...plan.warnings,
-        `The branch "${branch.name}" itself is kept — only the checkout at ` +
-          `${branch.dir} goes away.`,
+        fate.sentence,
       ].join('\n\n'),
     },
-    'Remove Worktree',
+    ...(fate.offerDelete ? [DELETE_TOO, REMOVE_ONLY] : [REMOVE_ONLY]),
   );
-  if (first !== 'Remove Worktree') return;
+  if (first !== DELETE_TOO && first !== REMOVE_ONLY) return;
+  const deleteBranchToo = first === DELETE_TOO;
 
   if (plan.force) {
     // The second Yes, and the only thing it is about: --force is what deletes
@@ -2364,8 +2531,116 @@ async function removeWorktreeFlow(
     return;
   }
   log('worktree: removed', branch.dir);
+  if (deleteBranchToo && deps.deleteBranch) {
+    // AFTER the removal, because git refuses to delete a checked-out branch —
+    // and through -d, so git re-checks merged-ness at this very moment. A
+    // refusal here is a kept ref and a message, never a surprise.
+    const del = await deps.deleteBranch({ repoDir, branch: branch.name });
+    if (del.ok) {
+      log('worktree: branch deleted', branch.name);
+      await safeAsync(
+        'forgetMintedBranch',
+        () =>
+          deps.forgetMintedBranch?.(repoDir, branch.name) ?? Promise.resolve(),
+        undefined,
+      );
+    } else {
+      log('worktree: branch delete refused:', del.output);
+      void vscode.window.showWarningMessage(
+        `Flock removed the worktree, but git kept the branch: ${del.output}`,
+      );
+    }
+  }
   deps.worktreesChanged?.(repoDir);
   deps.refresh();
+}
+
+/** The cwds of the rows a delete gesture is about to remove — read BEFORE the
+ *  writes, normalized, deduped: the cleanup offer below is about the rows
+ *  that just left, not the tree that remains. */
+function deletedSessionCwds(
+  deps: CommandDeps,
+  ids: readonly string[],
+): string[] {
+  const out = new Set<string>();
+  try {
+    const nodes = deps.getForest().nodes;
+    for (const id of ids) {
+      const cwd = normalizeDir(nodes.get(id)?.cwd ?? '');
+      if (cwd !== '') out.add(cwd);
+    }
+  } catch (err) {
+    logError('commands.deletedSessionCwds', err);
+  }
+  return [...out];
+}
+
+/** How many VISIBLE sessions — live or closed alike, deleted and ghost rows
+ *  excepted — have their cwd inside `dir`. Stricter than liveSessionCwds on
+ *  purpose: a closed session is one click from resuming, and resuming needs
+ *  its directory, so it holds the worktree open just as a running one does. */
+function sessionsRemainingIn(deps: CommandDeps, dir: string): number {
+  const target = normalizeDir(dir);
+  if (target === '') return 0;
+  let n = 0;
+  try {
+    for (const node of deps.getForest().nodes.values()) {
+      if (node.deleted || node.ghost) continue;
+      const cwd = normalizeDir(node.cwd ?? '');
+      if (cwd !== '' && isWithin(target, cwd)) n++;
+    }
+  } catch (err) {
+    logError('commands.sessionsRemainingIn', err);
+  }
+  return n;
+}
+
+/**
+ * After a DELETE has emptied a worktree Flock minted: ONE non-modal offer to
+ * fold the desk. Delete only, never close — a closed session is one click
+ * from resuming, and resuming needs its directory.
+ *
+ * The offer fires only when the gesture left EXACTLY ONE candidate — a
+ * minted, non-primary worktree with no visible session left inside it. A
+ * multi-delete that empties several offers nothing: two toasts is a queue,
+ * and the verb stays one right-click away on the branch row. "Clean Up…"
+ * routes into removeWorktreeFlow — same plan, same dialogs, no shortcut —
+ * which is where the branch's own fate gets decided.
+ */
+async function offerWorktreeCleanup(
+  deps: CommandDeps,
+  cwds: readonly string[],
+): Promise<void> {
+  if (cwds.length === 0) return;
+  const seen = new Set<string>();
+  const hits: Array<{ project: ProjectRecord; branch: BranchInfo }> = [];
+  for (const project of deps.allProjects()) {
+    const { branches, repoDir } = branchesOfProject(deps, project.id);
+    if (repoDir === '') continue;
+    for (const b of branches) {
+      if (b.primary || b.dir === '') continue;
+      const key = pathKey(b.dir);
+      if (key === '' || seen.has(key)) continue;
+      if (!cwds.some((cwd) => isWithin(b.dir, cwd))) continue;
+      seen.add(key);
+      const minted =
+        safeCall('isMintedBranch', () =>
+          deps.isMintedBranch?.(repoDir, b.name),
+        ) === true;
+      if (!minted) continue;
+      if (sessionsRemainingIn(deps, b.dir) > 0) continue;
+      hits.push({ project, branch: b });
+    }
+  }
+  if (hits.length !== 1) return;
+  const { project, branch } = hits[0];
+  const CLEAN = 'Clean Up…';
+  const choice = await vscode.window.showInformationMessage(
+    `"${branch.name}" has no sessions left. Clean up its worktree?`,
+    CLEAN,
+    'Not Now',
+  );
+  if (choice === CLEAN) await removeWorktreeFlow(deps, project, branch);
 }
 
 /**
@@ -5858,8 +6133,10 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   const deleteSessionsFlow = async (ids: string[]): Promise<void> => {
     if (ids.length === 0) return;
     // Names read BEFORE the writes, or the message would describe rows that
-    // have already left the tree.
+    // have already left the tree. The cwds too — the cleanup offer at the end
+    // is about the rows that just left.
     const label = ids.length === 1 ? labelFor(deps, ids[0]) : '';
+    const cwds = deletedSessionCwds(deps, ids);
     // Sequential, not Promise.all: every write goes through the store's own
     // mutation queue anyway, and awaiting each keeps a failure attributable.
     for (const id of ids) await deps.upsertRecord(id, { deleted: true });
@@ -5875,7 +6152,14 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
             'untouched; forks of them moved up to their parents.',
       UNDO,
     );
-    if (choice !== UNDO) return;
+    if (choice !== UNDO) {
+      // The undo window has passed un-taken. If this gesture emptied a
+      // worktree the `+` once minted, now is the moment to offer folding it —
+      // and only now: an offer racing the Undo button would be two toasts
+      // arguing over one gesture.
+      await offerWorktreeCleanup(deps, cwds);
+      return;
+    }
     for (const id of ids) await deps.upsertRecord(id, { deleted: false });
     log('delete: undone for', ids.map(shortId).join(' '));
     deps.refresh();
@@ -6184,9 +6468,11 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       // the row already said which of the two it is about to do — the `+`'s
       // tooltip is written from the same setting (see viewmodel.pushProject).
       // Both verbs stay on the right-click either way, so this is a default and
-      // never a restriction.
+      // never a restriction. ON — the default since 0.2 — is the AUTO flow: a
+      // worktree per root session, the branch minted from the session's name,
+      // no dialog. The picker-and-confirm flow stays on New Worktree….
       if (deps.newSessionInWorktree?.() === true) {
-        await newWorktreeFlow(deps, id);
+        await newWorktreeSessionFlow(deps, id);
         return;
       }
       await newSessionInProjectFlow(deps, id);

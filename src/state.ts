@@ -50,6 +50,7 @@ import {
   type HiddenFolder,
   type HookInstallState,
   type LineageState,
+  type MintedBranchRecord,
   type ProjectRecord,
   type SubprojectRecord,
   type RoutingChoice,
@@ -151,6 +152,7 @@ function emptyState(): LineageState {
     projects: {},
     subprojects: {},
     hiddenFolders: {},
+    mintedBranches: {},
     chains: {},
     workspaces: {},
     accounts: {},
@@ -541,6 +543,22 @@ function sanitizeHiddenFolder(key: string, value: unknown): HiddenFolder | null 
   return { path, hiddenAt: at };
 }
 
+/** The minted-branch map key: repo pathKey and branch, newline-joined. A ref
+ *  cannot contain a newline (git-check-ref-format forbids ASCII control
+ *  characters), so the two halves cannot collide however they are spelled. */
+export function mintedBranchKey(repoDir: string, branch: string): string {
+  return `${pathKey(repoDir)}\n${branch}`;
+}
+
+function sanitizeMintedBranch(value: unknown): MintedBranchRecord | null {
+  if (!isPlainObject(value)) return null;
+  const repo = isNonEmptyString(value.repo) ? pathKey(value.repo) : '';
+  if (repo === '') return null;
+  if (!isNonEmptyString(value.branch)) return null;
+  const at = isNonEmptyString(value.mintedAt) ? value.mintedAt : nowIso();
+  return { repo, branch: value.branch, mintedAt: at };
+}
+
 function sanitizeWindow(key: string, value: unknown): WindowRecord | null {
   if (!isNonEmptyString(key)) return null;
   if (!isPlainObject(value)) return null;
@@ -817,6 +835,7 @@ export function migrateState(raw: unknown): LineageState {
   if (version < 6) working = migrateV5ToV6(working);
   // v6 -> v7 is purely additive: named subprojects arrive as an empty map, so
   // every project keeps drawing exactly the directory rows it drew before.
+  // v7 -> v8 likewise: minted-branch records arrive as an empty map.
 
   const out: Record<string, unknown> = { ...working }; // keeps unknown keys
 
@@ -915,6 +934,21 @@ export function migrateState(raw: unknown): LineageState {
     }
   }
   out.hiddenFolders = hiddenFolders;
+
+  // v8 added the MINTED-BRANCH records. Purely additive: an older file yields
+  // the empty map, and a branch with no record never gets a delete offer —
+  // the conservative direction for missing data, here as everywhere. Re-keyed
+  // from the record's own fields on every load, the way hidden folders are,
+  // so a hand-edited key cannot make two entries disagree about one ref.
+  const mintedBranches: Record<string, MintedBranchRecord> = {};
+  if (isPlainObject(working.mintedBranches)) {
+    for (const [key, value] of Object.entries(working.mintedBranches)) {
+      const rec = sanitizeMintedBranch(value);
+      if (rec) mintedBranches[mintedBranchKey(rec.repo, rec.branch)] = rec;
+      else log('state: dropped unusable minted-branch record', key);
+    }
+  }
+  out.mintedBranches = mintedBranches;
 
   // v3 added the generation chains. Purely additive, exactly like v1 -> v2: an
   // older file simply yields the empty map.
@@ -1092,6 +1126,16 @@ export function mergeStates(
     disk.hiddenFolders,
     mem.hiddenFolders,
     (f) => f.hiddenAt ?? '',
+  );
+
+  // A minted-branch record is the same shape of fact as a hidden folder — a
+  // marker with nothing to merge field-wise — so the merge is the same
+  // per-key newest-wins. A prune only sticks if the other window is not
+  // simultaneously re-minting the ref, which is the intended semantics.
+  out.mintedBranches = newerWins(
+    disk.mintedBranches,
+    mem.mintedBranches,
+    (b) => b.mintedAt ?? '',
   );
 
   // Chains are append-mostly member SETS, so newest-wins would drop a member
@@ -1807,6 +1851,65 @@ export class StateStore implements DisposableLike {
       if (!isPlainObject(state.hiddenFolders)) state.hiddenFolders = {};
       for (const existing of Object.keys(state.hiddenFolders)) {
         if (pathKey(existing) === key) delete state.hiddenFolders[existing];
+      }
+    });
+  }
+
+  // --------------------------------------------------------- minted branches
+
+  /** Record that Flock created `branch` (`git worktree add -b`). Written once,
+   *  from the verb that ran the add — never from a probe or a poll. */
+  recordMintedBranch(repoDir: string, branch: string): Promise<void> {
+    const repo = pathKey(repoDir);
+    if (repo === '' || branch === '') return Promise.resolve();
+    return this.enqueue((state, stamp) => {
+      if (!isPlainObject(state.mintedBranches)) state.mintedBranches = {};
+      state.mintedBranches[mintedBranchKey(repo, branch)] = {
+        repo,
+        branch,
+        mintedAt: stamp,
+      };
+    });
+  }
+
+  /** Whether Flock created `branch` — what earns the delete OFFER when its
+   *  worktree is removed. Absent means no offer, which is the right reading
+   *  for a ref minted by another tool, by hand, or by a build before v8. */
+  isMintedBranch(repoDir: string, branch: string): boolean {
+    const repo = pathKey(repoDir);
+    if (repo === '' || branch === '') return false;
+    return (
+      this.memory.mintedBranches?.[mintedBranchKey(repo, branch)] !== undefined
+    );
+  }
+
+  /** Drop the record — after the ref is deleted, or found already gone. */
+  forgetMintedBranch(repoDir: string, branch: string): Promise<void> {
+    const repo = pathKey(repoDir);
+    if (repo === '' || branch === '') return Promise.resolve();
+    return this.enqueue((state) => {
+      if (!isPlainObject(state.mintedBranches)) state.mintedBranches = {};
+      delete state.mintedBranches[mintedBranchKey(repo, branch)];
+    });
+  }
+
+  /** Sweep one repository's records against the refs that still exist. Called
+   *  only from a verb that has just READ the branch list anyway (the `+`'s
+   *  auto flow) — never from a timer. A record another window's merge
+   *  resurrects is swept again on the next call, which costs nothing. */
+  pruneMintedBranches(
+    repoDir: string,
+    existing: readonly string[],
+  ): Promise<void> {
+    const repo = pathKey(repoDir);
+    if (repo === '') return Promise.resolve();
+    const live = new Set(existing);
+    return this.enqueue((state) => {
+      if (!isPlainObject(state.mintedBranches)) state.mintedBranches = {};
+      for (const [key, rec] of Object.entries(state.mintedBranches)) {
+        if (rec.repo === repo && !live.has(rec.branch)) {
+          delete state.mintedBranches[key];
+        }
       }
     });
   }

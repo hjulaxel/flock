@@ -4,6 +4,39 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **The `+` cuts a worktree per root session, and it is the default.** One
+  session, one checkout: the branch is minted from the session's name
+  (`flock 3` → `flock-3`, behind the new `lineage.git.branchPrefix` when set),
+  `git worktree add -b` runs with no dialog — it creates a directory and a
+  fresh ref and touches nothing that exists — and the status bar names both.
+  No two sessions can switch branches under each other again. Turn
+  `lineage.git.newSessionInWorktree` off for the old in-place `+`; forks stay
+  in their root's checkout either way, and a project with no repository falls
+  back to a plain session. Works without `lineage.git.branches`.
+
+### Added
+
+- **Remove Worktree decides the branch's fate, out loud.** A ref the `+`
+  minted whose every commit is on the main branch earns a second button —
+  **Remove and Delete Branch**, both commands quoted. Everything else keeps
+  the ref and the dialog says why. The delete is `git branch -d`, never `-D`:
+  git re-checks merged-ness at the moment of deletion, so a stale probe can
+  cost a refused button, never commits. Which refs Flock minted is recorded in
+  state (schema v8, additive) — refs minted by other tools are never offered.
+- **Deleting the last session in a minted worktree offers the cleanup.** One
+  non-modal toast after the Undo window: Clean Up… routes into Remove
+  Worktree, same dialogs, no shortcut. Delete only — a closed session still
+  needs its directory to resume.
+- **`shared ×2`, the shared-floor token.** A session whose checkout hosts two
+  or more root sessions says so on its branch line, in amber, with the hover
+  spelling out why it matters and the way out. Quiet below two.
+- **`lineage.git.branchPrefix`** — what minted branch names start with
+  (`axel/` → `axel/flock-3`, the Claude Squad convention). Blank by default.
+
 ## [0.1.5] — 2026-08-14
 
 ### Upgrading from 0.1.4

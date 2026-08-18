@@ -81,10 +81,25 @@ adds a project whose rows are fabricated.
 
 ### Making and unmaking worktrees
 
-Everything in this section needs `lineage.git.branches`, which is **off** — see
+**The `+` cuts a worktree per session, by default.** With
+`lineage.git.newSessionInWorktree` on — and it ships on — the `+` on a project
+row starts every root session in a fresh checkout of its own: the branch is
+minted from the session's name (`flock 3` → `flock-3`, behind
+`lineage.git.branchPrefix` when one is set), `git worktree add -b` runs with no
+dialog — it creates a directory and a fresh ref and touches nothing that exists
+— and the status bar names both. One session, one checkout is what makes "all
+my sessions switched branch at once" impossible: no two roots share a floor, so
+nobody's `git checkout` moves anybody else. Forks stay in their root's
+checkout, a project with no readable repository falls back to a plain session,
+and the minted ref is recorded as Flock's own — which is what the removal verb
+reads back later. This is the one part of the worktree feature that does NOT
+need `lineage.git.branches`.
+
+Everything else in this section needs `lineage.git.branches`, which is **off**
+— see
 [Branches and worktrees are parked](../README.md#branches-and-worktrees-are-parked).
-With it off, none of these verbs is in a menu or in the palette, and nothing here
-can run.
+With it off, none of these verbs is in a menu or in the palette, and nothing
+here can run.
 
 **New Worktree…** is on a branch row and in the command palette. It offers the repository's local branches — minus any that
 already have a checkout, which `git worktree add` refuses — plus **New branch…**
@@ -102,8 +117,24 @@ inside the one you are removing (Flock cannot stop an agent mid-turn, and will n
 pretend the removal is unrelated to it). And it asks a **second** time when the
 checkout is dirty: `git worktree remove` refuses a worktree with modified or
 untracked files, so getting past that needs `--force`, and `--force` deletes them.
-The branch itself always survives — only the checkout goes away — so a worktree
-you remove can be added back.
+
+**The branch's fate is the dialog's second question**, and the rule is the
+field's: you only delete what you minted. A ref the `+` created whose every
+commit is already on the main branch gets a second button — **Remove and Delete
+Branch**, with both commands quoted in the dialog. Every other case keeps the
+ref, and the dialog says which case this was: a branch Flock did not create is
+never offered ("the branch itself is kept"), and a minted one with commits main
+does not have says how many and keeps it. The delete is `git branch -d` —
+lowercase, never `-D` — so git re-checks merged-ness at the moment of deletion:
+a stale probe can cost a refused button, never commits.
+
+**Deleting the last session in a minted worktree offers the cleanup.** One
+non-modal toast, after the delete's Undo window has passed: `"axel/x" has no
+sessions left. Clean up its worktree?` — and **Clean Up…** routes into Remove
+Worktree, same dialogs, no shortcut. Delete only, never close: a closed session
+is one click from resuming, and resuming needs its directory. A gesture that
+empties several worktrees at once offers nothing, and the verb stays on the
+branch row's right-click.
 
 ### The two display modes
 
@@ -175,6 +206,14 @@ It is a `detailed`-level mark: `standard` reaches nothing but the local status
 cache, and a green arrow in it would be drawn from a source that level does not
 otherwise consult. The native tree draws the same five marks in the same five
 colours on its branch rows, from the same table.
+
+**`shared ×2`, in amber, is the shared-floor token**: two or more root sessions
+of the project are running in this one checkout, which is exactly the state
+where somebody's `git checkout` changes the branch under everybody standing
+there. Roots only — a fork staying in its root's worktree is the designed
+shape, not the hazard — and it draws only at two and up, so the quiet default
+costs no width. The row's hover says it in sentences, in both display modes,
+and ends with the way out: New Worktree… gives each its own.
 
 The **`*` for uncommitted work sits against the branch name**, not out with the
 arrows. `↑4 ↓3` is where this checkout stands against its *upstream*; the star is

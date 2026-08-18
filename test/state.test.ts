@@ -16,6 +16,7 @@ import {
   mergeChainRecords,
   mergeStates,
   migrateState,
+  mintedBranchKey,
   nowIso,
 } from '../src/state';
 import {
@@ -92,6 +93,8 @@ function state(partial: Partial<LineageState> = {}): LineageState {
     // on an empty object.
     subprojects: {},
     hiddenFolders: {},
+    // v8, on the same terms.
+    mintedBranches: {},
     chains: {},
     workspaces: {},
     // `migrateState` materialises both on every load, so a state
@@ -2345,5 +2348,118 @@ describe('state: named subprojects', () => {
       'From A',
       'From B',
     ]);
+  });
+});
+
+describe('minted branches', () => {
+  const REPO = '/tmp/app';
+
+  it('round-trips a record and answers isMintedBranch', async () => {
+    const dir = tempDir();
+    const store = makeStore(dir);
+    await store.load();
+    await store.recordMintedBranch(REPO, 'axel/flock-3');
+    expect(store.isMintedBranch(REPO, 'axel/flock-3')).toBe(true);
+    expect(store.isMintedBranch(REPO, 'axel/other')).toBe(false);
+    expect(store.isMintedBranch('/tmp/elsewhere', 'axel/flock-3')).toBe(false);
+
+    // A second store over the same file sees the record — the whole point of
+    // persisting it: the delete offer must survive the window that minted it.
+    const again = makeStore(dir);
+    await again.load();
+    expect(again.isMintedBranch(REPO, 'axel/flock-3')).toBe(true);
+  });
+
+  it('compares the repo by pathKey, not by spelling', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.recordMintedBranch('/tmp/app/', 'x');
+    expect(store.isMintedBranch('/tmp/app', 'x')).toBe(true);
+  });
+
+  it('forgets a record, and pruning sweeps only the named repository', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.recordMintedBranch(REPO, 'gone');
+    await store.recordMintedBranch(REPO, 'kept');
+    await store.recordMintedBranch('/tmp/other', 'gone');
+
+    await store.forgetMintedBranch(REPO, 'gone');
+    expect(store.isMintedBranch(REPO, 'gone')).toBe(false);
+    expect(store.isMintedBranch(REPO, 'kept')).toBe(true);
+
+    // Prune against the refs that still exist: 'kept' is not among them, so
+    // its record goes; the other repository's record is not this sweep's to
+    // touch.
+    await store.pruneMintedBranches(REPO, ['main']);
+    expect(store.isMintedBranch(REPO, 'kept')).toBe(false);
+    expect(store.isMintedBranch('/tmp/other', 'gone')).toBe(true);
+  });
+
+  it('refuses empty inputs rather than minting a record for nothing', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.recordMintedBranch('', 'x');
+    await store.recordMintedBranch(REPO, '');
+    // So complete a refusal that no state.json is even written: a refused
+    // mutator never enqueues, and load() alone writes nothing.
+    expect(fs.existsSync(path.join(store.storageDir, 'state.json'))).toBe(false);
+    expect(store.isMintedBranch('', 'x')).toBe(false);
+    expect(store.isMintedBranch(REPO, '')).toBe(false);
+  });
+
+  it('sanitizes a seeded file: re-keys good records, drops the unusable', async () => {
+    const dir = tempDir();
+    seedStateFile(dir, {
+      version: 8,
+      records: {},
+      windows: {},
+      mintedBranches: {
+        'hand-edited-key': { repo: '/tmp/app/', branch: 'x', mintedAt: nowIso() },
+        'no-branch': { repo: '/tmp/app', mintedAt: nowIso() },
+        'no-repo': { branch: 'y', mintedAt: nowIso() },
+        'not-an-object': 'nope',
+      },
+    });
+    const store = makeStore(dir);
+    await store.load();
+    // The good record answers under its canonical key, whatever key it sat
+    // under on disk.
+    expect(store.isMintedBranch('/tmp/app', 'x')).toBe(true);
+    expect(store.isMintedBranch('/tmp/app', 'y')).toBe(false);
+  });
+
+  it('merges as a union across two windows', () => {
+    const a = migrateState({
+      version: 8,
+      records: {},
+      windows: {},
+      mintedBranches: {
+        [mintedBranchKey('/tmp/app', 'from-a')]: {
+          repo: '/tmp/app',
+          branch: 'from-a',
+          mintedAt: nowIso(),
+        },
+      },
+    });
+    const b = migrateState({
+      version: 8,
+      records: {},
+      windows: {},
+      mintedBranches: {
+        [mintedBranchKey('/tmp/app', 'from-b')]: {
+          repo: '/tmp/app',
+          branch: 'from-b',
+          mintedAt: nowIso(),
+        },
+      },
+    });
+    const merged = mergeStates(a, b);
+    expect(Object.keys(merged.mintedBranches ?? {}).sort()).toEqual(
+      [
+        mintedBranchKey('/tmp/app', 'from-a'),
+        mintedBranchKey('/tmp/app', 'from-b'),
+      ].sort(),
+    );
   });
 });

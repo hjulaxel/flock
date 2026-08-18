@@ -1686,8 +1686,13 @@
         },
         "lineage.git.newSessionInWorktree": {
           "type": "boolean",
-          "default": false,
-          "markdownDescription": "Make the **`+` on a project or subproject row** cut a **new worktree** first and start the session there, instead of starting it in the directory as it is.\n\nOne agent per checkout is the reason most people turn the branch feature on at all, and with this off that workflow costs a right-click every time. It changes the **button's default and nothing else**: both verbs — **New Session** and **New Session in New Worktree…** — are on the row's right-click whichever way this points, and the row's `+` says in its tooltip which one it is about to run.\n\nThe worktree half still confirms and still quotes the exact `git worktree add` before running it, and it uses `#lineage.git.worktreePath#` to decide where. Needs `#lineage.git.branches#` on."
+          "default": true,
+          "markdownDescription": "The **`+` on a project row** cuts a **new worktree** first and starts the session there \u2014 one root session, one checkout, which is what keeps two sessions from ever switching branch under each other. The branch is minted from the session's name (`flock 3` \u2192 `flock-3`, with `#lineage.git.branchPrefix#` in front when set) and recorded as Flock's own, which is what later earns it the delete offer in **Remove Worktree**.\n\nNo dialog: `git worktree add -b` creates a directory and a fresh ref and touches nothing that exists \u2014 the status-bar receipt names both, and a project without a readable repository falls back to a plain session in the directory.\n\nTurn it **off** to make `+` start sessions in the project directory as before; **New Worktree\u2026** stays on the right-click either way, and `#lineage.git.worktreePath#` decides where the checkout goes. Does not need `#lineage.git.branches#` on."
+        },
+        "lineage.git.branchPrefix": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "What minted branch names start with \u2014 `axel/` puts every branch the `+` creates under your own namespace, the Claude Squad convention (`axel/flock-3`). Applies only where Flock names a branch itself; names typed into **New Worktree\u2026** are yours and get no prefix. Slashes make hierarchy; anything a ref cannot carry is replaced by `-`. Blank (the default) contributes nothing."
         },
         "lineage.preview.directoryModel": {
           "type": "boolean",
