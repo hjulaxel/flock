@@ -51,6 +51,7 @@ import {
   credentialsPathFor,
   IDENTITY_FILE,
   formatUsageSummary,
+  resetInLabel,
   keychainServiceFor,
   parseResetAt,
   parseUsageBody,
@@ -339,6 +340,40 @@ describe('formatUsageSummary', () => {
 
   it('no resetsAt anywhere omits the arrow entirely', () => {
     expect(formatUsageSummary(snap({ fiveHour: { utilization: 10 } }))).toBe('5h 10%');
+  });
+
+  it('a five-hour resetsAt puts the time LEFT on the 5h segment, same arrow as the weekly day', () => {
+    const now = Date.parse('2026-03-09T12:00:00.000Z');
+    expect(
+      formatUsageSummary(
+        snap({
+          fiveHour: { utilization: 62, resetsAt: now + (2 * 60 + 10) * 60_000 },
+          sevenDay: { utilization: 41, resetsAt: RESET_AT },
+        }),
+        now,
+      ),
+    ).toBe(`5h 62% → 2h 10m · wk 41% → ${DAY}`);
+  });
+
+  it('a five-hour reset already behind the clock says nothing — a stale duration is worse than none', () => {
+    const now = Date.parse('2026-03-09T12:00:00.000Z');
+    expect(
+      formatUsageSummary(
+        snap({ fiveHour: { utilization: 62, resetsAt: now - 60_000 } }),
+        now,
+      ),
+    ).toBe('5h 62%');
+  });
+
+  it('resetInLabel: minutes under the hour, exact hours, hours-and-minutes, floor at 1m', () => {
+    const now = 1_000_000_000_000;
+    expect(resetInLabel(now + 45 * 60_000, now)).toBe('45m');
+    expect(resetInLabel(now + 3 * 3_600_000, now)).toBe('3h');
+    expect(resetInLabel(now + (60 + 20) * 60_000, now)).toBe('1h 20m');
+    expect(resetInLabel(now + 10_000, now)).toBe('1m');
+    expect(resetInLabel(now, now)).toBe('');
+    expect(resetInLabel(undefined, now)).toBe('');
+    expect(resetInLabel(Number.NaN, now)).toBe('');
   });
 
   it('percentLabel never rounds up to 100 unless the value already is 100', () => {

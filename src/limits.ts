@@ -594,9 +594,42 @@ function weeklyReset(snapshot: UsageSnapshot): number | undefined {
 }
 
 /**
+ * How long until a window rolls over — "1h 20m", "45m" — or '' when the
+ * timestamp is absent, unreadable, or already behind us. A duration rather
+ * than a clock time because the five-hour window is the one this decorates,
+ * and "can I keep working here" is a question about hours left, not about
+ * what the clock will say. (The WEEKLY reset stays a weekday for the same
+ * reason in reverse: days out, the calendar is the answer.)
+ *
+ * Exported for the same reason `weekdayFor` is: the test builds its
+ * expectation from the function instead of hardcoding arithmetic.
+ */
+export function resetInLabel(
+  resetsAt: number | undefined,
+  now: number,
+): string {
+  if (typeof resetsAt !== 'number' || !Number.isFinite(resetsAt)) return '';
+  const ms = resetsAt - now;
+  if (ms <= 0) return '';
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 60) return `${String(Math.max(1, minutes))}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    const rest = minutes % 60;
+    return rest === 0 ? `${String(hours)}h` : `${String(hours)}h ${String(rest)}m`;
+  }
+  return `${String(Math.round(hours / 24))}d`;
+}
+
+/**
  * The one line the accounts view puts under an account's name.
  *
- *   "5h 62% · wk 41% → Tue"   numbers, weekly rollover day
+ *   "5h 62% → 1h 20m · wk 41% → Tue"   numbers, five-hour time left, weekly
+ *                             rollover day. The five-hour arrow answers the
+ *                             question the percentage cannot: 90% with ten
+ *                             minutes to go and 90% with four hours to go are
+ *                             opposite answers to "start another session
+ *                             here?" — same rule the weekly arrow follows.
  *   "5h 62% · wk 41% · stale" the same, served from a cache we no longer trust
  *   "a@b.c · usage unavailable"  signed in (identity file says so) but the
  *                             credential could not be read — the state that
@@ -616,14 +649,24 @@ function weeklyReset(snapshot: UsageSnapshot): number | undefined {
  * line that matters. A snapshot that EXISTS and carries nothing is different:
  * something answered and we could not use it, which is worth a word.
  *
- * Pure string building, no clock beyond the timestamps in the snapshot, so the
- * test lane can pin every one of these.
+ * Pure string building. The clock arrives as an argument — defaulted to the
+ * wall clock for the one live caller — so the test lane can still pin every
+ * one of these.
  */
-export function formatUsageSummary(snapshot: UsageSnapshot | null | undefined): string {
+export function formatUsageSummary(
+  snapshot: UsageSnapshot | null | undefined,
+  now: number = Date.now(),
+): string {
   if (snapshot === null || snapshot === undefined) return '';
 
   const parts: string[] = [];
-  if (snapshot.fiveHour) parts.push(`5h ${percentLabel(snapshot.fiveHour.utilization)}`);
+  if (snapshot.fiveHour) {
+    const left = resetInLabel(snapshot.fiveHour.resetsAt, now);
+    parts.push(
+      `5h ${percentLabel(snapshot.fiveHour.utilization)}` +
+        (left === '' ? '' : ` → ${left}`),
+    );
+  }
   if (snapshot.sevenDay) parts.push(`wk ${percentLabel(snapshot.sevenDay.utilization)}`);
   if (snapshot.sevenDayOpus) parts.push(`opus ${percentLabel(snapshot.sevenDayOpus.utilization)}`);
 
