@@ -402,6 +402,12 @@
         "icon": "$(git-branch)"
       },
       {
+        "command": "lineage.recommendedSetup",
+        "title": "Recommended Setup...",
+        "category": "Flock",
+        "icon": "$(checklist)"
+      },
+      {
         "command": "lineage.settingsMenu",
         "title": "Settings and Housekeeping...",
         "category": "Flock",
@@ -1424,7 +1430,7 @@
       {
         "view": "lineageSessions",
         "when": "!lineage.onlyActive",
-        "contents": "No Claude Code sessions here yet — Flock starts with a clean slate.\n[New Project](command:lineage.newProject)\n[New Claude Session](command:lineage.newSession)\nA project is a name and a directory; every session running in it groups under it. Add a second directory later and each one gets a row of its own.\n[Import Previous Sessions...](command:lineage.importSessions)\nSessions from before Flock — or running in some other terminal — stay off the tree until you import them, all at once or one folder at a time.\nIf sessions you started here are missing, set `lineage.claudeBinary` to the full path of your claude CLI."
+        "contents": "No Claude Code sessions here yet — Flock starts with a clean slate.\n[Recommended Setup...](command:lineage.recommendedSetup)\nA checklist of what a fresh install should turn on, with the reason on every line. You tick what you want; nothing is written until you do.\n[New Project](command:lineage.newProject)\n[New Claude Session](command:lineage.newSession)\nA project is a name and a directory; every session running in it groups under it. Add a second directory later and each one gets a row of its own.\n[Import Previous Sessions...](command:lineage.importSessions)\nSessions from before Flock — or running in some other terminal — stay off the tree until you import them, all at once or one folder at a time.\nIf sessions you started here are missing, set `lineage.claudeBinary` to the full path of your claude CLI."
       },
       {
         "view": "lineageSessions",
@@ -1722,17 +1728,28 @@
       {
         "id": "flockGettingStarted",
         "title": "Get started with Flock",
-        "description": "Three things worth knowing before you run six agents at once.",
+        "description": "Four things worth knowing before you run six agents at once.",
         "steps": [
           {
             "id": "flock.sessions",
-            "title": "Your sessions are already here",
-            "description": "Flock reads the Claude Code CLI's own session registry, so anything you have run `claude` on shows up with no setup.\n[Open the Sessions view](command:workbench.view.extension.lineage)",
+            "title": "The tree starts empty",
+            "description": "Nothing you ran before Flock, and nothing running in another terminal, appears until you say so \u2014 and nothing rings the bell either. Two doors bring your history in.\n[Open the Sessions view](command:workbench.view.extension.lineage)",
             "media": {
               "markdown": "media/walkthrough/sessions.md"
             },
             "completionEvents": [
               "onCommand:lineage.refresh"
+            ]
+          },
+          {
+            "id": "flock.setup",
+            "title": "Turn on the parts that are off",
+            "description": "Some of the best of Flock is off until you ask, because turning it on writes files in your home directory. The checklist says what each one does, and you tick what you want.\n[Recommended Setup...](command:lineage.recommendedSetup)",
+            "media": {
+              "markdown": "media/walkthrough/setup.md"
+            },
+            "completionEvents": [
+              "onCommand:lineage.recommendedSetup"
             ]
           },
           {

@@ -8,6 +8,25 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Added
 
+- **A recommended setup, that says why — `Flock: Recommended Setup`.**
+  Seventeen settings ship off, and the two that matter most are off for a
+  reason that has nothing to do with whether you want them: instant updates
+  and the in-session verbs write files in your home directory, so neither
+  could switch itself on. Nothing ever asked, so nobody had them. This is the
+  thing that asks: a checklist with a line per step — what it does, what it
+  writes — every worthwhile one pre-ticked, and nothing written until you
+  confirm. It can turn tmux back on, make your first project, open the import
+  door, install either of the two consent-gated features, and offer the branch
+  rows *unticked* (and only when a repository of yours really has two
+  checkouts). It never touches the four settings that **are** the clean slate,
+  and it never turns on `lineage.git.pullRequests`, the one setting that
+  reaches the network. A step you decline does not stop the rest, and the
+  receipt says how to undo each thing it set up. On the empty view, in the gear
+  menu, in the palette — and offered once, unprompted, on a window with no
+  projects and at least two things left to do. What is offered is decided by
+  `recommendedPlan` in `src/recommend.ts`, which is pure and tested; no new
+  setting was added for any of it.
+
 - **The accounts row says how long the five-hour window has left.** The weekly
   meter always named its rollover day (`wk 41% → Tue`); the five-hour meter —
   the number that actually decides whether to start another session — showed
@@ -50,6 +69,14 @@ All notable changes to Flock are recorded here. The format follows
   open sessions to pick the skill text up.
 
 ### Fixed
+
+- **The walkthrough no longer promises the tree Flock stopped drawing.** Its
+  first step was still titled *"Your sessions are already here"* and told a new
+  user that "anything you have ever run `claude` on shows up in the sidebar on
+  its own. Nothing to connect. No configuration." That was true until 0.1.5's
+  clean slate made it false, so the first screen of onboarding contradicted the
+  empty tree behind it. It is now the clean slate and its two doors, followed by
+  a new step for the recommended setup.
 
 - **"Show all sessions" no longer re-expands every fold the filter was
   hiding.** With **Show Only Active Sessions** on, the inline tree pruned the

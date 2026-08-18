@@ -4,6 +4,55 @@ The depth that does not belong on a marketplace page. For the pitch and the
 feature list, see the [README](../README.md); for every setting, see
 [settings.md](settings.md).
 
+## The recommended setup
+
+**Flock: Recommended Setup** — on the empty view, in the gear menu, in the
+palette — is a checklist of what a fresh install should turn on, with the reason
+on every line.
+
+It exists because "off by default" means four different things here, and only
+one of them means "you probably do not want this":
+
+| Why it ships off | Settings | What the checklist does |
+| --- | --- | --- |
+| **Consent** — turning it on writes files in your home directory | `hooks.enabled`, `verbs.enabled` | Offers them, ticked. This is the group it is for. |
+| **Policy** — it *is* the clean slate | `showForeignSessions`, `showArchived`, `showPhantomRows`, `onlyProjectSessions` | Never touches them. |
+| **Row budget** — it works, and it costs rows | `git.branches` and the five beside it | Offers `git.branches`, unticked, and only when one of your repositories actually has two checkouts. |
+| **Taste** | `soloSession`, `showTokens`, `notifications.popup`, the previews, `accounts.offerSwitchAtLimit` | Leaves them in the settings UI. |
+
+Everything the checklist can offer:
+
+| Step | Offered when | Ticked | Writes |
+| --- | --- | --- | --- |
+| **Turn tmux back on** | tmux is installed and `lineage.tmux` is `off` | yes | `lineage.tmux: auto` |
+| **Make your first project** | you have no projects | yes | nothing on disk — a folder dialog |
+| **Import your previous sessions (N)** | this machine has sessions with no row | yes | a row per session you tick |
+| **Instant updates (hooks)** | not installed | yes | a plugin directory under `~/.claude/skills` |
+| **Let Claude fork its own sessions** | not installed | yes | a skill file and a small CLI |
+| **Show branch and worktree rows** | a repository of yours has ≥2 checkouts, rows off | **no** | `lineage.git.branches` alone |
+
+Four rules it keeps:
+
+- **Nothing is written until you confirm**, and every line says what it writes
+  before you tick it. The two steps that write *files* then open their own
+  dialog naming every path — the same consent the two Install verbs have always
+  asked for, unchanged.
+- **The receipt says how to undo each thing** it set up, per step.
+- **A step you decline does not stop the rest.** Closing the folder dialog, or
+  saying no to the hooks consent, is an answer about that step.
+- **It never turns on `lineage.git.pullRequests`.** That is the one setting in
+  Flock that reaches the network, and a command called "recommended" is not the
+  thing that should switch it on. **Flock: Show Branches and Worktrees** is
+  still there for somebody who wants the whole branch feature, network chip
+  included — see [Turning it all on at once](#turning-it-all-on-at-once).
+
+It is also **offered once, unprompted**, a few seconds after a window opens —
+but only on a tree with no projects at all and at least two things left to turn
+on, which is a first launch or near enough. Answering it either way is the end
+of it; dismissing it with the X asks again next time. The same shape as the tmux
+and branch-row notices, and whichever of them fires suppresses the others for
+that session.
+
 ## How it works
 
 Every window independently polls `claude agents --json` — the CLI's own

@@ -14,6 +14,7 @@ import {
   adoptBackgroundJob,
   chatFlow,
   importSessionsFlow,
+  recommendedSetupFlow,
   chatSystemPrompt,
   configureProjectFlow,
   defaultForkTitle,
@@ -54,6 +55,7 @@ import type {
   EditorialRecord,
   LaunchOptions,
   ProjectRecord,
+  RecommendedWorld,
   RoutingChoice,
   SessionForest,
   SessionNode,
@@ -4171,6 +4173,10 @@ describe('the add / import flows', () => {
     reveals: string[];
     infos: string[];
     warnings: string[];
+    /** The recommended setup's two side effects, in the order they landed. */
+    settings: { key: string; value: boolean | string }[];
+    installs: string[];
+    projectDirs: string[];
   }
 
   function poolDeps(over: {
@@ -4179,6 +4185,15 @@ describe('the add / import flows', () => {
     forest?: SessionForest;
     hasTranscript?: (id: string) => boolean;
     tipOf?: (id: string) => string;
+    /** null = a wiring that cannot answer, which is what an older host and
+     *  every double that does not care about the setup looks like. */
+    world?: RecommendedWorld | null;
+    /** Keys `writeSettings` should report it could not write. */
+    unwritable?: string[];
+    /** What the two installers report back. Declining the consent modal is
+     *  `installed: false`, which is an answer rather than a failure. */
+    hooksInstall?: boolean;
+    verbsInstall?: boolean;
   } = {}): { deps: CommandDeps; calls: PoolCalls } {
     const calls: PoolCalls = {
       upserts: [],
@@ -4186,6 +4201,9 @@ describe('the add / import flows', () => {
       reveals: [],
       infos: [],
       warnings: [],
+      settings: [],
+      installs: [],
+      projectDirs: [],
     };
     const nope = (): never => {
       throw new Error('not used by the add/import flows');
@@ -4219,16 +4237,39 @@ describe('the add / import flows', () => {
       closeTerminal: () => false,
       focusWindowFor: async () => false,
       openProject: async () => undefined,
-      installHooks: nope,
+      installHooks: async () => {
+        calls.installs.push('hooks');
+        return { installed: over.hooksInstall ?? true };
+      },
       removeHooks: nope,
       getHookState: () => ({ installed: false }),
-      setHooksEnabled: async () => undefined,
+      setHooksEnabled: async (enabled) => {
+        calls.installs.push(`hooks.enabled=${String(enabled)}`);
+      },
+      installAgentVerbs: async () => {
+        calls.installs.push('verbs');
+        return { installed: over.verbsInstall ?? true };
+      },
+      setAgentVerbsEnabled: async (enabled) => {
+        calls.installs.push(`verbs.enabled=${String(enabled)}`);
+      },
+      recommendedWorld:
+        over.world === null ? undefined : async () => over.world ?? settledWorld,
+      writeSettings: async (entries) => {
+        for (const entry of entries) calls.settings.push({ ...entry });
+        return (over.unwritable ?? []).filter((k) =>
+          entries.some((e) => e.key === k),
+        );
+      },
       allProjects: () => projects,
       getProject: (id) => projects.find((p) => p.id === id),
       getBranches: () => [],
       setBranchShown: async () => undefined,
       setBranchesShown: async () => undefined,
-      upsertProject: async () => undefined,
+      upsertProject: async (_id, patch) => {
+        const dir = (patch as { rootDir?: string }).rootDir;
+        if (dir !== undefined) calls.projectDirs.push(dir);
+      },
       setProjectParent: async () => true,
       deleteProject: async () => undefined,
       hiddenFolders: () => [],
@@ -4280,16 +4321,27 @@ describe('the add / import flows', () => {
   function scriptPicks(...answers: (string | string[] | undefined)[]): {
     offered: string[][];
     many: boolean[];
+    /** Which rows arrived TICKED. The recommended setup's whole claim is that
+     *  the defaults are considered, so what it pre-ticks is an assertion. */
+    picked: string[][];
   } {
-    const state = { offered: [] as string[][], many: [] as boolean[] };
+    const state = {
+      offered: [] as string[][],
+      many: [] as boolean[],
+      picked: [] as string[][],
+    };
     let at = 0;
     host.showQuickPick = async (items: unknown, opts?: unknown) => {
       const list = (Array.isArray(items) ? items : []) as {
         label?: string;
         kind?: number;
+        picked?: boolean;
       }[];
       const rows = list.filter((i) => i.kind === undefined);
       state.offered.push(rows.map((i) => i.label ?? ''));
+      state.picked.push(
+        rows.filter((i) => i.picked === true).map((i) => i.label ?? ''),
+      );
       state.many.push(
         (opts as { canPickMany?: boolean } | undefined)?.canPickMany === true,
       );
@@ -4337,6 +4389,21 @@ describe('the add / import flows', () => {
     id: string,
     over: Partial<UnlistedSession> = {},
   ): UnlistedSession => ({ sessionId: id, live: false, ...over });
+
+  /** A machine with nothing left to recommend. Each setup test moves exactly
+   *  the fields it is about, so what it is testing is what it changed. */
+  const settledWorld: RecommendedWorld = {
+    platform: 'darwin',
+    tmuxBinary: '/opt/homebrew/bin/tmux',
+    tmuxMode: 'auto',
+    hooksInstalled: true,
+    verbsInstalled: true,
+    verbsAvailable: true,
+    hasProjects: true,
+    unlistedCount: 0,
+    branchRowsEnabled: false,
+    maxWorktrees: 1,
+  };
 
   describe('addSessionToProjectFlow', () => {
     it('offers only the sessions this project claims, and adopting one writes cwd', async () => {
@@ -4500,6 +4567,155 @@ describe('the add / import flows', () => {
       await importSessionsFlow(deps);
       expect(calls.upserts).toEqual([]);
       expect(calls.refreshes).toBe(0);
+    });
+  });
+
+  // ------------------------------------------------------ recommended setup
+  //
+  // The third door of the same problem, and the widest: the clean slate decides
+  // what is IN the tree, and this decides what is switched ON around it. What is
+  // offered is `recommendedPlan`'s (test/recommend.test.ts); what is asserted
+  // here is that a tick becomes exactly the side effect it promised, that an
+  // untick becomes none, and that one step saying no does not silence the rest.
+  describe('recommendedSetupFlow', () => {
+    const HOOKS = 'Instant updates (hooks)';
+    const VERBS = 'Let Claude fork its own sessions';
+    const PROJECT = 'Make your first project';
+    const BRANCHES = 'Show branch and worktree rows';
+
+    beforeEach(() => {
+      // newProjectFlow names the project it just made, and falls back to this
+      // command when there is no inline rename to run.
+      (mockCommands as { executeCommand?: unknown }).executeCommand =
+        async () => undefined;
+    });
+
+    afterEach(() => {
+      delete (mockCommands as { executeCommand?: unknown }).executeCommand;
+      delete (mockWindow as { showOpenDialog?: unknown }).showOpenDialog;
+    });
+
+    it('says so, and asks nothing, where the wiring cannot answer', async () => {
+      const { deps, calls } = poolDeps({ world: null });
+      const asked = scriptPicks();
+      await recommendedSetupFlow(deps);
+      expect(asked.offered).toEqual([]);
+      expect(saidInfo.join(' ')).toContain('not available in this window');
+      expect(calls.settings).toEqual([]);
+    });
+
+    it('reports a machine with nothing left to do, and adds the notes', async () => {
+      const { deps, calls } = poolDeps({
+        world: { ...settledWorld, tmuxBinary: null },
+      });
+      await recommendedSetupFlow(deps);
+      expect(saidInfo.join(' ')).toContain('already set up');
+      // The one thing it cannot do for you is still said.
+      expect(saidInfo.join(' ')).toContain('tmux is not installed');
+      expect(calls.settings).toEqual([]);
+    });
+
+    it('ticks what recommendedPlan recommends, and leaves the rest alone', async () => {
+      const { deps } = poolDeps({
+        world: { ...settledWorld, hooksInstalled: false, maxWorktrees: 3 },
+      });
+      const asked = scriptPicks(undefined);
+      await recommendedSetupFlow(deps);
+      expect(asked.many).toEqual([true]);
+      expect(asked.offered[0]).toEqual([HOOKS, BRANCHES]);
+      expect(asked.picked[0]).toEqual([HOOKS]);
+    });
+
+    it('installs and enables, in that order, for a ticked hooks step', async () => {
+      const { deps, calls } = poolDeps({
+        world: { ...settledWorld, hooksInstalled: false, verbsInstalled: false },
+      });
+      scriptPicks([HOOKS, VERBS]);
+      await recommendedSetupFlow(deps);
+      // Install is the opt-in: the plugin only makes Claude WRITE the events,
+      // and the setting is the half that reads them.
+      expect(calls.installs).toEqual([
+        'hooks',
+        'hooks.enabled=true',
+        'verbs',
+        'verbs.enabled=true',
+      ]);
+      expect(saidInfo.join(' ')).toContain('Remove Instant-Update Hooks');
+    });
+
+    it('does not enable a reader for an install the user declined', async () => {
+      const { deps, calls } = poolDeps({
+        world: { ...settledWorld, hooksInstalled: false },
+        hooksInstall: false,
+      });
+      scriptPicks([HOOKS]);
+      await recommendedSetupFlow(deps);
+      // Declining the consent modal is an ANSWER: nothing installed, so nothing
+      // to switch on, and the receipt must not claim it was set up.
+      expect(calls.installs).toEqual(['hooks']);
+      expect(saidInfo.join(' ')).toContain('nothing was changed');
+    });
+
+    it('writes a settings step from its own table', async () => {
+      const { deps, calls } = poolDeps({
+        world: { ...settledWorld, maxWorktrees: 4 },
+      });
+      scriptPicks([BRANCHES]);
+      await recommendedSetupFlow(deps);
+      expect(calls.settings).toEqual([{ key: 'git.branches', value: true }]);
+      expect(saidInfo.join(' ')).toContain('Hide Branches and Worktrees');
+    });
+
+    it('names the keys it could not write, and claims nothing about them', async () => {
+      const { deps } = poolDeps({
+        world: { ...settledWorld, maxWorktrees: 4 },
+        unwritable: ['git.branches'],
+      });
+      scriptPicks([BRANCHES]);
+      await recommendedSetupFlow(deps);
+      expect(saidInfo.join(' ')).toContain('Could not set up');
+      expect(saidInfo.join(' ')).toContain('git.branches');
+    });
+
+    it('carries on past a step the user backed out of', async () => {
+      const { deps, calls } = poolDeps({
+        world: { ...settledWorld, hasProjects: false, hooksInstalled: false },
+      });
+      // The folder dialog cancelled: no project. The hooks step must still run.
+      (mockWindow as { showOpenDialog?: unknown }).showOpenDialog =
+        async () => undefined;
+      scriptPicks([PROJECT, HOOKS]);
+      await recommendedSetupFlow(deps);
+      expect(calls.projectDirs).toEqual([]);
+      expect(calls.installs).toEqual(['hooks', 'hooks.enabled=true']);
+      expect(saidInfo.join(' ')).toContain(HOOKS);
+    });
+
+    it('makes the project when the dialog answers', async () => {
+      const { deps, calls } = poolDeps({
+        world: { ...settledWorld, hasProjects: false },
+      });
+      (mockWindow as { showOpenDialog?: unknown }).showOpenDialog = async () => [
+        { fsPath: '/w/api' },
+      ];
+      scriptPicks([PROJECT]);
+      await recommendedSetupFlow(deps);
+      expect(calls.projectDirs).toEqual(['/w/api']);
+      expect(calls.refreshes).toBeGreaterThan(0);
+    });
+
+    it('writes nothing when the checklist is cancelled or emptied', async () => {
+      const { deps, calls } = poolDeps({
+        world: { ...settledWorld, hooksInstalled: false, maxWorktrees: 4 },
+      });
+      scriptPicks(undefined);
+      await recommendedSetupFlow(deps);
+      scriptPicks([]);
+      await recommendedSetupFlow(deps);
+      expect(calls.installs).toEqual([]);
+      expect(calls.settings).toEqual([]);
+      // Not even a receipt: nothing happened, and saying so twice is noise.
+      expect(saidInfo).toEqual([]);
     });
   });
 });

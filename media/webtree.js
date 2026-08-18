@@ -430,6 +430,11 @@
     };
     button('New Claude Session', 'newSession');
     if (!filtered) {
+      // FIRST of the secondary buttons, because this is the one screen every
+      // new install meets and the checklist behind it is the only place that
+      // says what the off-by-default half of Flock is FOR. The two buttons
+      // below it are both inside it as steps.
+      button('Recommended Setup…', 'recommendedSetup', true);
       button('New Project…', 'newProject', true);
       // The clean slate is deliberate — sessions from before Flock, or running
       // in some other terminal, wait behind this door instead of pouring in.

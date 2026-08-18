@@ -946,6 +946,24 @@ export const COMMANDS = {
    *  as being asked. */
   showBranchesAndWorktrees: 'lineage.showBranchesAndWorktrees',
   hideBranchesAndWorktrees: 'lineage.hideBranchesAndWorktrees',
+  /** THE ONBOARDING VERB: everything a new install should turn on, as a
+   *  checklist that says why.
+   *
+   *  Seventeen of the forty settings ship off, and only some of them are off
+   *  because the default is right — `hooks.enabled` and `verbs.enabled` are off
+   *  because turning them on writes files under the user's home directory, and
+   *  a consent gate with nothing that ever asks is a feature nobody has. This
+   *  is the thing that asks. What it will and will not offer is decided by
+   *  `recommendedPlan` in src/recommend.ts, which is pure and tested; the flow
+   *  here runs the steps that were ticked.
+   *
+   *  A CHECKLIST rather than a `showBranchesAndWorktrees`-shaped write-it-all
+   *  pair, because the two commands answer different questions. That pair is
+   *  "give me the whole branch feature", asked by somebody who already knows
+   *  what it is. This one is asked by somebody who does not know what is on
+   *  offer, so every line has to carry its own reason and its own cost — and
+   *  the answer has to be theirs, per line, before anything is written. */
+  recommendedSetup: 'lineage.recommendedSetup',
   /** The gear at the end of the view title, and everything that used to be
    *  behind the `...` beside it.
    *
@@ -1345,6 +1363,47 @@ export interface UnlistedSession {
    *  "now", and pretending to know it more precisely would just be a lie the
    *  picker sorts by). */
   endedAt?: number;
+}
+
+/**
+ * What `recommendedPlan` (src/recommend.ts) needs to know about this machine.
+ *
+ * Facts, never preferences: which settings are where, what is installed, what
+ * the tree holds, and one git probe. The preferences — what a fresh install
+ * SHOULD have, and what it should merely be offered — are what that module
+ * decides from these.
+ *
+ * It lives here rather than beside the function for the reason `UnlistedSession`
+ * does: `CommandDeps` names it, and types.ts imports nothing so that every
+ * layer can depend on it.
+ */
+export interface RecommendedWorld {
+  /** `process.platform`. */
+  readonly platform: string;
+  /** `findTmuxBinary()`, injected so tests need no PATH. */
+  readonly tmuxBinary: string | null;
+  /** `lineage.tmux`. */
+  readonly tmuxMode: string | undefined;
+  readonly hooksInstalled: boolean;
+  readonly verbsInstalled: boolean;
+  /** Whether this wiring has the verbs manager at all. Every real activation
+   *  does; a unit double need not, and a step that cannot be run must never be
+   *  offered. */
+  readonly verbsAvailable: boolean;
+  /** Any project at all, CLOSED ones included: somebody who closed their last
+   *  project has met the concept, and telling them to make their first one
+   *  would be wrong. */
+  readonly hasProjects: boolean;
+  /** Sessions this machine knows about that have no row —
+   *  `unlistedSessions().length`. */
+  readonly unlistedCount: number;
+  /** `lineage.git.branches`. */
+  readonly branchRowsEnabled: boolean;
+  /** The most checkouts any one of the user's repositories has. The same probe
+   *  `branchRowsAdvice` needs, and load-bearing for the same reason: a
+   *  single-checkout repository draws no branch rows, so offering them to its
+   *  owner is offering nothing. */
+  readonly maxWorktrees: number;
 }
 
 // ------------------------------------------------------------------ lineage results
@@ -3166,6 +3225,38 @@ export interface CommandDeps {
    *  each command knows the value it means. There is no menu labelling itself
    *  off this one, so there is nothing to read back. */
   setBranchAndWorktreeFeatures?(on: boolean): Promise<void>;
+  // ---- the recommended setup ----------------------------------------------
+  /** Everything `recommendedPlan` (src/recommend.ts) needs to decide what a
+   *  fresh install should be offered: config values, install state, whether any
+   *  project exists, the size of the unlisted pool, and the worktree probe.
+   *
+   *  ASYNC and read once, when the command runs, because one field costs a
+   *  `git worktree list` per project directory — the same probe the branch-rows
+   *  notice makes, and for the same reason it is awaited rather than read off a
+   *  cold cache: a checklist that offers branch rows to somebody with one
+   *  checkout is a checklist that guessed.
+   *
+   *  Optional: a wiring without it (and every unit double that does not care)
+   *  has the command registered and reporting that it is unavailable in this
+   *  window, which is true and actionable, rather than throwing. */
+  recommendedWorld?(): Promise<RecommendedWorld>;
+  /** Write the settings a recommended step names, returning the keys it could
+   *  NOT write (a read-only profile, a sync conflict) so the flow can say which
+   *  ones are still where they were.
+   *
+   *  The one table-driven setter in this interface, and it is table-driven
+   *  because the table is the feature: which settings "recommended" means lives
+   *  in src/recommend.ts, held against the manifest by a test, and a setter per
+   *  key would be a second copy of that list in a place no test can reach.
+   *  The wiring refuses any key that is not a contributed setting.
+   *
+   *  Keys are section-relative — `git.branches`, the spelling `CONFIG_KEYS`
+   *  uses — and every write goes to the GLOBAL target: a recommendation is
+   *  about this person's editor, not about the folder they happen to have
+   *  open. */
+  writeSettings?(
+    entries: readonly { key: string; value: boolean | string }[],
+  ): Promise<readonly string[]>;
   // ---- the gear menu ------------------------------------------------------
   /** The state the gear menu labels itself with, read when it opens.
    *

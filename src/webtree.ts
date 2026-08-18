@@ -1249,6 +1249,8 @@ ${branchPaletteCss()}  }
             await this.deps.runCommand('newProject');
           } else if (msg.command === 'importSessions') {
             await this.deps.runCommand('importSessions');
+          } else if (msg.command === 'recommendedSetup') {
+            await this.deps.runCommand('recommendedSetup');
           }
           return;
         }

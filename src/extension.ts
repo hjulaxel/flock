@@ -145,6 +145,7 @@ import {
   describeForkEdge,
 } from './daemon';
 import { BranchListCache } from './branchList';
+import { recommendedNotice } from './recommend';
 import { WorktreeCache, branchRowsAdvice } from './git';
 import { BranchStatusCache } from './gitBranches';
 import {
@@ -247,6 +248,16 @@ const TMUX_INSTALL_URL = 'https://github.com/tmux/tmux/wiki/Installing';
 /** globalState, same reasoning as TMUX_NOTICE_KEY: a per-install "already
  *  asked" with nothing to merge across windows. */
 const BRANCH_ROWS_NOTICE_KEY = 'lineage.branchRowsNoticeShown';
+/** globalState, same reasoning again: the recommended setup is offered once per
+ *  install, and answering it — either way — is the end of it. */
+const RECOMMENDED_NOTICE_KEY = 'lineage.recommendedNoticeShown';
+/** AHEAD of the tmux notice, which is the point: this fires only on a window
+ *  with no projects at all, and on that window it is the more useful of the two
+ *  — it names tmux itself, among everything else. Whichever fires suppresses
+ *  the other for this session (see `recommendedNoticeOffered`), because two
+ *  stacked toasts on somebody's first launch is a first impression worth
+ *  avoiding. */
+const RECOMMENDED_NOTICE_DELAY_MS = 8_000;
 /** Staggered well behind the tmux notice. Both are once-per-install and rarely
  *  both apply, but an upgrade onto a machine without tmux is exactly when they
  *  would collide, and two stacked warnings read as something being wrong. */
@@ -335,7 +346,14 @@ export async function activate(
   const suppressTmuxNotice = (): void => {
     void context.globalState.update(TMUX_NOTICE_KEY, true);
   };
+  /** Set by the recommended-setup notice, four seconds earlier, when it speaks.
+   *  Not persisted and not a dismissal: it silences the tmux notice for THIS
+   *  session only, so a window that met the setup offer does not also get a
+   *  warning the offer already covers. Next launch asks again if it still
+   *  applies. */
+  let recommendedNoticeOffered = false;
   setTimeout(() => {
+    if (recommendedNoticeOffered) return;
     let advice: TmuxAdvice;
     try {
       advice = tmuxAdvice({
@@ -4089,6 +4107,78 @@ export async function activate(
       }
     },
 
+    // ---- the recommended setup ---------------------------------------------
+    //
+    // The world `recommendedPlan` decides from. Everything but the last field is
+    // a cache read; `maxWorktrees` costs one `git worktree list` per project
+    // directory, which is why this is async and why it stops at two — the only
+    // question that field answers is "does anybody have more than one checkout",
+    // and probing the rest to say `47` would be work spent on a number nobody
+    // reads. It rides the same WorktreeCache the branch-rows notice warms, so on
+    // a window that has drawn a project it is usually already hot.
+    recommendedWorld: async () => {
+      let maxWorktrees = 0;
+      for (const project of store.getProjects()) {
+        if (project.deleted === true) continue;
+        for (const dir of projectDirs(project)) {
+          try {
+            maxWorktrees = Math.max(maxWorktrees, (await worktrees.warm(dir)).length);
+          } catch (err) {
+            logError('extension.recommendedWorld', err);
+          }
+          if (maxWorktrees >= 2) break;
+        }
+        if (maxWorktrees >= 2) break;
+      }
+      return {
+        platform: process.platform,
+        tmuxBinary: findTmuxBinary(),
+        tmuxMode: cfg().get<string>(CONFIG_KEYS.tmux),
+        hooksInstalled: store.getHookState().installed === true,
+        verbsInstalled: store.getVerbsState().installed === true,
+        verbsAvailable: true,
+        // CLOSED projects count. Somebody who put their last project away has
+        // met the concept, and "make your first project" would be wrong.
+        hasProjects: store.getProjects().some((p) => p.deleted !== true),
+        unlistedCount: commandDeps.unlistedSessions?.().length ?? 0,
+        branchRowsEnabled: boolCfg(CONFIG_KEYS.gitBranches, false),
+        maxWorktrees,
+      };
+    },
+
+    // The table-driven setter behind the recommended steps. Two guards, and the
+    // first is the one that matters: `update()` on a key the manifest does not
+    // declare throws, so an entry that is not a contributed setting is refused
+    // by name here rather than reported as a mysterious failure. Writes keep
+    // going after one fails, exactly as setBranchAndWorktreeFeatures does — a
+    // half-written plan the person is told about beats an abandoned one they
+    // are not.
+    writeSettings: async (entries) => {
+      const declared = new Set<string>(Object.values(CONFIG_KEYS));
+      const unwritable: string[] = [];
+      for (const entry of entries) {
+        if (!declared.has(entry.key)) {
+          logError(
+            'extension.writeSettings',
+            new Error(`${entry.key} is not a contributed setting`),
+          );
+          unwritable.push(entry.key);
+          continue;
+        }
+        try {
+          await cfg().update(
+            entry.key,
+            entry.value,
+            vscode.ConfigurationTarget.Global,
+          );
+        } catch (err) {
+          logError('extension.writeSettings', err);
+          unwritable.push(entry.key);
+        }
+      }
+      return unwritable;
+    },
+
     // What the gear menu labels itself with. Read here, together, at the moment
     // the menu opens — the same three facts the `when` clauses this replaced read
     // off two context keys and one configuration value. `hookState` is the live
@@ -4195,6 +4285,57 @@ export async function activate(
   };
 
   context.subscriptions.push(registerCommands(commandDeps));
+
+  // THE ONE-TIME OFFER OF THE RECOMMENDED SETUP. Same shape as the two notices
+  // above — deferred off the activation path, decided by a pure function
+  // (`recommendedNotice` in src/recommend.ts), suppressed only by an explicit
+  // answer — and scheduled from here rather than from beside them because the
+  // world it needs is `commandDeps.recommendedWorld`, which does not exist
+  // until this line.
+  //
+  // It is deliberately hard to trigger: a tree with NO PROJECTS and at least
+  // two things left to turn on. That is a first launch, or near enough, and it
+  // is the one state where the sidebar has nothing else to say.
+  const recommendedNoticeShown = (): boolean =>
+    context.globalState.get<boolean>(RECOMMENDED_NOTICE_KEY) === true;
+  setTimeout(() => {
+    void (async (): Promise<void> => {
+      try {
+        if (recommendedNoticeShown()) return;
+        const world = await commandDeps.recommendedWorld?.();
+        if (!world) return;
+        if (
+          recommendedNotice({ world, dismissed: recommendedNoticeShown() }) !==
+          'offer'
+        ) {
+          return;
+        }
+        recommendedNoticeOffered = true;
+        const SET_UP = 'Set It Up';
+        const NEVER = 'Not now';
+        const choice = await vscode.window.showInformationMessage(
+          'Flock works out of the box, but the parts that make it fast are ' +
+            'off until you ask: instant updates instead of a three-second ' +
+            'poll, and letting Claude fork its own sessions. Both write files ' +
+            'in your home directory, which is why nothing turned them on for ' +
+            'you. The setup checklist says what each one does before you tick ' +
+            'it.',
+          SET_UP,
+          NEVER,
+        );
+        if (choice === SET_UP) {
+          await context.globalState.update(RECOMMENDED_NOTICE_KEY, true);
+          await vscode.commands.executeCommand(COMMANDS.recommendedSetup);
+        } else if (choice === NEVER) {
+          await context.globalState.update(RECOMMENDED_NOTICE_KEY, true);
+        }
+        // Dismissed with the X: not suppressed, so it asks once more next
+        // time. The same rule both notices above follow.
+      } catch (err) {
+        logError('recommended.notice', err);
+      }
+    })();
+  }, RECOMMENDED_NOTICE_DELAY_MS);
 
   // `/fork` ≡ Fork Session. A native `/fork` dispatches a background job
   // instead of opening a tab, so the branch the user just asked for arrives

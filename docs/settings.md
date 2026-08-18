@@ -4,6 +4,15 @@ All 40 settings, as contributed. The keys keep the `lineage.` prefix — Flock
 was named Lineage before 0.1.0, and renaming settings keys would silently
 discard everyone's existing configuration.
 
+**You do not have to read this table to set Flock up.** Seventeen of these ship
+off, and only some of them are off because the default is right —
+`lineage.hooks.enabled` and `lineage.verbs.enabled` are off because turning them
+on writes files in your home directory, which is not something an extension may
+do unasked. **Flock: Recommended Setup** in the command palette is the checklist
+that offers those, asks about the branch rows, leaves the clean slate alone, and
+says what each one does before you tick it — see
+[The recommended setup](reference.md#the-recommended-setup).
+
 One of them, `lineage.git.pullRequests`, is the only setting in Flock that makes
 anything leave your machine. It is off by default and its row below says exactly
 what turning it on runs.

@@ -25,7 +25,12 @@ import {
   isSessionId,
   shortId,
 } from '../src/types';
-import type { PullRequest, PullRequestState } from '../src/types';
+import type {
+  PullRequest,
+  PullRequestState,
+  RecommendedWorld,
+} from '../src/types';
+import { recommendedPlan } from '../src/recommend';
 import { branchStateIcon } from '../src/viewmodel';
 
 const ROOT = path.join(__dirname, '..');
@@ -87,7 +92,7 @@ describe('scaffold: the shared types contract', () => {
     //
     // Bump it in the same commit as the verb, and check the new id reaches a
     // menu: a command nobody can invoke is not a feature.
-    expect(ids).toHaveLength(85);
+    expect(ids).toHaveLength(86);
     // Duplicate values would make one of them unreachable — the later key wins
     // at registration and the earlier verb's menu entry fires the wrong flow.
     expect(new Set(ids).size).toBe(ids.length);
@@ -132,6 +137,62 @@ describe('scaffold: the shared types contract', () => {
       // A switch whose two positions are the same value is a row in this table
       // that does nothing, in either direction.
       expect(on, full).not.toEqual(off);
+    }
+  });
+
+  // The recommended setup writes settings named by a table in src/recommend.ts,
+  // and two things can go silently wrong there. A key that is not a contributed
+  // setting makes `update()` throw, so the step reports itself unwritable for a
+  // reason nobody can act on. A value outside a string setting's `enum` is
+  // written and then ignored by every reader, which looks exactly like the step
+  // having worked.
+  //
+  // NOT asserted: that the value differs from the shipped default. It is true of
+  // every step that turns something ON and deliberately false of the one that
+  // puts something BACK — `tmux` is offered only to somebody who switched it to
+  // `off` by hand, and what it writes is the default they left. A step's value
+  // has to differ from the world it was offered in, which is `recommendedPlan`'s
+  // own condition and is pinned in test/recommend.test.ts.
+  it('recommends settings that exist, and values those settings accept', () => {
+    const pkg = JSON.parse(
+      fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'),
+    ) as {
+      contributes: {
+        configuration: {
+          properties: Record<
+            string,
+            { default?: unknown; type?: string; enum?: unknown[] }
+          >;
+        };
+      };
+    };
+    const properties = pkg.contributes.configuration.properties;
+    // A world in which every settings-bearing step is on offer at once: tmux
+    // installed but switched off, and a repository with more than one checkout
+    // whose rows are not drawn.
+    const world: RecommendedWorld = {
+      platform: 'darwin',
+      tmuxBinary: '/opt/homebrew/bin/tmux',
+      tmuxMode: 'off',
+      hooksInstalled: true,
+      verbsInstalled: true,
+      verbsAvailable: true,
+      hasProjects: true,
+      unlistedCount: 0,
+      branchRowsEnabled: false,
+      maxWorktrees: 3,
+    };
+    const entries = recommendedPlan(world).steps.flatMap((s) => s.settings);
+    // The loop asserting nothing is the failure mode this guards against.
+    expect(entries.length).toBeGreaterThan(0);
+    for (const { key, value } of entries) {
+      const full = `${CONFIG_SECTION}.${key}`;
+      const declared = properties[full];
+      expect(declared, `${full} is not a contributed setting`).toBeDefined();
+      expect(typeof value, `${full} type`).toBe(declared.type);
+      if (declared.enum !== undefined) {
+        expect(declared.enum, `${full} accepts ${String(value)}`).toContain(value);
+      }
     }
   });
 

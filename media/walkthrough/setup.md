@@ -1,0 +1,34 @@
+## Turn on the parts that are off
+
+Flock ships forty settings and seventeen of them are off. They are not all off
+for the same reason, and that is the thing worth knowing:
+
+- **Two are off because turning them on writes files in your home directory.**
+  Instant updates and the in-session verbs are both genuinely worth having, and
+  neither could switch itself on without asking you first.
+- **Four are off because they *are* the clean slate** — the quiet first launch
+  the previous step described. Nothing recommends changing those.
+- **The branch rows are off because they cost rows** in a sidebar 250px wide.
+  Whether that is a good trade depends on your repositories, so you get asked
+  rather than told.
+- **The rest are taste**, and they stay in the settings UI where they belong.
+
+**Recommended Setup** offers you the first group, asks about the third, and
+never touches the second.
+
+### What it can turn on
+
+| | What it does | What it writes |
+|---|---|---|
+| **Instant updates** | The tree is a three-second poll without them. With them Claude writes each event as it happens and the tree redraws immediately. | A plugin directory under `~/.claude/skills`. Never `~/.claude/settings.json`. |
+| **In-session verbs** | "Fork this session" typed *to Claude* runs the same fork the sidebar button runs, with the same lineage edge. | A skill file and a small CLI. Both `rm -rf`-uninstallable. |
+| **Your first project** | A name and a directory. Sessions group under it, it gets a workspace, it can pin an account. | Nothing on disk. |
+| **Your history** | The bulk import door, if this machine has sessions with no row yet. | A row per session you tick. |
+| **Branch rows** *(offered, not recommended)* | A row per checkout, with the worktree verbs. | `lineage.git.branches` alone — never the pull-request chips, which are the one thing in Flock that reaches the network. |
+
+Every line says what it writes before you tick it, and the two that write files
+name every path in a dialog of their own before anything is created. The
+receipt afterwards tells you how to undo each thing you accepted.
+
+Run it any time from the command palette — **Flock: Recommended Setup** — or
+from the gear at the top of the sidebar.

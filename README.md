@@ -118,6 +118,18 @@ chats, and much more.
   stays one click from resuming. Only **Delete** removes a row, and that is also
   undoable.
 
+- **A recommended setup, that says why.** Seventeen of Flock's settings ship
+  off, and they are not off for the same reason: two of them — instant updates
+  and the in-session verbs — are off only because turning them on writes files
+  in your home directory, four of them *are* the clean slate below, and the rest
+  are taste. **Flock: Recommended Setup** is the checklist that tells them apart:
+  a line per thing worth turning on, with what it does and what it writes, every
+  worthwhile one pre-ticked, and nothing written until you confirm. It offers the
+  branch rows without ticking them, never touches the clean slate, and never
+  turns on the one setting that reaches the network. It is on the empty view, in
+  the gear menu, and in the palette.
+  [Details →](docs/reference.md#the-recommended-setup)
+
 - **A clean slate, and two doors in.** Flock starts empty: nothing you ran
   before it, and nothing running in some other terminal, appears — or rings the
   bell — until you say so. Right-click a project for **Add Existing Session…**

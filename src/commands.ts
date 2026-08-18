@@ -38,6 +38,8 @@ import * as vscode from 'vscode';
 
 import { log, logError } from './log';
 import { isDemoId } from './demoProject';
+import { recommendedPlan } from './recommend';
+import type { RecommendedStep, RecommendedStepId } from './recommend';
 import {
   COMMANDS,
   CONTEXT_HOOKS_INSTALLED,
@@ -1623,6 +1625,160 @@ export async function importSessionsFlow(deps: CommandDeps): Promise<void> {
   void vscode.window.showInformationMessage(
     `Flock: imported ${picks.length} session${picks.length === 1 ? '' : 's'}.`,
   );
+}
+
+/** One line of the recommended-setup checklist. The step's ID rides along
+ *  rather than its object, because a QuickPick item is compared by identity on
+ *  the way back and a plain id is the only field this side needs. */
+interface RecommendedPick extends vscode.QuickPickItem {
+  stepId: RecommendedStepId;
+}
+
+/**
+ * THE RECOMMENDED SETUP: a checklist of what a fresh install should turn on,
+ * with the reason on every line, and nothing written until it is ticked.
+ *
+ * WHAT IS OFFERED IS NOT DECIDED HERE. `recommendedPlan` (src/recommend.ts) is
+ * pure and tested and owns every sentence the user reads; this function is the
+ * side effects — the picker, the six ways of applying a step, and the receipt.
+ *
+ * NO CONFIRMATION MODAL OF ITS OWN, deliberately. The picker IS the choice, the
+ * same way running `showBranchesAndWorktrees` is: every line says what it
+ * writes before it is ticked, the two steps that write FILES open their own
+ * consent dialog naming every path (hooks.ts / agentVerbs.ts already own that
+ * gate, and it is a better gate than a summary), and the receipt says what
+ * landed. A summary modal in between would ask a question already answered and
+ * push the exact-paths dialog behind a second click.
+ *
+ * A STEP THAT FAILS OR IS DECLINED DOES NOT STOP THE REST. Declining the hooks
+ * consent, or closing the folder dialog, is an answer about that step and says
+ * nothing about the others — and a checklist that abandons everything below the
+ * line you said no to is a checklist you have to run twice.
+ */
+export async function recommendedSetupFlow(deps: CommandDeps): Promise<void> {
+  const world = await deps.recommendedWorld?.();
+  if (!world) {
+    void vscode.window.showInformationMessage(
+      'Flock: the recommended setup is not available in this window.',
+    );
+    return;
+  }
+
+  const plan = recommendedPlan(world);
+  if (plan.steps.length === 0) {
+    // Everything already true is a real outcome, not an error — and the notes
+    // (today: tmux is not installed) are the one thing left worth saying.
+    void vscode.window.showInformationMessage(
+      ['Flock: everything recommended is already set up.', ...plan.notes].join(' '),
+    );
+    return;
+  }
+
+  const items: RecommendedPick[] = plan.steps.map((step) => ({
+    label: step.title,
+    description: step.writes,
+    detail: step.why,
+    picked: step.recommended,
+    stepId: step.id,
+  }));
+  const chosen = await vscode.window.showQuickPick(items, {
+    placeHolder:
+      'Recommended setup — untick anything you do not want. Nothing is written until you confirm.',
+    canPickMany: true,
+    matchOnDetail: true,
+    ignoreFocusOut: true,
+  });
+  if (!chosen || chosen.length === 0) return;
+
+  const wanted = new Set(chosen.map((c) => c.stepId));
+  const applied: RecommendedStep[] = [];
+  let skipped = 0;
+  const failed: string[] = [];
+
+  for (const step of plan.steps) {
+    if (!wanted.has(step.id)) continue;
+    let done = false;
+    try {
+      done = await applyRecommendedStep(deps, step, failed);
+    } catch (err) {
+      // Per step, so one thrown step cannot take the other five with it. The
+      // top-level guard in `register` would have caught this and reported the
+      // whole command as failed, which is a worse thing to be told.
+      logError(`recommended: ${step.id}`, err);
+      failed.push(step.title);
+      continue;
+    }
+    if (done) applied.push(step);
+    else skipped += 1;
+  }
+
+  deps.refresh();
+  log('recommended:', applied.length, 'applied,', skipped, 'skipped');
+
+  // The receipt, carrying the `undo` of each step that actually landed: a setup
+  // command that cannot be walked back is one people are right not to run.
+  const parts: string[] = [];
+  if (applied.length > 0) {
+    parts.push(`Flock: set up ${applied.map((s) => s.title).join(', ')}.`);
+    parts.push(`Undo: ${applied.map((s) => s.undo).join('; ')}.`);
+  } else {
+    parts.push('Flock: nothing was changed.');
+  }
+  if (failed.length > 0) parts.push(`Could not set up: ${failed.join(', ')}.`);
+  parts.push(...plan.notes);
+  void vscode.window.showInformationMessage(parts.join(' '));
+}
+
+/** One step's side effect. Returns whether it actually landed — a declined
+ *  consent dialog and a closed folder dialog both mean "no", and neither is an
+ *  error. Keys that could not be written are appended to `failed`. */
+async function applyRecommendedStep(
+  deps: CommandDeps,
+  step: RecommendedStep,
+  failed: string[],
+): Promise<boolean> {
+  // The settings steps first, and by their table rather than by their id: which
+  // settings "recommended" means lives in recommend.ts, so a switch arm here
+  // naming a key would be a second copy of that list.
+  if (step.settings.length > 0) {
+    const unwritable = (await deps.writeSettings?.(step.settings)) ?? [
+      ...step.settings.map((s) => s.key),
+    ];
+    if (unwritable.length > 0) {
+      failed.push(`${step.title} (${unwritable.join(', ')})`);
+      return false;
+    }
+    return true;
+  }
+
+  switch (step.id) {
+    case 'hooks': {
+      // Install-is-the-opt-in, exactly as COMMANDS.installHooks does it: the
+      // plugin only makes Claude WRITE the events, and `lineage.hooks.enabled`
+      // is the half that reads them.
+      const state = await deps.installHooks();
+      if (state.installed !== true) return false;
+      await deps.setHooksEnabled(true);
+      return true;
+    }
+    case 'verbs': {
+      if (!deps.installAgentVerbs) return false;
+      const state = await deps.installAgentVerbs();
+      if (state.installed !== true) return false;
+      await deps.setAgentVerbsEnabled?.(true);
+      return true;
+    }
+    case 'project':
+      return (await newProjectFlow(deps)) !== undefined;
+    case 'import':
+      // The import flow does its own talking (it has counts this one does not),
+      // and it cannot report whether anything was ticked. Counted as applied:
+      // the person was shown the door, which is what this step promised.
+      await importSessionsFlow(deps);
+      return true;
+    default:
+      return false;
+  }
 }
 
 /**
@@ -7157,6 +7313,12 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     );
   });
 
+  // ------------------------------------------------------ recommended setup
+
+  register(COMMANDS.recommendedSetup, 'recommended setup', async () => {
+    await recommendedSetupFlow(deps);
+  });
+
   // --------------------------------------------------- the Accounts section
   //
   // The same two-command switch as the filter above, on
@@ -7203,6 +7365,17 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     const group = (label: string): void => {
       if (separator !== undefined) items.push({ label, kind: separator });
     };
+
+    // FIRST, above the housekeeping, because it is the entry a person opens
+    // this menu not knowing they wanted: the two installs below are also in
+    // here as bare verbs, and a bare verb only helps somebody who already knows
+    // what it does. This one says why before it asks.
+    group('Setup');
+    items.push({
+      label: '$(checklist) Recommended Setup...',
+      description: 'What to turn on, and why — you tick what you want',
+      command: COMMANDS.recommendedSetup,
+    });
 
     group('Sessions');
     if (state === undefined || !state.onlyActive) {
