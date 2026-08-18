@@ -32,7 +32,7 @@
 // prompt is the honest outcome, and it is what the interactive router does
 // with the same snapshot.
 
-import { DEFAULT_PROVIDER, isProviderId, isRoutingChoice } from './types';
+import { DEFAULT_PROVIDER, isProviderId } from './types';
 import type {
   AccountProfile,
   ProviderId,
@@ -44,68 +44,17 @@ import { resolveRouting } from './routing';
 
 // ------------------------------------------------------------------- entry
 
-/** Caps for the JSON boundary. The prompt ceiling is MAX_AGENT_PROMPT_CHARS's
- *  figure for MAX_AGENT_PROMPT_CHARS's reason: an opening turn is an argv. */
-export const MAX_DISPATCH_PROMPT_CHARS = 4000;
-export const MAX_DISPATCH_TITLE_CHARS = 120;
-
-/** An intent to start a session, parked until an account is worth it. */
-export interface DispatchEntry {
-  /** Caller-minted uuid. The queue's key, and later the launch's session id —
-   *  minted once so a crash between decide and launch cannot double-start. */
-  id: string;
-  /** Epoch ms when the entry was queued. FIFO is arrival order, and arrival
-   *  order is a promise to the person who queued first. */
-  createdAt: number;
-  /** Where the session opens. Absent inherits the launcher's default, the
-   *  same as every other launch. */
-  cwd?: string;
-  /** Opening turn, optional — "start looking at the failing tests" is the
-   *  reason to queue a session rather than an alarm clock. */
-  prompt?: string;
-  /** Row title, optional; the launcher's default naming applies otherwise. */
-  title?: string;
-  /** Where this may run: the same RoutingChoice a project pin uses, because
-   *  "which account" must not grow a second grammar. Absent = auto. */
-  routing?: RoutingChoice;
-  /** Epoch ms before which the entry holds regardless of usage — "after
-   *  lunch" composed with "when a window is open", not instead of it. */
-  notBefore?: number;
-}
-
-/** JSON boundary guard: the queue persists in state.json, which is
- *  hand-editable and survives older builds, so entries arrive as `unknown`.
- *  Same posture as isRoutingChoice, which it delegates the routing field to. */
-export function isDispatchEntry(v: unknown): v is DispatchEntry {
-  if (typeof v !== 'object' || v === null || Array.isArray(v)) return false;
-  const e = v as Record<string, unknown>;
-  if (typeof e.id !== 'string' || e.id.length === 0) return false;
-  if (typeof e.createdAt !== 'number' || !Number.isFinite(e.createdAt)) {
-    return false;
-  }
-  if (e.cwd !== undefined && typeof e.cwd !== 'string') return false;
-  if (
-    e.prompt !== undefined &&
-    (typeof e.prompt !== 'string' ||
-      e.prompt.length > MAX_DISPATCH_PROMPT_CHARS)
-  ) {
-    return false;
-  }
-  if (
-    e.title !== undefined &&
-    (typeof e.title !== 'string' || e.title.length > MAX_DISPATCH_TITLE_CHARS)
-  ) {
-    return false;
-  }
-  if (e.routing !== undefined && !isRoutingChoice(e.routing)) return false;
-  if (
-    e.notBefore !== undefined &&
-    (typeof e.notBefore !== 'number' || !Number.isFinite(e.notBefore))
-  ) {
-    return false;
-  }
-  return true;
-}
+// The entry SHAPE and its JSON-boundary guard live in types.ts, because the
+// queue persists in state.json and state.ts reads shapes from that file
+// alone. Re-exported here so this module stays the one import a consumer of
+// the dispatcher needs.
+export {
+  MAX_DISPATCH_PROMPT_CHARS,
+  MAX_DISPATCH_TITLE_CHARS,
+  isDispatchEntry,
+} from './types';
+export type { DispatchEntry } from './types';
+import type { DispatchEntry } from './types';
 
 // -------------------------------------------------------------------- gate
 

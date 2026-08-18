@@ -508,6 +508,17 @@
         "icon": "$(arrow-right)"
       },
       {
+        "command": "lineage.queueDispatch",
+        "title": "Queue Session for Dispatch...",
+        "category": "Flock",
+        "icon": "$(watch)"
+      },
+      {
+        "command": "lineage.dispatchQueue",
+        "title": "Dispatch Queue...",
+        "category": "Flock"
+      },
+      {
         "command": "lineage.hideBranch",
         "title": "Hide Branch",
         "category": "Flock"

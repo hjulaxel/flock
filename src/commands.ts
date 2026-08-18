@@ -41,6 +41,7 @@ import { isDemoId } from './demoProject';
 import {
   COMMANDS,
   CONTEXT_HOOKS_INSTALLED,
+  MAX_DISPATCH_PROMPT_CHARS,
   MAX_PROJECT_NAME_LEN,
   PROVIDERS,
   PROVIDER_IDS,
@@ -53,6 +54,7 @@ import type {
   BackgroundJob,
   BranchInfo,
   CommandDeps,
+  DispatchEntry,
   DisposableLike,
   EditorialRecord,
   ProjectRecord,
@@ -5513,6 +5515,141 @@ async function handoffFlow(
   deps.refresh();
 }
 
+/**
+ * Park an intent to start a session — the queue half of Queued Dispatch
+ * (src/dispatch.ts decides; dispatchHost.ts wakes; this verb only asks).
+ *
+ * Two questions, in the order of how much they matter: WHERE MAY IT RUN
+ * (auto / a provider / a named account — the same three tiers routing speaks,
+ * with the same wording), then the optional opening prompt, because "start
+ * looking at the failing tests" is the reason to queue a session rather than
+ * set an alarm. The directory is not asked: the entry lands where `+` would
+ * have started it, which is the project this window is scoped to.
+ */
+async function queueDispatchFlow(deps: AccountCommandDeps): Promise<void> {
+  const dispatch = deps.dispatch;
+  if (!dispatch) return; // a wiring with no queue has no verb
+  const profiles = deps.accounts?.accounts() ?? [];
+
+  const target = newSessionTarget(deps);
+  const cwd =
+    target.cwd ??
+    (target.projectId !== undefined
+      ? deps.getProject(target.projectId)?.rootDir
+      : undefined);
+
+  interface RoutePick extends vscode.QuickPickItem {
+    choice: RoutingChoice;
+  }
+  const items: RoutePick[] = [
+    {
+      label: 'Auto',
+      description: 'whichever account the router likes when one frees up',
+      choice: { kind: 'auto' },
+    },
+  ];
+  const hostable = profiles.filter((p) => canHostSession(p));
+  const providersSeen = new Set<ProviderId>();
+  for (const p of hostable) {
+    if (providersSeen.has(p.provider)) continue;
+    providersSeen.add(p.provider);
+    items.push({
+      label: `Any ${PROVIDERS[p.provider]?.label ?? p.provider} account`,
+      description: 'stays inside the provider, picks the best window',
+      choice: { kind: 'provider', provider: p.provider },
+    });
+  }
+  for (const p of hostable) {
+    items.push({
+      label: p.label,
+      description: deps.accounts
+        ? accountPickDescription(deps.accounts, p)
+        : undefined,
+      choice: { kind: 'account', id: p.id },
+    });
+  }
+  const routed = await vscode.window.showQuickPick(items, {
+    placeHolder: 'Queue a session for… (launches when a window is worth it)',
+    matchOnDescription: true,
+    ignoreFocusOut: true,
+  });
+  if (!routed) return;
+
+  const rawPrompt = await vscode.window.showInputBox({
+    title: 'Opening prompt (optional)',
+    prompt:
+      'The first turn the queued session starts with. Leave empty to just ' +
+      'open the session.',
+    validateInput: (v) =>
+      v.length > MAX_DISPATCH_PROMPT_CHARS
+        ? `Longer than ${MAX_DISPATCH_PROMPT_CHARS} characters.`
+        : undefined,
+    ignoreFocusOut: true,
+  });
+  if (rawPrompt === undefined) return; // Escape cancels the queueing
+  const prompt = rawPrompt.trim();
+
+  const entry: DispatchEntry = {
+    id: randomUUID(),
+    createdAt: Date.now(),
+    ...(cwd !== undefined ? { cwd } : {}),
+    ...(prompt !== '' ? { prompt } : {}),
+    ...(routed.choice.kind !== 'auto' ? { routing: routed.choice } : {}),
+  };
+  await dispatch.queue(entry);
+  dispatch.poke();
+  // A status line, not a toast: queueing is the user's own act, and the
+  // launch itself will speak when it happens.
+  vscode.window.setStatusBarMessage(
+    `Flock: queued for ${describeRouting(routed.choice, profiles)}` +
+      (cwd !== undefined ? ` in ${cwd}` : ''),
+    5000,
+  );
+}
+
+/** The parked intents, each saying what it waits for, with the one verb a
+ *  parked intent needs: cancel. Settled entries are not shown — the bell and
+ *  the tree already told their story. */
+async function dispatchQueueFlow(deps: AccountCommandDeps): Promise<void> {
+  const dispatch = deps.dispatch;
+  if (!dispatch) return;
+  const profiles = deps.accounts?.accounts() ?? [];
+  const pending = dispatch
+    .entries()
+    .filter((e) => e.done === undefined)
+    .sort((a, b) => a.createdAt - b.createdAt);
+  if (pending.length === 0) {
+    void vscode.window.showInformationMessage(
+      'Flock: the dispatch queue is empty.',
+    );
+    return;
+  }
+  interface QueuePick extends vscode.QuickPickItem {
+    entryId: string;
+  }
+  const items: QueuePick[] = pending.map((e) => ({
+    label: e.title ?? (e.prompt !== undefined ? e.prompt : 'session'),
+    description: describeRouting(e.routing, profiles),
+    ...(e.cwd !== undefined ? { detail: e.cwd } : {}),
+    entryId: e.id,
+  }));
+  const picked = await vscode.window.showQuickPick(items, {
+    placeHolder: `${pending.length} queued — pick one to cancel it`,
+    matchOnDescription: true,
+    ignoreFocusOut: true,
+  });
+  if (!picked) return;
+  const CANCEL = 'Cancel This Entry';
+  const confirm = await vscode.window.showQuickPick(
+    [CANCEL, 'Keep Waiting'],
+    { placeHolder: `"${picked.label}" — ${picked.description ?? ''}` },
+  );
+  if (confirm !== CANCEL) return;
+  await dispatch.cancel(picked.entryId);
+  dispatch.poke();
+  vscode.window.setStatusBarMessage('Flock: queue entry cancelled', 5000);
+}
+
 // ---------------------------------------------------------- registration
 
 type Handler = (...args: unknown[]) => void | Promise<void>;
@@ -7802,6 +7939,16 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       await handoffFlow(deps, id);
     },
   );
+
+  // ------------------------------------------------------------ dispatch
+
+  register(COMMANDS.queueDispatch, 'queue session for dispatch', async () => {
+    await queueDispatchFlow(deps);
+  });
+
+  register(COMMANDS.dispatchQueue, 'show dispatch queue', async () => {
+    await dispatchQueueFlow(deps);
+  });
 
   return {
     dispose(): void {
