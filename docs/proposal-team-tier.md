@@ -53,6 +53,45 @@ pretended across CLI or across humans. (Cross-provider mechanics for
 *one* person belong to the accounts lane; this pillar reuses whatever
 brief format that lane lands on.)
 
+### 2.2b The artifact layer: an index, not a host
+
+Research note, 2026-08-18: both vendors now ship artifact sharing of
+their own. Claude artifacts gained public links and multiplayer
+editing in Claude Code on 2026-07-13 — on Pro/Max a public link is
+the only way to share; on Team/Enterprise access is granted to named
+people or the whole org, viewers sign in on their own org seat, and
+public links stay off until an org Owner enables them. ChatGPT has
+shared projects (invite-only or anyone-with-link) and collaborative
+canvas/writing surfaces with comments and version history. Codex
+output is git-native — a branch or a PR.
+
+So the *content* problem is solved by the vendors, on their access
+control, seat by seat. What no vendor gives a team is one place to
+find all of it across providers, tied to the work it came from. That
+gap is exactly Flock-shaped: the artifact layer is an **index in the
+hub, not a host**.
+
+- An artifact entry is a pointer: title, provider, URL or repo path,
+  author seat, and — the part only Flock can know — the session, and
+  so the lineage, it came from.
+- Three classes: files in the repository (a path at a commit; git
+  already moves those), provider-hosted pages (claude.ai artifact
+  links, ChatGPT shared-project and canvas links), and hub-native
+  briefs (§2.2).
+- Viewing follows the vendor's own access control, which enforces
+  §7.1 for free: an org-scoped claude.ai artifact demands the
+  viewer's own org seat. And for one person with several accounts,
+  the entry names its provider, so Flock can open it under the right
+  identity row.
+- Public links are badged loudly. Public claude.ai share links have
+  already been Google-indexed in the wild (July 2026), so the
+  registry records visibility, the UI marks public entries, and
+  org-scoped links are the recommended default.
+
+The hub never re-hosts vendor content — pointers and briefs only — so
+custody, retention and revocation stay with the vendor and with the
+seat that created the artifact.
+
 ### 2.3 Per-seat setup
 
 A team template: settings defaults, skills, project definitions, and
@@ -198,6 +237,8 @@ being unambiguously on the right side:
 - No transcript sync — summaries only. Transcripts are large,
   private, and CLI-specific; briefs are small, written for a reader,
   and portable.
+- No re-hosting of provider artifact content — the hub carries
+  pointers and briefs (§2.2b), never copies of vendor-hosted pages.
 - No DRM, no obfuscation, no activation servers.
 - No commitment to an individual Pro tier (the accounts lane owns
   that question).
@@ -213,3 +254,10 @@ Licensing facts above were checked 2026-08-18:
 [Lemon Squeezy in 2026](https://fungies.io/lemon-squeezy-stripe-acquisition-saas-founders-2026/) ·
 [Keygen pricing](https://keygen.sh/pricing/) ·
 [Keygen offline cryptography](https://keygen.sh/docs/api/cryptography/)
+
+Artifact-layer facts (§2.2b), same date:
+[Claude Code artifacts docs](https://code.claude.com/docs/en/artifacts) ·
+[Claude artifacts public sharing and multiplayer](https://stacktr.ee/blog/claude-artifacts-public-sharing) ·
+[Shared claude.ai links indexed by Google](https://venturebeat.com/technology/uh-oh-some-claude-shared-conversations-and-artifacts-appear-to-be-indexed-and-publicly-accessible-on-google-search) ·
+[ChatGPT shared projects](https://www.aioperator.com/blog/chatgpt-project-sharing-a-new-feature-that-improves-team-collaboration/) ·
+[ChatGPT canvas collaboration](https://worldofaihub.com/ai-news/openai-expands-chatgpt-canvas-real-time-collaboration/)
