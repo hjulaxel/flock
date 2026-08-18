@@ -25,3 +25,10 @@ docs/**
 **/*.map
 **/*.ts
 !dist/extension.js
+
+# Secrets. `.gitignore` keeps `.env` out of git; this keeps it out of the
+# PACKAGE, which is a different door to the same file — the token would have
+# shipped to the marketplace inside the vsix. vsce refuses to build without
+# this, and it is right to.
+.env
+.env.*
