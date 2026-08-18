@@ -893,6 +893,21 @@ ${branchPaletteCss()}  }
     if (this.collapsed.size === 0) return;
     const forest = this.forest();
     const grouping = this.grouping(forest);
+    // WHILE THE ACTIVE-ONLY FILTER IS ON, the grouping below is computed over
+    // the FILTERED roots — a folder whose sessions are all closed, a branch
+    // row with nothing live under it, has no row right now, and pruning its
+    // key here is what made "Show all sessions" re-expand every fold the
+    // filter had been hiding: the rows came back, their collapsed keys did
+    // not. Merely hidden is not gone, so grouping-derived keys are left alone
+    // until the filter is off and the grouping covers the full universe
+    // again. Session keys stay prunable throughout — `forest.nodes` keeps
+    // filtered-out nodes (visibility is a separate pass), so a session key
+    // missing from it really is dead.
+    const filtered = this.safe(
+      'onlyActiveSessions',
+      () => this.deps.onlyActiveSessions?.(),
+      false,
+    );
     // Every row kind that can be collapsed, not just sessions: pruning only
     // `session:` keys would let a `project:`/`folder:` key for a project or
     // folder that no longer exists (deleted, renamed away from a folder
@@ -923,6 +938,7 @@ ${branchPaletteCss()}  }
     }
     for (const g of grouping.folders) live.add(folderRowKey(g.key));
     for (const key of Array.from(this.collapsed)) {
+      if (filtered && !key.startsWith('session:')) continue;
       if (!live.has(key)) this.collapsed.delete(key);
     }
   }

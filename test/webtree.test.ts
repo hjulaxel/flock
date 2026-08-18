@@ -137,6 +137,7 @@ function makeDeps(
     worktreesOf: (dir: string) => readonly Worktree[];
     branchRows: () => boolean;
     groupSessionsByBranch: () => boolean;
+    onlyActiveSessions: () => boolean;
   }> = {},
 ): { deps: WebtreeDeps; calls: DepsCalls } {
   const calls: DepsCalls = {
@@ -158,6 +159,9 @@ function makeDeps(
     projects: over.projects ?? (() => []),
     hiddenFolders: over.hiddenFolders ?? (() => []),
     onlyProjectSessions: over.onlyProjectSessions ?? (() => false),
+    ...(over.onlyActiveSessions === undefined
+      ? {}
+      : { onlyActiveSessions: over.onlyActiveSessions }),
     providerFor: over.providerFor ?? (() => 'claude'),
     mediaPath: () => undefined,
     assignToProject: async (sessionId, projectId) => {
@@ -684,6 +688,34 @@ describe('LineageWebtreeProvider.refresh() / pruneCollapsed', () => {
     expect(priv.collapsed.has(folderRowKey('/other'))).toBe(true);
     expect(priv.collapsed.has(folderRowKey('/nonexistent'))).toBe(false);
     expect(priv.collapsed.has(`session:${ROOT}`)).toBe(true);
+    expect(priv.collapsed.has(`session:${UNKNOWN}`)).toBe(false);
+  });
+
+  // REGRESSION. With `lineage.onlyActiveSessions` on, the grouping is computed
+  // over the FILTERED roots, so a fold the filter was merely HIDING (a folder
+  // whose sessions are all closed) had its key pruned on the next tick — and
+  // "Show all sessions" brought every one of those rows back expanded.
+  it('keeps grouping-derived keys while the active-only filter is on, and still prunes dead session keys', () => {
+    // Under the filter the /other leftover is gone entirely: the forest the
+    // provider sees carries only ROOT, so the /other folder has no row.
+    const forest = forestOf([node(ROOT, { cwd: '/proj' })]);
+    const { deps } = makeDeps(forest, {
+      projects: () => [project('p1', 'P1', '/proj')],
+      groupByFolder: () => true,
+      onlyActiveSessions: () => true,
+    });
+    const provider = new LineageWebtreeProvider(deps, EXT_URI);
+    const priv = internals(provider);
+    priv.view = fakeView();
+
+    priv.collapsed.add(folderRowKey('/other')); // hidden by the filter, NOT gone
+    priv.collapsed.add(projectRowKey('gone')); // stale, but unprovable right now
+    priv.collapsed.add(`session:${UNKNOWN}`); // dead for real — nodes is unfiltered
+
+    provider.refresh();
+
+    expect(priv.collapsed.has(folderRowKey('/other'))).toBe(true);
+    expect(priv.collapsed.has(projectRowKey('gone'))).toBe(true);
     expect(priv.collapsed.has(`session:${UNKNOWN}`)).toBe(false);
   });
 });
