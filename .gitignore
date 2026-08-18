@@ -10,6 +10,15 @@ dist/
 .vscode-test/
 *.vsix
 
+# Secrets. `.env` holds the Open VSX publishing token, and a file being
+# untracked is not the same as being ignored: one `git add -A` commits it, and
+# this repo has push credentials, so it would reach a public remote. Every
+# spelling, because `.env.local` leaks exactly as well as `.env` does. An
+# example file is not a secret and stays trackable.
+.env
+.env.*
+!.env.example
+
 # macOS
 .DS_Store
 
