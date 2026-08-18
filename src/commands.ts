@@ -89,6 +89,11 @@ import {
   uniqueAccountId,
   validateAccountLabel,
 } from './accounts';
+// Pure, like accounts/routing above: the refusal rule and the brief for
+// continuing a conversation on the OTHER CLI. The flow below is only modals
+// and a launch; every decision it makes lives in handoff.ts where it is
+// testable.
+import { buildHandoffPrompt, handoffRefusal } from './handoff';
 import {
   describeRouting,
   pinnedLaunchProfile,
@@ -5371,6 +5376,143 @@ async function switchAccountFlow(
   );
 }
 
+/**
+ * Continue a conversation on the OTHER CLI — the door through the wall
+ * `switchAccountFlow` refuses at (`different-cli`).
+ *
+ * What actually happens, so the modal-free flow is defensible: a NEW session
+ * is launched on the chosen account, and its opening turn is a brief naming
+ * the parent's transcript file (buildHandoffPrompt) — the same shape as
+ * Fork-and-Compact, where the child does the work as its first turn. The
+ * lineage edge is minted exactly as a fork's is (`recordLaunch`), but the
+ * launch carries NO `parentId`: argv-wise it is a plain new session, because
+ * `--fork-session --resume` could only name a transcript the target CLI can
+ * read, and the whole reason this verb exists is that it cannot.
+ *
+ * No confirmation modal, deliberately: the picker IS the decision, and unlike
+ * the account switch nothing is stopped, moved or restarted — the parent is
+ * untouched and stays exactly where it was.
+ */
+async function handoffFlow(
+  deps: AccountCommandDeps,
+  sessionIdArg: string,
+): Promise<void> {
+  const accts = deps.accounts;
+  if (!accts) return;
+  // The TIP, exactly as fork and switch resolve theirs: handing off a
+  // superseded generation would brief the child on a transcript whose live
+  // continuation is elsewhere.
+  const sessionId = deps.tipOf(sessionIdArg);
+  const node = deps.getForest().nodes.get(sessionId);
+  const label = labelFor(deps, sessionId);
+
+  if (node?.ghost === true) {
+    void vscode.window.showWarningMessage(
+      `Flock: "${label}" is an inferred ancestor with no transcript on disk, ` +
+        'so there is nothing to hand off.',
+    );
+    return;
+  }
+  const profiles = accts.accounts();
+  const current = pinnedProfile(accts.sessionProfileId(sessionId), profiles);
+
+  // Same honesty as the account switch, for the same reason: only Claude's
+  // transcript layout is one Flock knows how to NAME, and the brief has to
+  // name the file. A Codex parent gets "not yet", never a wrong path.
+  if (cliOfProfile(current) !== 'claude') {
+    const cli = current ? (PROVIDERS[current.provider]?.label ?? 'that') : 'that';
+    void vscode.window.showWarningMessage(
+      `Flock: "${label}" is a ${cli} conversation, and Flock cannot yet find ` +
+        "that CLI's own transcript to brief the new session with.",
+    );
+    return;
+  }
+  const transcriptPath = deps.transcriptPathOf?.(sessionId) ?? null;
+  if (transcriptPath === null) {
+    void vscode.window.showWarningMessage(
+      `Flock: "${label}" has not taken a turn yet, so there is nothing to ` +
+        'hand off. Start the session on the account you want instead.',
+    );
+    return;
+  }
+
+  // Only accounts the rule accepts, so the picker cannot offer something the
+  // mechanism would then refuse — and an empty list has one honest cause: no
+  // account on another CLI exists yet.
+  const choices = profiles.filter(
+    (p) => handoffRefusal(current, p, true) === null,
+  );
+  if (choices.length === 0) {
+    void vscode.window.showInformationMessage(
+      'Flock: no account on another CLI is configured to continue ' +
+        `"${label}" on. Add one in the Accounts section first.`,
+    );
+    return;
+  }
+
+  interface HandoffPick extends vscode.QuickPickItem {
+    accountId: string;
+  }
+  const items: HandoffPick[] = choices.map((p) => ({
+    label: p.label,
+    description: accountPickDescription(accts, p),
+    accountId: p.id,
+  }));
+  const chosen = await vscode.window.showQuickPick(items, {
+    // "a NEW session", said in the picker: the one place the difference from
+    // Move to Account… must be visible before anything happens.
+    placeHolder: `Brief a new session on… ("${label}" continues; not a resume)`,
+    matchOnDescription: true,
+    ignoreFocusOut: true,
+  });
+  if (!chosen) return;
+  const target = accts.getAccount(chosen.accountId);
+  // Re-checked against the same rule the list was built from: the account can
+  // have been deleted between the picker opening and the click.
+  if (!target || handoffRefusal(current, target, true) !== null) return;
+
+  const cwd = node?.cwd ?? deps.getRecord(sessionId)?.cwd;
+  // Named like a fork, with the destination CLI visible — a row that hides
+  // which CLI runs it is a row that lies — and deduped against the same names
+  // a fork dedupes against.
+  const stem = `${stripForkCounter(label)} → ${cliOfProfile(target)}`;
+  const siblings = (node?.children ?? [])
+    .map((id) => deps.getForest().nodes.get(id)?.label)
+    .filter((l): l is string => typeof l === 'string');
+  const title = nextFreeName(stem, [...siblings, label]);
+
+  const brief = buildHandoffPrompt({
+    transcriptPath,
+    sourceCli: cliOfProfile(current),
+    parentTitle: label,
+    ...(cwd !== undefined ? { cwd } : {}),
+  });
+
+  const childId = randomUUID();
+  // The minted edge, before the terminal exists — a crash between here and
+  // launch still leaves the lineage correct, exactly as forkFlow puts it.
+  await deps.recordLaunch(childId, sessionId, cwd);
+  await deps.upsertRecord(childId, { title });
+  log('handoff:', shortId(childId), 'continues', shortId(sessionId), 'on', target.id);
+  const binding = await deps.launchSession({
+    sessionId: childId,
+    ...(cwd !== undefined ? { cwd } : {}),
+    prompt: brief,
+    title,
+    env: envForProfile(target),
+    profileId: target.id,
+    ...(launchProviderOf(target) !== undefined
+      ? { provider: launchProviderOf(target) }
+      : {}),
+  });
+  if (!binding) {
+    log('handoff: launch failed for', shortId(childId));
+    return;
+  }
+  await pinLaunch(deps, childId, { profileId: target.id });
+  deps.refresh();
+}
+
 // ---------------------------------------------------------- registration
 
 type Handler = (...args: unknown[]) => void | Promise<void>;
@@ -7640,6 +7782,24 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
           ? accountArg
           : undefined,
       );
+    },
+  );
+
+  // The switch verb's complement (see handoffFlow). Same target resolution,
+  // and `liveOnly: false` for the same reason: a conversation that ran out of
+  // window and got closed is the archetypal thing to continue elsewhere.
+  register(
+    COMMANDS.handoffSession,
+    'handoff session',
+    async (arg?: unknown) => {
+      const id = await targetSession(
+        deps,
+        arg,
+        'Continue which session on another CLI?',
+        { liveOnly: false },
+      );
+      if (!id) return;
+      await handoffFlow(deps, id);
     },
   );
 

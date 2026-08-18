@@ -998,6 +998,12 @@ export const COMMANDS = {
    *  resume it there. On a SESSION row, not an account row — the thing being
    *  moved is the conversation, and the account is the destination. */
   switchSessionAccount: 'lineage.switchSessionAccount',
+  /** CONTINUE a conversation on the other CLI — the door through the wall
+   *  `switchSessionAccount` refuses at (`different-cli`): a NEW session on the
+   *  target account whose opening turn is a brief pointing at the parent's
+   *  transcript. Not a resume, and no surface may call it one; the lineage
+   *  edge is minted the way a fork's is. See src/handoff.ts. */
+  handoffSession: 'lineage.handoffSession',
 } as const;
 export type CommandId = (typeof COMMANDS)[keyof typeof COMMANDS];
 
@@ -2801,6 +2807,11 @@ export interface CommandDeps {
   getForest(): SessionForest;
   refresh(): void;
   hasTranscript(sessionId: string): boolean;
+  /** The transcript's path, for the one verb that has to NAME the file rather
+   *  than test for it: the handoff brief (src/handoff.ts). Claude layout only,
+   *  like `hasTranscript` — a Codex parent answers null and the verb says
+   *  "not yet" honestly. Optional so every unit double stays valid. */
+  transcriptPathOf?(sessionId: string): string | null;
   /** The background job holding this id, when one does. A native `/fork`
    *  dispatches such a job: live process, no pty any editor owns. Optional —
    *  a wiring without it (and every unit double) simply never offers to adopt

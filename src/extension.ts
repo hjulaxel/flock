@@ -119,6 +119,7 @@ import {
   forkParentFromTranscript,
   hasTranscript,
   readTranscriptHeader,
+  transcriptFile,
   transcriptMtimeMs,
 } from './transcript';
 import { repairResumeLeaf } from './resumeLeaf';
@@ -3345,6 +3346,11 @@ export async function activate(
     refresh: refreshNow,
     hasTranscript: (sessionId) =>
       hasTranscript(sessionId, { extraProjectsDirs: profileProjectsDirs() }),
+    // The same lookup hasTranscript runs, kept as a pair on purpose: the
+    // handoff brief has to NAME the file, and two different searches answering
+    // the two questions would eventually disagree.
+    transcriptPathOf: (sessionId) =>
+      transcriptFile(sessionId, { extraProjectsDirs: profileProjectsDirs() }),
     repairResumeLeaf: (sessionId) =>
       repairResumeLeaf(sessionId, { extraProjectsDirs: profileProjectsDirs() }),
     transcriptFacts,

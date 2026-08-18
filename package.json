@@ -502,6 +502,12 @@
         "icon": "$(arrow-swap)"
       },
       {
+        "command": "lineage.handoffSession",
+        "title": "Continue on Another CLI...",
+        "category": "Flock",
+        "icon": "$(arrow-right)"
+      },
+      {
         "command": "lineage.hideBranch",
         "title": "Hide Branch",
         "category": "Flock"
@@ -780,6 +786,11 @@
           "command": "lineage.switchSessionAccount",
           "when": "view == lineageSessions && viewItem =~ /;session;/ && lineage.manyAccounts",
           "group": "1_actions@3"
+        },
+        {
+          "command": "lineage.handoffSession",
+          "when": "view == lineageSessions && viewItem =~ /;session;/ && lineage.manyAccounts",
+          "group": "1_actions@4"
         },
         {
           "command": "lineage.closeSession",
