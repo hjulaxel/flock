@@ -134,6 +134,7 @@ import {
 import {
   buildChainIndex,
   collapseChains,
+  dropForkContinuations,
   emptyChainIndex,
 } from './generations';
 import type { ChainIndex } from './generations';
@@ -1051,8 +1052,25 @@ export async function activate(
     // generations from every input and surfaces each chain's editorial
     // history on its tip, so the forest below never sees more than one row
     // per logical conversation.
+    // A fork is never a re-key: where a continuation claim names the same
+    // (child, parent) pair as a persisted fork edge, the edge — recorded
+    // before the child process existed — wins and the claim is dropped.
+    // Without this, the daemon roster's transient `mode: 'resume'` view of a
+    // fork launch chains the child onto its parent and the collapse swallows
+    // the parent's row (see dropForkContinuations).
+    const forkParentOf = (childId: string): string | undefined => {
+      const record = records[childId];
+      if (record === undefined || !isSessionId(record.parentId)) {
+        return undefined;
+      }
+      const src = record.parentSource;
+      return src === 'minted' || src === 'daemon' ? record.parentId : undefined;
+    };
     chainIndex = buildChainIndex({
-      facts: [...archiveIndexer.chainFacts(), ...daemonChainFacts],
+      facts: dropForkContinuations(
+        [...archiveIndexer.chainFacts(), ...daemonChainFacts],
+        forkParentOf,
+      ),
       recorded: store.getChains(),
       liveIds,
     });
@@ -3098,6 +3116,9 @@ export async function activate(
     },
     resumeSessions: () =>
       boolCfg(CONFIG_KEYS.workspacesResumeSessions, true),
+    // The quality-of-life mode: parkOthers is a no-op without it, and the
+    // restore step brings back one session instead of the whole saved set.
+    soloSession: () => boolCfg(CONFIG_KEYS.soloSession, false),
     // With sessions in the panel there are no session tabs to park or restore,
     // so a switch leaves terminals alone entirely and snapshots files only.
     terminalLocation,
@@ -3118,6 +3139,31 @@ export async function activate(
     resumeViews,
   });
   isWorkspaceSwitching = () => workspaceManager.isSwitching();
+
+  /**
+   * `lineage.soloSession`, second half: pin the kept session's editor tab so
+   * it sits at the left of its group and survives "Close Others". Best-effort
+   * and guarded three ways, because `workbench.action.pinEditor` acts on
+   * whatever editor is active and cannot report that it pinned the wrong one:
+   * the workbench's active terminal must be the kept session's (every flow
+   * that calls this has just revealed it), the active TAB must be a terminal
+   * tab (panel-located sessions have none, and the pref check alone cannot
+   * cover a session launched under an older pref), and an already-pinned tab
+   * is left alone.
+   */
+  const pinSoloTab = async (sessionId: string): Promise<void> => {
+    try {
+      if (terminalLocation() === 'panel') return;
+      const active = registry.activeSessionId();
+      if (active === null || !chainAliases(sessionId).includes(active)) return;
+      const tab = vscode.window.tabGroups?.activeTabGroup?.activeTab;
+      if (!tab || !(tab.input instanceof vscode.TabInputTerminal)) return;
+      if (tab.isPinned === true) return;
+      await vscode.commands.executeCommand('workbench.action.pinEditor');
+    } catch (err) {
+      logError('extension.pinSoloTab', err);
+    }
+  };
 
   // THE SIDEBAR MIRRORS THE TAB STRIP: selecting a session's tab selects its
   // row (scrolled into view, never taking the keyboard — revealSession's own
@@ -3624,6 +3670,18 @@ export async function activate(
       // interval, and the user is looking at the panel it just opened.
       pokeNow();
       return { label: delegate.label };
+    },
+
+    /**
+     * `lineage.soloSession` — one session tab at a time. The park half is the
+     * workspace switcher's own machinery (same tiers, same records — see
+     * workspaces.parkOthers), the pin half is local. Consulted by every flow
+     * that opens or fronts a session tab; a no-op while the setting is off.
+     */
+    soloEnforce: async (keepSessionId) => {
+      if (!boolCfg(CONFIG_KEYS.soloSession, false)) return;
+      await workspaceManager.parkOthers(keepSessionId);
+      await pinSoloTab(keepSessionId);
     },
     focusSession: (sessionId) => {
       const bound = chainAliases(sessionId).find(

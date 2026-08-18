@@ -12,6 +12,7 @@ import { buildForest } from '../src/lineage';
 import {
   buildChainIndex,
   collapseChains,
+  dropForkContinuations,
   emptyChainIndex,
   type GenerationFacts,
 } from '../src/generations';
@@ -165,6 +166,64 @@ describe('generations: buildChainIndex', () => {
     });
     const chain = index.chains().find((c) => c.tipId === B);
     expect(chain?.rootStartedAt).toBeUndefined();
+  });
+});
+
+describe('generations: dropForkContinuations', () => {
+  // The observed bug: forks of one parent, each carrying a minted edge onto
+  // it, get transiently reported as CONTINUATIONS of that parent (the daemon
+  // roster's `mode: 'resume'` view of the launch). Folding the claim chained
+  // each child onto the parent, and the collapse then swallowed the parent's
+  // row while the branches surfaced as roots — until the roster moved on.
+  const F1 = id(11);
+  const F2 = id(12);
+  const F3 = id(13);
+  const forkParentOf = (childId: string): string | undefined =>
+    [F1, F2, F3].includes(childId) ? P : undefined;
+
+  it('strips a continuation that names the fork parent — the pair the edge already covers', () => {
+    const facts = dropForkContinuations(
+      [
+        fact(P, { mtimeMs: 100 }),
+        fact(F1, { continuesId: P, mtimeMs: 200, bytes: 500, startedAt: 150 }),
+        fact(F2, { continuesId: P, mtimeMs: 201 }),
+        fact(F3, { continuesId: P, mtimeMs: 202 }),
+      ],
+      forkParentOf,
+    );
+    for (const f of facts) expect(f.continuesId).toBeUndefined();
+    // Everything else about the fact survives — mtime and startedAt still
+    // feed tip selection and sibling order.
+    const f1 = facts.find((f) => f.sessionId === F1);
+    expect(f1).toMatchObject({ mtimeMs: 200, bytes: 500, startedAt: 150 });
+
+    // And the index built from the stripped facts chains nothing: the parent
+    // keeps its row, every fork stays its own node under its minted edge.
+    const index = buildChainIndex({ facts, liveIds: new Set() });
+    expect(index.tipOf(P)).toBe(P);
+    expect(index.isSuperseded(P)).toBe(false);
+    for (const child of [F1, F2, F3]) {
+      expect(index.tipOf(child)).toBe(child);
+      expect(index.membersOf(child)).toEqual([child]);
+    }
+  });
+
+  it('leaves a continuation naming any OTHER id alone — that one is information', () => {
+    // F1 was later plain-resumed into X: a real re-key, nothing to do with
+    // the fork edge onto P.
+    const facts = dropForkContinuations(
+      [fact(X, { continuesId: F1, mtimeMs: 300 })],
+      forkParentOf,
+    );
+    expect(facts[0].continuesId).toBe(F1);
+  });
+
+  it('touches nothing for a session with no fork edge', () => {
+    const facts = dropForkContinuations(
+      [fact(B, { continuesId: A, mtimeMs: 200 })],
+      forkParentOf,
+    );
+    expect(facts[0].continuesId).toBe(A);
   });
 });
 

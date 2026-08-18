@@ -1737,6 +1737,7 @@ async function newSessionFlow(
   }
   await pinLaunch(deps, sessionId, routed);
   routed.announce?.();
+  await soloEnforce(deps, sessionId);
   deps.refresh();
   // Select the row so the name is visible where it will live from now on, then
   // put an editable input on it. `revealSession` is deliberately not awaited —
@@ -1848,6 +1849,7 @@ async function newSessionInProjectFlow(
   }
   await pinLaunch(deps, sessionId, routed);
   routed.announce?.();
+  await soloEnforce(deps, sessionId);
   deps.refresh();
   void deps.revealSession(sessionId);
   await nameJustCreatedSession(deps, sessionId);
@@ -1936,6 +1938,7 @@ async function startSessionInProjectDir(
   }
   await pinLaunch(deps, sessionId, routed);
   routed.announce?.();
+  await soloEnforce(deps, sessionId);
   deps.refresh();
   void deps.revealSession(sessionId);
   await nameJustCreatedSession(deps, sessionId);
@@ -2885,6 +2888,7 @@ async function forkFlow(
     return undefined;
   }
   await pinLaunch(deps, childId, routed);
+  await soloEnforce(deps, childId);
   deps.refresh();
   // Select the new branch's row: the tree is where its name lives from now on.
   void deps.revealSession(childId);
@@ -3069,6 +3073,7 @@ export async function adoptBackgroundJob(
     return false;
   }
   await pinLaunch(deps, sessionId, routed);
+  await soloEnforce(deps, sessionId);
   deps.refresh();
   void deps.revealSession(sessionId);
   return true;
@@ -3362,6 +3367,7 @@ export async function resumeFlow(
   // `tmux: null` settles the detach-tier claim the same way the workspace
   // restore does: the tab is back, the record must stop saying "hidden".
   await deps.upsertRecord(sessionId, { closed: null, parked: false, tmux: null });
+  await soloEnforce(deps, sessionId);
   deps.refresh();
   return true;
 }
@@ -4163,6 +4169,7 @@ export async function chatFlow(
   if (binding) {
     await pinLaunch(deps, sessionId, routed);
     routed.announce?.();
+    await soloEnforce(deps, sessionId);
   } else {
     log('chat: launch failed for', shortId(sessionId));
   }
@@ -4623,6 +4630,23 @@ async function pinLaunch(
     await accts.pinSession(sessionId, routed.profileId);
   } catch (err) {
     logError('commands.pinLaunch', err);
+  }
+}
+
+/** `lineage.soloSession`, applied after a session's tab opened or came
+ *  forward: ask the wiring to park every OTHER session tab and pin this one.
+ *  Awaited so the park's record writes land before the flow moves on; a
+ *  missing dep (every unit double, an older wiring) or a throw is a no-op —
+ *  the quality-of-life mode must never be able to break the launch it rides
+ *  on. */
+async function soloEnforce(
+  deps: CommandDeps,
+  keepSessionId: string,
+): Promise<void> {
+  try {
+    await deps.soloEnforce?.(keepSessionId);
+  } catch (err) {
+    logError('commands.soloEnforce', err);
   }
 }
 
@@ -5432,7 +5456,12 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       liveOnly: false,
     });
     if (!id) return;
-    if (deps.focusSession(id)) return;
+    if (deps.focusSession(id)) {
+      // The tab the user asked for is now in front — the moment solo mode
+      // (if on) sweeps the others behind it.
+      await soloEnforce(deps, id);
+      return;
+    }
     if (await deps.focusWindowFor(id)) return;
 
     // Detach tier: a record naming a tmux session is OURS, running hidden in

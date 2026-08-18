@@ -54,8 +54,9 @@ import { log, logError } from './log';
 
 export const VERBS_SKILL_NAME = 'flock';
 /** Bumped whenever the generated files change; drives silent self-heal, the
- *  same contract as hooks.PLUGIN_VERSION. */
-export const VERBS_VERSION = 1;
+ *  same contract as hooks.PLUGIN_VERSION.
+ *  v2: `--name` — the model can title each fork from the user's own words. */
+export const VERBS_VERSION = 2;
 
 const SCRIPT_BASENAME = 'flock-verbs.mjs';
 const REQUESTS_DIR_BASENAME = 'requests';
@@ -68,6 +69,11 @@ export const MAX_AGENT_FORKS = 8;
 /** An opening prompt longer than this is refused rather than truncated —
  *  silently cutting a prompt changes what the fork does. */
 export const MAX_AGENT_PROMPT_CHARS = 4000;
+/** The protocol bound on one fork NAME. Deliberately looser than the 80
+ *  characters a row displays: a name is cosmetic, so an overlong one is
+ *  TRUNCATED downstream (nextFreeName, the same treatment every generated
+ *  title gets) rather than refused — only something file-abuse-sized is. */
+export const MAX_AGENT_TITLE_CHARS = 200;
 /** A request file larger than this is not even read. */
 const MAX_REQUEST_BYTES = 64 * 1024;
 
@@ -131,11 +137,25 @@ export function renderSkillMd(): string {
     '    node ~/.lineage/flock-verbs.mjs fork --count <n>',
     '',
     '- `--count <n>` — how many forks, 1 to 8. Omit it for one.',
+    '- `--name "<title>"` — a name for a fork, repeatable: give one per fork,',
+    '  in order. With names given, `--count` may be omitted (it becomes the',
+    '  number of names).',
     '- `--prompt "<text>"` — optional opening message sent to every fork.',
     '',
     'The command waits up to 30 seconds for a Flock window to answer, then',
     'prints the outcome. Report that outcome to the user — it names the new',
     'branches, or says exactly why nothing was forked.',
+    '',
+    'Naming the forks:',
+    '',
+    '- When the user says what each fork is FOR — "one to try the redis',
+    '  cache, one for the SQL approach" — pass a short `--name` per fork in',
+    '  their own words: `--name "redis cache" --name "SQL approach"`.',
+    '- When the request implies a single purpose ("fork this to try X"),',
+    '  name that one fork after the purpose.',
+    '- When the user just wants copies ("do three forks"), pass no names —',
+    '  Flock numbers them after this session, which is what they expect.',
+    '- Keep names short, like branch names: 2-5 words, no punctuation needed.',
     '',
     'Notes:',
     '',

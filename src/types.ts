@@ -1031,6 +1031,14 @@ export const CONFIG_KEYS = {
    *  install command, whose modal is the consent. */
   verbsEnabled: 'verbs.enabled',
   terminalLocation: 'terminalLocation',
+  /** Quality-of-life: keep at most ONE session tab open in this window.
+   *  Opening or focusing a session parks every other session tab — detached
+   *  into the private tmux server when the launch was wrapped (the process
+   *  keeps running, hidden), otherwise closed to be resumed from the tree —
+   *  and the kept tab is pinned. OFF by default: parking tabs the user laid
+   *  out side by side is a strong opinion, and the default stays the tab
+   *  strip as VS Code users know it. */
+  soloSession: 'soloSession',
   /** Who OPENS a new conversation: Flock's own tmux-backed terminal, or another
    *  extension's command (see src/hosts.ts's delegate table). Only ever consulted
    *  for a NEW conversation — a fork has nothing to hand over. */
@@ -2923,6 +2931,15 @@ export interface CommandDeps {
     cwd?: string;
     title?: string;
   }): Promise<{ label: string } | null>;
+  /** `lineage.soloSession`: after a session's tab opened (or was focused),
+   *  park every OTHER session tab in this window and pin the kept one.
+   *  A no-op when the setting is off. The mechanism is the workspace
+   *  switcher's park (same tiers, same records), which is why this lives in
+   *  the wiring rather than here — see workspaces.parkOthers.
+   *
+   *  Optional: absent means the setting does not exist for this wiring,
+   *  which is every unit double. */
+  soloEnforce?(keepSessionId: string): Promise<void>;
   focusSession(sessionId: string): boolean;         // bound-terminal show
   /** The session whose terminal is the ACTIVE one in this window, or null when
    *  the active terminal is not one of ours (or there is none).

@@ -62,6 +62,40 @@ export interface GenerationFacts {
   startedAt?: number;
 }
 
+/**
+ * Strip continuation claims that CONTRADICT an exact fork edge.
+ *
+ * A fork is a NEW BRANCH, never a re-key — the rule the hook path already
+ * enforces (a SessionStart with `source: 'fork'` is never chained). Both
+ * continuation sources can transiently claim one anyway: the daemon roster
+ * reports a fork launch as `mode: 'resume'` before (or without) its `fork`
+ * flag, and a child transcript head-read mid-copy can precede its
+ * `forkedFrom` marker. Folding such a claim chains the child onto its own
+ * parent, and the collapse then swallows the PARENT'S row into the branch —
+ * observed as "the parent disappeared and the forks became roots" until the
+ * roster moved on and the tree healed.
+ *
+ * The tiebreak is not a judgement call: a minted edge is written BEFORE the
+ * child process exists, so where the two sources name the same (child,
+ * parent) pair the fork edge is exact and the continuation is simply wrong.
+ * A continuation naming any OTHER id is left alone — that is real
+ * information, not the race.
+ *
+ * `forkParentOf` answers from the persisted editorial records; pure and
+ * injected so this stays testable without a store.
+ */
+export function dropForkContinuations(
+  facts: readonly GenerationFacts[],
+  forkParentOf: (childId: string) => string | undefined,
+): GenerationFacts[] {
+  return facts.map((fact) => {
+    if (fact.continuesId === undefined) return fact;
+    if (forkParentOf(fact.sessionId) !== fact.continuesId) return fact;
+    const { continuesId: _dropped, ...kept } = fact;
+    return kept;
+  });
+}
+
 // ------------------------------------------------------------------ index
 
 /** Which member of a chain is current, and how everyone else maps to it. */

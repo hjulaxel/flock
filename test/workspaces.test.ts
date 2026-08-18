@@ -1714,3 +1714,123 @@ describe('workspaces: a switch ends on the tab you asked for', () => {
     expect(calls.focused).toEqual([]);
   });
 });
+
+// -------------------------------------------------- solo mode (soloSession)
+
+describe('workspaces: solo mode (lineage.soloSession)', () => {
+  const S3 = '0f0000a3-0000-4000-8000-0000000000a3';
+  const binding = (sessionId: string, terminalName: string) => ({
+    nodeId: sessionId,
+    sessionId,
+    terminalName,
+    createdAt: 0,
+  });
+  const TMUX_S2 = `lineage-${S2}`;
+
+  it('parkOthers is a hard no-op — null — while the mode is off or unwired', async () => {
+    const { deps, calls } = harness({
+      bindings: () => [binding(S1, 'a'), binding(S2, 'b')],
+    });
+    // Unwired: the dep is optional and every older wiring omits it.
+    expect(await new WorkspaceManager(deps).parkOthers(S1)).toBeNull();
+    expect(calls.killed).toEqual([]);
+
+    const off = harness({
+      bindings: () => [binding(S1, 'a'), binding(S2, 'b')],
+      soloSession: () => false,
+    });
+    expect(await new WorkspaceManager(off.deps).parkOthers(S1)).toBeNull();
+    expect(off.calls.killed).toEqual([]);
+    expect(off.calls.written).toEqual([]);
+  });
+
+  it('parks every other tab through the same two tiers a switch uses', async () => {
+    // S1 is kept. S2 is tmux-backed and BUSY — detached anyway, name recorded.
+    // S3 is bare and idle — killed, name erased.
+    const { deps, calls } = harness({
+      bindings: () => [
+        binding(S1, 'keep'),
+        binding(S2, 'tmux'),
+        binding(S3, 'bare'),
+      ],
+      isSessionBusy: (id) => id === S2,
+      tmuxNameOf: (id) => (id === S2 ? TMUX_S2 : undefined),
+      soloSession: () => true,
+    });
+
+    expect(await new WorkspaceManager(deps).parkOthers(S1)).toBe(2);
+
+    expect(calls.killed.sort()).toEqual([S2, S3].sort());
+    const parked = calls.written.filter((w) => w.patch.parked === true);
+    expect(parked.find((w) => w.id === S2)?.patch.tmux).toBe(TMUX_S2);
+    expect(parked.find((w) => w.id === S3)?.patch.tmux).toBeNull();
+    expect(parked.some((w) => w.id === S1)).toBe(false);
+  });
+
+  it('spares a busy BARE session — a park there would abort its turn', async () => {
+    const { deps, calls } = harness({
+      bindings: () => [binding(S1, 'keep'), binding(S2, 'busy bare')],
+      isSessionBusy: (id) => id === S2,
+      soloSession: () => true,
+    });
+
+    expect(await new WorkspaceManager(deps).parkOthers(S1)).toBe(0);
+    expect(calls.killed).toEqual([]);
+    expect(calls.written).toEqual([]);
+  });
+
+  it("keeps the kept conversation's WHOLE CHAIN — a re-keyed generation is the same tab", async () => {
+    // The terminal is bound under its launch-time id S2; the row (and the
+    // caller) know the conversation as its tip S1.
+    const { deps, calls } = harness({
+      bindings: () => [binding(S2, 'kept, under its launch id')],
+      tipOf: (id) => (id === S2 ? S1 : id),
+      soloSession: () => true,
+    });
+
+    expect(await new WorkspaceManager(deps).parkOthers(S1)).toBe(0);
+    expect(calls.killed).toEqual([]);
+  });
+
+  it('a switch restores ONE session — the one the layout says was in front', async () => {
+    const records: Record<string, EditorialRecord> = {
+      [S1]: record(S1, { parked: true }),
+      [S2]: record(S2, { parked: true }),
+    };
+    const snapshot: WorkspaceSnapshot = {
+      projectId: 'pw',
+      tabs: [
+        { kind: 'session', sessionId: S1, viewColumn: 1 },
+        { kind: 'session', sessionId: S2, viewColumn: 1, active: true },
+      ],
+      savedAt: ISO,
+      updatedAt: ISO,
+    };
+    stubTabModel([{ viewColumn: 1, isActive: true, tabs: [] }], []);
+
+    const { deps, calls } = harness({
+      getProject: twoProjects,
+      getWorkspace: (id) => (id === 'pw' ? snapshot : undefined),
+      getActive: () => 'pa',
+      getRecord: (id) => records[id],
+      sessionCwd: () => '/code/web',
+      isLive: () => false,
+      soloSession: () => true,
+      launchSession: async (opts) => {
+        calls.launched.push(opts.sessionId);
+        return {
+          nodeId: opts.sessionId,
+          sessionId: opts.sessionId,
+          terminalName: 'claude',
+          createdAt: 0,
+        };
+      },
+    });
+
+    await new WorkspaceManager(deps).switchTo('pw');
+
+    // Only the layout's ACTIVE session came back; S1 stays parked, one
+    // row-click away.
+    expect(calls.launched).toEqual([S2]);
+  });
+});

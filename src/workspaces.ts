@@ -560,6 +560,12 @@ export interface WorkspaceManagerDeps {
   setActive(projectId: string | null): Promise<void>;
   // config
   resumeSessions(): boolean;
+  /** `lineage.soloSession` — the quality-of-life mode: at most one session
+   *  tab open at a time. Read by `parkOthers` (which is a no-op without it)
+   *  and by the restore step, which then brings back only the session the
+   *  user was last using instead of the whole saved set. Optional: an older
+   *  wiring (and every unit double that does not care) behaves as OFF. */
+  soloSession?(): boolean;
   /** Where new session terminals live. Optional: a host wiring that predates
    *  the setting simply behaves as `'editor'`, which is the default. */
   terminalLocation?(): TerminalLocationPref;
@@ -653,6 +659,69 @@ export class WorkspaceManager {
    *  inferred from that. */
   isSwitching(): boolean {
     return this.switching;
+  }
+
+  /**
+   * QUALITY-OF-LIFE (`lineage.soloSession`): one session tab at a time.
+   * Called by the wiring after a session's tab opened or was focused — park
+   * every OTHER session bound in this window, exactly the way a workspace
+   * switch parks a foreign one, so the two paths cannot disagree about what
+   * "parked" means:
+   *
+   *   * DETACH — tmux-wrapped: the tab closes, the process keeps running
+   *     hidden, and clicking the row re-attaches. Busy or not.
+   *   * KILL   — bare launch: the terminal is disposed and `--resume` brings
+   *     the conversation back from the tree. A BUSY or WAITING bare session
+   *     is spared — a turn in flight outranks tidiness here for the same
+   *     reason it does in a switch.
+   *
+   * Returns null when the mode is off or a switch is mid-flight (the switch
+   * owns the tabs right then and this must not fight it); otherwise how many
+   * tabs were parked — zero is the ordinary answer once the invariant holds.
+   *
+   * `keepSessionId` is compared by CHAIN TIP: a re-keyed generation of the
+   * kept conversation is the same tab, not a victim. Deliberately NOT gated
+   * on `resumeSessions` (that setting is about what a switch restores
+   * unasked); every session parked here has a row in the tree, and the row
+   * is how it comes back.
+   */
+  async parkOthers(keepSessionId: string): Promise<number | null> {
+    if (this.safeSolo() !== true) return null;
+    if (this.switching) return null;
+    try {
+      this.deps.refreshBindings();
+    } catch (err) {
+      logError('workspaces.parkOthers.refreshBindings', err);
+    }
+    const keepTip = this.safeTip(keepSessionId);
+    const victims: string[] = [];
+    const seen = new Set<string>();
+    for (const binding of this.safeBindings()) {
+      const tip = this.safeTip(binding.sessionId);
+      if (tip === keepTip || seen.has(tip)) continue;
+      seen.add(tip);
+      // Same spare rule as planSwitch, same shape: busy only matters where
+      // parking would kill.
+      if (
+        this.safeIsBusy(binding.sessionId) &&
+        this.safeTmuxName(binding.sessionId) === undefined &&
+        this.safeTmuxName(tip) === undefined
+      ) {
+        continue;
+      }
+      victims.push(binding.sessionId);
+    }
+    if (victims.length === 0) return 0;
+    const writes: Array<Promise<void>> = [];
+    const parked = this.parkSweep(victims, writes);
+    await Promise.all(writes);
+    log(
+      `workspaces: solo — parked ${String(parked.detached + parked.killed)} ` +
+        `session tab(s) (${String(parked.detached)} detached, ` +
+        `${String(parked.killed)} closed), keeping ${shortId(keepTip)}`,
+    );
+    this.deps.refresh();
+    return parked.detached + parked.killed;
   }
 
   /**
@@ -1304,11 +1373,26 @@ export class WorkspaceManager {
     // this project's, and a stale `parked` flag can cover a foreign one.
     // Restoring a project must only ever bring back ITS OWN sessions —
     // everything else keeps its flag and waits for its own project's switch.
-    const own = plan.sessions.filter(
+    let own = plan.sessions.filter(
       (tab) =>
         tab.sessionId !== undefined &&
         insideProject(dirs, this.deps.sessionCwd(tab.sessionId)),
     );
+    // SOLO MODE (`lineage.soloSession`): the switch brings back ONE session —
+    // the one the layout says was in front, or failing that the first — and
+    // the rest stay parked, one row-click away. Restoring the whole set would
+    // open the very wall of tabs the mode exists to prevent, and then park
+    // all but one of them again on the first focus.
+    const solo = this.safeSolo();
+    if (solo && own.length > 1) {
+      const front =
+        own.find((tab) => tab.sessionId === plan.activeSessionId) ?? own[0];
+      log(
+        `workspaces: solo — restoring 1 of ${String(own.length)} saved ` +
+          'session(s); the rest stay parked (reopen them from the tree)',
+      );
+      own = front === undefined ? [] : [front];
+    }
     if (own.length > MAX_AUTO_RESUME) {
       log(
         `workspaces: layout names ${own.length} sessions — resuming the ` +
@@ -1351,6 +1435,9 @@ export class WorkspaceManager {
     for (const record of Object.values(this.safeRecords())) {
       if (record?.chat !== true || record.parked !== true) continue;
       if (!insideProject(dirs, this.deps.sessionCwd(record.id))) continue;
+      // Solo mode holds its one-tab budget across BOTH loops: a chat comes
+      // home only when no session tab did, and only one of them.
+      if (solo && sessions > 0) continue;
       const outcome = await this.restoreSession(record.id, 1, true, writes);
       if (outcome !== false) sessions++;
     }
@@ -1649,6 +1736,17 @@ export class WorkspaceManager {
       return this.deps.resumeSessions();
     } catch (err) {
       logError('workspaces.resumeSessions', err);
+      return false;
+    }
+  }
+
+  /** `lineage.soloSession`. Absent dep or a throw is OFF — the mode parks
+   *  tabs, and a mode that parks tabs must never be inferred. */
+  private safeSolo(): boolean {
+    try {
+      return this.deps.soloSession?.() === true;
+    } catch (err) {
+      logError('workspaces.soloSession', err);
       return false;
     }
   }

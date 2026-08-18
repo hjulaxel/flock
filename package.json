@@ -1484,6 +1484,11 @@
           ],
           "description": "Where a Claude session's terminal opens."
         },
+        "lineage.soloSession": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Keep at most **one** Claude session tab open in this window. Opening or focusing a session parks every other session tab: a tmux-wrapped one is DETACHED (the tab vanishes, the conversation keeps running, hidden), a bare one is closed and comes back with `--resume` when you click its row — a busy or waiting bare session is spared and keeps its tab. The open session's tab is pinned, so it sits at the left of its group and survives *Close Others*. Workspace switches restore only the session you were last using instead of the whole set. Off by default: this parks tabs you laid out yourself, which is a strong opinion — turn it on if many open sessions are eating memory or making switches slow."
+        },
         "lineage.launch.mode": {
           "type": "string",
           "default": "flock",
