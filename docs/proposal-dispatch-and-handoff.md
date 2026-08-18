@@ -1,7 +1,9 @@
 # Proposal — Queued Dispatch, and Cross-Provider Handoff
 
-**Status: proposal, 2026-08-18. The two pure cores (`src/dispatch.ts`,
-`src/handoff.ts`) land with this document; the wiring milestones are marked.**
+**Status: implemented on `accounts/dispatch-handoff`, 2026-08-18. All three
+milestones (§4) landed: the pure cores, the dispatch wiring (state v8, the
+clockwork, both verbs), and the handoff verb. What remains open is listed at
+the end of §4.**
 Both features monetize nothing and move no credential anywhere: they are
 bookkeeping on top of the one fact accounts.ts already established — an
 account is a config directory on this machine. The framing that matters is
@@ -116,3 +118,9 @@ inherits that behaviour untouched, because it is just a launch.
   usage summaries, minted edge + briefed launch. Title follows the fork
   convention with the target CLI visible (`auth → codex`), because a row that
   hides its provider is a row that lies about what runs it.
+
+Still open after M-D3: Codex-parent handoffs (the brief has to NAME the
+rollout file, and only Claude's transcript layout has a locator today — the
+verb says "not yet" honestly); queue rows in the accounts view; and a
+Move-to-Account-style at-the-limit offer that suggests queueing or handing
+off when a window runs dry mid-conversation.
