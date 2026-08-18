@@ -256,16 +256,23 @@ export function isLaunchMode(v: unknown): v is LaunchMode {
 /**
  * Another extension Flock can hand a launch to.
  *
- * `newCommand` is deliberately the only command named. The official extension
- * contributes `claude-vscode.newConversation`, `claude-vscode.editor.open`,
- * `claude-vscode.sidebar.open`, `claude-vscode.terminal.open` and
- * `claude-vscode.createWorktree` — but only `newConversation` takes no
- * arguments and means exactly "start a fresh conversation". The others carry
- * placement (which is the user's `claudeCode.preferredLocation`, not ours to
- * override) or, in `createWorktree`'s case, write to the repository, which
- * Flock does not do.
+ * `newCommand` starts a fresh conversation: the official extension's
+ * `claude-vscode.newConversation` takes no arguments and means exactly that,
+ * opening in the user's own `claudeCode.preferredLocation` (sidebar or
+ * editor) — which is theirs, not ours to override.
  *
- * None of them accepts a working directory, a session id or a parent, which is
+ * `openCommand` OPENS AN EXISTING conversation by id. The official extension
+ * grew one: `claude-vscode.primaryEditor.open(sessionId?, prompt?)` — the
+ * same command its own `claude-code://open?session=` deep link runs. It
+ * resumes the named session in the extension's UI, and REVEALS the existing
+ * panel instead when that session is already open in one (panels are keyed
+ * by session id), which is exactly the click-a-row contract. Deliberately
+ * NOT `claude-vscode.editor.open`: called without an explicit view column
+ * that one overwrites the user's preferred location as a side effect.
+ * Optional in the shape, because a future delegate may not have one — and
+ * absent means resumes keep opening Flock's own terminal in that mode.
+ *
+ * No contributed command accepts a working directory or a parent, which is
  * the whole reason `forkFor` exists as a separate, weaker promise below.
  */
 export interface LaunchDelegate {
@@ -276,10 +283,15 @@ export interface LaunchDelegate {
   label: string;
   /** The command that starts a new conversation, no arguments. */
   newCommand: string;
+  /** The command that opens an EXISTING conversation, first argument the
+   *  session id. Absent: the delegate cannot, and resumes stay Flock's. */
+  openCommand?: string;
   /** Whether the delegate can be asked to FORK a specific session. None can:
-   *  no contributed command takes a session id, so Flock's fork verb keeps
-   *  launching its own terminal in every mode. Kept as a field so the answer
-   *  is written down next to the delegate it is about rather than assumed. */
+   *  `--fork-session` is a launch-time CLI flag no contributed command
+   *  carries, so Flock's fork verb keeps launching its own terminal in every
+   *  mode — which is also the only way a fork can inherit the parent's
+   *  history. Kept as a field so the answer is written down next to the
+   *  delegate it is about rather than assumed. */
   canFork: false;
   provider: ProviderId;
 }
@@ -294,6 +306,7 @@ export const DELEGATES: readonly LaunchDelegate[] = [
     extensionId: 'Anthropic.claude-code',
     label: 'Claude Code extension',
     newCommand: 'claude-vscode.newConversation',
+    openCommand: 'claude-vscode.primaryEditor.open',
     canFork: false,
     provider: 'claude',
   },

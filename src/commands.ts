@@ -2922,7 +2922,7 @@ async function forkFlow(
 export async function forkForAgent(
   deps: AccountCommandDeps,
   nodeId: string,
-  opts: { count: number; prompt?: string },
+  opts: { count: number; prompt?: string; titles?: string[] },
 ): Promise<AgentForkOutcome> {
   // The same tip resolution forkFlow itself performs, done early so the
   // refusal for an unstarted (or unknown) conversation is a sentence in the
@@ -2948,7 +2948,16 @@ export async function forkForAgent(
   const forked: string[] = [];
   const titles: string[] = [];
   for (let i = 0; i < count; i++) {
-    const title = defaultForkTitle(parentLabel, taken);
+    // A model-given name goes through nextFreeName rather than verbatim: the
+    // same truncation every generated title gets, and a counter when the name
+    // collides with an existing row (or with itself, passed twice) — two rows
+    // wearing one name is the ambiguity the whole naming scheme exists to
+    // prevent.
+    const asked = opts.titles?.[i]?.trim();
+    const title =
+      asked !== undefined && asked !== ''
+        ? nextFreeName(asked, taken)
+        : defaultForkTitle(parentLabel, taken);
     taken.push(title);
     const childId = await forkFlow(deps, nodeId, {
       title,
@@ -3328,6 +3337,55 @@ export async function resumeFlow(
   // account's config directory and nowhere else, so routing it elsewhere would
   // not merely misbill the branch, it would fail to find its history.
   const routed = pinnedLaunch(deps, coldFrom ?? sessionId);
+
+  // `lineage.launch.mode`, the RESUME half: a plain resume of an unpinned
+  // Claude conversation is handed to the delegate, which resumes it in its
+  // own UI — or reveals the panel it is already open in. Everything above
+  // still ran (tip routing, the live-writer backstop, leaf repair), because
+  // the delegate performs the same `--resume` this flow was about to. Three
+  // shapes stay Flock's own: a tmux ATTACH (the process is alive in our
+  // server, and the delegate would start a second one beside it), a COLD
+  // OPEN (`--session-id`/`--fork-session` flags no delegated command
+  // carries), and a conversation whose account pin sets an environment (the
+  // transcript lives in that account's config directory, which the delegate
+  // — running on the machine's own login — would not find).
+  if (
+    started &&
+    detached === undefined &&
+    routed.provider !== 'codex' &&
+    (routed.env === undefined || Object.keys(routed.env).length === 0)
+  ) {
+    let handedTo: { label: string } | null = null;
+    try {
+      handedTo = (await deps.delegateOpenSession?.(sessionId)) ?? null;
+    } catch (err) {
+      // A delegate that throws must not swallow the click: fall through and
+      // open Flock's own terminal, which is what the user wanted open.
+      logError('commands.delegateOpenSession', err);
+    }
+    if (handedTo !== null) {
+      log('resume: handed to', handedTo.label, shortId(sessionId));
+      // Reopening un-closes it (and un-parks it), exactly as the launch
+      // path below records. `tmux: null` for the same reason: the tab is
+      // back — in the delegate's UI, but back — so the record must stop
+      // saying "hidden".
+      await deps.upsertRecord(sessionId, {
+        closed: null,
+        parked: false,
+        tmux: null,
+      });
+      deps.refresh();
+      try {
+        vscode.window.setStatusBarMessage(
+          `Flock: conversation reopened in the ${handedTo.label}`,
+          4000,
+        );
+      } catch (err) {
+        logError('commands.delegateOpenSession.status', err);
+      }
+      return true;
+    }
+  }
 
   // The resumed process keeps this id, so sessionId === resumeId: the
   // LINEAGE_NODE_ID stamp and the binding both name what will be running.
@@ -5524,6 +5582,21 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     // another window, another tool — whose live state no editor can adopt.
     // Forking a copy is the one genuine "open" such a session has.
     const FORK = 'Fork Here';
+    // `lineage.launch.mode`: for the user who runs their sessions in the
+    // official extension, THESE rows are their sessions — live, and foreign
+    // only in the sense that Flock holds no terminal for them. The delegate's
+    // open command reveals the panel a session is already open in (panels are
+    // keyed by id), which is the click-a-row contract this dead end was
+    // missing. Offered, not automatic: a foreign row can also be a process in
+    // another editor entirely, and opening THAT one in a panel would put a
+    // second claude on its transcript — the button says where it goes, and
+    // the choice stays the user's. Claude rows only: the one delegate speaks
+    // no codex.
+    const delegate =
+      deps.sessionProvider?.(id) === 'codex'
+        ? null
+        : (deps.delegateOpenInfo?.() ?? null);
+    const OPEN_THERE = delegate === null ? '' : `Open in ${delegate.label}`;
     const choice = await vscode.window.showInformationMessage(
       `${hostSentence('foreign', {
         label,
@@ -5531,11 +5604,18 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
           ? { pid: node.roster.pid }
           : {}),
       })} Fork it to branch off a copy you own here.`,
+      ...(OPEN_THERE === '' ? [] : [OPEN_THERE]),
       FORK,
       'Copy Session ID',
     );
     if (choice === FORK) await forkFlow(deps, id);
-    else if (choice === 'Copy Session ID') {
+    else if (OPEN_THERE !== '' && choice === OPEN_THERE) {
+      try {
+        await deps.delegateOpenSession?.(id);
+      } catch (err) {
+        logError('commands.delegateOpenSession', err);
+      }
+    } else if (choice === 'Copy Session ID') {
       await vscode.env.clipboard.writeText(id);
     }
   });

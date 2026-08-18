@@ -87,10 +87,13 @@ chats, and much more.
 
 - **Ask Claude itself.** With the opt-in in-session verbs installed, "fork this
   session" — or "do three forks here" — typed to Claude runs the same fork the
-  sidebar button runs: same lineage edge, same naming, opened beside the
-  conversation it branched from, and Claude reports back the names of the new
-  branches. One consent modal installs a skill and a small local CLI; nothing
-  reaches the network. [Details →](docs/reference.md#in-session-verbs)
+  sidebar button runs: same lineage edge, opened beside the conversation it
+  branched from, and Claude reports back the names of the new branches. Say
+  what each fork is *for* — "one to try the redis cache, one for the SQL
+  approach" — and those become the rows' names; say nothing and they are
+  numbered like any other fork. One consent modal installs a skill and a small
+  local CLI; nothing reaches the network.
+  [Details →](docs/reference.md#in-session-verbs)
 
 - **Temporary chats.** The chat button on a project row opens a scratch
   conversation about that project. Right-click the project and **Old Chats…** for

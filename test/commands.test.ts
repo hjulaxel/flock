@@ -3445,6 +3445,125 @@ describe('focus reveals a terminal Flock did not create', () => {
 // --------------------------------------------- resume: the second-writer guard
 //
 // Two claude processes on one transcript is the worst thing this file can cause.
+// `lineage.launch.mode`, the RESUME half: a plain resume of an unpinned
+// Claude conversation is handed to the delegate's open-session command, which
+// resumes it in the official extension's own UI. What is pinned here is the
+// boundary: which resumes are handed over, and which stay Flock's own.
+
+describe('resume hands a plain reopen to the launch delegate', () => {
+  const SESSION = uuid(5);
+
+  function delegatedResumeHarness(
+    over: {
+      delegate?: { label: string } | null | 'throws' | 'unwired';
+      hasTranscript?: boolean;
+      pinnedTo?: { id: string; configDir?: string };
+    } = {},
+  ) {
+    const asked: string[] = [];
+    const delegateOver = over.delegate;
+    const { deps, calls } = chatDeps(undefined, {
+      hasTranscript: () => over.hasTranscript ?? true,
+    });
+    const profiles =
+      over.pinnedTo === undefined
+        ? []
+        : [
+            accountProfile(over.pinnedTo.id, {
+              ...(over.pinnedTo.configDir === undefined
+                ? {}
+                : { configDir: over.pinnedTo.configDir }),
+            }),
+          ];
+    const { accounts } = fakeAccountDeps(profiles, {
+      sessionProfileId: (id) =>
+        id === SESSION ? over.pinnedTo?.id : undefined,
+    });
+    const harness: AccountCommandDeps = {
+      ...deps,
+      accounts,
+      getForest: () =>
+        forestOf([
+          node(SESSION, { archived: true, status: 'exited', cwd: '/code/api' }),
+        ]),
+      launchSession: async (opts) => {
+        calls.launches.push(opts);
+        return {
+          nodeId: opts.sessionId,
+          sessionId: opts.sessionId,
+          terminalName: 'claude',
+          createdAt: 0,
+        };
+      },
+      ...(delegateOver === 'unwired'
+        ? {}
+        : {
+            delegateOpenSession: async (sessionId: string) => {
+              asked.push(sessionId);
+              if (delegateOver === 'throws') throw new Error('gone');
+              return delegateOver ?? null;
+            },
+          }),
+    };
+    return { deps: harness, calls, asked };
+  }
+
+  it('opens no terminal of its own when the delegate took the reopen — and un-closes the record', async () => {
+    const h = delegatedResumeHarness({
+      delegate: { label: 'Claude Code extension' },
+    });
+    expect(await resumeFlow(h.deps, SESSION)).toBe(true);
+    expect(h.asked).toEqual([SESSION]);
+    expect(h.calls.launches).toEqual([]);
+    // The same record the launch path writes: the tab is back — in the
+    // delegate's UI, but back.
+    const patch = h.calls.records.find((r) => r.id === SESSION)?.patch;
+    expect(patch?.closed).toBeNull();
+    expect(patch?.parked).toBe(false);
+  });
+
+  it('launches here when the delegate declines, throws, or is unwired', async () => {
+    for (const delegate of [null, 'throws', 'unwired'] as const) {
+      const h = delegatedResumeHarness({ delegate });
+      expect(await resumeFlow(h.deps, SESSION)).toBe(true);
+      expect(h.calls.launches).toHaveLength(1);
+      expect(h.calls.launches[0]?.resumeId).toBe(SESSION);
+    }
+  });
+
+  it('is not consulted for a COLD open — the flags it needs are not the delegate\'s to carry', async () => {
+    const h = delegatedResumeHarness({
+      delegate: { label: 'Claude Code extension' },
+      hasTranscript: false,
+    });
+    expect(await resumeFlow(h.deps, SESSION)).toBe(true);
+    expect(h.asked).toEqual([]);
+    expect(h.calls.launches).toHaveLength(1);
+    // A fresh start under the same id, exactly as before.
+    expect(h.calls.launches[0]?.resumeId).toBeUndefined();
+  });
+
+  it('is not consulted when the account pin sets an environment — the delegate could not find the transcript', async () => {
+    const h = delegatedResumeHarness({
+      delegate: { label: 'Claude Code extension' },
+      pinnedTo: { id: 'work', configDir: '/work/.claude' },
+    });
+    expect(await resumeFlow(h.deps, SESSION)).toBe(true);
+    expect(h.asked).toEqual([]);
+    expect(h.calls.launches).toHaveLength(1);
+  });
+
+  it('IS consulted for a pin that sets no environment — the default login can see that transcript', async () => {
+    const h = delegatedResumeHarness({
+      delegate: { label: 'Claude Code extension' },
+      pinnedTo: { id: 'default' },
+    });
+    expect(await resumeFlow(h.deps, SESSION)).toBe(true);
+    expect(h.asked).toEqual([SESSION]);
+    expect(h.calls.launches).toEqual([]);
+  });
+});
+
 // resumeFlow already refuses a session the FOREST calls live; this covers the
 // direction the forest gets wrong — a row reads as closed whenever the roster
 // does not carry it, which is also what a session running somewhere the roster

@@ -665,24 +665,52 @@ one shell after a `/fork`, a terminal inside a terminal — and then you get the
 old behaviour, an offer to fork a copy you own. Two Claudes on one transcript is
 the outcome all of this exists to avoid.
 
-**Handing new conversations to the extension.** Set `lineage.launch.mode` to
-`claudeExtension` and Flock's `+` runs the extension's **New Conversation**
-command instead of opening a terminal. Flock then watches for the session to
-appear on the roster and files it under the project and name your click implied.
+**Handing conversations to the extension.** Set `lineage.launch.mode` to
+`claudeExtension` and the extension's own UI becomes where sessions open, in
+both directions:
+
+- **New conversations.** Flock's `+` runs the extension's **New Conversation**
+  command instead of opening a terminal — which opens in *your*
+  `claudeCode.preferredLocation`, sidebar or editor. Flock then watches for the
+  session to appear on the roster and files it under the project and name your
+  click implied.
+- **Reopening a closed row.** Click a closed session (or **Resume Session…**)
+  and Flock hands the reopen to the extension's open-session command — the one
+  its own `claude-code://open` deep link runs — so the conversation comes back
+  in the extension's UI, not in a terminal. Every guard Flock runs before a
+  resume still runs first: tip routing, the second-writer backstop, resume-leaf
+  repair.
+- **Clicking a live session the extension hosts.** Such a row is *foreign* to
+  Flock (no terminal to reveal), and its dead-end dialog grows an **Open in
+  Claude Code extension** button that reveals the panel the session is open in
+  (the extension keys panels by session id). Offered, not automatic, because a
+  foreign row can also be a process in another editor entirely — opening *that*
+  in a panel would put a second Claude on its transcript.
+
 The right-hand column of the table above is what you get from then on — the row
 and the tree, not the ownership verbs. The setting is only honoured while that
 extension is installed; without it Flock opens the session itself and says so
 once.
 
-Two things the mode deliberately does not do:
+Three things the mode deliberately does not delegate:
 
-- **Fork is never delegated.** Nothing the extension contributes accepts a
-  session id or a resume target, so there is no way to ask it for a branch of a
-  specific conversation. Fork always opens Flock's own terminal, which is also
-  the only way it can inherit the parent's history.
-- **Picking an account by hand overrides it.** A delegated launch runs under the
-  delegate's own environment, so it cannot be pinned to one of your
-  subscriptions. **New Session From…** therefore keeps launching here.
+- **Fork.** `--fork-session` is a launch-time CLI flag no command the extension
+  contributes carries, so there is no way to ask it for a branch of a specific
+  conversation. Fork always opens Flock's own terminal, which is also the only
+  way it can inherit the parent's history.
+- **A resume pinned to another account.** The extension runs on the machine's
+  own login; a conversation whose account pin names its own config directory
+  lives in a transcript the extension would not find, so that resume keeps
+  Flock's terminal (and its pinned environment).
+- **Picking an account by hand.** A delegated launch runs under the delegate's
+  own environment, so it cannot be pinned to one of your subscriptions. **New
+  Session From…** therefore keeps launching here.
+
+**The terminal panel works the same way it always did.** If you prefer sessions
+in the bottom panel rather than as editor tabs, that is not this mode — set
+`lineage.terminalLocation` to `panel` and every Flock verb keeps working there:
+launches open in the panel, clicking a row reveals its panel terminal, and
+workspace switches leave panel terminals alone entirely.
 
 **What Flock never does to somebody else's session.** It does not attach to a
 pty it did not create, write to a transcript another process is holding, send
@@ -875,10 +903,19 @@ launch, the same lineage edge, the same naming (`auth 2`, `auth 3`, `auth 4`)
 that clicking **Fork Session** produces. "Do three forks here" is three of
 them, titled past each other.
 
+The forks can also be **named in your words**: "one to try the redis cache,
+one for the SQL approach" makes Claude pass `--name "redis cache"
+--name "SQL approach"` — one per fork, in order — and those become the rows'
+titles. A name that would collide with an existing row (or with itself, asked
+for twice) gets the same free-counter treatment every generated title gets,
+because two rows wearing one name is the ambiguity titles exist to prevent.
+Say nothing about names and the numbered defaults apply.
+
 The guardrails, since the requester is a model:
 
-- **Fork is the only verb.** A request may carry a count (capped at 8) and an
-  opening prompt (capped at 4000 characters); nothing else.
+- **Fork is the only verb.** A request may carry a count (capped at 8), one
+  name per fork, and an opening prompt (capped at 4000 characters); nothing
+  else.
 - **A request expires.** One older than two minutes is answered "expired"
   rather than executed — a fork nobody is waiting for must not fire when a
   window finally opens. The CLI withdraws its own request if no window answers

@@ -21,6 +21,8 @@ import {
   AgentVerbsManager,
   MAX_AGENT_FORKS,
   MAX_AGENT_PROMPT_CHARS,
+  MAX_AGENT_TITLE_CHARS,
+  VERBS_VERSION,
   clampForkCount,
   parseRequestText,
   renderSkillMd,
@@ -29,7 +31,11 @@ import {
   verbsScriptPath,
   verbsSkillDir,
 } from '../src/agentVerbs';
-import type { AgentForkOutcome, VerbExecutor } from '../src/agentVerbs';
+import type {
+  AgentForkOutcome,
+  AgentForkRequest,
+  VerbExecutor,
+} from '../src/agentVerbs';
 import { forkForAgent } from '../src/commands';
 import type { AccountCommandDeps } from '../src/commands';
 import type {
@@ -141,16 +147,16 @@ async function until(
 
 /** An executor whose fork calls are recorded; `bound` decides claim priority. */
 function makeExecutor(opts: { bound?: boolean; fail?: string } = {}) {
-  const calls: Array<{ node: string; count: number; prompt?: string }> = [];
+  const calls: AgentForkRequest[] = [];
   const executor: VerbExecutor = {
     isBoundHere: () => opts.bound === true,
     tipOf: (id) => id,
-    runFork: async (node, count, prompt) => {
-      calls.push({ node, count, ...(prompt !== undefined ? { prompt } : {}) });
+    runFork: async (request) => {
+      calls.push(request);
       if (opts.fail !== undefined) {
         return { forked: [], titles: [], error: opts.fail };
       }
-      const forked = Array.from({ length: count }, (_, i) =>
+      const forked = Array.from({ length: request.count }, (_, i) =>
         SID.replace(/a1$/, `b${i}`),
       );
       const titles = forked.map((_, i) => `fork ${i + 2}`);
@@ -199,6 +205,38 @@ describe('parseRequestText', () => {
     expect(at('three')).toMatchObject({ count: 1 });
     expect(at(undefined)).toMatchObject({ count: 1 });
     expect(at(3.7)).toMatchObject({ count: 3 });
+  });
+
+  it('carries fork names through, trimmed', () => {
+    const parsed = parseRequestText(
+      JSON.stringify({
+        v: 1,
+        verb: 'fork',
+        node: SID,
+        count: 2,
+        titles: [' redis cache ', 'SQL approach'],
+      }),
+    );
+    expect(parsed).toEqual({
+      verb: 'fork',
+      node: SID,
+      count: 2,
+      titles: ['redis cache', 'SQL approach'],
+    });
+  });
+
+  it('refuses names that do not line up one-per-fork', () => {
+    const at = (count: number, titles: unknown) =>
+      parseRequestText(
+        JSON.stringify({ v: 1, verb: 'fork', node: SID, count, titles }),
+      );
+    expect(at(3, ['a', 'b'])).toHaveProperty('error');
+    expect(at(1, [])).toHaveProperty('error');
+    expect(at(2, ['a', 7])).toHaveProperty('error');
+    expect(at(2, ['a', '  '])).toHaveProperty('error');
+    expect(at(1, ['x'.repeat(MAX_AGENT_TITLE_CHARS + 1)])).toHaveProperty(
+      'error',
+    );
   });
 
   it('refuses an oversized or non-string prompt — never truncates one', () => {
@@ -283,7 +321,7 @@ describe('selfHeal', () => {
     const { manager } = makeManager(home, {
       initial: {
         installed: true,
-        pluginVersion: 1,
+        pluginVersion: VERBS_VERSION,
         pluginDir: verbsSkillDir(home),
       },
     });
@@ -557,6 +595,29 @@ describe('forkForAgent', () => {
     ]);
   });
 
+  it('wears the names the model asked for, in order', async () => {
+    const { deps, PARENT } = forkDeps();
+    const outcome = await forkForAgent(deps, PARENT, {
+      count: 2,
+      titles: ['redis cache', 'SQL approach'],
+    });
+    expect(outcome.error).toBeUndefined();
+    expect(outcome.titles).toEqual(['redis cache', 'SQL approach']);
+  });
+
+  it('a name that collides — with a row or with itself — gets a counter, not a twin', async () => {
+    // 'auth 2' already exists as the parent's branch; asking for it twice
+    // more must yield three DISTINCT rows.
+    const { deps, PARENT } = forkDeps();
+    const outcome = await forkForAgent(deps, PARENT, {
+      count: 2,
+      titles: ['auth 2', 'auth 2'],
+    });
+    expect(outcome.titles).toHaveLength(2);
+    expect(new Set(outcome.titles).size).toBe(2);
+    expect(outcome.titles).not.toContain('auth 2');
+  });
+
   it('clamps a runaway count', async () => {
     const { deps, launches, PARENT } = forkDeps();
     const outcome = await forkForAgent(deps, PARENT, { count: 999 });
@@ -692,6 +753,64 @@ describe('the rendered CLI', () => {
     expect(result.code).toBe(1);
     expect(result.stderr).toContain('Could not tell which session');
     // And it left no request behind for a window to trip over later.
+    expect(
+      fs.existsSync(requestsDir(home)) &&
+        fs.readdirSync(requestsDir(home)).length > 0,
+    ).toBe(false);
+  });
+
+  it('names imply the count, and land in the request as titles', async () => {
+    const home = tempHome();
+    fs.mkdirSync(path.dirname(verbsScriptPath(home)), { recursive: true });
+    fs.writeFileSync(verbsScriptPath(home), renderVerbScript());
+
+    const done = runCli(
+      home,
+      ['fork', '--name', 'redis cache', '--name', 'SQL approach'],
+      { LINEAGE_NODE_ID: SID },
+    );
+    const dir = requestsDir(home);
+    expect(
+      await until(() =>
+        fs.existsSync(dir) &&
+        fs.readdirSync(dir).some((f) => /^[0-9a-f-]{36}\.json$/.test(f)),
+      ),
+    ).toBe(true);
+    const reqName = fs
+      .readdirSync(dir)
+      .find((f) => /^[0-9a-f-]{36}\.json$/.test(f))!;
+    const body = JSON.parse(
+      fs.readFileSync(path.join(dir, reqName), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(body).toMatchObject({
+      count: 2,
+      titles: ['redis cache', 'SQL approach'],
+    });
+    fs.writeFileSync(
+      path.join(dir, reqName.replace(/\.json$/, '.reply.json')),
+      JSON.stringify({
+        ok: true,
+        forked: [SID, SID],
+        titles: ['redis cache', 'SQL approach'],
+      }),
+    );
+    const result = await done;
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('redis cache, SQL approach');
+  });
+
+  it('refuses a name/count mismatch before writing anything', async () => {
+    const home = tempHome();
+    fs.mkdirSync(path.dirname(verbsScriptPath(home)), { recursive: true });
+    fs.writeFileSync(verbsScriptPath(home), renderVerbScript());
+
+    const result = await runCli(
+      home,
+      ['fork', '--count', '3', '--name', 'only one'],
+      { LINEAGE_NODE_ID: SID },
+    );
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('one --name per fork');
     expect(
       fs.existsSync(requestsDir(home)) &&
         fs.readdirSync(requestsDir(home)).length > 0,

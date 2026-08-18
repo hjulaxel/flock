@@ -185,7 +185,7 @@ export function renderVerbScript(): string {
     '// (in-session verbs v' + String(VERBS_VERSION) + '). A Claude Code session runs this to ask',
     '// Flock for a verb:',
     '//',
-    '//   node ~/.lineage/flock-verbs.mjs fork [--count N] [--prompt "..."]',
+    '//   node ~/.lineage/flock-verbs.mjs fork [--count N] [--name "..."]... [--prompt "..."]',
     '//',
     '// The request lands in ~/.lineage/requests/, one Flock window claims it,',
     '// runs the same fork the sidebar button runs, and replies here.',
@@ -222,17 +222,35 @@ export function renderVerbScript(): string {
     '',
     'const argv = process.argv.slice(2);',
     "if (argv[0] !== 'fork') {",
-    '  die(\'usage: flock-verbs.mjs fork [--count N] [--prompt "..."]\');',
+    '  die(\'usage: flock-verbs.mjs fork [--count N] [--name "..."]... [--prompt "..."]\');',
     '}',
-    'let count = 1;',
+    'let count;',
     'let prompt;',
+    'const names = [];',
     'for (let i = 1; i < argv.length; i++) {',
     '  const a = argv[i];',
     "  if (a === '--count') count = Number(argv[++i]);",
     "  else if (a === '--prompt') prompt = argv[++i];",
+    "  else if (a === '--name') names.push(argv[++i]);",
     '  else if (/^--count=/.test(a)) count = Number(a.slice(8));',
     '  else if (/^--prompt=/.test(a)) prompt = a.slice(9);',
+    '  else if (/^--name=/.test(a)) names.push(a.slice(7));',
     "  else die('unknown argument: ' + a);",
+    '}',
+    '// Names imply the count; both given, they have to agree — a third fork',
+    '// wearing a name meant for nobody is worse than an error here.',
+    'if (names.length > 0 && count === undefined) count = names.length;',
+    'if (count === undefined) count = 1;',
+    'if (names.length > 0 && names.length !== count) {',
+    "  die('give one --name per fork (' + count + '), or none.');",
+    '}',
+    'for (const name of names) {',
+    "  if (typeof name !== 'string' || name.trim() === '') {",
+    "    die('--name needs a non-empty title.');",
+    '  }',
+    '  if (name.length > ' + String(MAX_AGENT_TITLE_CHARS) + ') {',
+    "    die('a --name is longer than " + String(MAX_AGENT_TITLE_CHARS) + " characters.');",
+    '  }',
     '}',
     'if (!Number.isInteger(count) || count < 1 || count > ' + String(MAX_AGENT_FORKS) + ') {',
     "  die('--count must be a whole number from 1 to " + String(MAX_AGENT_FORKS) + ".');",
@@ -253,6 +271,7 @@ export function renderVerbScript(): string {
     "const replyFile = path.join(DIR, id + '.reply.json');",
     "const body = { v: 1, verb: 'fork', node, count };",
     "if (typeof prompt === 'string' && prompt.length > 0) body.prompt = prompt;",
+    'if (names.length > 0) body.titles = names.map((n) => n.trim());',
     "const tmp = path.join(DIR, '.' + id + '.tmp');",
     "fs.writeFileSync(tmp, JSON.stringify(body) + '\\n');",
     'fs.renameSync(tmp, reqFile);',
@@ -296,12 +315,23 @@ export function renderVerbScript(): string {
 
 // ----------------------------------------------------------------- requests
 
-/** One validated fork request. `count` is already clamped; anything the
- *  validator could not accept is an `{ error }` instead — the caller still
- *  claims the file and REPLIES with the error, so the CLI never times out on
- *  a request the extension actually saw. */
+/** One validated fork request, as the executor receives it. */
+export interface AgentForkRequest {
+  node: string;
+  count: number;
+  prompt?: string;
+  /** One title per fork, in order, from the model — derived from the user's
+   *  own words ("one for auth, one for search"). Absent, the forks get the
+   *  numbered defaults the sidebar button generates. */
+  titles?: string[];
+}
+
+/** `count` is already clamped; anything the validator could not accept is an
+ *  `{ error }` instead — the caller still claims the file and REPLIES with
+ *  the error, so the CLI never times out on a request the extension actually
+ *  saw. */
 export type ParsedRequest =
-  | { verb: 'fork'; node: string; count: number; prompt?: string }
+  | ({ verb: 'fork' } & AgentForkRequest)
   | { error: string };
 
 export function parseRequestText(text: string): ParsedRequest {
@@ -322,6 +352,9 @@ export function parseRequestText(text: string): ParsedRequest {
   const node = body['node'];
   if (!isSessionId(node)) return { error: 'the request names no session' };
   const count = clampForkCount(body['count']);
+
+  const out: { verb: 'fork' } & AgentForkRequest = { verb: 'fork', node, count };
+
   const prompt = body['prompt'];
   if (prompt !== undefined) {
     if (typeof prompt !== 'string' || prompt.length === 0) {
@@ -332,9 +365,35 @@ export function parseRequestText(text: string): ParsedRequest {
         error: `the prompt is longer than ${MAX_AGENT_PROMPT_CHARS} characters`,
       };
     }
-    return { verb: 'fork', node, count, prompt };
+    out.prompt = prompt;
   }
-  return { verb: 'fork', node, count };
+
+  const titles = body['titles'];
+  if (titles !== undefined) {
+    if (!Array.isArray(titles) || titles.length === 0) {
+      return { error: 'titles is not a list of names' };
+    }
+    // One per fork, exactly — the CLI enforces the same, so a mismatch here
+    // is a hand-written request, and a fork wearing a name meant for a
+    // different one is worse than the refusal.
+    if (titles.length !== count) {
+      return { error: `one name per fork (${count}), or none` };
+    }
+    const clean: string[] = [];
+    for (const raw of titles) {
+      if (typeof raw !== 'string' || raw.trim() === '') {
+        return { error: 'a fork name is not a non-empty string' };
+      }
+      if (raw.length > MAX_AGENT_TITLE_CHARS) {
+        return {
+          error: `a fork name is longer than ${MAX_AGENT_TITLE_CHARS} characters`,
+        };
+      }
+      clean.push(raw.trim());
+    }
+    out.titles = clean;
+  }
+  return out;
 }
 
 /** 1..MAX_AGENT_FORKS; anything unusable is 1, never a refusal — a count is a
@@ -363,11 +422,7 @@ export interface VerbExecutor {
   /** launch-id → current generation, chainIndex.tipOf. */
   tipOf(sessionId: string): string;
   /** The verb itself — forkForAgent(commandDeps, …) in the real wiring. */
-  runFork(
-    nodeId: string,
-    count: number,
-    prompt?: string,
-  ): Promise<AgentForkOutcome>;
+  runFork(request: AgentForkRequest): Promise<AgentForkOutcome>;
 }
 
 export interface VerbsDeps {
@@ -870,13 +925,11 @@ export class AgentVerbsManager implements DisposableLike {
           'verbs: fork ×' + String(parsed.count),
           'of',
           shortId(parsed.node),
+          parsed.titles !== undefined ? '(named)' : '',
           parsed.prompt !== undefined ? '(with prompt)' : '',
         );
-        outcome = await executor.runFork(
-          parsed.node,
-          parsed.count,
-          parsed.prompt,
-        );
+        const { verb: _verb, ...request } = parsed;
+        outcome = await executor.runFork(request);
       }
     } catch (err) {
       logError('verbs: run fork', err);

@@ -1039,9 +1039,11 @@ export const CONFIG_KEYS = {
    *  out side by side is a strong opinion, and the default stays the tab
    *  strip as VS Code users know it. */
   soloSession: 'soloSession',
-  /** Who OPENS a new conversation: Flock's own tmux-backed terminal, or another
-   *  extension's command (see src/hosts.ts's delegate table). Only ever consulted
-   *  for a NEW conversation — a fork has nothing to hand over. */
+  /** Who OPENS a conversation: Flock's own tmux-backed terminal, or another
+   *  extension's commands (see src/hosts.ts's delegate table). Consulted for a
+   *  NEW conversation and for a plain RESUME of an unpinned one — a fork has
+   *  nothing to hand over (`--fork-session` is a CLI flag no delegated command
+   *  carries). */
   launchMode: 'launch.mode',
   onlyProjectSessions: 'onlyProjectSessions',
   /** Show live sessions Flock does not own — `claude` running in some other
@@ -2931,6 +2933,26 @@ export interface CommandDeps {
     cwd?: string;
     title?: string;
   }): Promise<{ label: string } | null>;
+  /** `lineage.launch.mode`, the RESUME half: hand an existing conversation to
+   *  the delegate's open-session command (hosts.LaunchDelegate.openCommand),
+   *  which resumes it in that extension's own UI — or reveals the panel it is
+   *  already open in. Resolves to the delegate's label when it ran; null when
+   *  the mode is `flock`, the extension is missing, the delegate has no such
+   *  command, or the command threw — in every case the caller opens its own
+   *  terminal exactly as it always did.
+   *
+   *  The caller stays responsible for everything that guards a resume (the
+   *  live-writer check, tip routing, leaf repair) and for NOT delegating a
+   *  conversation whose account pin names a different config directory — the
+   *  delegate runs on the machine's default login and would not find the
+   *  transcript. Optional, like delegateLaunch, and for the same reason. */
+  delegateOpenSession?(sessionId: string): Promise<{ label: string } | null>;
+  /** The delegate `lineage.launch.mode` currently resolves to, when it is
+   *  installed and can OPEN a specific session — null otherwise. What the
+   *  focus verb consults to decide whether a foreign live row's dead-end
+   *  dialog may offer "Open in <label>" at all: the offer must not render in
+   *  flock mode, and a dialog cannot probe by running the command. */
+  delegateOpenInfo?(): { label: string } | null;
   /** `lineage.soloSession`: after a session's tab opened (or was focused),
    *  park every OTHER session tab in this window and pin the kept one.
    *  A no-op when the setting is off. The mechanism is the workspace

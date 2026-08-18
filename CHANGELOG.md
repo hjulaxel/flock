@@ -4,6 +4,35 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Claude can name the forks it makes.** "Fork this twice — one to try the
+  redis cache, one for the SQL approach" now comes back as two rows called
+  **redis cache** and **SQL approach**: the in-session verbs CLI takes a
+  repeatable `--name` (one per fork, in order; with names given, `--count`
+  may be omitted), and the skill teaches Claude to derive short names from
+  the user's own words — and to pass none when the user just wants copies,
+  which keeps the numbered defaults. A name that would collide with an
+  existing row, or with itself asked for twice, gets the same free-counter
+  treatment every generated title gets. Already-installed verbs self-heal to
+  the new skill and CLI on the next activation; run `/reload-plugins` in
+  open sessions to pick the skill text up.
+
+### Fixed
+
+- **Forking no longer makes the parent row vanish while the forks turn into
+  roots.** Both continuation signals — the daemon roster's view of a launch
+  and a transcript head-read — can transiently describe a fresh fork as a
+  plain-resume *continuation* of its parent, and folding that claim chained
+  the child onto the parent: the collapse then swallowed the parent's row
+  into the branch until the roster moved on and the tree healed itself. A
+  fork is never a re-key, and the minted edge is written before the child
+  process exists — so a continuation claim naming the same (child, parent)
+  pair as a persisted fork edge is now dropped at the chain fold, for agent
+  forks and clicked ones alike.
+
 ## [0.1.5] — 2026-08-14
 
 ### Upgrading from 0.1.4

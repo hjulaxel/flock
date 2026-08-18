@@ -2240,10 +2240,15 @@ export async function activate(
         verbsManager.startWatcher({
           isBoundHere: (id) => registry.isBoundHere(id),
           tipOf: (id) => chainIndex.tipOf(id),
-          runFork: (node, count, prompt) =>
-            forkForAgent(commandDeps, node, {
-              count,
-              ...(prompt !== undefined ? { prompt } : {}),
+          runFork: (request) =>
+            forkForAgent(commandDeps, request.node, {
+              count: request.count,
+              ...(request.prompt !== undefined
+                ? { prompt: request.prompt }
+                : {}),
+              ...(request.titles !== undefined
+                ? { titles: request.titles }
+                : {}),
             }),
         });
       } else {
@@ -3670,6 +3675,65 @@ export async function activate(
       // interval, and the user is looking at the panel it just opened.
       pokeNow();
       return { label: delegate.label };
+    },
+
+    /**
+     * The RESUME half of `lineage.launch.mode`: open an existing conversation
+     * in the delegate's own UI (claude-vscode.primaryEditor.open — the command
+     * the extension's own deep link runs; it reveals the existing panel when
+     * the session is already open in one). Same failure contract as
+     * delegateLaunch: every null sends the caller back to its own terminal.
+     * No claim is armed — the row already exists, and whatever generation id
+     * the resume mints is re-keyed onto it by the chain machinery exactly as
+     * for any other resume Flock did not perform.
+     */
+    delegateOpenSession: async (sessionId) => {
+      const resolved = resolveLaunchMode(
+        cfg().get<string>(CONFIG_KEYS.launchMode),
+        (id) => vscode.extensions?.getExtension(id) !== undefined,
+      );
+      if (resolved.fellBack) {
+        if (!delegateFallbackTold) {
+          delegateFallbackTold = true;
+          void vscode.window.showWarningMessage(
+            'Flock: `lineage.launch.mode` names an extension that is not ' +
+              'installed, so this session opened here instead.',
+          );
+        }
+        return null;
+      }
+      const delegate = resolved.delegate;
+      if (delegate?.openCommand === undefined) return null;
+      try {
+        await vscode.commands.executeCommand(delegate.openCommand, sessionId);
+      } catch (err) {
+        logError('extension.delegateOpenSession', err);
+        return null;
+      }
+      // The resumed process will not be on the roster for up to a poll
+      // interval, and the user is looking at the panel it just opened.
+      pokeNow();
+      return { label: delegate.label };
+    },
+
+    /** What the focus verb's dead-end dialog may offer. Pure read, no
+     *  side effects, no fallback warning — a dialog being CONSTRUCTED is not
+     *  the moment to toast about a missing extension. */
+    delegateOpenInfo: () => {
+      try {
+        const resolved = resolveLaunchMode(
+          cfg().get<string>(CONFIG_KEYS.launchMode),
+          (id) => vscode.extensions?.getExtension(id) !== undefined,
+        );
+        const delegate = resolved.delegate;
+        if (resolved.fellBack || delegate?.openCommand === undefined) {
+          return null;
+        }
+        return { label: delegate.label };
+      } catch (err) {
+        logError('extension.delegateOpenInfo', err);
+        return null;
+      }
     },
 
     /**

@@ -220,15 +220,26 @@ describe('resolveLaunchMode', () => {
 
 describe('the delegate table', () => {
   it('names one delegate, which cannot fork', () => {
-    // No contributed command of the official extension takes a session id, so
-    // the fork verb keeps launching Flock's own terminal in every mode. This
-    // asserts the fact rather than the wish.
+    // `--fork-session` is a launch-time CLI flag no contributed command
+    // carries, so the fork verb keeps launching Flock's own terminal in every
+    // mode. This asserts the fact rather than the wish.
     expect(DELEGATES).toHaveLength(1);
     expect(DELEGATES.every((d) => d.canFork === false)).toBe(true);
     expect(delegateFor('claudeExtension')?.extensionId).toBe(
       'Anthropic.claude-code',
     );
     expect(delegateFor('flock')).toBeUndefined();
+  });
+
+  it('can OPEN an existing session, through the deep-link command', () => {
+    // `primaryEditor.open`, not `editor.open`: the latter overwrites the
+    // user's claudeCode.preferredLocation as a side effect when called
+    // without an explicit view column, and their placement is not ours to
+    // change. The former is what the extension's own claude-code://open
+    // deep link runs.
+    expect(delegateFor('claudeExtension')?.openCommand).toBe(
+      'claude-vscode.primaryEditor.open',
+    );
   });
 
   it('spells out what the mode costs, including the two close verbs', () => {
