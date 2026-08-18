@@ -8,6 +8,35 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Added
 
+- **The accounts row says how long the five-hour window has left.** The weekly
+  meter always named its rollover day (`wk 41% → Tue`); the five-hour meter —
+  the number that actually decides whether to start another session — showed
+  only a percentage. It now carries the same arrow with the time left:
+  `5h 62% → 1h 20m`, computed at render time, omitted when the provider gave
+  no reset or the moment has passed.
+
+- **One session tab at a time, behind `lineage.soloSession` (off by
+  default).** The quality-of-life mode for windows drowning in claude tabs:
+  opening or focusing a session parks every other session tab through the
+  workspace switcher's own two tiers — tmux-wrapped ones detach and keep
+  running hidden, bare ones close and `--resume` from the tree, and a busy or
+  waiting bare one is spared for the same reason a switch spares it. The kept
+  tab is pinned, so it sits at the left of its group and survives *Close
+  Others*. Workspace switches restore only the session the layout says was in
+  front instead of the whole saved set.
+
+- **`claudeExtension` mode now opens sessions in the extension's UI, not just
+  new ones.** The official extension grew a command that takes a session id
+  (the one its own `claude-code://open` deep link runs), so clicking a closed
+  row reopens the conversation there instead of in a terminal — after every
+  guard Flock already ran — and the dead-end dialog on a live row the
+  extension hosts offers **Open in Claude Code extension**, which reveals the
+  panel it is already open in. Forks, tmux attaches, cold opens and resumes
+  pinned to another account's config directory keep Flock's own terminal,
+  each for its own stated reason. Bottom-panel people were already served by
+  `lineage.terminalLocation: "panel"`; the reference now says so where they
+  will look.
+
 - **Claude can name the forks it makes.** "Fork this twice — one to try the
   redis cache, one for the SQL approach" now comes back as two rows called
   **redis cache** and **SQL approach**: the in-session verbs CLI takes a
@@ -21,6 +50,15 @@ All notable changes to Flock are recorded here. The format follows
   open sessions to pick the skill text up.
 
 ### Fixed
+
+- **"Show all sessions" no longer re-expands every fold the filter was
+  hiding.** With **Show Only Active Sessions** on, the inline tree pruned the
+  collapsed-state keys of rows the filter had merely hidden — a folder whose
+  sessions were all closed, a branch row with nothing live under it — so
+  turning the filter back off brought those rows back expanded. Hidden is not
+  gone: grouping-derived keys now survive the filter round-trip, and session
+  keys stay prunable throughout because the forest never forgets a filtered
+  node.
 
 - **Forking no longer makes the parent row vanish while the forks turn into
   roots.** Both continuation signals — the daemon roster's view of a launch
