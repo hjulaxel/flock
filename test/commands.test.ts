@@ -4561,8 +4561,9 @@ describe('the add / import flows', () => {
     over: Partial<UnlistedSession> = {},
   ): UnlistedSession => ({ sessionId: id, live: false, ...over });
 
-  /** A machine with nothing left to recommend. Each setup test moves exactly
-   *  the fields it is about, so what it is testing is what it changed. */
+  /** A machine with nothing left to recommend — except the surface question,
+   *  which is on every plan. Each setup test moves exactly the fields it is
+   *  about, so what it is testing is what it changed. */
   const settledWorld: RecommendedWorld = {
     platform: 'darwin',
     tmuxBinary: '/opt/homebrew/bin/tmux',
@@ -4574,6 +4575,10 @@ describe('the add / import flows', () => {
     unlistedCount: 0,
     branchRowsEnabled: false,
     maxWorktrees: 1,
+    terminalLocation: 'editor',
+    soloSession: false,
+    launchMode: 'flock',
+    claudeExtensionInstalled: false,
   };
 
   describe('addSessionToProjectFlow', () => {
@@ -4753,6 +4758,7 @@ describe('the add / import flows', () => {
     const VERBS = 'Let Claude fork its own sessions';
     const PROJECT = 'Make your first project';
     const BRANCHES = 'Show branch and worktree rows';
+    const SURFACE = 'Choose where sessions open';
 
     beforeEach(() => {
       // newProjectFlow names the project it just made, and falls back to this
@@ -4775,15 +4781,26 @@ describe('the add / import flows', () => {
       expect(calls.settings).toEqual([]);
     });
 
-    it('reports a machine with nothing left to do, and adds the notes', async () => {
+    it('still asks the surface question on a machine with nothing else to do, and the receipt carries the notes', async () => {
+      // The old "everything recommended is already set up" outcome is gone on
+      // purpose: the surface step has no "already done", so even a settled
+      // machine is offered the checklist — with exactly that one row on it —
+      // and the notes ride the receipt.
       const { deps, calls } = poolDeps({
         world: { ...settledWorld, tmuxBinary: null },
       });
+      const asked = scriptPicks([SURFACE], 'Editor tabs (current)');
       await recommendedSetupFlow(deps);
-      expect(saidInfo.join(' ')).toContain('already set up');
+      expect(asked.offered[0]).toEqual([SURFACE]);
+      // Choosing an option — even the current one — writes it, explicitly.
+      expect(calls.settings).toEqual([
+        { key: 'terminalLocation', value: 'editor' },
+        { key: 'soloSession', value: false },
+        { key: 'launch.mode', value: 'flock' },
+      ]);
       // The one thing it cannot do for you is still said.
       expect(saidInfo.join(' ')).toContain('tmux is not installed');
-      expect(calls.settings).toEqual([]);
+      expect(saidInfo.join(' ')).toContain('choose differently');
     });
 
     it('ticks what recommendedPlan recommends, and leaves the rest alone', async () => {
@@ -4793,8 +4810,45 @@ describe('the add / import flows', () => {
       const asked = scriptPicks(undefined);
       await recommendedSetupFlow(deps);
       expect(asked.many).toEqual([true]);
-      expect(asked.offered[0]).toEqual([HOOKS, BRANCHES]);
-      expect(asked.picked[0]).toEqual([HOOKS]);
+      expect(asked.offered[0]).toEqual([SURFACE, HOOKS, BRANCHES]);
+      expect(asked.picked[0]).toEqual([SURFACE, HOOKS]);
+    });
+
+    it('writes nothing for a ticked surface step whose picker was cancelled', async () => {
+      // The tick opened the question; only an ANSWER writes. Escape on the
+      // four-way picker is "no", not an error, and the receipt says nothing
+      // happened.
+      const { deps, calls } = poolDeps({ world: settledWorld });
+      scriptPicks([SURFACE], undefined);
+      await recommendedSetupFlow(deps);
+      expect(calls.settings).toEqual([]);
+      expect(saidInfo.join(' ')).toContain('nothing was changed');
+    });
+
+    it('writes launch.mode ALONE for the extension option, installed or not', async () => {
+      const { deps, calls } = poolDeps({ world: settledWorld });
+      const asked = scriptPicks([SURFACE], 'Claude Code extension');
+      await recommendedSetupFlow(deps);
+      // The row is on offer even though the extension is missing — the
+      // description says so, and the launcher already falls back.
+      expect(asked.offered[1]).toContain('Claude Code extension');
+      expect(calls.settings).toEqual([
+        { key: 'launch.mode', value: 'claudeExtension' },
+      ]);
+    });
+
+    it('suffixes the current arrangement, and moves off it when asked', async () => {
+      const { deps, calls } = poolDeps({
+        world: { ...settledWorld, soloSession: true },
+      });
+      const asked = scriptPicks([SURFACE], 'Bottom terminal panel');
+      await recommendedSetupFlow(deps);
+      expect(asked.offered[1]).toContain('One pinned session tab (current)');
+      expect(calls.settings).toEqual([
+        { key: 'terminalLocation', value: 'panel' },
+        { key: 'soloSession', value: false },
+        { key: 'launch.mode', value: 'flock' },
+      ]);
     });
 
     it('installs and enables, in that order, for a ticked hooks step', async () => {

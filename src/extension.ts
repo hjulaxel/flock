@@ -46,6 +46,7 @@ import {
   DEFAULT_PROVIDER,
   DEFAULT_STALE_AFTER_HOURS,
   ENV_NODE_ID,
+  EXTENSION_ID,
   isProviderId,
   isSessionId,
   isTerminalLocationPref,
@@ -192,7 +193,7 @@ import {
 // no vscode — see the module header for why the move is a rename.
 import { moveConversation } from './accountMove';
 import { pinnedLaunchProfile, pinnedProfile, rankUsage } from './routing';
-import { hostOfChain, resolveLaunchMode } from './hosts';
+import { delegateFor, hostOfChain, resolveLaunchMode } from './hosts';
 import type { SessionHost } from './hosts';
 import { ensureProfileConfig } from './profileConfig';
 import type { ProfileConfigSources } from './profileConfig';
@@ -252,6 +253,19 @@ const BRANCH_ROWS_NOTICE_KEY = 'lineage.branchRowsNoticeShown';
 /** globalState, same reasoning again: the recommended setup is offered once per
  *  install, and answering it — either way — is the end of it. */
 const RECOMMENDED_NOTICE_KEY = 'lineage.recommendedNoticeShown';
+/** globalState once more: the walkthrough front door is decided once per
+ *  install — opened or judged unnecessary — and either verdict is final. */
+const WALKTHROUGH_KEY = 'lineage.walkthroughOpened';
+/** What `workbench.action.openWalkthrough` takes: publisher.name#walkthroughId.
+ *  The id half is `EXTENSION_ID`, which a test holds equal to the manifest;
+ *  the fragment is the walkthrough's `id` in package.json. A walkthrough
+ *  contribution has no command id of its own, so this string is the only
+ *  address it has. */
+const WALKTHROUGH_REF = `${EXTENSION_ID}#flockGettingStarted`;
+/** Ahead of every toast, and short: the walkthrough is a PAGE, not a
+ *  notification, and on the only install it fires for the editor area is
+ *  empty anyway — there is nothing to wait for and nothing to cover up. */
+const WALKTHROUGH_DELAY_MS = 2_500;
 /** AHEAD of the tmux notice, which is the point: this fires only on a window
  *  with no projects at all, and on that window it is the more useful of the two
  *  — it names tmux itself, among everything else. Whichever fires suppresses
@@ -4242,6 +4256,10 @@ export async function activate(
         }
         if (maxWorktrees >= 2) break;
       }
+      // Probed by the same extension id `resolveLaunchMode`'s installed
+      // callback gets at every launch, so the surface picker and the launcher
+      // cannot disagree about whether the delegate is really there.
+      const claudeDelegate = delegateFor('claudeExtension');
       return {
         platform: process.platform,
         tmuxBinary: findTmuxBinary(),
@@ -4255,6 +4273,15 @@ export async function activate(
         unlistedCount: commandDeps.unlistedSessions?.().length ?? 0,
         branchRowsEnabled: boolCfg(CONFIG_KEYS.gitBranches, false),
         maxWorktrees,
+        // The same normalizing reader every launch uses, so the picker's
+        // "current" and the launcher cannot disagree about a hand-edited value.
+        terminalLocation: terminalLocation(),
+        soloSession: boolCfg(CONFIG_KEYS.soloSession, false),
+        launchMode: cfg().get<string>(CONFIG_KEYS.launchMode),
+        claudeExtensionInstalled:
+          claudeDelegate !== undefined &&
+          vscode.extensions?.getExtension(claudeDelegate.extensionId) !==
+            undefined,
       };
     },
 
@@ -4397,6 +4424,40 @@ export async function activate(
   };
 
   context.subscriptions.push(registerCommands(commandDeps));
+
+  // THE ONE GUARANTEED FRONT DOOR. Every other first-launch surface here is
+  // deliberately hard to trigger — the recommended-setup notice below needs no
+  // projects AND two recommended steps left, the tmux notice needs tmux missing
+  // — so an install where none of them fires greets its person with an empty
+  // sidebar and silence. A genuinely fresh install deserves exactly one thing
+  // it can count on: the walkthrough, opened for it, once.
+  //
+  // "Genuinely fresh" is the store's own testimony — no projects and no session
+  // records — because those are the two things every path into Flock writes,
+  // and either one existing means somebody has already been through a door.
+  // The key is stamped BEFORE the check, not after the command: whichever way
+  // the freshness question resolves is this install's answer for good, so an
+  // upgrade with a tree full of sessions is judged once and never re-asked, and
+  // a failure to open cannot queue a second attempt onto some later launch
+  // where the page would arrive as a non sequitur.
+  setTimeout(() => {
+    void (async (): Promise<void> => {
+      try {
+        if (context.globalState.get<boolean>(WALKTHROUGH_KEY) === true) return;
+        await context.globalState.update(WALKTHROUGH_KEY, true);
+        const fresh =
+          store.getProjects().length === 0 &&
+          Object.keys(store.all()).length === 0;
+        if (!fresh) return;
+        await vscode.commands.executeCommand(
+          'workbench.action.openWalkthrough',
+          WALKTHROUGH_REF,
+        );
+      } catch (err) {
+        logError('walkthrough.frontDoor', err);
+      }
+    })();
+  }, WALKTHROUGH_DELAY_MS);
 
   // THE ONE-TIME OFFER OF THE RECOMMENDED SETUP. Same shape as the two notices
   // above — deferred off the activation path, decided by a pure function

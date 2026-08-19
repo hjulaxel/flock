@@ -30,7 +30,7 @@ import type {
   PullRequestState,
   RecommendedWorld,
 } from '../src/types';
-import { recommendedPlan } from '../src/recommend';
+import { recommendedPlan, surfaceChoices } from '../src/recommend';
 import { branchStateIcon } from '../src/viewmodel';
 
 const ROOT = path.join(__dirname, '..');
@@ -181,8 +181,18 @@ describe('scaffold: the shared types contract', () => {
       unlistedCount: 0,
       branchRowsEnabled: false,
       maxWorktrees: 3,
+      terminalLocation: 'editor',
+      soloSession: false,
+      launchMode: 'flock',
+      claudeExtensionInstalled: false,
     };
-    const entries = recommendedPlan(world).steps.flatMap((s) => s.settings);
+    // The surface step itself carries no settings — its four OPTIONS do, and
+    // each is a write the picker can perform, so each is held to the same
+    // manifest contract as a step's own table.
+    const entries = [
+      ...recommendedPlan(world).steps.flatMap((s) => s.settings),
+      ...surfaceChoices(world).flatMap((c) => c.settings),
+    ];
     // The loop asserting nothing is the failure mode this guards against.
     expect(entries.length).toBeGreaterThan(0);
     for (const { key, value } of entries) {

@@ -20,6 +20,14 @@
 //   TASTE       `soloSession`, `showTokens`, `notifications.popup`, the two
 //               previews, `offerSwitchAtLimit`. Not recommendable in either
 //               direction; they stay in the settings UI where they belong.
+//               One taste question IS worth asking out loud — where sessions
+//               open (`terminalLocation` + `soloSession` + `launch.mode`) —
+//               because a person who has never met the three keys cannot ask
+//               it themselves. Asking is the `surface` step: an explicit
+//               four-way question, never a pre-ticked checkbox that writes
+//               settings. The step itself carries no settings at all; the
+//               writes belong to whichever option is CHOSEN in the picker
+//               (`surfaceChoices` below), and cancelling it writes nothing.
 //
 // A "recommended setup" is only honest if it moves the first group, asks about
 // the third, and leaves the other two alone. That distinction is the whole
@@ -36,6 +44,7 @@
 // that only exists in a QuickPick is a `why` that goes stale the first time the
 // feature changes.
 
+import { resolveLaunchMode } from './hosts';
 import { tmuxInstallHint } from './tmux';
 import { CONFIG_KEYS } from './types';
 import type { RecommendedWorld } from './types';
@@ -47,6 +56,7 @@ export type { RecommendedWorld };
  *  tree live, then the optional rows. */
 export const RECOMMENDED_STEP_IDS = [
   'tmux',
+  'surface',
   'project',
   'import',
   'hooks',
@@ -151,6 +161,33 @@ export function recommendedPlan(world: RecommendedWorld): RecommendedPlan {
       done.push('tmux');
     }
   }
+
+  // ---- where sessions open --------------------------------------------------
+  //
+  // ALWAYS OFFERED, which makes it the one step with no `done` arm: a choice
+  // has no "already done". Every other line here repairs or enables something,
+  // so "already true" retires it; this one is a question, and the defaults
+  // being AN answer is not the same as the person having been asked.
+  //
+  // It is TASTE, so it is ASKED — a FLOW step whose tick opens an explicit
+  // four-way picker (commands.ts) — and never pre-answered: the step itself
+  // writes nothing, and confirming the checklist with it ticked still writes
+  // nothing until an option is chosen in that picker. The four options and
+  // their writes are `surfaceChoices` below, so the sentence a person reads
+  // and the keys it moves live in the same file.
+  steps.push({
+    id: 'surface',
+    title: 'Choose where sessions open',
+    why:
+      'Four places a session can live: one pinned tab at a time, a tab per ' +
+      'session beside your files, the official Claude Code extension’s own ' +
+      'UI, or the terminal panel under your editor. The default is fine; the ' +
+      'point is that it was never YOUR answer until you give it.',
+    writes: 'opens a picker of the four — nothing until you choose one there',
+    undo: 'run Recommended Setup again and choose differently',
+    recommended: true,
+    settings: [],
+  });
 
   // ---- a project ----------------------------------------------------------
   if (world.hasProjects) {
@@ -269,6 +306,113 @@ export function recommendedPlan(world: RecommendedWorld): RecommendedPlan {
   return { steps, done, notes };
 }
 
+// ---------------------------------------------------------- where sessions open
+
+export type SurfaceChoiceId = 'pinnedTab' | 'editorTabs' | 'claudeExtension' | 'panel';
+
+/** One of the four places a session can open — a row of the picker the
+ *  `surface` step runs. The settings are written all together when THIS option
+ *  is chosen there, and not a moment sooner. */
+export interface SurfaceChoice {
+  readonly id: SurfaceChoiceId;
+  /** The picker label. */
+  readonly label: string;
+  /** What living there is like, in one sentence. */
+  readonly description: string;
+  /** Section-relative, `RecommendedSetting`'s own contract. */
+  readonly settings: readonly RecommendedSetting[];
+  /** Where sessions open TODAY, so the picker can say "(current)" and start
+   *  the cursor there. At most one is current; a `newWindow` world marks none,
+   *  because a fifth place is not one of these four. */
+  readonly current: boolean;
+}
+
+/**
+ * The four places, with the current one marked.
+ *
+ * CURRENT IS DERIVED, launch mode first: `resolveLaunchMode` — the exact
+ * function every launch runs — decides whether `launch.mode` actually lands in
+ * the Claude Code extension, so the picker can never call "current" a mode the
+ * launcher would silently fall back from. Only a launch that stays Flock's own
+ * consults `terminalLocation` + `soloSession`.
+ *
+ * The extension option is on offer EVEN WHEN THE EXTENSION IS MISSING, with the
+ * absence said in its description instead of the row hidden: the setting is
+ * legal to want first and install second, and the launcher already falls back
+ * to Flock's own terminal (with a note) until the extension arrives. What the
+ * three Flock-side options write includes `launch.mode: flock` for the same
+ * honesty in reverse — picked from extension mode, they must actually move you.
+ * The extension option writes `launch.mode` ALONE, leaving the Flock-side
+ * arrangement where it was for whenever the person comes back.
+ */
+export function surfaceChoices(world: RecommendedWorld): SurfaceChoice[] {
+  const resolved = resolveLaunchMode(
+    world.launchMode,
+    () => world.claudeExtensionInstalled,
+  );
+  const current: SurfaceChoiceId | undefined =
+    resolved.mode === 'claudeExtension'
+      ? 'claudeExtension'
+      : world.terminalLocation === 'panel'
+        ? 'panel'
+        : world.terminalLocation === 'editor'
+          ? world.soloSession
+            ? 'pinnedTab'
+            : 'editorTabs'
+          : undefined;
+
+  return [
+    {
+      id: 'pinnedTab',
+      label: 'One pinned session tab',
+      description:
+        'Sessions open as editor tabs, one at a time — the open one is ' +
+        'pinned, and the rest park to the tree.',
+      settings: [
+        { key: CONFIG_KEYS.terminalLocation, value: 'editor' },
+        { key: CONFIG_KEYS.soloSession, value: true },
+        { key: CONFIG_KEYS.launchMode, value: 'flock' },
+      ],
+      current: current === 'pinnedTab',
+    },
+    {
+      id: 'editorTabs',
+      label: 'Editor tabs',
+      description:
+        'Every session gets its own tab beside your files — the default.',
+      settings: [
+        { key: CONFIG_KEYS.terminalLocation, value: 'editor' },
+        { key: CONFIG_KEYS.soloSession, value: false },
+        { key: CONFIG_KEYS.launchMode, value: 'flock' },
+      ],
+      current: current === 'editorTabs',
+    },
+    {
+      id: 'claudeExtension',
+      label: 'Claude Code extension',
+      description:
+        'New conversations open in the official extension’s own UI.' +
+        (world.claudeExtensionInstalled
+          ? ''
+          : ' It is not installed on this machine yet, so launches fall ' +
+            'back to Flock’s own terminal until it is.'),
+      settings: [{ key: CONFIG_KEYS.launchMode, value: 'claudeExtension' }],
+      current: current === 'claudeExtension',
+    },
+    {
+      id: 'panel',
+      label: 'Bottom terminal panel',
+      description: 'Sessions open in the terminal panel under your editor.',
+      settings: [
+        { key: CONFIG_KEYS.terminalLocation, value: 'panel' },
+        { key: CONFIG_KEYS.soloSession, value: false },
+        { key: CONFIG_KEYS.launchMode, value: 'flock' },
+      ],
+      current: current === 'panel',
+    },
+  ];
+}
+
 /**
  * Should activation OFFER the recommended setup, unprompted?
  *
@@ -292,6 +436,11 @@ export function recommendedNotice(opts: {
   if (opts.dismissed) return 'none';
   if (opts.world.hasProjects) return 'none';
   const plan = recommendedPlan(opts.world);
-  const recommended = plan.steps.filter((s) => s.recommended).length;
+  // The `surface` step is on EVERY plan by design — a choice has no "already
+  // done" — so counting it would quietly lower the threshold to "anybody with
+  // no projects", the exact firing this threshold exists to stop.
+  const recommended = plan.steps.filter(
+    (s) => s.recommended && s.id !== 'surface',
+  ).length;
   return recommended >= 2 ? 'offer' : 'none';
 }

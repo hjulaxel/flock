@@ -1414,6 +1414,22 @@ export interface RecommendedWorld {
    *  single-checkout repository draws no branch rows, so offering them to its
    *  owner is offering nothing. */
   readonly maxWorktrees: number;
+  /** `lineage.terminalLocation`, normalized to its three legal values — the
+   *  same `isTerminalLocationPref` read every launch makes. Where a
+   *  Flock-launched session's terminal goes; one leg of the answer to "where do
+   *  sessions open today" that `surfaceChoices` marks as current. */
+  readonly terminalLocation: TerminalLocationPref;
+  /** `lineage.soloSession` — the other leg: editor tabs one at a time (pinned,
+   *  the rest parked) or side by side. */
+  readonly soloSession: boolean;
+  /** `lineage.launch.mode` AS CONFIGURED, not as resolved. Resolution needs the
+   *  extension-presence fact below, and `surfaceChoices` does it with the same
+   *  `resolveLaunchMode` every launch uses — so a mode naming a missing
+   *  extension is still distinguishable from `flock` chosen on purpose. */
+  readonly launchMode: string | undefined;
+  /** Whether the official Claude Code extension is installed — the one fact in
+   *  this shape only a host can answer (`vscode.extensions.getExtension`). */
+  readonly claudeExtensionInstalled: boolean;
 }
 
 // ------------------------------------------------------------------ lineage results

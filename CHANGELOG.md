@@ -17,6 +17,22 @@ All notable changes to Flock are recorded here. The format follows
   **Chat History…**; a chat that is busy or waiting is never touched, and
   neither is the tab you are looking at. The decision is pure and tested
   (`chatAutoCloseVictims`, `src/chatAutoClose.ts`).
+- **The recommended setup asks where sessions open.** A new checklist step —
+  always offered, because a choice has no "already done" — opens a four-way
+  picker: one pinned session tab, editor tabs (the default), the official
+  Claude Code extension's own UI, or the bottom terminal panel, with the
+  current arrangement marked. Ticking the step writes nothing; the option you
+  choose in the picker writes `lineage.terminalLocation`,
+  `lineage.soloSession` and `lineage.launch.mode` together (the extension
+  option writes the mode alone), and cancelling it writes nothing at all. The
+  options and the current-answer rule are pure and tested (`surfaceChoices`,
+  `src/recommend.ts`).
+- **A genuinely fresh install opens the Get Started walkthrough, once.** The
+  first-launch notices are all deliberately hard to trigger, so an install
+  where none of them fired greeted its person with an empty sidebar and
+  silence. Now a machine whose store holds no projects and no session records
+  gets the walkthrough opened for it a moment after activation — one
+  guaranteed front door, decided once per install and never re-asked.
 
 ### Fixed
 

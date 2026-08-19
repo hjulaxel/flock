@@ -1755,7 +1755,7 @@
           {
             "id": "flock.setup",
             "title": "Turn on the parts that are off",
-            "description": "Some of the best of Flock is off until you ask, because turning it on writes files in your home directory. The checklist says what each one does, and you tick what you want.\n[Recommended Setup...](command:lineage.recommendedSetup)",
+            "description": "Some of the best of Flock is off until you ask, because turning it on writes files in your home directory. The checklist says what each one does, you tick what you want — and it asks where sessions should open: one pinned tab, editor tabs, the Claude Code extension, or the bottom panel.\n[Recommended Setup...](command:lineage.recommendedSetup)",
             "media": {
               "markdown": "media/walkthrough/setup.md"
             },

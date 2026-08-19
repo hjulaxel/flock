@@ -38,8 +38,13 @@ import * as vscode from 'vscode';
 
 import { log, logError } from './log';
 import { isDemoId } from './demoProject';
-import { recommendedPlan } from './recommend';
-import type { RecommendedStep, RecommendedStepId } from './recommend';
+import { recommendedPlan, surfaceChoices } from './recommend';
+import type {
+  RecommendedStep,
+  RecommendedStepId,
+  RecommendedWorld,
+  SurfaceChoice,
+} from './recommend';
 import {
   COMMANDS,
   CONTEXT_HOOKS_INSTALLED,
@@ -1640,7 +1645,7 @@ interface RecommendedPick extends vscode.QuickPickItem {
  *
  * WHAT IS OFFERED IS NOT DECIDED HERE. `recommendedPlan` (src/recommend.ts) is
  * pure and tested and owns every sentence the user reads; this function is the
- * side effects — the picker, the six ways of applying a step, and the receipt.
+ * side effects — the picker, the seven ways of applying a step, and the receipt.
  *
  * NO CONFIRMATION MODAL OF ITS OWN, deliberately. The picker IS the choice, the
  * same way running `showBranchesAndWorktrees` is: every line says what it
@@ -1666,8 +1671,11 @@ export async function recommendedSetupFlow(deps: CommandDeps): Promise<void> {
 
   const plan = recommendedPlan(world);
   if (plan.steps.length === 0) {
-    // Everything already true is a real outcome, not an error — and the notes
-    // (today: tmux is not installed) are the one thing left worth saying.
+    // Defensive: the `surface` step is on every plan today, so this branch is
+    // unreachable — kept because recommendedPlan owns that fact, not this
+    // function, and a future plan with a genuinely empty answer should say
+    // this rather than open an empty picker. The notes (today: tmux is not
+    // installed) are the one thing left worth saying.
     void vscode.window.showInformationMessage(
       ['Flock: everything recommended is already set up.', ...plan.notes].join(' '),
     );
@@ -1699,7 +1707,7 @@ export async function recommendedSetupFlow(deps: CommandDeps): Promise<void> {
     if (!wanted.has(step.id)) continue;
     let done = false;
     try {
-      done = await applyRecommendedStep(deps, step, failed);
+      done = await applyRecommendedStep(deps, step, world, failed);
     } catch (err) {
       // Per step, so one thrown step cannot take the other five with it. The
       // top-level guard in `register` would have caught this and reported the
@@ -1730,11 +1738,13 @@ export async function recommendedSetupFlow(deps: CommandDeps): Promise<void> {
 }
 
 /** One step's side effect. Returns whether it actually landed — a declined
- *  consent dialog and a closed folder dialog both mean "no", and neither is an
- *  error. Keys that could not be written are appended to `failed`. */
+ *  consent dialog, a closed folder dialog and a cancelled surface picker all
+ *  mean "no", and none is an error. Keys that could not be written are
+ *  appended to `failed`. */
 async function applyRecommendedStep(
   deps: CommandDeps,
   step: RecommendedStep,
+  world: RecommendedWorld,
   failed: string[],
 ): Promise<boolean> {
   // The settings steps first, and by their table rather than by their id: which
@@ -1776,9 +1786,91 @@ async function applyRecommendedStep(
       // the person was shown the door, which is what this step promised.
       await importSessionsFlow(deps);
       return true;
+    case 'surface': {
+      // The explicit question the step promised. The choice writes; the tick
+      // did not — so a cancelled picker is "no" and costs nothing, exactly as
+      // recommend.ts's contract for a TASTE question requires.
+      const choice = await chooseSurface(world);
+      if (choice === undefined) return false;
+      const unwritable = (await deps.writeSettings?.(choice.settings)) ?? [
+        ...choice.settings.map((s) => s.key),
+      ];
+      if (unwritable.length > 0) {
+        failed.push(`${step.title} (${unwritable.join(', ')})`);
+        return false;
+      }
+      return true;
+    }
     default:
       return false;
   }
+}
+
+/** One row of the surface picker. The choice id rides along for the same
+ *  reason RecommendedPick carries a step id: items come back by identity, and
+ *  the id is the only field this side needs. */
+interface SurfacePick extends vscode.QuickPickItem {
+  choiceId: SurfaceChoice['id'];
+}
+
+/**
+ * "Where should sessions open?" — the four places, single select, the current
+ * one both suffixed "(current)" and given the cursor.
+ *
+ * `createQuickPick` where the host has one, because starting the cursor ON the
+ * current answer is the difference between a question ("this is where you are —
+ * move, or press Enter to stay") and a list that pretends the person lives
+ * nowhere. `showQuickPick` has no active-item control, so a host without the
+ * builder (the unit mock, a slim host) gets the same rows with the suffix
+ * doing the pointing alone.
+ */
+async function chooseSurface(
+  world: RecommendedWorld,
+): Promise<SurfaceChoice | undefined> {
+  const choices = surfaceChoices(world);
+  const items: SurfacePick[] = choices.map((c) => ({
+    label: c.current ? `${c.label} (current)` : c.label,
+    detail: c.description,
+    choiceId: c.id,
+  }));
+  const placeHolder = 'Where should sessions open?';
+
+  const host: Partial<typeof vscode.window> = vscode.window;
+  let pickedId: SurfaceChoice['id'] | undefined;
+  if (typeof host.createQuickPick === 'function') {
+    const quickPick = host.createQuickPick<SurfacePick>();
+    pickedId = await new Promise<SurfaceChoice['id'] | undefined>((resolve) => {
+      quickPick.placeholder = placeHolder;
+      quickPick.items = items;
+      quickPick.matchOnDetail = true;
+      quickPick.ignoreFocusOut = true;
+      const current = items.find(
+        (i) => choices.find((c) => c.id === i.choiceId)?.current === true,
+      );
+      if (current !== undefined) quickPick.activeItems = [current];
+      quickPick.onDidAccept(() => {
+        const item = quickPick.selectedItems[0] ?? quickPick.activeItems[0];
+        resolve(item?.choiceId);
+        quickPick.hide();
+      });
+      // Escape, focus loss on a host that ends anyway, or the accept above:
+      // hide is the one event every ending shares, and resolving undefined
+      // after an accept already resolved is a no-op by Promise contract.
+      quickPick.onDidHide(() => {
+        quickPick.dispose();
+        resolve(undefined);
+      });
+      quickPick.show();
+    });
+  } else {
+    const picked = await vscode.window.showQuickPick(items, {
+      placeHolder,
+      matchOnDetail: true,
+      ignoreFocusOut: true,
+    });
+    pickedId = picked?.choiceId;
+  }
+  return choices.find((c) => c.id === pickedId);
 }
 
 /**
