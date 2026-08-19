@@ -684,6 +684,16 @@ export class WorkspaceManager {
    * on `resumeSessions` (that setting is about what a switch restores
    * unasked); every session parked here has a row in the tree, and the row
    * is how it comes back.
+   *
+   * A project CHAT is never a victim: it is not a session tab, and "every
+   * session parked here has a row" is exactly what a chat does not have —
+   * parking one because the user focused their pinned session throws away a
+   * conversation they were mid-thought in, with nothing on screen to say
+   * where it went. Its tab tidiness is the auto-close window
+   * (`lineage.chat.autoCloseMinutes`), not solo mode. WORKSPACE-SWITCH
+   * parking is deliberately untouched: a foreign chat must still leave the
+   * screen when its project does, or project A's chats sit on project B's
+   * screen.
    */
   async parkOthers(keepSessionId: string): Promise<number | null> {
     if (this.safeSolo() !== true) return null;
@@ -700,6 +710,10 @@ export class WorkspaceManager {
       const tip = this.safeTip(binding.sessionId);
       if (tip === keepTip || seen.has(tip)) continue;
       seen.add(tip);
+      // A chat is exempt — see the contract above. Checked here, on the
+      // victim side, rather than in the callers: solo mode itself must not be
+      // able to sweep a chat away, whoever asked for the enforcement.
+      if (this.isChat(binding.sessionId)) continue;
       // Same spare rule as planSwitch, same shape: busy only matters where
       // parking would kill.
       if (
@@ -1657,12 +1671,23 @@ export class WorkspaceManager {
   /** Is this session a project chat? Asked of BOTH the launch-time id and the
    *  chain tip: a terminal is bound under the id it launched with, while a
    *  `--resume` mints a new generation and the record follows the tip. Being a
-   *  chat names the conversation, so either id carrying the flag settles it. */
+   *  chat names the conversation, so either id carrying the flag settles it.
+   *
+   *  When neither does, the STORE is walked for any record whose chain
+   *  resolves to the same tip: the `chat` flag is written once, at birth, so
+   *  a chat reopened twice runs bound under a generation id nothing ever
+   *  flagged — and only its birth record still says what the conversation
+   *  is. */
   private isChat(sessionId: string): boolean {
     try {
       if (this.deps.getRecord(sessionId)?.chat === true) return true;
       const tip = this.safeTip(sessionId);
-      return tip !== sessionId && this.deps.getRecord(tip)?.chat === true;
+      if (tip !== sessionId && this.deps.getRecord(tip)?.chat === true) {
+        return true;
+      }
+      return Object.values(this.deps.allRecords()).some(
+        (r) => r.chat === true && this.safeTip(r.id) === tip,
+      );
     } catch (err) {
       logError('workspaces.isChat', err);
       return false;

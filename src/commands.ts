@@ -4380,10 +4380,19 @@ export async function chatFlow(
   // is write-once, so a failed id would hold that account for good, and a
   // status line naming the subscription a chat did not start on is worse than
   // silence.
+  //
+  // Deliberately NO soloEnforce: a chat opens BESIDE the pinned session,
+  // never in its place. Solo mode is "one SESSION tab at a time", and a chat
+  // is not a session tab — enforcing it here parked the very conversation the
+  // user was working in (and pinned the side question where it sat) because
+  // they asked something ABOUT it, which is the cheapest object in the
+  // extension evicting the most important one. The wrapper below refuses chat
+  // ids anyway (see soloEnforce), so this is the rule stated where the chat
+  // is born, not the only thing enforcing it. A chat's own tab tidiness is
+  // `lineage.chat.autoCloseMinutes`, not solo mode.
   if (binding) {
     await pinLaunch(deps, sessionId, routed);
     routed.announce?.();
-    await soloEnforce(deps, sessionId);
   } else {
     log('chat: launch failed for', shortId(sessionId));
   }
@@ -4852,16 +4861,40 @@ async function pinLaunch(
  *  Awaited so the park's record writes land before the flow moves on; a
  *  missing dep (every unit double, an older wiring) or a throw is a no-op —
  *  the quality-of-life mode must never be able to break the launch it rides
- *  on. */
+ *  on.
+ *
+ *  A CHAT id is a no-op here, whichever verb it arrived through — the chat
+ *  history's resume, the focus verb, anything that reopens by id. Solo mode
+ *  is "one SESSION tab at a time", and a chat is not a session tab: it opens
+ *  beside the pinned session and must not park it, let alone take its pin.
+ *  Gating in the wrapper rather than at each call site is what makes the rule
+ *  hold for the call site nobody remembers to exempt. */
 async function soloEnforce(
   deps: CommandDeps,
   keepSessionId: string,
 ): Promise<void> {
   try {
+    if (isChatConversation(deps, keepSessionId)) return;
     await deps.soloEnforce?.(keepSessionId);
   } catch (err) {
     logError('commands.soloEnforce', err);
   }
+}
+
+/** Is this id a project CHAT's? Asked of the id, its tip, and — because the
+ *  `chat` flag is written once, at birth, and inherited only in the forest's
+ *  collapsed overlay (which a rowless chat never surfaces through) — of any
+ *  record in the store whose chain resolves to the same tip. Without the last
+ *  step, a chat reopened twice answers "session": its current tip is a
+ *  generation nothing ever wrote `chat` onto. Callers treat a throw as "not a
+ *  chat", which fails toward the pre-chat behaviour. */
+function isChatConversation(deps: CommandDeps, sessionId: string): boolean {
+  if (deps.getRecord(sessionId)?.chat === true) return true;
+  const tip = deps.tipOf(sessionId);
+  if (deps.getRecord(tip)?.chat === true) return true;
+  return Object.values(deps.allRecords()).some(
+    (r) => r.chat === true && deps.tipOf(r.id) === tip,
+  );
 }
 
 /** The project a directory belongs to, for routing purposes only. */

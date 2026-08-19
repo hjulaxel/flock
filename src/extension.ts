@@ -146,6 +146,7 @@ import {
 } from './daemon';
 import { BranchListCache } from './branchList';
 import { recommendedNotice } from './recommend';
+import { chatAutoCloseVictims } from './chatAutoClose';
 import { WorktreeCache, branchRowsAdvice } from './git';
 import { BranchStatusCache } from './gitBranches';
 import {
@@ -3187,6 +3188,98 @@ export async function activate(
       logError('extension.pinSoloTab', err);
     }
   };
+
+  // ------------------------------------------------- chat auto-close sweep
+  //
+  // `lineage.chat.autoCloseMinutes`: a project chat's tab closes itself after
+  // N minutes without use. A chat has no tree row, so none of the machinery
+  // that tidies session tabs applies to it — solo mode exempts it on purpose,
+  // and a switch only stows it away from foreign projects — which is how
+  // finished chats piled up as tabs. The DECISION is chatAutoCloseVictims
+  // (src/chatAutoClose.ts, pure and tested); this supplies the world: which
+  // tabs are chats, which is active, what the roster says, when each was last
+  // used. Every read is the same source its surface uses — status from the
+  // roster entries the tree's dots read, activity from the transcript mtime
+  // the busy-destaler reads — so the sweep cannot disagree with the screen.
+
+  /** Not numCfg: that helper treats a non-positive value as "unset" and would
+   *  resurrect the default — but 0 is this setting's off switch. */
+  const chatAutoCloseMinutes = (): number => {
+    const v = cfg().get<number>(CONFIG_KEYS.chatAutoCloseMinutes);
+    return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 30;
+  };
+  const sweepIdleChats = (): void => {
+    try {
+      // A switch owns the tabs while it runs: it disposes and launches
+      // terminals of its own, and a close landing mid-switch would race the
+      // restore's bookkeeping. The next tick is a minute away — nothing about
+      // "idle for half an hour" needs it sooner.
+      if (workspaceManager.isSwitching()) return;
+      const minutes = chatAutoCloseMinutes();
+      if (minutes <= 0) return;
+      const now = Date.now();
+      const active = registry.activeSessionId();
+      const activeTip = active === null ? null : chainIndex.tipOf(active);
+      const tabs = registry.bindings().map((binding) => {
+        // Every fact is asked over the CHAIN, not one id: the terminal is
+        // bound under its launch-time id, the roster reports whichever
+        // generation is running, and the `chat`/`launchedByUs` flags live on
+        // the birth record — after a reopen or two those are three different
+        // ids for one conversation.
+        const aliases = chainAliases(binding.sessionId);
+        const entry = lastEntries.find((e) => aliases.includes(e.sessionId));
+        // Last use = the newest transcript write any generation made, the
+        // same freshness probe the busy-destaler trusts. A chat that has not
+        // been spoken to yet has no transcript (claude writes lazily), so the
+        // bind time stands in — the window then counts from the tab opening.
+        const mtimes = aliases
+          .map((id) =>
+            transcriptMtimeMs(id, { extraProjectsDirs: profileProjectsDirs() }),
+          )
+          .filter((m): m is number => m !== null);
+        return {
+          sessionId: binding.sessionId,
+          // `launchedByUs` folded in: a chat some other window launched is
+          // not this window's to close — its own sweep will get it.
+          isChat:
+            aliases.some((id) => store.get(id)?.chat === true) &&
+            aliases.some((id) => store.get(id)?.launchedByUs === true),
+          isActiveTab:
+            activeTip !== null && chainIndex.tipOf(binding.sessionId) === activeTip,
+          status: entry === undefined ? ('unknown' as const) : normalizeStatus(entry).status,
+          lastActivityMs:
+            mtimes.length > 0 ? Math.max(...mtimes) : binding.createdAt,
+        };
+      });
+      const idleOf = new Map(tabs.map((t) => [t.sessionId, t.lastActivityMs]));
+      for (const id of chatAutoCloseVictims({
+        now,
+        autoCloseMinutes: minutes,
+        tabs,
+      })) {
+        // `killTmux`, and NEVER `parked`: parked means "a switch will bring
+        // this back", which is exactly wrong here — the chat is done until
+        // asked for, and Chat History is how it is asked for. Without the
+        // kill a wrapped chat would only detach, leaving a hidden claude
+        // running forever for a conversation nobody is in.
+        if (registry.closeTerminal(id, { killTmux: true })) {
+          const idleMin = Math.round((now - (idleOf.get(id) ?? now)) / 60_000);
+          log(`chat: auto-closed ${shortId(id)} after ${String(idleMin)}m idle`);
+        }
+      }
+    } catch (err) {
+      logError('extension.sweepIdleChats', err);
+    }
+  };
+  // Its own timer rather than a rider on the roster poll: the poll interval is
+  // a latency knob (and pokeNow bursts it), while this is a lifecycle measured
+  // in tens of minutes — one check a minute is both cheap and plenty.
+  const chatSweepTimer = setInterval(sweepIdleChats, 60_000);
+  context.subscriptions.push({
+    dispose: () => {
+      clearInterval(chatSweepTimer);
+    },
+  });
 
   // THE SIDEBAR MIRRORS THE TAB STRIP: selecting a session's tab selects its
   // row (scrolled into view, never taking the keyboard — revealSession's own

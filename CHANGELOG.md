@@ -6,8 +6,27 @@ All notable changes to Flock are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Idle chat tabs close themselves — `lineage.chat.autoCloseMinutes`.** A
+  project chat is a scratch conversation whose normal ending is abandonment,
+  and it has no tree row for solo mode or a workspace switch to tidy behind —
+  so finished chats piled up as tabs until each was closed by hand. Now a
+  chat's tab closes on its own after 30 minutes without use (set the minutes
+  to taste; `0` turns it off). The conversation is kept and reopens from
+  **Chat History…**; a chat that is busy or waiting is never touched, and
+  neither is the tab you are looking at. The decision is pure and tested
+  (`chatAutoCloseVictims`, `src/chatAutoClose.ts`).
+
 ### Fixed
 
+- **Opening a chat no longer hijacks the solo pin.** With `lineage.soloSession`
+  on, asking a side question about the session you were working in parked that
+  very session and pinned the chat in its place — the cheapest object in the
+  extension evicting the most important one. A chat is now a normal tab, never
+  the solo tab: it opens beside the pinned session, reopening one from **Chat
+  History…** does the same, and solo mode's sweep never parks a chat either —
+  a chat's tab lifecycle is the auto-close window above, not the pin.
 - **Move to Account… is on the session row's right-click in the default view
   too.** The verb was contributed to the native tree's menu only, and the
   default `lineage.viewStyle` is `inline` — so on a default install the row

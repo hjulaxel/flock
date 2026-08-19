@@ -1,6 +1,6 @@
 # Settings
 
-All 40 settings, as contributed. The keys keep the `lineage.` prefix — Flock
+All 41 settings, as contributed. The keys keep the `lineage.` prefix — Flock
 was named Lineage before 0.1.0, and renaming settings keys would silently
 discard everyone's existing configuration.
 
@@ -32,6 +32,7 @@ back — see
 | `lineage.codexBinary` | `""` | Full path to the `codex` CLI, used by sessions on a Codex / OpenAI account. Empty searches `PATH`, then the usual install roots (`~/.codex/bin`, the active nvm node version, `~/.local/bin`, Homebrew). Worth setting explicitly if you use a node version manager: `codex` is installed per node version, and VS Code often does not inherit the PATH that selects one — which is what makes a Codex row's **Sign in** appear to do nothing. |
 | `lineage.terminalLocation` | `"editor"` | Where a session opens: `editor` tab, terminal `panel`, or `newWindow`. |
 | `lineage.soloSession` | `false` | Quality-of-life: keep at most **one** session tab open. Opening or focusing a session parks the others — tmux-wrapped ones detach and keep running hidden, bare ones close and `--resume` from the tree (busy/waiting bare ones are spared) — and the kept tab is pinned. Workspace switches restore only the session you were last using. |
+| `lineage.chat.autoCloseMinutes` | `30` | A project chat's tab closes on its own after this many minutes without use. The conversation is kept — **Chat History…** on the project's row reopens it — so this tidies the tab, never the words. A chat that is busy or waiting is never touched, and neither is the tab you are looking at. `0` turns it off. |
 | `lineage.launch.mode` | `"flock"` | Who opens a conversation. `flock` opens it here, in a terminal Flock owns. `claudeExtension` hands it to the official Claude Code extension: new conversations run its **New Conversation** command (opening in your preferred location — sidebar or editor) and are adopted onto a row once the CLI reports it; clicking a closed row reopens the conversation in the extension's UI; clicking a live one it hosts reveals or offers its panel — at the cost of tmux parking, the two Close verbs, account pinning, the wrap prompt and Flock-named tabs. Requires that extension; without it Flock falls back to opening the session itself and says so once. Fork is never delegated, and a resume pinned to another account's config directory stays in Flock's terminal. [Details →](reference.md#using-flock-alongside-the-claude-code-extension) |
 | `lineage.tmux` | `"auto"` | Run Flock-launched sessions inside a private tmux server (`tmux -L lineage`). This upgrades workspace parking from close-and-resume to detach-and-reattach: switching away hides a session's tab while the conversation **keeps running** — busy ones too — and switching back reattaches it instantly. Requires tmux on `PATH`; without it, and always on Windows, Flock falls back to close-and-resume. Sessions started outside Flock are never wrapped either way. |
 | `lineage.groupByFolder` | `true` | Group sessions no project claims by their working directory. |

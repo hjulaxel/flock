@@ -250,7 +250,7 @@ this release.
 
 ## Documentation
 
-- **[Settings](docs/settings.md)** — all 40, with defaults.
+- **[Settings](docs/settings.md)** — all 41, with defaults.
 - **[Reference](docs/reference.md)** — how it works, projects, subprojects,
   notifications, workspaces, close vs delete, naming, the sidebar rendering
   modes, and what you get alongside the Claude Code extension.

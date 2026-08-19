@@ -1779,6 +1779,44 @@ describe('workspaces: solo mode (lineage.soloSession)', () => {
     expect(calls.written).toEqual([]);
   });
 
+  it('never parks a CHAT — it is not a session tab, and it has no row to come back by', async () => {
+    // Focusing the pinned session S1 must sweep the ordinary session S2 and
+    // leave the chat's tab exactly where it is, idle or not.
+    const records: Record<string, EditorialRecord> = {
+      [CHAT]: record(CHAT, { chat: true }),
+    };
+    const { deps, calls } = harness({
+      bindings: () => [binding(S1, 'keep'), binding(S2, 'session'), binding(CHAT, 'chat')],
+      getRecord: (id) => records[id],
+      allRecords: () => records,
+      soloSession: () => true,
+    });
+
+    expect(await new WorkspaceManager(deps).parkOthers(S1)).toBe(1);
+    expect(calls.killed).toEqual([S2]);
+    expect(calls.written.some((w) => w.id === CHAT)).toBe(false);
+  });
+
+  it('recognises a reopened chat by its BIRTH record — the bound generation carries no flag', async () => {
+    // A chat reopened twice is bound under a generation id nothing ever wrote
+    // `chat` onto; only the birth record (a chain member) still says what the
+    // conversation is. S3 is the bound generation, CHAT its birth id.
+    const records: Record<string, EditorialRecord> = {
+      [CHAT]: record(CHAT, { chat: true }),
+    };
+    const tip = (id: string): string => (id === CHAT || id === S3 ? S3 : id);
+    const { deps, calls } = harness({
+      bindings: () => [binding(S1, 'keep'), binding(S3, 'reopened chat')],
+      getRecord: (id) => records[id],
+      allRecords: () => records,
+      tipOf: tip,
+      soloSession: () => true,
+    });
+
+    expect(await new WorkspaceManager(deps).parkOthers(S1)).toBe(0);
+    expect(calls.killed).toEqual([]);
+  });
+
   it("keeps the kept conversation's WHOLE CHAIN — a re-keyed generation is the same tab", async () => {
     // The terminal is bound under its launch-time id S2; the row (and the
     // caller) know the conversation as its tip S1.

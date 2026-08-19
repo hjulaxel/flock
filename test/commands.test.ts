@@ -900,6 +900,92 @@ describe('chatFlow', () => {
   });
 });
 
+// ------------------------------------------- chats never take the solo pin
+
+/**
+ * `lineage.soloSession` and chats: a chat is a normal tab beside the pinned
+ * session, never the solo tab. Opening one must not park the session tabs,
+ * and every verb that REOPENS a chat by id (the chat history lands in
+ * resumeFlow) must skip the enforcement too — the wrapper refuses chat ids,
+ * so the rule holds for the call site nobody remembers to exempt.
+ */
+describe('solo mode never fires for a chat', () => {
+  const CHAT_ID = uuid(41);
+  const SESSION_ID = uuid(42);
+
+  function soloHarness(records: Record<string, EditorialRecord>): {
+    deps: CommandDeps;
+    enforced: string[];
+  } {
+    const enforced: string[] = [];
+    const { deps, calls } = chatDeps(projectOf(), {
+      records,
+      hasTranscript: () => true,
+    });
+    const harness: CommandDeps = {
+      ...deps,
+      // Closed rows, so resumeFlow's "still running — fork instead" guard
+      // stays quiet and the flow reaches its launch (and the enforcement).
+      getForest: () =>
+        forestOf([
+          node(CHAT_ID, { archived: true, status: 'exited' }),
+          node(SESSION_ID, { archived: true, status: 'exited' }),
+        ]),
+      launchSession: async (opts) => {
+        calls.launches.push(opts);
+        return {
+          nodeId: opts.sessionId,
+          sessionId: opts.sessionId,
+          terminalName: 'claude',
+          createdAt: 0,
+        };
+      },
+      soloEnforce: async (id) => {
+        enforced.push(id);
+      },
+    };
+    return { deps: harness, enforced };
+  }
+
+  it('opening a NEW chat parks nothing and pins nothing', async () => {
+    const { deps, enforced } = soloHarness({});
+    await chatFlow(deps, 'p1');
+    expect(enforced).toEqual([]);
+  });
+
+  it('REOPENING a chat (resumeFlow, where the history picker lands) skips the enforcement', async () => {
+    const { deps, enforced } = soloHarness({
+      [CHAT_ID]: chatRecord(CHAT_ID),
+    });
+    expect(await resumeFlow(deps, CHAT_ID)).toBe(true);
+    expect(enforced).toEqual([]);
+  });
+
+  it('recognises a chat by any chain member — a reopened generation carries no flag of its own', async () => {
+    // The tip GEN is a generation minted by an earlier reopen: no record says
+    // `chat` under it, only the birth record — a chain sibling — does.
+    const GEN = uuid(43);
+    const { deps, enforced } = soloHarness({
+      [CHAT_ID]: chatRecord(CHAT_ID),
+    });
+    const chained: CommandDeps = {
+      ...deps,
+      getForest: () => forestOf([node(GEN, { archived: true, status: 'exited' })]),
+      tipOf: (id) => (id === CHAT_ID || id === GEN ? GEN : id),
+    };
+    expect(await resumeFlow(chained, GEN)).toBe(true);
+    expect(enforced).toEqual([]);
+  });
+
+  it('a plain SESSION resume still enforces — the exemption is the chat flag, not the flow', async () => {
+    const { deps, enforced } = soloHarness({
+      [SESSION_ID]: chatRecord(SESSION_ID, { chat: false }),
+    });
+    expect(await resumeFlow(deps, SESSION_ID)).toBe(true);
+    expect(enforced).toEqual([SESSION_ID]);
+  });
+});
+
 // ---------------------------------------------------- the chat history
 
 /**

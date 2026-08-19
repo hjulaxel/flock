@@ -1500,6 +1500,12 @@
           "default": false,
           "markdownDescription": "Keep at most **one** Claude session tab open in this window. Opening or focusing a session parks every other session tab: a tmux-wrapped one is DETACHED (the tab vanishes, the conversation keeps running, hidden), a bare one is closed and comes back with `--resume` when you click its row — a busy or waiting bare session is spared and keeps its tab. The open session's tab is pinned, so it sits at the left of its group and survives *Close Others*. Workspace switches restore only the session you were last using instead of the whole set. Off by default: this parks tabs you laid out yourself, which is a strong opinion — turn it on if many open sessions are eating memory or making switches slow."
         },
+        "lineage.chat.autoCloseMinutes": {
+          "type": "number",
+          "default": 30,
+          "minimum": 0,
+          "markdownDescription": "A project chat's tab closes on its own after this many minutes without use. The conversation is kept — **Chat History…** on the project's row reopens it — so this tidies the tab, never the words. A chat that is busy or waiting is never touched, and neither is the tab you are looking at. `0` turns it off."
+        },
         "lineage.launch.mode": {
           "type": "string",
           "default": "flock",

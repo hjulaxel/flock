@@ -1057,6 +1057,16 @@ export const CONFIG_KEYS = {
    *  out side by side is a strong opinion, and the default stays the tab
    *  strip as VS Code users know it. */
   soloSession: 'soloSession',
+  /** How long a project chat's tab may sit unused before it closes itself, in
+   *  minutes; 0 disables. A chat is a scratch conversation whose NORMAL ending
+   *  is abandonment, and it has no tree row for solo mode or a switch to tidy
+   *  behind — so without this, finished chats pile up as tabs. The close is a
+   *  plain terminal close, never a park (`parked` means "a switch will bring
+   *  this back", which is exactly wrong for a chat), and the conversation
+   *  survives in Chat History. Busy or waiting chats and the active tab are
+   *  never touched. The decision is chatAutoCloseVictims
+   *  (src/chatAutoClose.ts); extension.ts sweeps on a timer. */
+  chatAutoCloseMinutes: 'chat.autoCloseMinutes',
   /** Who OPENS a conversation: Flock's own tmux-backed terminal, or another
    *  extension's commands (see src/hosts.ts's delegate table). Consulted for a
    *  NEW conversation and for a plain RESUME of an unpinned one — a fork has
