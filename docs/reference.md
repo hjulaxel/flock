@@ -741,16 +741,26 @@ and the tree, not the ownership verbs. The setting is only honoured while that
 extension is installed; without it Flock opens the session itself and says so
 once.
 
-Three things the mode deliberately does not delegate:
+Four things the mode deliberately does not delegate:
 
 - **Fork.** `--fork-session` is a launch-time CLI flag no command the extension
   contributes carries, so there is no way to ask it for a branch of a specific
   conversation. Fork always opens Flock's own terminal, which is also the only
   way it can inherit the parent's history.
-- **A resume pinned to another account.** The extension runs on the machine's
-  own login; a conversation whose account pin names its own config directory
-  lives in a transcript the extension would not find, so that resume keeps
-  Flock's terminal (and its pinned environment).
+- **A launch routed to another account.** Project and default routing resolve
+  *before* the handover, and a conversation they send to another provider's
+  CLI — or to a Claude account with its own config directory — opens in
+  Flock's own terminal instead, with a status-bar note saying so. The
+  extension runs on the machine's own login: it cannot start another
+  provider's CLI at all, and a session it started for that account would look
+  routed in the tree while actually running — and writing its transcript —
+  where the account's next resume would never look. A launch routed nowhere,
+  or to the default account, is exactly what the extension runs anyway and
+  keeps being handed over.
+- **A resume pinned to another account.** The same rule on the way back in: a
+  conversation whose account pin names its own config directory lives in a
+  transcript the extension would not find, so that resume keeps Flock's
+  terminal (and its pinned environment).
 - **Picking an account by hand.** A delegated launch runs under the delegate's
   own environment, so it cannot be pinned to one of your subscriptions. **New
   Session From…** therefore keeps launching here.

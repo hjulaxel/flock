@@ -1,8 +1,9 @@
 // src/hosts.ts — WHO is running a session, and therefore what Flock may
 // honestly offer to do about it.
 //
-// Pure: it imports ./types and nothing else — never vscode, never node — so
-// every rule below is a table lookup a test can drive with an object literal.
+// Pure: it imports ./types and ./accounts (itself pure) and nothing else —
+// never vscode, never node — so every rule below is a table lookup a test can
+// drive with an object literal.
 //
 // THE PROBLEM THIS FILE EXISTS TO FIX. `claude agents --json` is machine-wide,
 // so the tree has always shown sessions Flock never started: `claude` typed
@@ -46,7 +47,8 @@
 // on a conversation Flock has no business ending, which is the failure this
 // module exists to remove.
 
-import type { EditorialRecord, ProviderId } from './types';
+import { cliOfProfile, isDefaultAccount } from './accounts';
+import type { AccountProfile, EditorialRecord, ProviderId } from './types';
 
 /**
  * Who is running a session, as far as Flock can honestly tell.
@@ -363,7 +365,12 @@ export function resolveLaunchMode(
  *     (commands.pinLaunch), and the account's environment reaches claude only
  *     through the terminal's env / the wrap's `-e`. A delegated launch carries
  *     the delegate's own environment, so there is nothing to pin and nothing
- *     that would be true if we pinned it.
+ *     that would be true if we pinned it. Per-account ROUTING is not on the
+ *     list any more, because it is not lost — it is honoured by refusal: a
+ *     conversation the routing sends somewhere the delegate cannot host is
+ *     never handed over in the first place (see delegateRefusal below), so
+ *     the routed launch opens in Flock's own terminal instead of silently
+ *     landing on the default login.
  *   the wrap prompt — sendTextToSession needs a bound terminal.
  *   tab naming — rename goes through the workbench's active-terminal command on
  *     a terminal we hold.
@@ -377,7 +384,57 @@ export function resolveLaunchMode(
 export const DELEGATED_LOSSES: readonly string[] = [
   'tmux parking (a workspace switch closes the session instead of hiding it)',
   'Close and Close with Summary',
-  'account pinning and per-account routing',
+  'account pinning (a conversation ROUTED to another provider or to an ' +
+    'account with its own config directory is not handed over at all — it ' +
+    'falls back to Flock\'s own terminal)',
   'the wrap prompt',
   'Flock-named tabs',
 ];
+
+/**
+ * Why a NEW conversation routed to `profile` must NOT be handed to the launch
+ * delegate — null when it may be.
+ *
+ * The delegate runs another extension's new-conversation command, and that
+ * command carries no environment of ours: the official extension starts
+ * `claude` on the machine's own default login, full stop. Two kinds of routing
+ * answer are therefore launches it cannot perform, and handing either over
+ * would silently ignore the routing the user configured:
+ *
+ *   another CLI — a project routed to a Codex account needs `codex` exec'd,
+ *     and no delegate contributes a command that starts another provider's
+ *     CLI. Tested through cliOfProfile rather than the provider id so the
+ *     API-key profile (`generic`, a claude launch in all but name) is not
+ *     refused for a difference that does not exist.
+ *
+ *   an account with its own environment — a config directory, an API key, or
+ *     both. The launch would LOOK routed in the tree while actually running on
+ *     the default login, and with a config directory the transcript would be
+ *     written where that account's next resume will never look. This is the
+ *     same rule the RESUME half has always applied (see resumeFlow's
+ *     delegation gate); the new-session half is here so the two cannot
+ *     disagree about which accounts the delegate can host.
+ *
+ * No routed account at all — or the default account, which resolves to an
+ * empty environment on purpose — is exactly what the delegate runs anyway, so
+ * those keep delegating precisely as before.
+ *
+ * The string is the reason, for the log and the status-bar note; the caller
+ * says what it did about it ("opened here").
+ */
+export function delegateRefusal(
+  profile: AccountProfile | null | undefined,
+): string | null {
+  if (!profile) return null;
+  const cli = cliOfProfile(profile);
+  if (cli !== 'claude') {
+    return `${profile.label} runs ${cli}, not a CLI any delegate starts`;
+  }
+  if (!isDefaultAccount(profile)) {
+    return (
+      `${profile.label} launches under its own environment, and a delegate ` +
+      "runs on the machine's default login"
+    );
+  }
+  return null;
+}

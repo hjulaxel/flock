@@ -3827,6 +3827,25 @@ export async function activate(
       return { label: delegate.label };
     },
 
+    /** The NEW-conversation twin of delegateOpenInfo, for the routing gate's
+     *  "opened here" note (commands.delegated): same pure read, minus the
+     *  openCommand requirement — every delegate has a newCommand. Never the
+     *  thing that decides a handover; delegateLaunch above does, by trying. */
+    delegateNewInfo: () => {
+      try {
+        const resolved = resolveLaunchMode(
+          cfg().get<string>(CONFIG_KEYS.launchMode),
+          (id) => vscode.extensions?.getExtension(id) !== undefined,
+        );
+        const delegate = resolved.delegate;
+        if (resolved.fellBack || delegate === undefined) return null;
+        return { label: delegate.label };
+      } catch (err) {
+        logError('extension.delegateNewInfo', err);
+        return null;
+      }
+    },
+
     /** What the focus verb's dead-end dialog may offer. Pure read, no
      *  side effects, no fallback warning — a dialog being CONSTRUCTED is not
      *  the moment to toast about a missing extension. */

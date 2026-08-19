@@ -104,7 +104,7 @@ import { MAX_AGENT_FORKS } from './agentVerbs';
 import type { AgentForkOutcome } from './agentVerbs';
 // Pure as well. The single answer to "who is running this", so a verb's refusal
 // and the row's marker cannot disagree about it.
-import { canEndSession, hostSentence } from './hosts';
+import { canEndSession, delegateRefusal, hostSentence } from './hosts';
 import type { SessionHost } from './hosts';
 // Same arrangement, and for the same reason: the DECISIONS a worktree verb makes
 // — where the checkout goes, whether a removal may be offered at all — are pure
@@ -1866,16 +1866,24 @@ async function newSessionFlow(
     cwd === undefined ? [] : namesUnder(deps, [cwd]),
   );
 
-  // `lineage.launch.mode`. An account picked BY HAND overrides it: that gesture
-  // is a statement about which subscription to bill, and a delegate carries its
-  // own environment, so honouring both at once is impossible and silently
-  // dropping the account would be the expensive half to get wrong.
-  if (account === undefined && (await delegated(deps, cwd, title))) return;
-
   // Routed by the project this directory belongs to, if any — a folder
   // that is part of a project inherits that project's account even when the
   // launch came from the folder rather than from the project's row.
+  //
+  // Resolved BEFORE the delegation question, because the answer decides it:
+  // the delegate runs on the machine's own default login, so a conversation
+  // this routing sends to another CLI or to an account with its own
+  // environment is not one it can host (see hosts.delegateRefusal). Resolving
+  // first costs nothing — routeNewSession writes nothing; the pin and the
+  // announcement both happen only after a launch Flock itself performs.
   const routed = routeNewSession(deps, projectIdForCwd(deps, cwd), account);
+
+  // `lineage.launch.mode`. An account picked BY HAND overrides it: that gesture
+  // is a statement about which subscription to bill, and a delegate carries its
+  // own environment, so honouring both at once is impossible and silently
+  // dropping the account would be the expensive half to get wrong. An account
+  // the ROUTING resolved gates it the same way, inside `delegated`.
+  if (account === undefined && (await delegated(deps, cwd, title, routed))) return;
 
   const sessionId = randomUUID();
   await deps.recordLaunch(sessionId, null, cwd);
@@ -1905,7 +1913,8 @@ async function newSessionFlow(
 }
 
 /**
- * Hand this new conversation to another extension, if the user asked for that.
+ * Hand this new conversation to another extension, if the user asked for that
+ * — and if the routing the caller resolved is one the delegate can honour.
  * True when it was handed over and this flow is finished.
  *
  * THE WHOLE OF THE VERB LAYER'S PART IN IT, deliberately. Which extension,
@@ -1925,7 +1934,38 @@ async function delegated(
   deps: AccountCommandDeps,
   cwd: string | undefined,
   title: string,
+  routed: RoutedLaunch,
 ): Promise<boolean> {
+  // THE ROUTING GATE. A launch the delegate cannot perform as routed is never
+  // handed over: the official extension starts `claude` on the machine's own
+  // default login, so a conversation routed to a Codex account would open
+  // under the wrong CLI entirely, and one routed to a Claude account with its
+  // own config directory would LOOK routed in the tree while actually running
+  // — and writing its transcript — on the default login, where that account's
+  // next resume will never look. Both failures are silent, which is why the
+  // refusal is decided here rather than left to whatever the extension
+  // happens to do. Same rule the RESUME half has applied since the mode
+  // existed (see resumeFlow's gate); an unrouted launch, or one routed to the
+  // default account, passes through and delegates exactly as before.
+  const profile = routed.profile ?? null;
+  const refusal = delegateRefusal(profile);
+  if (refusal !== null && profile !== null) {
+    // Said only when a delegation was actually forgone: `delegateNewInfo` is
+    // null in flock mode (and on a wiring without the setting), where opening
+    // here is not news. A pure read — the gate must not probe by running the
+    // delegate's command.
+    const delegate = deps.delegateNewInfo?.() ?? null;
+    if (delegate !== null) {
+      log('new: not delegated —', refusal);
+      vscode.window.setStatusBarMessage(
+        `Flock: opened here — this conversation routes to ${profile.label}, ` +
+          `which the ${delegate.label} cannot host.`,
+        6000,
+      );
+    }
+    return false;
+  }
+
   let handled: { label: string } | null = null;
   try {
     handled =
@@ -1984,10 +2024,11 @@ async function newSessionInProjectFlow(
     namesUnder(deps, projectDirs(project)),
   );
 
-  // Same gate, same override rule as newSessionFlow — see the note there.
-  if (account === undefined && (await delegated(deps, cwd, title))) return;
-
+  // Routing first, then the gate — same order, same override rule as
+  // newSessionFlow; see the notes there.
   const routed = routeNewSession(deps, project.id, account);
+
+  if (account === undefined && (await delegated(deps, cwd, title, routed))) return;
 
   const sessionId = randomUUID();
   await deps.recordLaunch(sessionId, null, cwd);
@@ -4631,6 +4672,13 @@ interface RoutedLaunch {
   /** Which CLI the resolved account runs. See launchProviderOf — absent means
    *  claude, which is what every account except a Codex one resolves to. */
   provider?: ProviderId;
+  /** The resolved account itself, when routing picked one. What the delegation
+   *  gate reads (hosts.delegateRefusal): whether the launch delegate can
+   *  honour this routing turns on facts — the account's CLI, whether it pins
+   *  its own config directory — that `env` and `profileId` have already
+   *  flattened away. Set by routeNewSession only; a resume never delegates on
+   *  this shape (pinnedLaunch has its own gate in resumeFlow). */
+  profile?: AccountProfile;
   announce?: () => void;
 }
 
@@ -4716,6 +4764,7 @@ function routeNewSession(
       return {
         env: envForProfile(forced),
         profileId: forced.id,
+        profile: forced,
         ...(launchProviderOf(forced) !== undefined
           ? { provider: launchProviderOf(forced) }
           : {}),
@@ -4744,6 +4793,7 @@ function routeNewSession(
     return {
       env: envForProfile(profile),
       profileId: profile.id,
+      profile,
       ...(launchProviderOf(profile) !== undefined
         ? { provider: launchProviderOf(profile) }
         : {}),

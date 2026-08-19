@@ -27,6 +27,18 @@ All notable changes to Flock are recorded here. The format follows
   the solo tab: it opens beside the pinned session, reopening one from **Chat
   History…** does the same, and solo mode's sweep never parks a chat either —
   a chat's tab lifecycle is the auto-close window above, not the pin.
+- **A conversation routed to an account the Claude Code extension cannot host
+  is no longer handed to it.** In `lineage.launch.mode: claudeExtension`, a
+  new session was delegated before routing was consulted — so a project routed
+  to a Codex account, or to a Claude account with its own config directory,
+  opened in the extension on the machine's default login, silently ignoring
+  the routing (and, with a config directory, writing the transcript where that
+  account's next resume would never look). Routing now resolves first, and a
+  launch the extension cannot host — another provider's CLI, or an account
+  with its own environment — opens in Flock's own terminal with a status-bar
+  note saying why. A launch routed nowhere, or to the default login, delegates
+  exactly as before, and an account picked by hand still overrides the mode
+  outright. The rule is pure and tested (`delegateRefusal`, `src/hosts.ts`).
 - **Move to Account… is on the session row's right-click in the default view
   too.** The verb was contributed to the native tree's menu only, and the
   default `lineage.viewStyle` is `inline` — so on a default install the row

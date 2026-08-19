@@ -2994,7 +2994,11 @@ export interface CommandDeps {
    *
    *  Only ever consulted for a NEW conversation. Nothing a delegate contributes
    *  takes a session id, so a fork has nothing to hand over and keeps Flock's
-   *  own launch in every mode. See src/hosts.ts for the delegate table.
+   *  own launch in every mode. The caller also decides FIRST whether the
+   *  launch is the delegate's to make at all: a conversation whose routing
+   *  resolves to another CLI, or to an account with its own environment,
+   *  never reaches this (see hosts.delegateRefusal). See src/hosts.ts for the
+   *  delegate table.
    *
    *  Optional: absent means the setting does not exist for this wiring, which is
    *  every unit double. */
@@ -3022,6 +3026,15 @@ export interface CommandDeps {
    *  dialog may offer "Open in <label>" at all: the offer must not render in
    *  flock mode, and a dialog cannot probe by running the command. */
   delegateOpenInfo?(): { label: string } | null;
+  /** The delegate a NEW conversation would be handed to — label only, nothing
+   *  run — or null in flock mode, when the extension is missing, or on a
+   *  wiring without the setting. The NEW-launch twin of delegateOpenInfo,
+   *  without the open-command requirement (every delegate has a newCommand).
+   *  What the routing gate consults for its status-bar note: "opened here"
+   *  is only worth saying when a delegation was actually forgone, and the
+   *  gate must not probe by running the delegate's command. It never DECIDES
+   *  the handover — delegateLaunch does, by trying. */
+  delegateNewInfo?(): { label: string } | null;
   /** `lineage.soloSession`: after a session's tab opened (or was focused),
    *  park every OTHER session tab in this window and pin the kept one.
    *  A no-op when the setting is off. The mechanism is the workspace

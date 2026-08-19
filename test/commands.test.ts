@@ -3350,6 +3350,13 @@ describe('a new session can be handed to another extension', () => {
 
   function delegateHarness(
     delegate: null | { label: string } | 'throws' | 'unwired',
+    over: {
+      /** Account routing the launch resolves BEFORE the delegation gate. */
+      accounts?: AccountDeps;
+      /** The pure "which delegate is configured" read the refusal note uses.
+       *  Absent everywhere the note is not under test — an old wiring. */
+      delegateNewInfo?: () => { label: string } | null;
+    } = {},
   ): DelegateHarness {
     const launches: LaunchOptions[] = [];
     const asked: Array<{ cwd?: string; title?: string }> = [];
@@ -3373,6 +3380,10 @@ describe('a new session can be handed to another extension', () => {
           createdAt: 0,
         };
       },
+      ...(over.accounts === undefined ? {} : { accounts: over.accounts }),
+      ...(over.delegateNewInfo === undefined
+        ? {}
+        : { delegateNewInfo: over.delegateNewInfo }),
       ...(delegate === 'unwired'
         ? {}
         : {
@@ -3425,6 +3436,80 @@ describe('a new session can be handed to another extension', () => {
     const h = delegateHarness('unwired');
     await h.run(COMMANDS.newSessionInProject, { type: 'project', projectId: 'api' });
     expect(h.asked).toEqual([]);
+    expect(h.launches).toHaveLength(1);
+  });
+
+  // ---- the routing gate: hosts.delegateRefusal, driven through the flow.
+  //
+  // Routing resolves BEFORE the handover, and a routing the delegate cannot
+  // honour keeps the launch here. The delegate runs on the machine's own
+  // default login: handing it a Codex-routed conversation would open the
+  // wrong CLI, and handing it one routed to an account with its own config
+  // directory would open a session that LOOKS routed in the tree while its
+  // transcript lands where that account's next resume will never look.
+
+  it('is never asked for a conversation routed to a Codex account', async () => {
+    const { accounts } = fakeAccountDeps(
+      [accountProfile('codex-work', { provider: 'codex', label: 'Work (Codex)' })],
+      { defaultRouting: () => ({ kind: 'account', id: 'codex-work' }) },
+    );
+    const h = delegateHarness({ label: 'Claude Code extension' }, { accounts });
+    await h.run(COMMANDS.newSessionInProject, { type: 'project', projectId: 'api' });
+    expect(h.asked).toEqual([]); // never handed over
+    expect(h.launches).toHaveLength(1); // Flock's own terminal opened instead
+    expect(h.launches[0]?.provider).toBe('codex'); // ...as routed
+    expect(h.launches[0]?.profileId).toBe('codex-work');
+  });
+
+  it('is never asked when the routed account pins its own config directory', async () => {
+    const { accounts } = fakeAccountDeps(
+      [accountProfile('work', { configDir: '/work/.claude' })],
+      { defaultRouting: () => ({ kind: 'account', id: 'work' }) },
+    );
+    const h = delegateHarness({ label: 'Claude Code extension' }, { accounts });
+    await h.run(COMMANDS.newSessionInProject, { type: 'project', projectId: 'api' });
+    expect(h.asked).toEqual([]);
+    expect(h.launches).toHaveLength(1);
+    expect(h.launches[0]?.env?.CLAUDE_CONFIG_DIR).toBe('/work/.claude');
+  });
+
+  it('still takes a launch routed to the default account — exactly what it runs anyway', async () => {
+    const { accounts } = fakeAccountDeps(
+      [accountProfile('default-login')], // no configDir, no extraEnv
+      { defaultRouting: () => ({ kind: 'account', id: 'default-login' }) },
+    );
+    const h = delegateHarness({ label: 'Claude Code extension' }, { accounts });
+    await h.run(COMMANDS.newSessionInProject, { type: 'project', projectId: 'api' });
+    expect(h.asked).toHaveLength(1);
+    expect(h.launches).toEqual([]);
+  });
+
+  it('says in the status bar why the routed launch opened here', async () => {
+    const { accounts } = fakeAccountDeps(
+      [accountProfile('codex-work', { provider: 'codex', label: 'Work (Codex)' })],
+      { defaultRouting: () => ({ kind: 'account', id: 'codex-work' }) },
+    );
+    const h = delegateHarness(
+      { label: 'Claude Code extension' },
+      { accounts, delegateNewInfo: () => ({ label: 'Claude Code extension' }) },
+    );
+    await h.run(COMMANDS.newSessionInProject, { type: 'project', projectId: 'api' });
+    expect(h.said[0]).toContain('opened here');
+    expect(h.said[0]).toContain('Work (Codex)');
+    expect(h.said[0]).toContain('Claude Code extension');
+  });
+
+  it('keeps the refusal silent in flock mode, where opening here is not news', async () => {
+    const { accounts } = fakeAccountDeps(
+      [accountProfile('codex-work', { provider: 'codex', label: 'Work (Codex)' })],
+      { defaultRouting: () => ({ kind: 'account', id: 'codex-work' }) },
+    );
+    const h = delegateHarness(null, {
+      accounts,
+      delegateNewInfo: () => null,
+    });
+    await h.run(COMMANDS.newSessionInProject, { type: 'project', projectId: 'api' });
+    expect(h.said).toEqual([]);
     expect(h.launches).toHaveLength(1);
   });
 });
