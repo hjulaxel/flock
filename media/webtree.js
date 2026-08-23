@@ -1714,6 +1714,16 @@
       const i = indexOfKey(msg.key);
       const el = i >= 0 ? root.children[i] : null;
       if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
+      // `focus` is the session-SWITCHER gesture (lineage.focusSessionsView),
+      // and it is opt-in per message because almost every other reveal must
+      // NOT take the keyboard: a session launched from a terminal selects its
+      // new row while the user goes on typing in the terminal, and a reveal
+      // that stole focus there would eat the next keystroke.
+      //
+      // The extension has already focused the VIEW by this point, which in a
+      // webview means the iframe and nothing inside it. This is what puts the
+      // keyboard on the element the arrow handler is bound to.
+      if (msg.focus) root.focus();
       return;
     }
   });

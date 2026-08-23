@@ -1088,13 +1088,44 @@ ${branchPaletteCss()}  }
    *  come first: the row may only exist because of an expansion this call just
    *  made, and a `select` naming a key the client has not rendered yet is a
    *  no-op it never retries. */
-  private async selectRow(key: string): Promise<void> {
+  private async selectRow(key: string, focus = false): Promise<void> {
     this.post();
     try {
-      await this.view?.webview.postMessage({ type: 'select', key });
+      await this.view?.webview.postMessage({ type: 'select', key, focus });
     } catch (err) {
       logError('webtree.selectRow', err);
     }
+  }
+
+  /**
+   * `reveal`, but the keyboard comes too — the sidebar as a session SWITCHER
+   * rather than a list you click (COMMANDS.focusSessionsView).
+   *
+   * TWO focus moves, and both are needed. `focusView()` reveals the view and
+   * hands it the workbench's focus, which gets as far as the webview frame and
+   * no further — a webview is an iframe, and focusing it does not focus
+   * anything inside it. The `focus` flag on the select message is the second
+   * half: the client focuses the tree element itself, which is what the
+   * arrow-key handler is actually bound to. Without the first, a Flock sidebar
+   * that is collapsed or behind another container never appears at all;
+   * without the second it appears with the row highlighted and the arrows
+   * still going wherever they were going before — the failure that reads as
+   * "nothing happened".
+   *
+   * `focusView()` also WAITS for a cold webview to finish loading its script,
+   * which is why the select is safe to send immediately after it: a message
+   * arriving before the page is listening is dropped and never retried.
+   *
+   * Returns false when the view could not be brought up — the caller
+   * (extension.ts) then tries the native tree, which is the same
+   * exactly-one-of-the-two shape every other surface here uses.
+   */
+  async focusSession(sessionId: string): Promise<boolean> {
+    if (!isSessionId(sessionId)) return false;
+    if (!(await this.focusView())) return false;
+    await this.reveal(sessionId);
+    await this.selectRow(sessionRowKey(sessionId), true);
+    return true;
   }
 
   /**
@@ -1588,6 +1619,10 @@ export function branchRowParts(
 export interface WebtreeController extends DisposableLike {
   refresh(): void;
   revealSession(sessionId: string): Promise<void>;
+  /** revealSession, plus the keyboard: reveal the view, select the row and
+   *  focus the tree so the arrows switch sessions from there. False when the
+   *  view could not be brought up. */
+  focusSession(sessionId: string): Promise<boolean>;
   revealProject(projectId: string): Promise<void>;
   /** Show the view, give it the keyboard, and wait for its page to listen.
    *  Anything that is about to ask for an inline edit calls this first — see
@@ -1636,6 +1671,7 @@ export function registerWebtree(
   return {
     refresh: () => provider.refresh(),
     revealSession: (sessionId) => provider.reveal(sessionId),
+    focusSession: (sessionId) => provider.focusSession(sessionId),
     revealProject: (projectId) => provider.revealProject(projectId),
     focusView: () => provider.focusView(),
     beginRename: (sessionId) => provider.beginRename(sessionId),

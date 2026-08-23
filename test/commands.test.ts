@@ -682,6 +682,7 @@ function chatDeps(
     revealSession: async (id) => {
       calls.reveals.push(id);
     },
+    focusSessionsView: async () => true,
     revealProject: async (id) => {
       calls.reveals.push(id);
     },
@@ -4725,6 +4726,7 @@ describe('the add / import flows', () => {
       revealSession: async (id) => {
         calls.reveals.push(id);
       },
+      focusSessionsView: async () => true,
       revealProject: async (id) => {
         calls.reveals.push(id);
       },

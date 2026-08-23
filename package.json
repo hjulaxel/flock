@@ -224,6 +224,11 @@
         "category": "Flock"
       },
       {
+        "command": "lineage.focusSessionsView",
+        "title": "Show Current Session in the Sidebar",
+        "category": "Flock"
+      },
+      {
         "command": "lineage.focusSession",
         "title": "Focus Session",
         "category": "Flock",
@@ -1575,6 +1580,19 @@
           ],
           "markdownDescription": "Who opens a conversation.\n\n`flock` opens it here, in a terminal Flock owns. `claudeExtension` hands it to the official Claude Code extension: a **new** conversation runs its **New Conversation** command (opening in your `claudeCode.preferredLocation` — sidebar or editor) and is adopted onto a tree row once `claude agents --json` reports it; clicking a closed row **reopens the conversation in the extension's UI** instead of a terminal, and clicking a live one it hosts reveals or offers to open its panel.\n\nIn `claudeExtension` mode Flock does not own the process, so these stop working for sessions started that way: **tmux parking** (a workspace switch closes the session instead of hiding it), **Close** and **Close with Summary**, **account pinning** (the launch runs under the extension's own login), the **wrap prompt**, and **Flock-named tabs**. Per-account **routing** is honoured by falling back instead: a conversation routed to another provider's CLI, or to a Claude account with its own config directory, opens in Flock's own terminal — the extension, on the machine's default login, could not host it — and the status bar says so. The tree row, the fork edge, the age, the status dot, the bell, project membership, branch colours, **Fork** and **Copy Session ID** all keep working.\n\n**Fork is never delegated.** `--fork-session` is a launch-time CLI flag no command the extension contributes carries, so a fork always opens Flock's own terminal — which is also the only way it can inherit the parent's history. A conversation **pinned to an account** with its own config directory also keeps Flock's terminal on resume: the extension runs on the machine's own login and would not find that transcript. Picking an account by hand (**New Session From…**) overrides the mode the same way."
         },
+        "lineage.sessionSwitching": {
+          "type": "string",
+          "enum": [
+            "flock",
+            "claude"
+          ],
+          "enumDescriptions": [
+            "Flock's tree is the session switcher: the row of whatever conversation is in front stays selected, and alt+left over the Claude Code extension puts the keyboard on that row so the arrows move between sessions.",
+            "Leave the Claude Code extension's own agent list alone. Flock stops following the conversation in front and contributes no alt+left binding."
+          ],
+          "default": "flock",
+          "markdownDescription": "Where you switch between conversations.\n\n`flock` makes the tree the switcher. The row of whatever conversation is in front stays **selected**, so the sidebar always already says where you are \u2014 and `alt+left`, while the Claude Code extension has focus, puts the **keyboard** on that row, so the up and down arrows move you between sessions from there.\n\nThat binding exists because of the back arrow at the top of the Claude Code extension's panel, which leaves your conversation for an agent list that knows nothing about forks, projects or worktrees, and is very easy to hit by accident. **Flock cannot intercept that arrow**: it is a route change inside another extension's webview and produces no tab, title, command or context key on the outside. What it can do is make sure the tree never lost your place, and give the same gesture somewhere better to go.\n\n`claude` turns both halves off and leaves the agent list alone."
+        },
         "lineage.groupByFolder": {
           "type": "boolean",
           "default": true,
@@ -1802,6 +1820,11 @@
         "command": "lineage.renameSessionInline",
         "key": "f2",
         "when": "focusedView == lineageSessionsInline"
+      },
+      {
+        "command": "lineage.focusSessionsView",
+        "key": "alt+left",
+        "when": "config.lineage.sessionSwitching == 'flock' && (activeWebviewPanelId == 'claudeVSCodePanel' || claude-vscode.sideBarActive)"
       }
     ],
     "walkthroughs": [

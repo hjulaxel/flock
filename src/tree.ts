@@ -1733,6 +1733,8 @@ function parseDraggedProjectIds(raw: string): string[] {
 export interface TreeController extends DisposableLike {
   refresh(): void;
   revealSession(sessionId: string): Promise<void>;
+  /** revealSession, plus the keyboard — see the implementation. */
+  focusSession(sessionId: string): Promise<boolean>;
   /** The worktrees this view accounts for under one project — what a worktree
    *  verb re-resolves its target against when the native tree is the one on
    *  screen. See LineageTreeProvider.branchesOf. */
@@ -1842,6 +1844,26 @@ export function registerTree(deps: TreeDeps): TreeController {
         });
       } catch (err) {
         logError('tree.revealSession', err);
+      }
+    },
+
+    /** revealSession with `focus: true` — the session-switcher gesture
+     *  (COMMANDS.focusSessionsView). The native tree needs no second focus
+     *  move the way the webview does: a TreeView is a real workbench list, so
+     *  focusing it focuses the row, and the arrows are the workbench's own.
+     *  Reports whether the reveal landed, so the caller can say nothing
+     *  happened rather than claim it did. */
+    async focusSession(sessionId: string): Promise<boolean> {
+      try {
+        await view.reveal(provider.sessionRef(sessionId), {
+          select: true,
+          focus: true,
+          expand: REVEAL_EXPAND_LEVELS,
+        });
+        return true;
+      } catch (err) {
+        logError('tree.focusSession', err);
+        return false;
       }
     },
 

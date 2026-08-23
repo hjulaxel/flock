@@ -6080,6 +6080,28 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
 
   // --------------------------------------------------------------- focus
 
+  /**
+   * The session SWITCHER gesture: put the keyboard in the tree, on the row of
+   * whatever conversation is in front, so the arrows move between sessions.
+   *
+   * The inverse of focusSession below — that one takes a row and brings you
+   * its conversation, this one takes the conversation you are in and brings
+   * you its row. It is bound to alt+left while the Claude Code extension's
+   * panel or sidebar has focus, because that extension's own back arrow leaves
+   * a conversation for an agent list Flock cannot see into and does not need:
+   * this is the arrow that means "back" doing something useful instead.
+   *
+   * A toast on failure and not silence, because the whole point of the verb is
+   * that a key press moves the keyboard somewhere — and a gesture that moves
+   * nothing, twice, is one a user stops trying.
+   */
+  register(COMMANDS.focusSessionsView, 'focus sessions view', async () => {
+    if (await deps.focusSessionsView()) return;
+    void vscode.window.showInformationMessage(
+      'Flock: no session in front to jump to — open one from the tree first.',
+    );
+  });
+
   register(COMMANDS.focusSession, 'focus session', async (arg?: unknown) => {
     const id = await targetSession(deps, arg, 'Focus a Claude session', {
       liveOnly: false,

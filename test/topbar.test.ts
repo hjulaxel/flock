@@ -126,6 +126,7 @@ function depsOf(
     beginInlineRename: nope,
     beginInlineRenameProject: nope,
     revealSession: nope,
+    focusSessionsView: nope,
     revealProject: nope,
     getRecord: (id) => over.records?.[id],
     allRecords: () => over.records ?? {},

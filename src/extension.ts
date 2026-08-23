@@ -53,11 +53,13 @@ import {
   CONTEXT_ONLY_ACTIVE,
   DEFAULT_BUSY_STALE_MINUTES,
   DEFAULT_PROVIDER,
+  DEFAULT_SESSION_SWITCHING,
   DEFAULT_STALE_AFTER_HOURS,
   ENV_NODE_ID,
   EXTENSION_ID,
   isProviderId,
   isSessionId,
+  isSessionSwitching,
   isTerminalLocationPref,
   shortId,
 } from './types';
@@ -75,6 +77,7 @@ import type {
   RosterEntry,
   RosterResult,
   SessionForest,
+  SessionSwitching,
   TerminalLocationPref,
   TmuxSpawn,
   TranscriptFacts,
@@ -173,6 +176,7 @@ import {
 import { BranchListCache } from './branchList';
 import { recommendedNotice } from './recommend';
 import { chatAutoCloseVictims } from './chatAutoClose';
+import { frontSession, mayFollowSelection } from './switcher';
 import { CompactionTracker } from './compaction';
 import { planDeepReveal } from './deepSwitch';
 import { WorktreeCache, branchRowsAdvice } from './git';
@@ -2806,6 +2810,108 @@ export async function activate(
     });
   };
 
+  // ------------------------------------------- the sidebar as the switcher
+  //
+  // `lineage.sessionSwitching` (see the type in types.ts for the whole
+  // argument). Two halves:
+  //
+  //   1. FOLLOW. The row of whatever conversation is in front stays selected,
+  //      so the sidebar always already says where you are. This is what makes
+  //      the Claude extension's back arrow survivable without intercepting it:
+  //      you cannot land on the agent list "having lost your place", because
+  //      the tree never lost it.
+  //   2. JUMP. COMMANDS.focusSessionsView puts the keyboard on that row, which
+  //      is what turns a highlighted row into a switcher — up and down move
+  //      between sessions from there. Bound to alt+left while Claude's panel
+  //      or sidebar has focus, which is the gesture the arrow is standing in
+  //      for.
+  //
+  // WHAT FLOCK CANNOT DO, so that nobody looks for it here: intercept the
+  // arrow. It is a route change inside another extension's webview and it
+  // produces nothing observable on the outside — no tab, no title, no command,
+  // no context key. The click is not preventable, catchable, or even visible.
+
+  const sessionSwitching = (): SessionSwitching => {
+    const raw = cfg().get<string>(CONFIG_KEYS.sessionSwitching);
+    return isSessionSwitching(raw) ? raw : DEFAULT_SESSION_SWITCHING;
+  };
+
+  /**
+   * The conversation in front, as far as this window can tell.
+   *
+   * The active TERMINAL first, because that is the one thing the workbench
+   * reports precisely; then the last session Flock itself put in front, which
+   * is the only handle there is on a conversation living in the Claude
+   * extension's panel (it exposes no "which session is this tab" API, and a
+   * webview tab carries nothing but a viewType).
+   *
+   * Answered over the chain, because every one of those handles names the
+   * generation that was CURRENT when it was recorded, and the row now carries
+   * the tip.
+   */
+  let lastFrontSessionId: string | null = null;
+  const frontSessionId = (): string | null =>
+    frontSession({
+      activeSessionId: registry.activeSessionId(),
+      lastFrontSessionId,
+      tipOf: (id) => chainIndex.tipOf(id),
+      hasRow: (id) => forest.nodes.has(id),
+    });
+
+  /** Record a conversation as the one in front. Called wherever Flock puts a
+   *  session on screen by a route the active-terminal read cannot see — the
+   *  delegated open, above all, which hands the conversation to another
+   *  extension's panel and never touches a terminal. */
+  const noteFrontSession = (sessionId: string): void => {
+    if (isSessionId(sessionId)) lastFrontSessionId = sessionId;
+  };
+
+  /**
+   * Half 1: keep the selection on the conversation in front.
+   *
+   * Never takes the keyboard — the user is typing in the thing they just
+   * switched to, and a reveal that stole focus would eat the keystroke. And
+   * never through `revealSession`, whose wait-for-the-row-to-exist loop is
+   * right for a launch and wrong here: this fires on every terminal switch,
+   * and a fifteen-second waiter per switch would pile up subscriptions for
+   * rows that are simply not in the tree.
+   */
+  const followFrontSession = (): void => {
+    const visible =
+      webtreeController?.visible === true || treeController?.visible === true;
+    if (!mayFollowSelection({ mode: sessionSwitching(), treeVisible: visible })) {
+      return;
+    }
+    const id = frontSessionId();
+    if (id === null) return;
+    void treeController?.revealSession(id);
+    void webtreeController?.revealSession(id);
+  };
+
+  try {
+    context.subscriptions.push(
+      registry.onDidChangeActive((sessionId) => {
+        if (sessionId !== null) noteFrontSession(sessionId);
+        followFrontSession();
+      }),
+    );
+  } catch (err) {
+    logError('extension.followFrontSession', err);
+  }
+
+  /** Half 2: the jump. Reveals the sidebar, selects the row and hands it the
+   *  keyboard — whichever of the two surfaces is the live one. Falsy return
+   *  means neither could be brought up, and the caller says so rather than
+   *  leaving the gesture looking broken. */
+  const focusSessionsView = async (): Promise<boolean> => {
+    const id = frontSessionId();
+    if (id === null) return false;
+    // Exactly one of the two views is ever on screen (their `when` clauses are
+    // complements), so this is a try-both, not a do-both.
+    if ((await webtreeController?.focusSession(id)) === true) return true;
+    return (await treeController?.focusSession(id)) === true;
+  };
+
   // ----------------------------------------------------- project workspaces
 
   // --------------------------------------- the Explorer follows the project
@@ -4370,6 +4476,7 @@ export async function activate(
       return (await queryPanePid(binary, name)) !== undefined;
     },
     revealSession,
+    focusSessionsView,
 
     /** No wait-for-it loop, unlike revealSession: a project exists in the model
      *  the moment it is written, because it comes from `state.json` rather than
@@ -4653,6 +4760,13 @@ export async function activate(
         logError('extension.delegateOpenSession', err);
         return null;
       }
+      // The one handle there is on a conversation living in the delegate's own
+      // panel: it opened because WE named this id, and no terminal changed
+      // hands, so the active-terminal read that feeds `frontSessionId` will
+      // never see it. Without this the sidebar's selection would go on
+      // following whatever terminal happened to be active last, which is the
+      // opposite of "the tree always says where you are".
+      noteFrontSession(sessionId);
       // The resumed process will not be on the roster for up to a poll
       // interval, and the user is looking at the panel it just opened.
       pokeNow();

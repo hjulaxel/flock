@@ -671,6 +671,38 @@ export function isTerminalLocationPref(v: unknown): v is TerminalLocationPref {
   return v === 'editor' || v === 'panel' || v === 'newWindow';
 }
 
+/**
+ * `lineage.sessionSwitching` — which list is THE list of conversations.
+ *
+ * Two session switchers on one screen is one too many. The Claude Code
+ * extension has an agent list of its own, reachable from the back arrow at the
+ * top of its panel, and it is very easy to land in by accident; it also knows
+ * nothing about forks, projects, worktrees or anything else the tree exists to
+ * show, so arriving there is a downgrade you did not ask for.
+ *
+ * `flock` (the default) makes the tree the switcher: the row of whatever
+ * conversation is in front stays SELECTED as you move between them, so the
+ * sidebar always already says where you are, and alt+left over Claude puts the
+ * keyboard on that row so the arrows can move you off it.
+ *
+ * `claude` turns both halves off and leaves the agent list alone. Nothing here
+ * disables anything of Claude's — Flock could not if it wanted to — it only
+ * stops Flock from having an opinion about where you are.
+ *
+ * WHAT THIS IS NOT: an interception. The back arrow is a route change inside
+ * another extension's webview and it produces no signal on the outside — no
+ * tab, no title change, no command, no context key. Flock cannot stop the
+ * click, cannot see it, and does not pretend to. What it can do is make sure
+ * the place you land is already correct.
+ */
+export type SessionSwitching = 'flock' | 'claude';
+
+export function isSessionSwitching(v: unknown): v is SessionSwitching {
+  return v === 'flock' || v === 'claude';
+}
+
+export const DEFAULT_SESSION_SWITCHING: SessionSwitching = 'flock';
+
 // ------------------------------------------------------------------ verbs
 
 export const WRAP_PROMPT =
@@ -680,6 +712,26 @@ export const WRAP_PROMPT =
 export const COMMANDS = {
   refresh: 'lineage.refresh',
   focusSession: 'lineage.focusSession',
+  /**
+   * Put the keyboard in the Flock sidebar, on the row of whatever conversation
+   * is in front — the one gesture that makes the sidebar a session SWITCHER
+   * rather than a list you click.
+   *
+   * It exists because of the Claude Code extension's own back arrow, which
+   * leaves its conversation for an agent list Flock cannot see into and does
+   * not need: two session lists on one screen, and only one of them knows
+   * about forks, projects or worktrees. Flock cannot intercept that click — it
+   * is a route change inside another extension's webview, with no tab, title,
+   * command or context key on the outside of it — so this is the half that can
+   * be made to work: the arrow key that means "back" while Claude has focus
+   * lands you in the tree instead, on the row you were already in, with the up
+   * and down arrows switching sessions from there.
+   *
+   * Bound to alt+left, scoped to the Claude panel or sidebar being active, and
+   * only while `lineage.sessionSwitching` is `flock`. Always available from the
+   * palette, whatever that setting says.
+   */
+  focusSessionsView: 'lineage.focusSessionsView',
   newSession: 'lineage.newSession',
   /** `newSession` with the folder question forced back on. `newSession` itself
    *  defaults to the project this window is open on and asks nothing, which is
@@ -1141,6 +1193,9 @@ export const CONFIG_KEYS = {
    *  nothing to hand over (`--fork-session` is a CLI flag no delegated command
    *  carries). */
   launchMode: 'launch.mode',
+  /** WHERE you switch conversations: Flock's tree, or the Claude Code
+   *  extension's own agent list. See SessionSwitching. */
+  sessionSwitching: 'sessionSwitching',
   onlyProjectSessions: 'onlyProjectSessions',
   /** Show live sessions Flock does not own — `claude` running in some other
    *  terminal, another editor, a script. OFF by default: the roster is
@@ -3197,6 +3252,21 @@ export interface CommandDeps {
    *  reports it, which is a roster tick away. Resolves either way; never
    *  throws, and never steals keyboard focus from the terminal. */
   revealSession(sessionId: string): Promise<void>;
+  /**
+   * `revealSession` for the conversation currently IN FRONT, plus the
+   * keyboard: reveal the Flock sidebar, select that row, and focus the tree so
+   * the up and down arrows switch sessions from there.
+   *
+   * Takes no id on purpose — "the session I am in" is a question only
+   * extension.ts can answer (the active terminal, else the last conversation
+   * Flock put on screen, resolved over the generation chain), and a caller
+   * that had an id to pass would want `revealSession` instead.
+   *
+   * False means nothing happened: no conversation in front, or neither view
+   * could be brought up. The verb says so rather than reporting a jump it did
+   * not make.
+   */
+  focusSessionsView(): Promise<boolean>;
   /** Select the project's row. No ancestor walk is needed — a project row is
    *  always at depth 0 — so this is the select half of `revealSession` alone. */
   revealProject(projectId: string): Promise<void>;
