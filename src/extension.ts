@@ -77,6 +77,7 @@ import type {
   RosterEntry,
   RosterResult,
   SessionForest,
+  SessionNode,
   SessionSwitching,
   TerminalLocationPref,
   TmuxSpawn,
@@ -177,6 +178,7 @@ import { BranchListCache } from './branchList';
 import { recommendedNotice } from './recommend';
 import { chatAutoCloseVictims } from './chatAutoClose';
 import { frontSession, mayFollowSelection } from './switcher';
+import { registerShellsView } from './shellsView';
 import { CompactionTracker } from './compaction';
 import { planDeepReveal } from './deepSwitch';
 import { WorktreeCache, branchRowsAdvice } from './git';
@@ -3525,6 +3527,59 @@ export async function activate(
     accountsViewController = registerAccountsView(accountDeps);
     context.subscriptions.push(accountsViewController);
   }
+
+  // ------------------------------------------------------------ 6c. shells
+  //
+  // The third section: one row per TERMINAL this window has bound. See
+  // src/shellsView.ts for why a process list is a view of its own rather than
+  // more columns on the tree — briefly, its unit is a pty with a pid and a
+  // tmux name, none of which survive the re-key that the tree's unit (a
+  // conversation) is defined by.
+  //
+  // Every session lookup is resolved over the CHAIN here, on the way in, so
+  // that shellsView.ts never has to know generations exist: the binding is
+  // held under the id its terminal was LAUNCHED with, and the row, the status
+  // and the cwd all live on whichever generation is current.
+  const shellSessionNode = (boundId: string): SessionNode | undefined => {
+    for (const id of chainAliases(boundId)) {
+      const node = forest.nodes.get(id);
+      if (node !== undefined) return node;
+    }
+    return undefined;
+  };
+  const shellsViewController = registerShellsView({
+    shells: () => registry.bindings(),
+    sessionLabel: (id) => shellSessionNode(id)?.label,
+    sessionStatus: (id) => shellSessionNode(id)?.status,
+    // The node's cwd first (the roster's answer, which is where the process
+    // actually is), then the record's — a shell whose session the roster has
+    // not reported yet still knows where it was launched.
+    sessionCwd: (id) =>
+      shellSessionNode(id)?.cwd ?? store.get(chainIndex.tipOf(id))?.cwd,
+    // Three signals, one repaint: a terminal appearing, a terminal exiting,
+    // and the roster tick that moves every row's age and status along. The
+    // forest event covers the third and is also what fires after a re-key, so
+    // a row whose conversation changed generations re-reads its label.
+    onDidChange: (listener) => {
+      const subs = [
+        registry.onDidBind(() => listener()),
+        registry.onDidExit(() => listener()),
+        onForestChanged.event(() => listener()),
+      ];
+      return {
+        dispose(): void {
+          for (const sub of subs) {
+            try {
+              sub.dispose();
+            } catch (err) {
+              logError('extension.shells.dispose', err);
+            }
+          }
+        },
+      };
+    },
+  });
+  context.subscriptions.push(shellsViewController);
 
   // ONE read at start-up, whether or not the view exists and whether or not
   // anybody is looking at it. The meters are not only decoration: the

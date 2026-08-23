@@ -77,6 +77,14 @@
           "contextualTitle": "AI Accounts",
           "when": "config.lineage.accounts.enabled && config.lineage.accounts.section",
           "visibility": "collapsed"
+        },
+        {
+          "id": "lineageShells",
+          "name": "Shells",
+          "icon": "media/flock.svg",
+          "contextualTitle": "Running Shells",
+          "when": "config.lineage.shells.section",
+          "visibility": "collapsed"
         }
       ],
       "explorer": [
@@ -1494,6 +1502,10 @@
       {
         "view": "lineageAccounts",
         "contents": "No AI accounts yet.\n[Add Account](command:lineage.addAccount)\nAn account is one subscription you can launch sessions on — a work plan, a personal plan, an API key. Each gets its own config directory, so you sign in once per account and never again."
+      },
+      {
+        "view": "lineageShells",
+        "contents": "No shells in this window.\n[New Session](command:lineage.newSession)\nThis lists the terminals THIS window has bound — one per session it is running, with the pid in it and whether it is wrapped in tmux. Sessions in other windows are still in the tree above, which reads a machine-wide roster; their terminals belong to those windows."
       }
     ],
     "configuration": {
@@ -1715,6 +1727,11 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "Draw **Accounts** as a second section of the Flock sidebar. On by default: the accounts are worth a row of their own.\n\nThe only reason to turn it off is the top bar. VS Code merges a view's buttons into the container header — the row that reads **FLOCK** — only while that container shows exactly one section, so while Accounts is drawn the bell, New Project, `+`, fork and the gear sit on the **SESSIONS** row just below it instead. Off moves them up one row, and costs you the Accounts section.\n\nNothing about accounts stops working while it is off. Usage is still read, new sessions are still routed, a session is still pinned to its account for life, and every account verb — **Add Account…**, **Sign In**, **Set Default Account**, **Set Project Account…** — is in the Command Palette under **Flock**. The switch is also in the gear menu at the top of the sidebar."
+        },
+        "lineage.shells.section": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Draw **Shells** as a section of the Flock sidebar: one row per terminal this window has bound, with the pid actually running in it, whether it is wrapped in tmux, and how old it is. Clicking a row brings that terminal to the front.\n\nIt ships collapsed. The tree above deliberately hides all of this \u2014 it collapses a conversation's generations onto one row so that the machinery underneath stops being your problem \u2014 and this is where it stops being hidden, for the times when it *is* your problem: a session that will not focus, a tmux wrap you want to confirm, an editor that has quietly accumulated eleven terminals.\n\n**This window only.** A terminal belongs to the window that made it, so a second window's shells are not here. Its sessions still are \u2014 the tree above reads a machine-wide roster.\n\nLike **Accounts**, drawing a second section moves Flock's top-bar buttons down onto the **SESSIONS** row; see `lineage.accounts.section`."
         },
         "lineage.accounts.offerSwitchAtLimit": {
           "type": "boolean",

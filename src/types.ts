@@ -2312,7 +2312,21 @@ export type ContextToken =
    *  user reads — but the row is where the fact lives, and inventing the token
    *  later would mean changing a contextValue every `when` clause matches. */
   | 'account'
-  | 'default';
+  | 'default'
+  /** A row in the Shells view — one terminal this window has bound. Its own
+   *  token rather than 'session' even though the row carries a session id: a
+   *  shell row's verbs are about a PROCESS (reveal its terminal, confirm its
+   *  wrap) and the tree's session menu — fork, rename, hide, move to account —
+   *  is a menu about a conversation, which would be nonsense on a list of
+   *  ptys. */
+  | 'shell'
+  /** This shell is WRAPPED in the private tmux server. A second token on a
+   *  shell row, never alone, and it marks the one fact on that row with a
+   *  consequence: a wrapped shell survives a workspace switch (the pane is
+   *  detached and reattached) where an unwrapped one is closed and resumed.
+   *  Positive, like every other pair here, because the manifest never negates
+   *  a viewItem regex. */
+  | 'tmux';
 export function contextValueOf(tokens: ContextToken[]): string {
   return ';' + tokens.join(';') + ';';
 }
