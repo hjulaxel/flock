@@ -722,6 +722,95 @@ describe('computeGrouping: shared claims and folder scope', () => {
   });
 });
 
+describe('computeGrouping: the scope fence over PROJECT rows', () => {
+  // Sessions were only half the leak. A project row renders even with no
+  // sessions in it (that empty row is where "New Session in Project" lives),
+  // so a folder-scoped window used to list every OTHER project on the machine
+  // — each with a `+` the launch fence now refuses. An empty window showed the
+  // whole roster and nothing runnable.
+  it('drops projects with no directory in scope', () => {
+    const result = grouping({
+      visibleRootIds: [],
+      cwdOf: cwdMap({}),
+      scopeDirs: ['/code/app'],
+      projects: [
+        project('mine', 'Mine', '/code/app'),
+        project('theirs', 'Theirs', '/code/other'),
+        project('far', 'Far', '/somewhere/else'),
+      ],
+    });
+    expect(result.projects.map((p) => p.label)).toEqual(['Mine']);
+  });
+
+  it('keeps a project whose directory merely CONTAINS the scope', () => {
+    // A window opened on a subdirectory of a project is still that project's
+    // window in every other respect; isWithin is asymmetric, so state the
+    // direction the fence actually uses.
+    const result = grouping({
+      visibleRootIds: [],
+      cwdOf: cwdMap({}),
+      scopeDirs: ['/code/app'],
+      projects: [project('inner', 'Inner', '/code/app/pkg')],
+    });
+    expect(result.projects.map((p) => p.label)).toEqual(['Inner']);
+  });
+
+  it('keeps an out-of-scope PARENT that is the only path to an in-scope child', () => {
+    // Fencing the parent out would strand the child: a subproject row is only
+    // reachable through its parent.
+    const result = grouping({
+      visibleRootIds: [],
+      cwdOf: cwdMap({}),
+      scopeDirs: ['/code/app'],
+      projects: [
+        project('parent', 'Parent', '/elsewhere/root'),
+        { ...project('child', 'Child', '/code/app'), parentId: 'parent' },
+      ],
+    });
+    expect(result.projects.map((p) => p.label).sort()).toEqual([
+      'Child',
+      'Parent',
+    ]);
+  });
+
+  it('fences out a project with NO directories at all', () => {
+    // The one place "unplaceable stays" does NOT apply, and the reason is the
+    // asymmetry between a session and a project. An unknown session cwd means
+    // a real conversation we failed to place, and stranding it loses work. A
+    // project with no directory has nothing to strand: it can claim no session
+    // in any window and its `+` has nowhere to launch.
+    //
+    // Found by running computeGrouping against a real state.json, which had
+    // three nameless dirless projects that rendered as blank rows in every
+    // window — a fixture would not have had them.
+    const result = grouping({
+      visibleRootIds: [],
+      cwdOf: cwdMap({}),
+      scopeDirs: ['/code/app'],
+      projects: [
+        project('real', 'Real', '/code/app'),
+        { ...project('junk', '', '/x'), rootDir: '', dirs: [] },
+      ],
+    });
+    expect(result.projects.map((p) => p.label)).toEqual(['Real']);
+  });
+
+  it('does not fence at all without a scope', () => {
+    // Project mode and empty windows: the whole roster, dirless rows included,
+    // exactly as before. The fence is folder mode's rule and nothing else's.
+    const unscoped = grouping({
+      visibleRootIds: [],
+      cwdOf: cwdMap({}),
+      projects: [
+        project('a', 'A', '/code/app'),
+        project('b', 'B', '/code/other'),
+        { ...project('junk', '', '/x'), rootDir: '', dirs: [] },
+      ],
+    });
+    expect(unscoped.projects).toHaveLength(3);
+  });
+});
+
 describe('computeGrouping: the "Still running" appendix', () => {
   const cwds = cwdMap({
     A: '/shared/x',

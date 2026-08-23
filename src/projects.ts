@@ -1974,7 +1974,68 @@ export function computeGrouping(
       node.parentId !== null && closed.has(node.parentId);
     if (node.project.hidden === true || inheritedlyClosed) closed.add(id);
   }
-  const projects = all.filter((p) => !closed.has(p.id));
+  // FOLDER MODE's fence over PROJECT ROWS, the same boundary the session loop
+  // below applies to session rows.
+  //
+  // Sessions were only half the leak. A project row is rendered even with no
+  // sessions in it — deliberately, because an empty project row is where "New
+  // Session in Project" lives — so a window scoped to one folder still listed
+  // every OTHER project on the machine, each with a `+` that the launch fence
+  // now refuses. An empty window showed the whole roster and nothing runnable.
+  //
+  // Kept when the project OR ANY DESCENDANT has a directory in scope: a parent
+  // is the only path to its children, so fencing it out would strand an
+  // in-scope subproject. Walked over the whole tree (closed ones included) for
+  // the same reason the closed-inheritance pass above is.
+  //
+  // `isWithin` inline rather than modes.outsideScope, which would be a cycle
+  // (modes.ts imports this module). Same asymmetry, deliberately: a project
+  // with no placeable directory is not proven foreign and stays.
+  const scopeDirsRaw = (input?.scopeDirs ?? [])
+    .map((d) => normalizeDir(d))
+    .filter((d) => d !== '');
+  const outOfScopeProjects = new Set<string>();
+  if (scopeDirsRaw.length > 0) {
+    const ownDirsInScope = (p: ProjectRecord): boolean => {
+      const dirs = projectDirs(p)
+        .map((d) => normalizeDir(d))
+        .filter((d) => d !== '');
+      // NO DIRECTORY AT ALL is fenced OUT, and this is the one place the
+      // "unplaceable stays" rule deliberately does not apply.
+      //
+      // For a SESSION, an unknown cwd means a real conversation we failed to
+      // place, and stranding it would lose work — so it stays. For a PROJECT,
+      // no directory means there is nothing to strand: it can claim no
+      // session in any window, and the `+` on its row has nowhere to launch.
+      // Keeping it produced exactly that — three nameless, empty rows in
+      // every window, found by probing this function against the real
+      // state.json rather than a fixture. A project row with no directory is
+      // not information, and a window scoped to a folder is the last place to
+      // show one.
+      if (dirs.length === 0) return false;
+      return dirs.some((dir) =>
+        scopeDirsRaw.some((scope) => isWithin(scope, dir)),
+      );
+    };
+    // Reverse preorder = children before parents, so a parent can read the
+    // verdicts its descendants already have.
+    const keep = new Set<string>();
+    for (const id of [...tree.order].reverse()) {
+      const node = tree.byId.get(id);
+      if (!node) continue;
+      if (
+        ownDirsInScope(node.project) ||
+        node.childIds.some((c) => keep.has(c))
+      ) {
+        keep.add(id);
+      }
+    }
+    for (const id of tree.order) if (!keep.has(id)) outOfScopeProjects.add(id);
+  }
+
+  const projects = all.filter(
+    (p) => !closed.has(p.id) && !outOfScopeProjects.has(p.id),
+  );
   const hiddenFolders = input?.hiddenFolders ?? [];
   const hasProjects = projects.length > 0;
   // Read once, here, so every decision below asks the same two questions of the
