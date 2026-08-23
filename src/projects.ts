@@ -962,23 +962,23 @@ export function validateProjectName(
 /**
  * The project that already lists `dir` itself, by exact path — or undefined.
  *
- * THE FAILURE THIS EXISTS TO REFUSE. Membership is containment, and the deepest
- * claim wins (see matchProject), so two projects listing the SAME directory is
- * the one arrangement the model has no answer for: the tie breaks on name, which
- * means every session in that directory belongs to whichever project sorts
- * first, and the other one displays nothing while still claiming everything.
+ * HISTORY: this used to be a REFUSAL — the create and add-directory flows
+ * declined a directory another project already listed, because the
+ * single-winner matcher had no answer for a duplicate claim: the tie broke on
+ * name, one project got every session and the other displayed nothing while
+ * still claiming everything. Claims are NON-EXCLUSIVE now (see matchProjects:
+ * a session in a twice-claimed directory files under BOTH projects), so the
+ * arrangement is representable and the refusal is gone.
  *
- * A subproject is where this used to happen by accident. Its directory pick opens
- * inside its parent, so accepting the dialog without navigating anywhere chose
- * the parent's OWN directory — and the new subproject then took the parent's
- * whole session list with it, which is not a thing anybody asks a new, empty
- * project to do.
+ * What survives is the LOOKUP: the flows that used to refuse now use this to
+ * TELL the user the directory is shared ("also covered by X — sessions there
+ * will show under both"), because a duplicate claim is still usually an
+ * accident — a subproject dialog accepted without navigating anywhere picks
+ * the parent's own directory — and an accident announced at the moment it
+ * happens is one the user can undo while they still remember making it.
  *
- * Exact paths only, deliberately. A subproject rooted at `app/api` SHOULD take
- * the sessions running under `app/api` off its parent — that is the entire
- * feature, and nesting by containment is how a project spanning a monorepo is
- * meant to be split up. What is refused is the duplicate claim, not the deeper
- * one.
+ * Exact paths only, deliberately: a claim on `app/api` inside a project
+ * rooted at `app` is nesting, not sharing, and was never anyone's mistake.
  */
 export function projectClaiming(
   projects: readonly ProjectRecord[],
@@ -1012,12 +1012,33 @@ export interface ProjectMatch {
 }
 
 /**
- * The project owning `cwd`, or null. Longest matching directory wins so a
- * project rooted at `~/code/api` beats one rooted at `~/code`. Ties (the same
- * directory listed by two projects — a user mistake, not a crash) break on
- * project name then id, so the answer is stable across ticks.
+ * EVERY project owning `cwd`, best first — [] when none does.
+ *
+ * Claims are non-exclusive (design/levels-and-modes.md): a directory may be
+ * listed by several projects — worked on as a subproject of two different
+ * ones — and a session there belongs to ALL of them for grouping. What stays
+ * singular is DEPTH: the longest matching directory still wins outright, so a
+ * project rooted at `~/code/api` still takes `~/code/api` sessions off one
+ * rooted at `~/code` — nesting is how a monorepo is split up, and the plural
+ * is only ever about claims of the SAME depth.
+ *
+ * At the winning depth, two rules decide who is in the list:
+ *
+ *   1. If any claim there is OWN (explicitly listed), the list is exactly the
+ *      own claims. Several explicit statements co-exist — that is the feature
+ *      — but an inference (a worktree reach) must not ride alongside a
+ *      statement it would have lost to one at a time.
+ *   2. If every claim there is DERIVED, the list is ONE project — the old
+ *      single-winner tie-break, whole. A worktree belongs to whichever project
+ *      owns the repository, not to every subproject sitting inside a checkout
+ *      of it, and making inferences plural would quietly file every worktree
+ *      session under all of them.
+ *
+ * Order is the old tie-break (`beatsAtEqualDepth`), so `[0]` is EXACTLY the
+ * project the single-winner matcher used to return — every single-answer call
+ * site reads `matchProject`, which is this list's head, and nothing moved.
  */
-export function matchProject(
+export function matchProjects(
   projects: readonly ProjectRecord[],
   cwd: string | undefined,
   /**
@@ -1033,12 +1054,15 @@ export function matchProject(
    * right one — are unchanged.
    */
   extraDirs?: (project: ProjectRecord) => readonly string[],
-): ProjectMatch | null {
+): ProjectMatch[] {
   const target = normalizeDir(cwd);
-  if (target === '') return null;
+  if (target === '') return [];
 
   const all = projects ?? [];
-  let best: ProjectMatch | null = null;
+  // Best candidate PER PROJECT first: a project reaching the cwd through two
+  // of its directories (or through a claim and a worktree at once) is still
+  // one claimant, and must appear in the answer once.
+  const claimants: ProjectMatch[] = [];
   for (const project of all) {
     if (!project) continue;
     const listed: (readonly [string, boolean])[] = projectDirs(project).map(
@@ -1050,20 +1074,84 @@ export function matchProject(
           ...extraDirs(project).map((d) => [normalizeDir(d), false] as const),
         ]
       : listed;
+    let best: ProjectMatch | null = null;
     for (const [dir, own] of dirs) {
       if (dir === '' || !isWithin(dir, target)) continue;
       const depth = pathKey(dir).length;
-      const candidate: ProjectMatch = { project, dir, depth, own };
-      if (best === null || depth > best.depth) {
-        best = candidate;
-        continue;
-      }
-      if (depth === best.depth && beatsAtEqualDepth(all, candidate, best)) {
-        best = candidate;
+      if (
+        best === null ||
+        depth > best.depth ||
+        (depth === best.depth && own === true && best.own !== true)
+      ) {
+        best = { project, dir, depth, own };
       }
     }
+    if (best !== null) claimants.push(best);
   }
-  return best;
+  if (claimants.length === 0) return [];
+
+  let top = -1;
+  for (const m of claimants) if (m.depth > top) top = m.depth;
+  const atTop = claimants.filter((m) => m.depth === top);
+  if (atTop.some((m) => m.own === true)) {
+    const owns = atTop.filter((m) => m.own === true);
+    owns.sort((a, b) => (beatsAtEqualDepth(all, a, b) ? -1 : 1));
+    return owns;
+  }
+  // All derived: singular, per rule 2 above.
+  let winner = atTop[0];
+  for (const candidate of atTop.slice(1)) {
+    if (beatsAtEqualDepth(all, candidate, winner)) winner = candidate;
+  }
+  return [winner];
+}
+
+/**
+ * The project owning `cwd`, or null — the head of {@link matchProjects}, kept
+ * as the reading every SINGLE-ANSWER call site takes (where a new session
+ * files, which glyph a row wears, which project a chat opens on). Longest
+ * matching directory wins so a project rooted at `~/code/api` beats one rooted
+ * at `~/code`; equal-depth claims break on `beatsAtEqualDepth` then name/id,
+ * so the answer is stable across ticks. Grouping is the one consumer that
+ * reads the whole list instead — a twice-claimed directory shows its sessions
+ * under both claimants, but files new work under this one.
+ */
+export function matchProject(
+  projects: readonly ProjectRecord[],
+  cwd: string | undefined,
+  /** See {@link matchProjects}. */
+  extraDirs?: (project: ProjectRecord) => readonly string[],
+): ProjectMatch | null {
+  return matchProjects(projects, cwd, extraDirs)[0] ?? null;
+}
+
+/**
+ * The claimant a SINGLE-PROJECT action should file under, given the plural
+ * answer and the project the user is switched into.
+ *
+ * The static tie-break (matchProjects' order) is stable but blind: a
+ * directory claimed by two projects always files under the same alphabetical
+ * winner, even while the user is explicitly working IN the other one. So in
+ * project mode the ACTIVE project outranks the tie-break — it is the most
+ * explicit statement of "the project I am working in" the product has (the
+ * user switched to it) — and only among actual claimants: an active project
+ * that does not claim the cwd never steals the filing (design: "prefer the
+ * ACTIVE project in project mode").
+ *
+ * Folder mode's half of the spec — most-recently-used claimant — is NOT
+ * implemented: nothing records a per-project lastUsedAt yet, and guessing at
+ * one (say, newest session filed) would make the filing flap with the roster.
+ * Callers there pass no activeId and get the stable static winner, unchanged.
+ */
+export function preferredClaimant(
+  matches: readonly ProjectMatch[],
+  activeProjectId: string | null | undefined,
+): ProjectMatch | null {
+  if (typeof activeProjectId === 'string' && activeProjectId !== '') {
+    const active = matches?.find((m) => m.project.id === activeProjectId);
+    if (active !== undefined) return active;
+  }
+  return matches?.[0] ?? null;
 }
 
 /**
@@ -1579,6 +1667,39 @@ export interface GroupingInput {
   cwdOf(sessionId: string): string | undefined;
   projects: readonly ProjectRecord[];
   hiddenFolders: readonly string[];
+  /**
+   * FOLDER MODE's scope: every real folder this window opened (the Flock
+   * anchor already excluded by the wiring — see explorer.nonAnchorFolders).
+   * Set, a root whose cwd is KNOWN and lies outside ALL of them is dropped
+   * from every bucket — that session is another window's to show, and a
+   * window that is "the folder you opened" must not render other folders'
+   * work. Counted in `outOfScopeCount`, NOT in `hiddenCount`: hiding is a
+   * choice the user made and might want undone, where scope is a fact about
+   * which window this is. A UNION because a multi-root window opened every
+   * one of its folders — fencing on folder[0] alone dropped everything under
+   * folders[1..], and in converted explorer-follow windows (folder[0] is the
+   * anchor) dropped everything, full stop.
+   *
+   * A root with NO cwd stays visible. A session this window cannot place is
+   * not thereby proven foreign, and dropping it would make a running process
+   * rowless everywhere — the exact invisible state the levels design exists to
+   * forbid. Absent or empty (project mode, or an empty window) scopes nothing.
+   */
+  scopeDirs?: readonly string[];
+  /**
+   * Does this root's visible subtree contain a RUNNING process? The escape
+   * hatch on EVERY drop computeGrouping makes — the scope fence, the
+   * all-claimants-closed drop, folder-hiding and onlyProjectSessions alike: a
+   * running session may be filtered into the collapsed "Running elsewhere"
+   * group (see GroupingResult.elsewhere) but never OUT of the tree — "every
+   * running process has a row in every window" outranks every fence and
+   * filter, because an invisible running state is the incident this design
+   * exists to prevent. A lookup rather than data on the root ids because
+   * liveness lives on the forest, which this pure module never sees; absent
+   * (older wirings, tests that predate it) means nothing is rescued, which is
+   * the pre-invariant behaviour.
+   */
+  hasRunning?: (rootId: string) => boolean;
   /** lineage.groupByFolder — applies to what is left over after projects. */
   groupByFolder: boolean;
   /** lineage.onlyProjectSessions — drop everything no project claims. Ignored
@@ -1695,9 +1816,37 @@ export interface GroupingResult {
   folders: GroupNode[];
   /** Leftover roots rendered as bare session rows. */
   loose: string[];
-  /** How many root sessions were removed by folder-hiding / project-only. */
+  /** How many root sessions were removed by folder-hiding / project-only /
+   *  every-claimant-closed. Running roots are never in this count — they go
+   *  to `elsewhere`, same rule as the scope fence below. */
   hiddenCount: number;
+  /** How many root sessions `scopeDirs` excluded — other folders' work, at
+   *  home in other windows. Zero whenever no scope was given. Kept apart from
+   *  `hiddenCount` so "you hid N" never inflates with rows the user never
+   *  hid. Running roots are never in this count — they go to `elsewhere`. */
+  outOfScopeCount: number;
+  /**
+   * The "Running elsewhere" group, or null when no filter dropped a running
+   * root. The visibility half of the levels invariant: a RUNNING session whose
+   * cwd the scope fence excludes, whose every claiming project is closed,
+   * whose folder the user hid, or that onlyProjectSessions would drop,
+   * still costs memory on this machine — so instead of being dropped (a
+   * running process with no row in this window) it files into this one
+   * collapsed appendix group. Rendered LAST and collapsed by default: it is a
+   * ledger, not a workspace — the rows exist so the badge's machine-wide count
+   * always has rows to point at, and so Close Now / routing verbs are one
+   * click away, not so another folder's work competes for attention.
+   * Built here rather than in the renderers so both view styles show the same
+   * rows in the same order (the reason every other grouping decision is here).
+   */
+  elsewhere: GroupNode | null;
 }
+
+/** GroupNode.key of the "Running elsewhere" group. NUL-prefixed so no real
+ *  cwd (the other keyspace GroupNode uses) can ever collide with it. */
+export const ELSEWHERE_GROUP_KEY = '\u0000running-elsewhere';
+/** Its label. Words, not a path: the group has no directory of its own. */
+export const ELSEWHERE_GROUP_LABEL = 'Running elsewhere';
 
 function cmp(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
@@ -1778,6 +1927,11 @@ function sameBranches(
  *   2. then folder-hiding removes what is left in a hidden directory;
  *   3. then onlyProjectSessions (if any project exists) removes the rest.
  *
+ * No rule, however, ever removes a root whose subtree still has a RUNNING
+ * process: those file into the "Running elsewhere" appendix instead (see
+ * GroupingInput.hasRunning) — a filter is a view preference and the levels
+ * invariant outranks it for exactly as long as the process lives.
+ *
  * Projects with no sessions are still rendered: the user created them on
  * purpose, and an empty project row is where "New Session in Project" lives.
  */
@@ -1840,31 +1994,93 @@ export function computeGrouping(
   for (const p of projects) claimed.set(p.id, []);
 
   const leftover: string[] = [];
+  const elsewhereRoots: string[] = [];
   let hiddenCount = 0;
+  let outOfScopeCount = 0;
+  const scopes = (input?.scopeDirs ?? [])
+    .map((d) => normalizeDir(d))
+    .filter((d) => d !== '');
+  // The invariant's escape hatch: a dropped root whose subtree still has a
+  // running process goes to the "Running elsewhere" appendix instead of
+  // vanishing. Total on purpose — a throwing lookup must not take the tree
+  // down, and "not provably running" degrades to the plain drop.
+  const running = (rootId: string): boolean => {
+    try {
+      return input?.hasRunning?.(rootId) === true;
+    } catch {
+      return false;
+    }
+  };
 
   for (const rootId of input?.visibleRootIds ?? []) {
     const cwd = input.cwdOf(rootId);
+    // FOLDER MODE's fence, before any other rule: a session another folder's
+    // window owns is not hidden here, not filed here, not loose here — it is
+    // simply not this window's. Known cwds only; see GroupingInput.scopeDirs
+    // for why an unplaceable session stays. UNLESS it is running: a running
+    // process must keep a row in every window (the appendix group), because
+    // the memory it costs is machine-wide even when the work is not ours.
+    if (
+      scopes.length > 0 &&
+      normalizeDir(cwd) !== '' &&
+      !scopes.some((scope) => isWithin(scope, cwd ?? ''))
+    ) {
+      if (running(rootId)) elsewhereRoots.push(rootId);
+      else outOfScopeCount++;
+      continue;
+    }
     // Matched against ALL projects, CLOSED ones included (the user-facing verb
     // is "close"; the field it writes is still called `hidden`). A closed
     // project still OWNS its directories: if the winning match is closed, the
     // session goes with it. Otherwise closing a project would just demote its
     // sessions to folder rows, i.e. close nothing — and a closed project nested
     // inside an open one (close `api`, keep `code`) would leak straight back.
-    const match = matchProject(all, cwd, extraDirs);
-    if (match) {
-      // `closed`, not `match.project.hidden`: a subproject of a closed project
-      // is closed too, and its sessions have to go away with it rather than
-      // reappear under a folder row.
-      if (closed.has(match.project.id)) hiddenCount++;
-      else claimed.get(match.project.id)?.push(rootId);
+    //
+    // ALL claimants, not one: claims are non-exclusive (see matchProjects), so
+    // a session in a twice-claimed directory renders under BOTH projects. The
+    // row is a view of the session, not the session itself — two rows for one
+    // conversation cost nothing, where picking a winner here made the losing
+    // project display nothing while still claiming everything.
+    const matches = matchProjects(all, cwd, extraDirs);
+    if (matches.length > 0) {
+      // `closed`, not `project.hidden`: a subproject of a closed project is
+      // closed too, and its sessions have to go away with it rather than
+      // reappear under a folder row. With several claimants the session stays
+      // as long as ANY of them is open — closing one of two projects sharing a
+      // directory must not take the other's rows with it — and counts hidden
+      // only when every claimant closed.
+      let filed = false;
+      for (const match of matches) {
+        if (closed.has(match.project.id)) continue;
+        claimed.get(match.project.id)?.push(rootId);
+        filed = true;
+      }
+      // Every claimant closed: the rows go away with their projects — except
+      // a RUNNING session, which keeps its one appendix row. Closing a
+      // project is "stop showing me this work", and the group honours that
+      // (collapsed, at the bottom) while refusing the part no view option may
+      // do: hide a process that is still spending this machine's memory.
+      if (!filed) {
+        if (running(rootId)) elsewhereRoots.push(rootId);
+        else hiddenCount++;
+      }
       continue;
     }
+    // The two remaining filters get the same escape hatch the fence and the
+    // closed-claimants drop have above: hiding is a VIEW preference, and no
+    // view preference is allowed to hide a process that is still spending
+    // this machine's memory (the levels invariant). A hidden folder stays
+    // hidden for everything NOT running — the rescue applies exactly while a
+    // process lives, and the moment it exits the root drops here as it always
+    // did.
     if (isHiddenFolder(hiddenFolders, cwd)) {
-      hiddenCount++;
+      if (running(rootId)) elsewhereRoots.push(rootId);
+      else hiddenCount++;
       continue;
     }
     if (hasProjects && input.onlyProjectSessions) {
-      hiddenCount++;
+      if (running(rootId)) elsewhereRoots.push(rootId);
+      else hiddenCount++;
       continue;
     }
     leftover.push(rootId);
@@ -2021,6 +2237,20 @@ export function computeGrouping(
     folders,
     loose,
     hiddenCount,
+    outOfScopeCount,
+    // GroupNode-shaped so both renderers draw it with their existing group
+    // row machinery; cwd '' because the group has no directory (its members
+    // each have their own, shown on their rows).
+    elsewhere:
+      elsewhereRoots.length > 0
+        ? {
+            type: 'group',
+            key: ELSEWHERE_GROUP_KEY,
+            cwd: '',
+            label: ELSEWHERE_GROUP_LABEL,
+            rootIds: elsewhereRoots,
+          }
+        : null,
   };
   return prev ? reuseUnchanged(result, prev) : result;
 }
@@ -2074,5 +2304,15 @@ function reuseUnchanged(
     return g;
   });
 
-  return { ...next, projects, folders };
+  // Same identity-reuse for the appendix group — it is a rendered row like
+  // any folder, and handing the workbench a fresh object every refresh would
+  // collapse it back the moment the user had expanded it.
+  const elsewhere =
+    next.elsewhere !== null &&
+    prev.elsewhere !== null &&
+    sameIds(prev.elsewhere.rootIds, next.elsewhere.rootIds)
+      ? prev.elsewhere
+      : next.elsewhere;
+
+  return { ...next, projects, folders, elsewhere };
 }

@@ -24,6 +24,14 @@ import * as vscode from 'vscode';
 
 import * as path from 'node:path';
 import * as os from 'node:os';
+import * as fs from 'node:fs/promises';
+
+import {
+  listPidFacts,
+  orphanRescueDecision,
+  reapSurvivors,
+  type PersistedPidFact,
+} from './procs';
 
 import {
   ARCHIVE_RESCAN_MIN_MS,
@@ -39,6 +47,7 @@ import {
   CONTEXT_EXPLORER_FOLLOW,
   CONTEXT_HOOKS_INSTALLED,
   CONTEXT_MANY_ACCOUNTS,
+  CONTEXT_MODE,
   CONTEXT_NATIVE_TREE,
   CONTEXT_MULTI_SELECT,
   CONTEXT_ONLY_ACTIVE,
@@ -76,22 +85,32 @@ import {
   type TmuxAdvice,
   ensureTmuxConf,
   findTmuxBinary,
-  killTmuxSession,
+  killTmuxSessionTree,
+  listTmuxSessions,
   queryClientSessions,
   queryPanePid,
   resolveTmuxSpawn,
   respawnTmuxPane,
+  sessionIdOfTmuxName,
   tmuxAdvice,
   tmuxInstallHint,
 } from './tmux';
 import {
   matchProject,
+  matchProjects,
+  preferredClaimant,
   normalizeDir,
   pathKey,
   projectDirs,
   providerOfProject,
   validateProjectName,
 } from './projects';
+import {
+  type LineageMode,
+  normalizeMode,
+  projectSwitchingOn,
+  windowForDir,
+} from './modes';
 import { log, logError, setLogSink } from './log';
 import {
   RosterFilter,
@@ -120,9 +139,15 @@ import {
   forkParentFromTranscript,
   hasTranscript,
   readTranscriptHeader,
+  transcriptFile,
   transcriptMtimeMs,
 } from './transcript';
 import { repairResumeLeaf } from './resumeLeaf';
+import {
+  idleCloseDecisions,
+  reconcileTmuxDecisions,
+} from './idleClose';
+import type { ReconcileRecordFacts, SessionCloseFacts } from './idleClose';
 import { LineageResolver, buildForest, resolveAll } from './lineage';
 import type { ResolveOptions } from './lineage';
 import {
@@ -148,6 +173,7 @@ import {
 import { BranchListCache } from './branchList';
 import { recommendedNotice } from './recommend';
 import { chatAutoCloseVictims } from './chatAutoClose';
+import { planDeepReveal } from './deepSwitch';
 import { WorktreeCache, branchRowsAdvice } from './git';
 import { BranchStatusCache } from './gitBranches';
 import {
@@ -162,7 +188,7 @@ import {
   runWorktreeRemove,
 } from './worktrees';
 import type { GenerationFacts } from './generations';
-import { TranscriptStatsCache, readFirstPrompt } from './usage';
+import { TranscriptStatsCache, readFirstPrompt, readTailStats } from './usage';
 import type { TranscriptStats } from './usage';
 import { WorkspaceManager } from './workspaces';
 import {
@@ -171,6 +197,7 @@ import {
   WORKSPACE_FILE_NAME,
   anchorLabelFor,
   desiredFolders,
+  nonAnchorFolders,
   withAnchorName,
   workspaceFileJson,
 } from './explorer';
@@ -321,6 +348,68 @@ export async function activate(
     const v = cfg().get<number>(key);
     return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : dflt;
   };
+  /** The detach grace window (minutes). Not numCfg: 0 is a real value here —
+   *  "no grace, the sweep kills on its next tick" — not an unset. Shared by
+   *  the workspace switch's detach tier and the window-close stamp below. */
+  const detachGraceMinutes = (): number => {
+    const v = cfg().get<number>(CONFIG_KEYS.sessionDetachGraceMinutes);
+    return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 10;
+  };
+  /** `lineage.mode`, resolved (src/modes.ts). Re-read on every call like every
+   *  other setting here, so flipping it takes effect without a reload. */
+  const lineageMode = (): LineageMode =>
+    normalizeMode(cfg().get<string>(CONFIG_KEYS.mode));
+
+  /** The Flock anchor's path (src/explorer.ts owns its identity): the empty
+   *  globalStorage directory a converted explorer-follow window carries at
+   *  folder[0] so splices never restart the extension host. Needed up here —
+   *  long before the Explorer wiring — because BOTH windows this extension
+   *  publishes about itself (the folder-mode scope below, the WindowRecord
+   *  folders) must exclude it: it is Flock's plumbing, not a folder the user
+   *  opened. */
+  const anchorPath = path.join(
+    context.globalStorageUri.fsPath,
+    ANCHOR_DIR_NAME,
+  );
+
+  /** The REAL workspace folders — everything the user opened, the anchor
+   *  filtered out. The one list both the folder-mode fence and the published
+   *  WindowRecord read, so what this window scopes to and what other windows
+   *  route to it can never be two different sets of directories. */
+  const realWorkspaceFolders = (): string[] =>
+    nonAnchorFolders(
+      anchorPath,
+      (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath),
+    );
+
+  /** FOLDER MODE's fence: every real folder this window opened, or undefined
+   *  when nothing is fenced — project mode, or a window with no real folder
+   *  at all. The UNION of all real roots, never folder[0] alone: a converted
+   *  explorer-follow window keeps the anchor at index 0 (an empty directory
+   *  no session runs under — scoping to it rendered zero sessions), and an
+   *  ordinary multi-root window opened every one of its folders on purpose. */
+  const scopeFolders = (): string[] | undefined => {
+    if (lineageMode() !== 'folder') return undefined;
+    const real = realWorkspaceFolders();
+    return real.length > 0 ? real : undefined;
+  };
+
+  /** Mirror the RESOLVED mode into the when-clause key (see CONTEXT_MODE for
+   *  why the manifest cannot read the setting directly). At activation and on
+   *  every configuration change. */
+  const syncModeContext = async (): Promise<void> => {
+    try {
+      await vscode.commands.executeCommand(
+        'setContext',
+        CONTEXT_MODE,
+        lineageMode(),
+      );
+    } catch (err) {
+      logError('extension.modeContext', err);
+    }
+  };
+  void syncModeContext();
+
   // Re-read on every call so a settings change takes effect without rebuilding
   // the poller or the terminal registry.
   const claudeBin = (): string | null =>
@@ -1461,11 +1550,14 @@ export async function activate(
     },
     // Closing a tab closes the SESSION (the sidebar contract) — for a
     // wrapped terminal the dispose only detached, so the registry asks for
-    // the session's real end here.
+    // the session's real end here. The TREE kill, not the plain one: every
+    // session spawns ~8 MCP children that `kill-session` orphans to PID 1,
+    // and this dep is the funnel every close path (verb, chat sweep, idle
+    // sweep, user tab-close) runs through — one reap point covers them all.
     tmuxKillSession: (name) => {
       const binary = tmuxSpawn()?.binary ?? findTmuxBinary();
       return binary !== null
-        ? killTmuxSession(binary, name)
+        ? killTmuxSessionTree(binary, name)
         : Promise.resolve(false);
     },
   });
@@ -1483,8 +1575,41 @@ export async function activate(
   context.subscriptions.push(terminalMatcher);
 
   context.subscriptions.push(
-    registry.onDidExit((sessionId) => {
+    registry.onDidExit((sessionId, _code, reason, tmuxName) => {
       void store.upsert(sessionId, { boundWindowId: null });
+      // The tab X is a 1→2 transition too (the close handler kills the wrap),
+      // so it gets the same at-rest repair every other close path runs. Only
+      // reason 'user': an extension dispose is the workspace sweep (which has
+      // its own bookkeeping) and a shutdown keeps the session for revival.
+      if (reason === 'user') {
+        repairResumeLeaf(sessionId, {
+          extraProjectsDirs: profileProjectsDirs(),
+        });
+      }
+      // WINDOW CLOSE (reason 'shutdown'): a wrapped session survives the
+      // window on purpose — that is the revival feature — but "survives" must
+      // never mean "runs with no deadline and no reaper until some window
+      // happens to activate". Stamp the detach grace here, so the graced
+      // sweep of any surviving window (and the next activation's reconcile)
+      // BOUNDS it exactly like a switch-detached session; if this window
+      // dies before the async write flushes, the reconcile's unclaimed-kill
+      // is the backstop. PINNED sessions are deliberately exempt: the pin is
+      // the user saying "this long autonomous run outlives my windows" — a
+      // deadline would break exactly that promise. Their visibility across
+      // windows is the next slice's problem, not solved by killing them here.
+      if (reason === 'shutdown' && tmuxName !== undefined) {
+        const pinned = chainAliases(sessionId).some(
+          (id) => store.get(id)?.pinned === true,
+        );
+        if (!pinned) {
+          void store.upsert(chainIndex.tipOf(sessionId), {
+            graceUntil: new Date(
+              Date.now() + detachGraceMinutes() * 60_000,
+            ).toISOString(),
+            tmux: tmuxName,
+          });
+        }
+      }
       pokeNow();
     }),
     registry.onDidChangeActive(() => {
@@ -1499,6 +1624,10 @@ export async function activate(
 
   const focusIntegration = await registerFocusIntegration({
     publishWindow: (rec) => store.publishWindow(rec),
+    // The anchor-free folder list the published WindowRecord carries — same
+    // reader as the folder-mode fence, so what this window claims to host and
+    // what it scopes its own tree to are one set of directories.
+    realFolders: () => realWorkspaceFolders(),
     onFocusRequest: (id) => {
       if (!id) return;
       // treeController is a `let` on purpose — this closure runs long after
@@ -1586,6 +1715,246 @@ export async function activate(
       boundWindowId: focusIntegration.windowId,
     });
   }
+
+  // ------------------------------------------------- 5b. tmux reconcile
+  //
+  // Once per activation: `tmux -L lineage list-sessions` against state. The
+  // invariant is "no running process without a visible row", and two lies
+  // survive a crash, a window closed mid-grace, or an old build's parked
+  // leftovers: a LIVE session nothing claims (killed here, tree and all — the
+  // record, if any, becomes an archived row), and a record NAMING a dead
+  // session (name cleared, or the next resume would attach to a ghost; a
+  // graced one is closed outright — its countdown row was covering a corpse).
+  // This is also the process half of the v7→v8 migration: sanitizeRecord
+  // flipped `parked` records to archived at load and deliberately discarded
+  // their tmux names — the live names themselves encode the session ids, so
+  // the orphans those records left running die right here, on the first
+  // activation of the new build. The decision is reconcileTmuxDecisions
+  // (src/idleClose.ts, pure and tested); a freshness guard in it spares
+  // records another window wrote moments ago whose claim has not flushed yet.
+  //
+  // AFTER reassociate(), deliberately: a window reload's revived terminals
+  // and an app restart's tmux-client adoptions must be bound — claimed —
+  // before anything judges a live session unclaimed.
+  void (async () => {
+    try {
+      const binary = tmuxSpawn()?.binary ?? findTmuxBinary();
+      if (binary === null) return;
+      const liveNames = await listTmuxSessions(binary);
+      const records = store.all();
+      const liveWindows = new Set(store.getWindows().map((w) => w.windowId));
+      const boundHere = new Set<string>();
+      for (const b of registry.bindings()) {
+        for (const id of chainAliases(b.sessionId)) boundHere.add(id);
+      }
+      const recordFacts: ReconcileRecordFacts[] = Object.values(records).map(
+        (r) => {
+          const grace = r.graceUntil != null ? Date.parse(r.graceUntil) : NaN;
+          const updated = Date.parse(r.updatedAt);
+          return {
+            sessionId: r.id,
+            tmux: r.tmux,
+            // An unparseable deadline still claims: expiry is the sweep's
+            // call, and the sweep reads the same stamp as already expired.
+            ...(r.graceUntil != null
+              ? { graceUntilMs: Number.isFinite(grace) ? grace : 0 }
+              : {}),
+            // Chain-expanded, same as boundHere and the shutdown stamp's own
+            // check: the pin may sit on any generation while the wrap name
+            // lives on the tip. A pinned chain's window-close deliberately
+            // skipped the grace stamp (the pin means "outlives my windows"),
+            // so without this fact the reconcile would kill exactly the
+            // survivor that skip protected.
+            pinned: chainAliases(r.id).some(
+              (id) => records[id]?.pinned === true,
+            ),
+            boundToLiveWindow:
+              typeof r.boundWindowId === 'string' &&
+              liveWindows.has(r.boundWindowId),
+            updatedAtMs: Number.isFinite(updated) ? updated : 0,
+          };
+        },
+      );
+      const plan = reconcileTmuxDecisions({
+        now: Date.now(),
+        liveNames,
+        records: recordFacts,
+        boundHere,
+      });
+      if (
+        plan.killNames.length === 0 &&
+        plan.closeIds.length === 0 &&
+        plan.clearTmuxIds.length === 0
+      ) {
+        return;
+      }
+      log(
+        `reconcile: ${String(liveNames.length)} live tmux session(s) — ` +
+          `killing ${String(plan.killNames.length)} unclaimed, closing ` +
+          `${String(plan.closeIds.length)} record(s), clearing ` +
+          `${String(plan.clearTmuxIds.length)} stale name(s)`,
+      );
+      for (const name of plan.killNames) {
+        await killTmuxSessionTree(binary, name);
+        // A live session with NO record still deserves an archived row: the
+        // transcript exists, and a row is how the user finds out what died.
+        // Only when nothing in the plan already closes a record for this wrap
+        // — the grace holder lives on the chain TIP, and a second record
+        // under the launch-generation id would be a duplicate row.
+        const id = sessionIdOfTmuxName(name);
+        const holderClosed = Object.values(records).some(
+          (r) => r.tmux === name && plan.closeIds.includes(r.id),
+        );
+        if (id !== undefined && !holderClosed && !plan.closeIds.includes(id)) {
+          void store.upsert(id, {
+            closed: new Date().toISOString(),
+            graceUntil: null,
+            tmux: null,
+          });
+        }
+      }
+      for (const id of plan.closeIds) {
+        void store.upsert(id, {
+          closed: new Date().toISOString(),
+          graceUntil: null,
+          tmux: null,
+          closeAfterTurn: false,
+        });
+        repairResumeLeaf(id, { extraProjectsDirs: profileProjectsDirs() });
+      }
+      for (const id of plan.clearTmuxIds) {
+        void store.upsert(id, { tmux: null });
+      }
+      pokeNow();
+    } catch (err) {
+      logError('extension.reconcileTmux', err);
+    }
+  })();
+
+  // ------------------------------------------- 5c. bare-orphan rescue
+  //
+  // The reconcile above is TMUX-ONLY: a BARE session's window close has no
+  // server to interrogate. VS Code kills the bare claude root itself, its
+  // MCP children re-parent to PID 1, and the shutdown-time best-effort reap
+  // (terminals.reapBareOnShutdown) runs inside a dying extension host that
+  // may not live out even one wait. So the mechanism is a persisted ledger:
+  //
+  //   * each window writes its bare pid snapshot — root + descendants, with
+  //     each pid's `ps lstart` — to its OWN file under globalStorage
+  //     (`bare-rescue/<extension-host-pid>.json`, so no window ever clobbers
+  //     another's), refreshed on the same 60 s tick that refreshes the
+  //     in-memory snapshots. What a crash or close leaves behind is at most
+  //     a minute stale;
+  //   * the NEXT activation — any window's — reads every leftover file and
+  //     reaps what PROVABLY orphaned. "Provably" is procs.ts's
+  //     orphanRescueDecision: pid alive + start time identical (a recycled
+  //     pid is somebody else's process, however long the gap) + ppid 1
+  //     (still-parented pids belong to a live window's session or a reload's
+  //     revived terminal, and are left alone — this check, not window
+  //     bookkeeping, is what makes reading other windows' files safe).
+  //
+  // A file is deleted once nothing in it is verifiably alive-and-parented;
+  // one that still names a living claimed tree is its owner's (or its
+  // reloaded heir's) and stays. Files therefore self-clean one activation
+  // after their processes end, and a torn write (a crash mid-rename) parses
+  // as nothing verifiable and is removed the same way.
+  const bareRescueDir = path.join(
+    context.globalStorageUri.fsPath,
+    'bare-rescue',
+  );
+  const bareRescueFile = path.join(
+    bareRescueDir,
+    `${String(process.pid)}.json`,
+  );
+
+  const persistBareRescueSnapshot = async (): Promise<void> => {
+    try {
+      const pids = registry.bareSnapshotPids();
+      if (pids.length === 0) {
+        // Nothing bare and bare here: an empty ledger is a stale ledger, and
+        // leaving one behind would make the next activation verify pids this
+        // window already reaped through the ordinary funnels.
+        await fs.rm(bareRescueFile, { force: true });
+        return;
+      }
+      // Start times captured NOW, against the same parser the rescue's
+      // verification uses — string equality across the two is the identity
+      // check. A pid ps cannot see any more is already gone and not written.
+      const facts = await listPidFacts(pids);
+      const entries: PersistedPidFact[] = [];
+      for (const pid of pids) {
+        const start = facts.get(pid)?.start;
+        if (start !== undefined) entries.push({ pid, start });
+      }
+      await fs.mkdir(bareRescueDir, { recursive: true });
+      // Write-then-rename so a reader never sees half a ledger; the .tmp of
+      // a host that died mid-write is swept by the rescue below.
+      const tmp = `${bareRescueFile}.tmp`;
+      await fs.writeFile(
+        tmp,
+        JSON.stringify({ savedAt: new Date().toISOString(), pids: entries }),
+        'utf8',
+      );
+      await fs.rename(tmp, bareRescueFile);
+    } catch (err) {
+      logError('extension.persistBareRescue', err);
+    }
+  };
+
+  void (async () => {
+    try {
+      let names: string[];
+      try {
+        names = await fs.readdir(bareRescueDir);
+      } catch {
+        return; // no ledger directory = no window has ever persisted one
+      }
+      for (const name of names) {
+        const file = path.join(bareRescueDir, name);
+        // Ours only via an OS-recycled extension-host pid; either way this
+        // incarnation owns the name now and will overwrite it on the tick.
+        if (file === bareRescueFile) continue;
+        if (!name.endsWith('.json')) {
+          await fs.rm(file, { force: true }); // a dead host's torn .tmp
+          continue;
+        }
+        let saved: PersistedPidFact[] = [];
+        try {
+          const parsed: unknown = JSON.parse(await fs.readFile(file, 'utf8'));
+          const list = (parsed as { pids?: unknown }).pids;
+          if (Array.isArray(list)) {
+            saved = list.filter(
+              (e): e is PersistedPidFact =>
+                typeof e === 'object' &&
+                e !== null &&
+                Number.isInteger((e as { pid?: unknown }).pid) &&
+                typeof (e as { start?: unknown }).start === 'string',
+            );
+          }
+        } catch {
+          // Unreadable = nothing verifiable = nothing to act on, ever; the
+          // deletion below is what keeps a corrupt ledger from lingering.
+        }
+        const facts =
+          saved.length > 0
+            ? await listPidFacts(saved.map((e) => e.pid))
+            : new Map<number, { ppid: number; start: string }>();
+        const decision = orphanRescueDecision(saved, facts);
+        if (decision.reap.length > 0) {
+          log(
+            `bare rescue: ${name} left ${String(decision.reap.length)} ` +
+              `verified orphan(s) — reaping by pid`,
+          );
+          await reapSurvivors(decision.reap);
+        }
+        if (!decision.ownerLikelyAlive) {
+          await fs.rm(file, { force: true });
+        }
+      }
+    } catch (err) {
+      logError('extension.bareOrphanRescue', err);
+    }
+  })();
 
   // ------------------------------------------------- 6. tree + decorations
 
@@ -1854,8 +2223,13 @@ export async function activate(
     try {
       for (const node of forest.nodes.values()) {
         if (node.unseen !== true || node.hidden) continue;
-        const match = matchProject(allProjects(), node.cwd);
-        if (match && match.project.hidden !== true) out.add(match.project.id);
+        // EVERY claimant, not one: a twice-claimed session renders under both
+        // project rows (see matchProjects), so the dot has to light both — a
+        // row showing the session while its sibling carries the green mark
+        // would read as two different sessions.
+        for (const match of matchProjects(allProjects(), node.cwd)) {
+          if (match.project.hidden !== true) out.add(match.project.id);
+        }
       }
     } catch (err) {
       logError('extension.projectsWithUnseen', err);
@@ -1958,6 +2332,10 @@ export async function activate(
     hiddenFolders: () => store.getHiddenFolders().map((f) => f.path),
     onlyProjectSessions: () =>
       boolCfg(CONFIG_KEYS.onlyProjectSessions, false),
+    // Folder mode's fence, undefined whenever nothing is fenced. The same
+    // answer the command layer's scopeDirs dep gives, so the rows a window
+    // draws and the sessions its verbs will act on in place are one set.
+    scopeDirs: () => scopeFolders(),
     onlyActiveSessions: () => boolCfg(CONFIG_KEYS.onlyActiveSessions, false),
     noteSelection,
     showTokens: () => boolCfg(CONFIG_KEYS.showTokens, false),
@@ -2356,10 +2734,10 @@ export async function activate(
   // splicing that list. src/explorer.ts owns the arithmetic and the anchor
   // invariant that keeps a splice from restarting the extension host; this is
   // only the workbench half of it.
-  const explorerAnchorPath = path.join(
-    context.globalStorageUri.fsPath,
-    ANCHOR_DIR_NAME,
-  );
+  // Hoisted to the config section (the scope fence and the window publisher
+  // need it long before the Explorer wiring runs); aliased here so the
+  // explorer half keeps reading under the name that says whose path it is.
+  const explorerAnchorPath = anchorPath;
   const explorerWorkspaceFile = path.join(
     context.globalStorageUri.fsPath,
     WORKSPACE_FILE_NAME,
@@ -2820,7 +3198,7 @@ export async function activate(
           if (back) return;
           // The pane will not take the conversation back; do not leave the
           // placeholder sitting there pretending to be a session.
-          await killTmuxSession(tmuxBinary, tmuxName);
+          await killTmuxSessionTree(tmuxBinary, tmuxName);
         } else if (!disposed) {
           return; // nothing was stopped, so there is nothing to put back
         }
@@ -2866,7 +3244,7 @@ export async function activate(
       if (!inPlace) {
         // The placeholder is still in that pane, and `new-session -A` below
         // would ATTACH to it rather than start anything. Kill it first.
-        await killTmuxSession(tmuxBinary, tmuxName);
+        await killTmuxSessionTree(tmuxBinary, tmuxName);
       }
     }
     if (!inPlace && (wrapped || disposed)) {
@@ -3102,6 +3480,16 @@ export async function activate(
     // id, because the binding lives under the launch-time one.
     closeSessionTab: (id) =>
       chainAliases(id).some((alias) => registry.closeTerminal(alias)),
+    // The chat tier's kill: `killTmux` sends a wrapped chat through
+    // killTmuxSessionTree, and the registry's bare path walks and reaps on
+    // its own — either way the whole process tree ends, never just the pane
+    // root. Chats are the one thing a switch ends rather than detaches: they
+    // have no tree row, so a graced chat would be a running process with no
+    // surface anywhere.
+    endSessionTab: (id) =>
+      chainAliases(id).some((alias) =>
+        registry.closeTerminal(alias, { killTmux: true }),
+      ),
     // A switch must never abort work in flight: a session mid-turn (busy) or
     // blocked on a permission dialog (waiting) keeps its tab — in the KILL
     // tier. A tmux-backed session is detached instead, which interrupts
@@ -3154,6 +3542,9 @@ export async function activate(
     },
     resumeSessions: () =>
       boolCfg(CONFIG_KEYS.workspacesResumeSessions, true),
+    // The detach grace window (minutes) — the shared reader above, so the
+    // switch's detach tier and the window-close stamp can never disagree.
+    detachGraceMinutes,
     // The quality-of-life mode: parkOthers is a no-op without it, and the
     // restore step brings back one session instead of the whole saved set.
     soloSession: () => boolCfg(CONFIG_KEYS.soloSession, false),
@@ -3171,6 +3562,67 @@ export async function activate(
       // says, which for a restore is the session it is about to focus.
       explorerDirOverride = null;
       await explorerSync.sync(project, explorerDirFor(project));
+    },
+    // THE DEEP SWITCH's arrival gesture. The decision is planDeepReveal
+    // (src/deepSwitch.ts, pure); this supplies its world:
+    //
+    //   * the LANE — the auto-switch's trigger session carries a lane stamp
+    //     (EditorialRecord.subprojectId, read off the chain tip because a
+    //     re-key moves the record), and that lane is what narrows the reveal
+    //     from the project's root to the folder the user actually moved into.
+    //     A stamp naming another project's lane is ignored, not followed: the
+    //     switch is arriving at THIS project.
+    //   * the WORKTREES — deliberately NOT behind `lineage.git.branches`.
+    //     That setting hides the branch ROWS; the probe itself already runs
+    //     ungated for grouping (see worktreesOf above), and the deep switch is
+    //     specified to work with the rows off. A MANUAL switch warms the probe
+    //     (a user-facing verb under a spinner can afford one `git worktree
+    //     list`); an AUTO switch takes the cache as it stands — focus-follows
+    //     is a side effect of just working and must not gain a subprocess
+    //     await, so a cold cache merely costs it the note, never the switch.
+    revealSwitchTarget: async (project, opts) => {
+      let lane;
+      if (opts.trigger !== null) {
+        const rec =
+          store.get(chainIndex.tipOf(opts.trigger)) ?? store.get(opts.trigger);
+        const laneId = rec?.subprojectId;
+        if (typeof laneId === 'string' && laneId !== '') {
+          const candidate = store.getSubproject(laneId);
+          if (candidate && candidate.projectId === project.id) lane = candidate;
+        }
+      }
+      const probeDir = lane?.dir ?? project.rootDir;
+      if (typeof probeDir !== 'string' || probeDir.trim() === '') return '';
+      const list = opts.auto
+        ? worktrees.get(probeDir)
+        : await worktrees.warm(probeDir);
+      const plan = planDeepReveal({
+        rootDir: project.rootDir,
+        laneDir: lane?.dir,
+        pinnedBranch: lane?.branch,
+        worktrees: list,
+      });
+      if (plan.dir === '') return '';
+      // The REVEAL is manual-only. An auto switch fires every time focus moves
+      // into another project's session — yanking the Explorer's selection (and
+      // momentarily its focus) on every such click is chrome the "side effect
+      // of just working" path must not have. The git-context note still
+      // travels: it costs nothing and lands in a status-bar summary.
+      if (!opts.auto) {
+        try {
+          // `revealInExplorer` on a folder outside the window's workspace
+          // roots is a no-op in some hosts and a rejection in others; both are
+          // fine — the unconverted-window case degrades to "no reveal",
+          // exactly as the syncExplorer splice above does.
+          await vscode.commands.executeCommand(
+            'revealInExplorer',
+            vscode.Uri.file(plan.dir),
+          );
+        } catch (err) {
+          log('workspaces: explorer reveal skipped —', String(err));
+        }
+      }
+      return plan.note;
     },
     refresh: () => refreshNow(),
     suspendViews,
@@ -3285,10 +3737,224 @@ export async function activate(
       logError('extension.sweepIdleChats', err);
     }
   };
+  // ------------------------------------------------- session lifecycle sweep
+  //
+  // The chat sweep, generalized to EVERY session (design/levels-and-modes.md):
+  // level 1 (running, shown) drains to level 2 (archived row, click to
+  // resume) on `lineage.session.closeAfterMinutes` of idleness, and the
+  // detach grace — the countdown a workspace switch leaves a tmux-wrapped
+  // process running under — expires here too. The DECISION is
+  // idleCloseDecisions (src/idleClose.ts, pure and tested); this supplies the
+  // world and acts. Two fact sources, one decision:
+  //
+  //   * BOUND tabs — this window's terminals, same reads as the chat sweep,
+  //     except idleness: the last REAL transcript record's timestamp (via
+  //     readTailStats), never mtime — hooks touch transcripts without new
+  //     content, and an mtime clock never fires on an abandoned session.
+  //   * GRACED records — sessions detached under a deadline. No binding
+  //     anywhere (their terminal was disposed), so they are read off the
+  //     store; expiry kills the wrap's whole process TREE (~8 MCP children).
+  //
+  // Every 1→2 transition runs the resumeLeaf repair, so an archived row is
+  // provably resumable AT REST, not just when clicked. (The repair may skip
+  // with 'writing' right after a kill — the on-resume-click repair still
+  // covers that row; the spec runs it at both points for exactly this
+  // reason.)
+
+  /** Same not-numCfg rule as the chat window: 0 is the off switch. */
+  const sessionCloseAfterMinutes = (): number => {
+    const v = cfg().get<number>(CONFIG_KEYS.sessionCloseAfterMinutes);
+    return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 30;
+  };
+
+  /** Epoch ms of the last real conversation record any generation wrote —
+   *  the idle clock. Non-finite (NaN) when no generation has a transcript
+   *  yet, which the decision reads as "never close on not knowing". */
+  const lastRealActivityMs = (aliases: readonly string[]): number => {
+    let best = Number.NaN;
+    for (const id of aliases) {
+      const file = transcriptFile(id, {
+        extraProjectsDirs: profileProjectsDirs(),
+      });
+      if (file === null) continue;
+      const at = readTailStats(file).lastRecordAt;
+      if (at !== undefined && (!Number.isFinite(best) || at > best)) best = at;
+    }
+    return best;
+  };
+
+  /** End a DETACHED session to level 2: kill its wrap (tree and all), stamp
+   *  the record archived, run the at-rest repair. The one kill everything
+   *  detached funnels through — grace expiry, pool eviction, the Close Now
+   *  verb, the activation reconcile. */
+  const endDetached = async (sessionId: string, why: string): Promise<void> => {
+    const record = store.get(sessionId);
+    const name =
+      typeof record?.tmux === 'string' && record.tmux !== ''
+        ? record.tmux
+        : undefined;
+    if (name !== undefined) {
+      const binary = tmuxSpawn()?.binary ?? findTmuxBinary();
+      if (binary !== null) await killTmuxSessionTree(binary, name);
+    }
+    await store.upsert(sessionId, {
+      closed: new Date().toISOString(),
+      graceUntil: null,
+      tmux: null,
+      closeAfterTurn: false,
+    });
+    repairResumeLeaf(sessionId, { extraProjectsDirs: profileProjectsDirs() });
+    log(`lifecycle: ${why} — ${shortId(sessionId)} is archived (level 2)`);
+  };
+
+  const sweepSessionLifecycle = (): void => {
+    try {
+      // Same guard as the chat sweep: a switch owns the tabs while it runs.
+      if (workspaceManager.isSwitching()) return;
+      const now = Date.now();
+      const active = registry.activeSessionId();
+      const activeTip = active === null ? null : chainIndex.tipOf(active);
+      const facts: SessionCloseFacts[] = [];
+      const boundTips = new Set<string>();
+
+      for (const binding of registry.bindings()) {
+        const aliases = chainAliases(binding.sessionId);
+        const tip = chainIndex.tipOf(binding.sessionId);
+        boundTips.add(tip);
+        // Chats have their own sweep above (their rules and their setting
+        // predate this one); a session another window launched is not this
+        // window's to close — its own sweep will get it.
+        if (aliases.some((id) => store.get(id)?.chat === true)) continue;
+        if (!aliases.some((id) => store.get(id)?.launchedByUs === true)) continue;
+        const entry = lastEntries.find((e) => aliases.includes(e.sessionId));
+        const last = lastRealActivityMs(aliases);
+        facts.push({
+          sessionId: binding.sessionId,
+          isActiveTab: activeTip !== null && tip === activeTip,
+          status:
+            entry === undefined ? ('unknown' as const) : normalizeStatus(entry).status,
+          pinned: aliases.some((id) => store.get(id)?.pinned === true),
+          closeAfterTurn: aliases.some(
+            (id) => store.get(id)?.closeAfterTurn === true,
+          ),
+          // A session that has not written yet counts from its tab opening,
+          // exactly as the chat sweep does.
+          lastActivityMs: Number.isFinite(last) ? last : binding.createdAt,
+        });
+      }
+
+      const liveWindows = new Set(store.getWindows().map((w) => w.windowId));
+      for (const record of Object.values(store.all())) {
+        if (record.graceUntil == null) continue;
+        const tip = chainIndex.tipOf(record.id);
+        // Bound here = already level 1 again; a restore raced the sweep and
+        // the bound facts above own the row now.
+        if (boundTips.has(tip)) continue;
+        // Claimed by a live foreign window (mid-restore there) — not ours.
+        if (
+          typeof record.boundWindowId === 'string' &&
+          record.boundWindowId !== focusIntegration.windowId &&
+          liveWindows.has(record.boundWindowId)
+        ) {
+          continue;
+        }
+        const deadline = Date.parse(record.graceUntil);
+        const aliases = chainAliases(record.id);
+        const entry = lastEntries.find((e) => aliases.includes(e.sessionId));
+        facts.push({
+          sessionId: record.id,
+          isActiveTab: false, // grace means the tab is gone by definition
+          status:
+            entry === undefined ? ('unknown' as const) : normalizeStatus(entry).status,
+          pinned: aliases.some((id) => store.get(id)?.pinned === true),
+          closeAfterTurn: record.closeAfterTurn === true,
+          // An unparseable deadline reads as already expired: a corrupt stamp
+          // must not hold a hidden process open forever.
+          graceUntilMs: Number.isFinite(deadline) ? deadline : 0,
+          lastActivityMs: lastRealActivityMs(aliases),
+        });
+      }
+
+      const plan = idleCloseDecisions({
+        now,
+        closeAfterMinutes: sessionCloseAfterMinutes(),
+        sessions: facts,
+      });
+
+      for (const id of plan.close) {
+        // `killTmux` — the dep is the TREE kill, so the wrap's MCP children
+        // go with it — and never a detach: the timer's whole verdict is that
+        // nobody is coming back soon.
+        if (registry.closeTerminal(id, { killTmux: true })) {
+          const tip = chainIndex.tipOf(id);
+          void store.upsert(tip, {
+            closed: new Date().toISOString(),
+            closeAfterTurn: false,
+            boundWindowId: null,
+          });
+          repairResumeLeaf(tip, { extraProjectsDirs: profileProjectsDirs() });
+          log(`lifecycle: idle-closed ${shortId(id)} (level 2)`);
+        }
+      }
+      for (const id of plan.graceKill) {
+        void endDetached(id, 'grace expired');
+      }
+      for (const id of plan.graceEvict) {
+        void endDetached(id, 'grace pool over cap (oldest idle)');
+      }
+      for (const id of plan.markCloseAfterTurn) {
+        void store.upsert(chainIndex.tipOf(id), { closeAfterTurn: true });
+        log(`lifecycle: ${shortId(id)} is busy — closing after this turn`);
+      }
+      for (const id of plan.clearCloseAfterTurn) {
+        void store.upsert(chainIndex.tipOf(id), { closeAfterTurn: false });
+      }
+    } catch (err) {
+      logError('extension.sweepSessionLifecycle', err);
+    }
+  };
+
   // Its own timer rather than a rider on the roster poll: the poll interval is
   // a latency knob (and pokeNow bursts it), while this is a lifecycle measured
-  // in tens of minutes — one check a minute is both cheap and plenty.
-  const chatSweepTimer = setInterval(sweepIdleChats, 60_000);
+  // in tens of minutes — one check a minute is both cheap and plenty. The
+  // session sweep rides the SAME tick as the chat sweep (the spec's "widen the
+  // existing timer"): one clock, two decision tables, no second cadence to
+  // reason about.
+  const chatSweepTimer = setInterval(() => {
+    sweepIdleChats();
+    sweepSessionLifecycle();
+    // Keep each bare terminal's descendant snapshot fresh (terminals.ts): the
+    // user's tab X reaches the registry only after the pty died, so its reap
+    // acts on the last walk — this tick is what bounds that walk's age to a
+    // minute. A handful of `ps` calls, and only for bare bindings.
+    try {
+      registry.refreshBareDescendants();
+    } catch (err) {
+      logError('extension.refreshBareDescendants', err);
+    }
+    // And persist that snapshot to this window's rescue ledger (5c above) on
+    // the same beat: what a crash or a window close leaves on disk is then at
+    // most a minute behind the truth — the bound the next activation's
+    // verified reap works within. (Reads the PREVIOUS tick's walk, which only
+    // widens the bound by the walk's own latency, never breaks it.)
+    void persistBareRescueSnapshot();
+    // The countdown rows ride this tick too. Row text repaints on data change
+    // (the 3 s roster poll when the roster moved, any editorial write), but a
+    // machine where NOTHING changes for a minute is exactly the machine where
+    // a "closing in 9m" row is quietly going stale — so the same clock that
+    // will eventually keep the countdown's promise also keeps it honest.
+    // Minute granularity (see viewmodel.formatGraceCountdown) is what makes
+    // one nudge a minute enough; a repaint is view-local string work, no
+    // roster read and no rebuild, and it is skipped entirely while no grace
+    // deadline exists to count down.
+    try {
+      if (Object.values(store.all()).some((r) => r.graceUntil != null)) {
+        refreshViews();
+      }
+    } catch (err) {
+      logError('extension.graceRepaint', err);
+    }
+  }, 60_000);
   context.subscriptions.push({
     dispose: () => {
       clearInterval(chatSweepTimer);
@@ -3327,7 +3993,18 @@ export async function activate(
         // active-terminal events itself — drop them here, silently, instead
         // of logging an "auto-switching / ignored" pair for every one.
         if (workspaceManager.isSwitching()) return;
-        if (!boolCfg(CONFIG_KEYS.workspacesEnabled, true)) return;
+        // FOLDER MODE has no in-window switching at all — navigation never
+        // mutates the window (design/levels-and-modes.md). One gate shared
+        // with the status bar and the switch verb, so no surface can disagree
+        // with another about whether switching exists.
+        if (
+          !projectSwitchingOn(
+            lineageMode(),
+            boolCfg(CONFIG_KEYS.workspacesEnabled, true),
+          )
+        ) {
+          return;
+        }
         if (!boolCfg(CONFIG_KEYS.workspacesAutoSwitch, true)) return;
         const tip = chainIndex.tipOf(sessionId);
         const cwd =
@@ -3335,7 +4012,16 @@ export async function activate(
           forest.nodes.get(sessionId)?.cwd ??
           store.get(tip)?.cwd ??
           store.get(sessionId)?.cwd;
-        const match = matchProject(allProjects(), cwd);
+        // Through preferredClaimant, not the static head: a directory two
+        // projects share must not auto-switch AWAY from the one the user is
+        // in whenever the tie-break happens to favour the other. The active
+        // project outranks the tie-break among actual claimants (the spec's
+        // "prefer the ACTIVE project in project mode"), which turns the
+        // shared-directory case into the no-op two lines down.
+        const match = preferredClaimant(
+          matchProjects(allProjects(), cwd),
+          workspaceManager.activeProjectId(),
+        );
         if (!match || match.project.hidden === true) return;
         if (match.project.id === workspaceManager.activeProjectId()) return;
         log(
@@ -3368,7 +4054,15 @@ export async function activate(
       // turning the status bar off would silently freeze the header too.
       refreshExplorerHeader();
       const w: Partial<typeof vscode.window> = vscode.window;
-      if (!boolCfg(CONFIG_KEYS.workspacesEnabled, true)) {
+      // Hidden in FOLDER MODE, whatever `workspaces.enabled` says: a window
+      // that IS its folder has no workspace to name, and a status-bar item
+      // whose click opens a refusal is worse than no item.
+      if (
+        !projectSwitchingOn(
+          lineageMode(),
+          boolCfg(CONFIG_KEYS.workspacesEnabled, true),
+        )
+      ) {
         workspaceStatusBar?.hide();
         return;
       }
@@ -3510,6 +4204,36 @@ export async function activate(
       }
     }),
   );
+
+  /**
+   * Does some record on this session's chain name a LIVE window other than
+   * this one? The cross-window RESTORE-RACE guard, and deliberately the same
+   * probe the lifecycle sweep runs before acting on a graced record: another
+   * window's restore binds the terminal (stamping `boundWindowId`) first and
+   * clears `graceUntil`/`tmux` only after its launch resolves, so for a few
+   * seconds the record reads as a detached claim while the process already
+   * has a tab THERE. Chain-expanded like focusWindowFor, because
+   * boundWindowId is view-state that never inherits across generations.
+   * getWindows() already drops dead pids, so "live" means a window that is
+   * actually up, not a week-old record. Total: a throwing store answers
+   * false, which only ever costs the caller a kill it could also have done.
+   */
+  const boundToLiveForeignWindow = (sessionId: string): boolean => {
+    try {
+      const liveWindows = new Set(store.getWindows().map((w) => w.windowId));
+      return chainAliases(sessionId).some((id) => {
+        const windowId = store.get(id)?.boundWindowId;
+        return (
+          typeof windowId === 'string' &&
+          windowId !== focusIntegration.windowId &&
+          liveWindows.has(windowId)
+        );
+      });
+    } catch (err) {
+      logError('extension.boundToLiveForeignWindow', err);
+      return false;
+    }
+  };
 
   const commandDeps: AccountCommandDeps = {
     // The whole accounts surface, as ONE optional member: the verbs guard
@@ -3717,9 +4441,22 @@ export async function activate(
       if (!binding) {
         pendingLaunches.delete(opts.sessionId);
       } else if (parkedAlias !== undefined) {
-        // The record claimed "hidden, maybe running"; the tab now exists, so
+        // The record claimed "detached, maybe running"; the tab now exists, so
         // the claim is settled — the same clear the workspace restore writes.
-        void store.upsert(parkedAlias, { parked: false, tmux: null });
+        // `graceUntil` goes with the name: an attached session is level 1
+        // again, and a countdown left behind would have the sweep kill the
+        // very tab the user just opened. `closeAfterTurn` goes with them for
+        // the same reason: the mark was a grace deadline landing on a busy
+        // session, and left behind it would close the re-attached tab on its
+        // first idle tick — navigation mutating lifecycle, the forbidden move.
+        // `stowedBySwitch` is consumed with the claim it rode in on: the tab
+        // is back, so a later user close must stay closed across switches.
+        void store.upsert(parkedAlias, {
+          graceUntil: null,
+          tmux: null,
+          closeAfterTurn: false,
+          stowedBySwitch: false,
+        });
       }
       // Persisted only for a launch that actually STARTED, and only forward: the
       // store keeps the first stamp a session ever gets (see
@@ -3896,21 +4633,10 @@ export async function activate(
         (id) => registry.binding(id) !== undefined,
       );
       if (!bound) return false;
-      const tip = chainIndex.tipOf(sessionId);
-      if (store.get(tip)?.parked === true) {
-        // A parked session with a LIVE binding here can only be a legacy one:
-        // an older build parked by stowing the tab into the terminal panel
-        // (today's park closes the terminal, so nothing stays bound). Asking
-        // for the session means "bring the tab home", not "open the panel":
-        // move it to the editor area and clear the flag — only on success, or
-        // a failed move would strand it with nothing to retry.
-        // Fire-and-forget: the deps contract is a synchronous boolean.
-        void (async () => {
-          const moved = await registry.moveToEditor(bound);
-          if (moved) await store.upsert(tip, { parked: false });
-        })();
-        return true;
-      }
+      // (The old `parked`-with-a-live-binding special case — a legacy
+      // panel-stowed tab moved home on focus — is gone with the flag itself:
+      // sanitizeRecord flips parked records to archived at load, so no record
+      // can carry the state past schema v8.)
       return registry.focus(bound);
     },
     // "The conversation you are looking at", for the two view-title buttons that
@@ -3927,12 +4653,34 @@ export async function activate(
     sendTextToSession: (sessionId, text) =>
       chainAliases(sessionId).some((id) => registry.sendText(id, text)),
     // The CLOSE verb means "end this session" — for a wrapped terminal the
-    // dispose only detaches, so the kill intent rides along. Workspace
-    // parking calls the registry directly, without it.
+    // dispose only detaches, so the kill intent rides along. The workspace
+    // sweep calls the registry directly, without it.
     closeTerminal: (sessionId) =>
       chainAliases(sessionId).some((id) =>
         registry.closeTerminal(id, { killTmux: true }),
       ),
+    // Close Now's second tier: a session with no terminal anywhere — counting
+    // down in the grace pool — dies through the same funnel as a grace
+    // expiry: tree-reaping kill, archived stamp, at-rest repair.
+    killDetached: async (sessionId) => {
+      // The restore-race guard, HERE as well as in the verbs that call this:
+      // a live foreign window's binding means the wrap has a tab there and
+      // the "detached" claim is only its not-yet-cleared grace stamp.
+      // Guarding in the funnel itself means no future caller can kill a
+      // session out from under the window that just re-attached it.
+      if (boundToLiveForeignWindow(sessionId)) return false;
+      const holder = chainAliases(sessionId).find((id) => {
+        const r = store.get(id);
+        return (
+          r?.graceUntil != null ||
+          (typeof r?.tmux === 'string' && r.tmux !== '')
+        );
+      });
+      if (holder === undefined) return false;
+      await endDetached(holder, 'closed now (user verb)');
+      return true;
+    },
+    boundToLiveForeignWindow,
 
     focusWindowFor: async (sessionId) => {
       // boundWindowId is view-state and never inherited across a chain, so
@@ -3947,6 +4695,23 @@ export async function activate(
       }
       return false;
     },
+
+    // Folder mode's routing arm: no binding to follow (the session is
+    // detached, archived, or was never this machine's terminal), so the
+    // DIRECTORY says which window should host it. The resolver is pure
+    // (modes.windowForDir); getWindows() has already dropped dead pids, and
+    // this window itself is skipped — a caller asking to route elsewhere has
+    // already established that "here" is the wrong answer.
+    focusWindowForDir: async (dir, sessionId) => {
+      const others = store
+        .getWindows()
+        .filter((w) => w.windowId !== focusIntegration.windowId);
+      const rec = windowForDir(others, dir);
+      if (!rec) return false;
+      return focusIntegration.focusWindow(rec, sessionId);
+    },
+    lineageMode: () => lineageMode(),
+    scopeDirs: () => scopeFolders(),
 
     openProject: (fsPath, newWindow) => openProject(fsPath, newWindow),
 
@@ -4054,6 +4819,10 @@ export async function activate(
       cfg().get<string>(CONFIG_KEYS.gitWorktreePath, DEFAULT_WORKTREE_PATH_PATTERN) ??
       DEFAULT_WORKTREE_PATH_PATTERN,
     localBranches: (dir) => readLocalBranches(dir),
+    // A WARMED read, for the placement decision a lane's `+` makes off a pinned
+    // branch: the launch is a user verb, so it can afford the one `git worktree
+    // list` that makes the answer current — the sync cache is for renders.
+    worktreesFor: (dir) => worktrees.warm(dir),
     addWorktree: (opts) => runWorktreeAdd(opts),
     removeWorktree: (opts) => runWorktreeRemove(opts),
     pullRequestFor: (repoDir, branch) => pullRequests.get(repoDir, branch),
@@ -4931,14 +5700,20 @@ export async function activate(
       ) {
         pokeNow();
       }
-      // The status bar's visibility is config-gated.
+      // The status bar's visibility is config-gated — on the old key AND on
+      // the mode, which is the master gate (see modes.projectSwitchingOn).
       if (
         e.affectsConfiguration(
           `${CONFIG_SECTION}.${CONFIG_KEYS.workspacesEnabled}`,
-        )
+        ) ||
+        e.affectsConfiguration(`${CONFIG_SECTION}.${CONFIG_KEYS.mode}`)
       ) {
         updateWorkspaceStatusBar();
       }
+      // The mode's when-clause mirror follows the setting wherever it was
+      // edited; the grouping change (folder scope on/off) rides the rebuild
+      // at the bottom of this handler.
+      void syncModeContext();
       // Turning pull requests ON has to clear the cache, and specifically the
       // FAILURES in it: the cache holds a failed probe for fifteen minutes on
       // purpose (see src/pullRequests.ts), so somebody who turned the setting on,

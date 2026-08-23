@@ -52,6 +52,60 @@ export function formatAge(deltaMs: number): string {
 }
 
 /**
+ * The grace countdown as a row reads it: `closing in 9m`, then `closing now`.
+ *
+ * Minute granularity on purpose, not the mm:ss a stopwatch would show: the
+ * repaint cadence is the roster poll (~3 s) plus a once-a-minute nudge from
+ * the lifecycle timer, and a seconds display that is wrong for most of every
+ * minute is worse than a minutes display that is right. Ceiling, not floor —
+ * a countdown that says `0m` while the process still runs has already broken
+ * its promise, and "closing in 1m" with 20 seconds left errs the way a
+ * countdown should: it never claims more time is gone than is.
+ *
+ * `closing now` past the deadline rather than nothing: a busy session
+ * outlives its deadline on purpose (the sweep marks it close-after-turn and
+ * waits), and the row must keep saying the process is on its way out for as
+ * long as it runs. Not-a-number renders as nothing, same rule as formatAge.
+ */
+export function formatGraceCountdown(remainingMs: number): string {
+  if (typeof remainingMs !== 'number' || !Number.isFinite(remainingMs)) {
+    return '';
+  }
+  if (remainingMs <= 0) return 'closing now';
+  return `closing in ${Math.ceil(remainingMs / 60_000)}m`;
+}
+
+/** How much of the last exchange an archived ROW carries. The description
+ *  shares a line with the age and is elided by the surface at the first
+ *  squeeze anyway; 80 characters is enough to recognise a conclusion and
+ *  little enough that the age column stays a column. The hover shows the
+ *  longer text (bounded at capture — see usage.LAST_EXCHANGE_MAX_CHARS). */
+export const SNIPPET_MAX_CHARS = 80;
+
+/**
+ * What a level-2 row says it CONCLUDED: the recorded close-with-summary when
+ * there is one, else the last conversation text out of the transcript tail.
+ * The summary wins because the user wrote it for exactly this line.
+ *
+ * Whitespace is collapsed because both surfaces render descriptions and hover
+ * lines single-line — a newline in a TreeItem.description is a box glyph, not
+ * a break. '' when the node has neither, so callers can filter it out of a
+ * ` · `-joined description like every other optional part.
+ */
+export function sessionSnippet(
+  node: SessionNode,
+  maxChars: number = SNIPPET_MAX_CHARS,
+): string {
+  const text = (node.summary ?? node.lastExchange ?? '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (text === '' || !Number.isFinite(maxChars) || text.length <= maxChars) {
+    return text;
+  }
+  return text.slice(0, Math.max(maxChars - 1, 1)).trimEnd() + '…';
+}
+
+/**
  * A token count as a row reads it: `840`, `12.3k`, `284k`, `1.2M`.
  *
  * One fractional digit below 100 k and none above, because the row has to stay
@@ -493,6 +547,13 @@ export function sessionContextValue(
     // and any caller that builds a context value without a registry — so it
     // reads as 'hosted' and the menus are byte-identical to what they were.
     tokens.push(host === 'foreign' ? 'foreign' : 'hosted');
+    // Detached under the grace countdown — a third token BESIDE the live and
+    // ownership ones, never instead of them, because a grace row keeps every
+    // live verb and gains exactly two: Close Now and Keep Awake. Emitted for
+    // an EXPIRED deadline too: the sweep spares a busy session past its
+    // deadline on purpose (close-after-turn), and the verbs must not vanish
+    // from a row whose process is still running.
+    if (node.graceDeadlineAt !== undefined) tokens.push('grace');
   }
 
   if (node.source === 'minted') tokens.push('ours');
@@ -1541,6 +1602,19 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
     // so it keeps the position it has always had, hard against the dot.
     const tokens = input.showTokens === true ? formatTokens(node.tokens) : '';
     const host = safeHost(input, id);
+    // The grace countdown — the words that make the one detached-running
+    // state a VISIBLE state. After the age and the status fact, because those
+    // two keep the positions every row gives them; NEWS still beats the
+    // standing host marker behind it.
+    const grace =
+      node.graceDeadlineAt !== undefined
+        ? formatGraceCountdown(node.graceDeadlineAt - input.now)
+        : '';
+    // What the session concluded — the level-2 question, answered on the one
+    // kind of row that has no tab to answer it in. Only archived rows spend
+    // the width: a live conversation's last line is on screen in its own tab,
+    // and a ghost never said anything.
+    const snippet = node.archived ? sessionSnippet(node) : '';
     // 'elsewhere' — one quiet word, and only on a row Flock does not own. It
     // goes LAST, after the age and after whatever a waiting session is waiting
     // for, because it is a standing fact about the row rather than news: what
@@ -1549,6 +1623,8 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
       tokens,
       age,
       status,
+      grace,
+      snippet,
       hostMarker(host ?? 'none') ?? '',
       node.hidden ? 'hidden' : '',
     ]
@@ -2292,6 +2368,49 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
   for (const folder of input.grouping.folders) pushFolder(folder);
   for (const id of input.grouping.loose) pushSession(id, 0, [], 0);
 
+  // The "Running elsewhere" appendix, LAST and collapsed by default (the host
+  // seeds its key into the collapsed set — see webtree.ts): running sessions
+  // the fences filtered out keep one row here so the machine-wide badge always
+  // has rows to point at. A ledger, not a workspace, hence the tail position.
+  const elsewhere = input.grouping.elsewhere;
+  if (elsewhere !== null) {
+    const key = folderRowKey(elsewhere.key);
+    const expanded = !collapsed.has(key);
+    rows.push({
+      key,
+      kind: 'folder',
+      depth: 0,
+      label: elsewhere.label,
+      description: `${elsewhere.rootIds.length}`,
+      expandable: true,
+      expanded,
+      icon: { type: 'codicon', id: 'server-process' },
+      muted: false,
+      closed: false,
+      canRename: false,
+      canDrag: false,
+      rails: [],
+      descends: false,
+      context: {
+        webviewSection: 'elsewhere',
+        webviewId: input.viewId,
+        key: elsewhere.key,
+        // Its own token, NOT 'group': the folder verbs (hide, open in window)
+        // act on a directory this row does not have.
+        viewItem: contextValueOf(['elsewhere']),
+        preventDefaultContextMenuItems: true,
+      },
+      tooltip:
+        'Running sessions this window’s filters would otherwise hide — ' +
+        'other folders’ work, or closed projects’. Each still costs ' +
+        'this machine memory; close or route them from here.',
+      cwd: '',
+    });
+    if (expanded) {
+      for (const id of elsewhere.rootIds) pushSession(id, 1, [], 0);
+    }
+  }
+
   return rows;
 }
 
@@ -2352,6 +2471,16 @@ function sessionTooltip(
   // is the only tone word that survives being hidden.
   if (tone !== undefined) lines.push(TONE_WORDS[tone]);
   else if (closed) lines.push(TONE_WORDS.closed);
+  // The sentence behind the row's countdown: what "closing in 9m" means, and
+  // the absolute deadline the relative words are computed from — the same
+  // relative-on-the-row, absolute-in-the-hover deal the age gets below.
+  if (node.graceDeadlineAt !== undefined) {
+    const deadline = isoOrUndefined(node.graceDeadlineAt);
+    lines.push(
+      'detached: tab closed, process kept for instant re-attach' +
+        (deadline !== undefined ? ` — closes at ${deadline}` : ''),
+    );
+  }
   if (description !== '') lines.push(description);
   // The age in `description` is relative ("5m"); these are the absolute
   // timestamps it is computed from, spelled out for anyone who wants to know
@@ -2388,6 +2517,14 @@ function sessionTooltip(
   if (accountLabel !== undefined) lines.push(`account: ${accountLabel}`);
   if (node.cwd) lines.push(node.cwd);
   if (node.summary) lines.push(`summary: ${node.summary}`);
+  // The fallback conclusion, only where no summary was written: the hover
+  // gets the longer text (bounded at capture — usage.LAST_EXCHANGE_MAX_CHARS)
+  // where the archived row itself carries at most SNIPPET_MAX_CHARS. The cap
+  // here is a formality sessionSnippet needs, not a second budget.
+  else if (node.lastExchange !== undefined) {
+    const exchange = sessionSnippet(node, 4000);
+    if (exchange !== '') lines.push(`last exchange: ${exchange}`);
+  }
   if (node.hidden) lines.push('hidden: sorted last, not counted in the badge');
   return lines.join('\n');
 }
@@ -2430,6 +2567,9 @@ export function attentionCountOf(
     ...grouping.projects.flatMap((p) => p.rootIds),
     ...grouping.folders.flatMap((g) => g.rootIds),
     ...grouping.loose,
+    // The "Running elsewhere" appendix renders rows too — a waiting session
+    // in it shows its dot, so the count must see it or badge and dots argue.
+    ...(grouping.elsewhere?.rootIds ?? []),
   ];
   const seen = new Set<string>();
   const stack = [...roots];
@@ -2445,4 +2585,61 @@ export function attentionCountOf(
     stack.push(...node.visibleChildren);
   }
   return count;
+}
+
+/**
+ * RUNNING sessions on this MACHINE — level 1 and the grace countdown together
+ * — for the view-container badge.
+ *
+ * This is the levels invariant as a number: "no running process without a
+ * visible row" is only checkable if the count of processes is on the
+ * container, and the incident this design answers was 84 detached sessions
+ * that no surface anywhere counted. The predicate is exactly
+ * sessionContextValue's `live` — not a status filter, because a live row with
+ * an UNKNOWN status is still a process this machine is paying for.
+ *
+ * Counted over the whole FOREST, machine-wide — deliberately NOT the rendered
+ * traversal attentionCountOf uses. Attention is a per-window ask ("what on
+ * this screen wants me"), but a running process costs the machine the same
+ * memory whichever window looks at it, so every window's badge shows the same
+ * number and none can under-report. The rows keep up with the count from the
+ * other side: a filtered-out RUNNING session renders in the "Running
+ * elsewhere" group (GroupingResult.elsewhere) instead of being dropped, so
+ * the badge is never a number with nothing on screen to point at. (A HIDDEN —
+ * muted — row still counts here and is excluded by attentionCountOf: muting
+ * silences the dot, not the process.)
+ */
+export function runningCountOf(forest: SessionForest): number {
+  let count = 0;
+  for (const node of forest.nodes.values()) {
+    if (!node.ghost && !node.archived && node.status !== 'exited') count++;
+  }
+  return count;
+}
+
+/**
+ * Does this root's subtree contain a RUNNING process? The grouping's
+ * `hasRunning` lookup (GroupingInput) for both view styles: the pure grouping
+ * pass decides which filtered roots are rescued into the "Running elsewhere"
+ * group, and liveness is a forest fact it cannot see. Same predicate as
+ * runningCountOf, over the VISIBLE children — a running descendant deep in
+ * the lineage keeps the whole root's row exactly because dropping the root
+ * would drop the descendant with it.
+ */
+export function subtreeHasRunning(
+  forest: SessionForest,
+  rootId: string,
+): boolean {
+  const seen = new Set<string>();
+  const stack = [rootId];
+  for (;;) {
+    const id = stack.pop();
+    if (id === undefined) return false;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const node = forest.nodes.get(id);
+    if (!node) continue;
+    if (!node.ghost && !node.archived && node.status !== 'exited') return true;
+    stack.push(...node.visibleChildren);
+  }
 }

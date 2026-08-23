@@ -496,12 +496,17 @@ export interface BuildForestInput {
    *  from `archive.endedAt` directly (see below) and never consult this map. */
   activityMtimes?: ReadonlyMap<string, number>;
   /** sessionId → what the transcript TAIL says about the session: when the
-   *  user last prompted it, and how many tokens the last turn ran with. Same
-   *  chain-tip-collapsed keying as `activityMtimes`. Both fields are optional
-   *  per entry and per session — a transcript whose tail carries neither (too
-   *  new, or nothing but tool traffic in the window) simply leaves the node's
-   *  fields unset and every renderer falls back to what it showed before. */
-  tailStats?: ReadonlyMap<string, { lastPromptAt?: number; tokens?: number }>;
+   *  user last prompted it, how many tokens the last turn ran with, and the
+   *  last conversation text (what an archived row shows when no summary was
+   *  recorded). Same chain-tip-collapsed keying as `activityMtimes`. Every
+   *  field is optional per entry and per session — a transcript whose tail
+   *  carries none of them (too new, or nothing but tool traffic in the
+   *  window) simply leaves the node's fields unset and every renderer falls
+   *  back to what it showed before. */
+  tailStats?: ReadonlyMap<
+    string,
+    { lastPromptAt?: number; tokens?: number; lastExchange?: string }
+  >;
   opts?: {
     showGhosts?: boolean; // default true
     now?: number;         // default Date.now()
@@ -562,7 +567,9 @@ function nonEmpty(v: unknown): string | undefined {
  *  claiming to show. */
 function applyTailStats(
   node: SessionNode,
-  stats: { lastPromptAt?: number; tokens?: number } | undefined,
+  stats:
+    | { lastPromptAt?: number; tokens?: number; lastExchange?: string }
+    | undefined,
 ): void {
   if (stats === undefined) return;
   const at = stats.lastPromptAt;
@@ -572,6 +579,13 @@ function applyTailStats(
   const tokens = stats.tokens;
   if (typeof tokens === 'number' && Number.isFinite(tokens) && tokens > 0) {
     node.tokens = tokens;
+  }
+  // Copied onto every node the tail sweep covered, not only archived ones:
+  // the fact is the same either way, and it is the RENDERERS that decide an
+  // archived row is the one place it earns width (see viewmodel.pushSession).
+  const exchange = stats.lastExchange;
+  if (typeof exchange === 'string' && exchange.trim() !== '') {
+    node.lastExchange = exchange;
   }
 }
 
@@ -716,6 +730,21 @@ export function buildForest(input: BuildForestInput): SessionForest {
     const la = input?.activityMtimes?.get(id);
     if (la !== undefined) node.lastActiveAt = la;
     applyTailStats(node, input?.tailStats?.get(id));
+    // The detach grace, as a renderable fact. `graceUntil` is the lifecycle
+    // sweep's deadline (workspaces.ts writes it when a switch detaches a
+    // wrapped session); the row it governs is a LIVE row — the roster still
+    // lists the process — and the spec's price for that detached-running
+    // state is that the row must say so, with a countdown. Stamped only here,
+    // in the live pass: an archived record's leftover deadline describes a
+    // process that no longer exists, and a countdown on a dead row would be a
+    // promise the sweep already kept. An unparseable stamp is left off the
+    // node — the sweep reads the same garbage as "expired" and ends the
+    // process within a minute, so the honest render is a plain live row, not
+    // a fabricated deadline.
+    if (typeof record?.graceUntil === 'string') {
+      const deadline = Date.parse(record.graceUntil);
+      if (Number.isFinite(deadline)) node.graceDeadlineAt = deadline;
+    }
     // A muted (hidden) row never carries the green dot — hide is how the
     // user says "stop telling me about this one". Nor does a DELETED one, and
     // for a harder reason than taste: a deleted session has no row, so a dot

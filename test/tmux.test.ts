@@ -22,8 +22,10 @@ import {
   findTmuxBinary,
   tmuxAdvice,
   tmuxInstallHint,
+  killTmuxSessionTree,
   parseClientSessions,
   parsePanePid,
+  parseTmuxSessions,
   resolveTmuxSpawn,
   sessionIdOfTmuxName,
   tmuxNameOfTerminal,
@@ -379,5 +381,75 @@ describe('buildSetEnvArgs', () => {
       '-L', 'lineage', 'set-environment', '-t', '=lineage-abc',
       'CLAUDE_CONFIG_DIR', '/home/p',
     ]);
+  });
+});
+
+describe('parseTmuxSessions', () => {
+  it('reads one name per line and skips blanks', () => {
+    expect(parseTmuxSessions('lineage-a\n\nlineage-b\n')).toEqual([
+      'lineage-a',
+      'lineage-b',
+    ]);
+    expect(parseTmuxSessions('')).toEqual([]);
+  });
+});
+
+describe('killTmuxSessionTree', () => {
+  // The composition contract, with every side injected: WALK before the kill
+  // (a dead root's children have re-parented to PID 1 and can never be found
+  // again), then kill-session, then reap root + descendants by pid.
+  function fakes(over: {
+    panePid?: number | undefined;
+    killOk?: boolean;
+  } = {}) {
+    const calls: string[] = [];
+    let reaped: readonly number[] = [];
+    const deps = {
+      panePid: async () => {
+        calls.push('walk-pid');
+        return 'panePid' in over ? over.panePid : 100;
+      },
+      listDescendants: async (root: number) => {
+        calls.push(`walk-tree:${root}`);
+        return [101, 102];
+      },
+      killSession: async () => {
+        calls.push('kill-session');
+        return over.killOk ?? true;
+      },
+      reapSurvivors: async (pids: readonly number[]) => {
+        calls.push('reap');
+        reaped = pids;
+        return { exited: pids.length, termed: 0, killed: 0 };
+      },
+    };
+    return { calls, deps, reaped: () => reaped };
+  }
+
+  it('walks BEFORE the kill and reaps root plus descendants, by pid', async () => {
+    const f = fakes();
+    await expect(
+      killTmuxSessionTree('/usr/bin/tmux', 'lineage-abc', f.deps),
+    ).resolves.toBe(true);
+    // The reap lands on a microtask behind the kill (fire-and-forget).
+    await new Promise((r) => setTimeout(r, 0));
+    expect(f.calls).toEqual(['walk-pid', 'walk-tree:100', 'kill-session', 'reap']);
+    expect(f.reaped()).toEqual([100, 101, 102]);
+  });
+
+  it('a failed kill reaps NOTHING — no walk result is licence without a kill', async () => {
+    const f = fakes({ killOk: false });
+    await expect(
+      killTmuxSessionTree('/usr/bin/tmux', 'lineage-abc', f.deps),
+    ).resolves.toBe(false);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(f.calls).toEqual(['walk-pid', 'walk-tree:100', 'kill-session']);
+  });
+
+  it('no pane pid (session already gone) still kills, but signals nobody', async () => {
+    const f = fakes({ panePid: undefined });
+    await killTmuxSessionTree('/usr/bin/tmux', 'lineage-abc', f.deps);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(f.calls).toEqual(['walk-pid', 'kill-session']);
   });
 });

@@ -186,6 +186,39 @@ export function isAnchored(
 }
 
 /**
+ * The window's REAL folders: the workspace folder list with the anchor
+ * removed, order kept.
+ *
+ * The anchor is Flock's own — an empty directory in globalStorage that exists
+ * only to hold folder[0] so splices never restart the extension host (see the
+ * header) — so it must never count as something this window "opened": nothing
+ * runs in it, nothing is under it, and any consumer that treats it as a real
+ * root gets a nonsense answer (folder mode scoping a converted window to it
+ * rendered zero sessions; windowForDir routing on it made the window
+ * unreachable). This module owns the anchor's identity, so this is where the
+ * question "which folders are actually the user's?" is answered — every other
+ * file asks it rather than re-deriving the anchor path comparison.
+ *
+ * Matching is by path identity ANYWHERE in the list, not just index 0: a
+ * window whose user rearranged folders above the anchor is degraded (splices
+ * are off, see isAnchored) but its real folders are still its real folders.
+ */
+export function nonAnchorFolders(
+  anchorPath: string,
+  folders: readonly string[],
+): string[] {
+  const anchorKey = pathKey(normalizeDir(anchorPath));
+  const out: string[] = [];
+  for (const raw of folders ?? []) {
+    const dir = normalizeDir(raw);
+    if (dir === '') continue;
+    if (anchorKey !== '' && pathKey(dir) === anchorKey) continue;
+    out.push(raw);
+  }
+  return out;
+}
+
+/**
  * The folder rows a project should occupy, in Explorer order: main directory
  * first, extras below. Never includes the anchor.
  *

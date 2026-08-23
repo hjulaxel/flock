@@ -67,13 +67,16 @@ import type {
   RoutingChoice,
   SessionForest,
   SessionNode,
+  SubprojectRecord,
   UnlistedSession,
+  Worktree,
 } from './types';
 import {
   buildProjectTree,
   chatsForProject,
   isWithin,
   matchProject,
+  matchProjects,
   normalizeDir,
   pathKey,
   projectClaiming,
@@ -83,6 +86,7 @@ import {
   subprojectLabels,
   validateProjectName,
 } from './projects';
+import { openTargetFor, outsideScope } from './modes';
 import {
   canHostSession,
   envForProfile,
@@ -125,6 +129,9 @@ import {
   worktreePathFor,
   worktreeRemoveArgv,
 } from './worktrees';
+// The deep switch's placement rule, shared with workspaces.ts's arrival reveal:
+// a lane that pins a branch launches (and reveals) in that branch's checkout.
+import { planDeepReveal } from './deepSwitch';
 import { branchWebUrl } from './pullRequests';
 import { accountIdOf, usageSummaryOf } from './accountsView';
 import type { AccountDeps } from './accountsView';
@@ -1040,7 +1047,13 @@ export function newSessionTarget(deps: CommandDeps): NewSessionTarget {
   const visible = deps.allProjects().filter((p) => p.hidden !== true);
   /** Hidden projects are excluded above, so a workspace or a cwd pointing at
    *  one falls through rather than starting a session under a row that has been
-   *  closed out of the tree. */
+   *  closed out of the tree.
+   *
+   *  Plain matchProject, no preferredClaimant: tier (1) below already answers
+   *  with the ACTIVE project whenever one exists — which is the spec's
+   *  project-mode filing preference, applied even more strongly (the active
+   *  project need not claim the cwd) — so by the time these claims run there
+   *  is no active project left to prefer. */
   const claims = (cwd: string | undefined): string | undefined =>
     matchProject(visible, cwd ?? '')?.project.id;
 
@@ -1900,22 +1913,18 @@ async function newProjectFlow(
     (await pickDirectory('Use as Project Directory', 'Directory for the project'));
   if (!rootDir) return undefined;
 
-  // Refused before anything is written: two projects listing one directory have
-  // no defined owner for the sessions in it (see projectClaiming).
-  //
-  // The message names the project that has it and the two ways forward, because
-  // "no" on its own here reads as a bug: the directory the user picked is a
-  // perfectly real directory, and nothing on screen said it was taken.
+  // Claims are NON-EXCLUSIVE (see projectClaiming's history): a directory may
+  // belong to several projects, and grouping shows its sessions under each of
+  // them. What used to be a modal refusal here is now an announcement — a
+  // duplicate claim is usually an accident (the picker opens inside the
+  // parent), and naming the other project at the moment the claim is made is
+  // what lets the user undo a mistake while they still remember making it.
   const claimed = projectClaiming(deps.allProjects(), rootDir);
   if (claimed) {
-    void vscode.window.showWarningMessage(
-      `Flock: "${claimed.name}" already covers ${rootDir}, so a second project ` +
-        'on it would have no defined owner for the sessions in there.\n\n' +
-        'Pick a subdirectory, or add this directory to that project as a ' +
-        'subproject.',
-      { modal: true },
+    void vscode.window.showInformationMessage(
+      `Flock: "${claimed.name}" also covers ${rootDir} — sessions in there ` +
+        'will show under both projects.',
     );
-    return undefined;
   }
 
   const existing = deps.allProjects();
@@ -2166,6 +2175,51 @@ async function startSessionInWorktree(
   branch: string,
 ): Promise<void> {
   await startSessionInProjectDir(deps, project, dir, branch, `on branch ${branch}`);
+}
+
+/**
+ * Where a NAMED LANE's `+` starts its session — worktree-aware placement.
+ *
+ * A lane with no pinned branch answers with its own directory, exactly as it
+ * always has. A lane that PINS a branch (SubprojectRecord.branch) launches in
+ * whatever checkout has that branch out today: the lane's work is the branch,
+ * and the recorded directory is only where the branch used to live. The rule is
+ * planDeepReveal's (src/deepSwitch.ts), the same one the project-mode switch
+ * reveals by, so a lane's `+` and its arrival reveal can never land in
+ * different places.
+ *
+ * The probe is a WARMED read (deps.worktreesFor), because the answer places a
+ * shell: a cached list could name a worktree that was removed a minute ago.
+ * Every failure path — no dep (unit doubles, older wiring), a probe that
+ * throws, a pin with no checkout — falls back to the lane's directory, never
+ * refuses the launch: the pin is a preference about WHERE, not a gate on
+ * WHETHER.
+ *
+ * `branch` in the answer is non-empty ONLY when the pin actually moved the
+ * launch — it feeds the log line, and "on feat/x" on a launch that landed in
+ * the lane's own folder would be narrating something that did not happen.
+ */
+async function lanePlacement(
+  deps: CommandDeps,
+  lane: SubprojectRecord,
+): Promise<{ dir: string; branch: string }> {
+  const laneDir = normalizeDir(lane.dir);
+  const pinned = typeof lane.branch === 'string' ? lane.branch.trim() : '';
+  if (laneDir === '' || pinned === '' || deps.worktreesFor === undefined) {
+    return { dir: laneDir, branch: '' };
+  }
+  let list: readonly Worktree[] = [];
+  try {
+    list = await deps.worktreesFor(laneDir);
+  } catch (err) {
+    logError('commands.lanePlacement', err);
+  }
+  const plan = planDeepReveal({
+    rootDir: laneDir,
+    pinnedBranch: pinned,
+    worktrees: list,
+  });
+  return { dir: plan.dir, branch: plan.redirected ? plan.branch : '' };
 }
 
 /**
@@ -3512,6 +3566,55 @@ async function refusedLiveWriter(
  * see the comment on `started` below. Clicking a session you created and never
  * wrote in has to open something.
  */
+/**
+ * FOLDER MODE's "route, never adopt" arm: true when the session lives outside
+ * this window's folder AND has now been routed — the caller must stop, because
+ * everything it would do next happens IN PLACE.
+ *
+ * A window in folder mode IS the folder it opened. A session whose cwd is
+ * elsewhere is another window's work: resuming it here would put a running
+ * process in a window whose tree scopes it out — a rowless process, the exact
+ * invisible state the levels design forbids — and adopting it is the in-place
+ * project switch folder mode exists not to have. So the click ROUTES instead,
+ * in three tiers, most specific first:
+ *
+ *   1. the window that has the session BOUND (focusWindowFor);
+ *   2. any live window whose opened folder covers the session's cwd
+ *      (modes.windowForDir, deepest folder winning);
+ *   3. an OFFER of `vscode.openFolder(..., { forceNewWindow: true })` on the
+ *      owning project's claimed directory (else the cwd itself). An offer,
+ *      not an act — opening a window is a large gesture to spend on a click.
+ *
+ * False — the ordinary answer — whenever nothing is fenced: project mode, an
+ * empty window, a unit double without the deps, a session in scope, or one
+ * whose cwd is unknown (a session this window cannot place is not thereby
+ * proven foreign — see modes.outsideScope).
+ */
+async function routeForeign(
+  deps: CommandDeps,
+  sessionId: string,
+): Promise<boolean> {
+  const node = deps.getForest().nodes.get(sessionId);
+  const cwd = node?.cwd ?? deps.getRecord(sessionId)?.cwd;
+  if (!outsideScope(deps.scopeDirs?.(), cwd)) return false;
+  if (await deps.focusWindowFor(sessionId)) return true;
+  if ((await deps.focusWindowForDir?.(cwd ?? '', sessionId)) === true) {
+    return true;
+  }
+  // outsideScope proved the cwd known, so openTargetFor can never answer ''.
+  const target = openTargetFor(matchProjects(deps.allProjects(), cwd), cwd);
+  const label = node?.label ?? shortId(sessionId);
+  const OPEN = 'Open in New Window';
+  const choice = await vscode.window.showInformationMessage(
+    `Flock: "${label}" is in ${target} — outside this window's folder. ` +
+      'Open that folder in its own window to work on it; this window is ' +
+      'never rearranged.',
+    OPEN,
+  );
+  if (choice === OPEN) await deps.openProject(target, true);
+  return true;
+}
+
 export async function resumeFlow(
   deps: AccountCommandDeps,
   sessionIdArg: string,
@@ -3519,6 +3622,10 @@ export async function resumeFlow(
   // Same tip routing as forkFlow — resuming a superseded generation
   // would branch the conversation's history without the user asking for it.
   const sessionId = deps.tipOf(sessionIdArg);
+  // Folder mode: a foreign-folder session is routed to its own window, never
+  // resumed in place — see routeForeign. Ahead of every other tier because
+  // every other tier acts HERE.
+  if (await routeForeign(deps, sessionId)) return false;
   const node = deps.getForest().nodes.get(sessionId);
   const detached = await detachedTmuxName(deps, sessionIdArg);
 
@@ -3654,14 +3761,20 @@ export async function resumeFlow(
     }
     if (handedTo !== null) {
       log('resume: handed to', handedTo.label, shortId(sessionId));
-      // Reopening un-closes it (and un-parks it), exactly as the launch
-      // path below records. `tmux: null` for the same reason: the tab is
-      // back — in the delegate's UI, but back — so the record must stop
-      // saying "hidden".
+      // Reopening un-closes it (and settles any grace claim), exactly as the
+      // launch path below records. `tmux: null` for the same reason: the tab
+      // is back — in the delegate's UI, but back — so the record must stop
+      // saying "hidden". `closeAfterTurn` clears with the grace it rode in
+      // on: a mark that survived the reopen would close the conversation on
+      // its first idle tick, timer setting notwithstanding.
       await deps.upsertRecord(sessionId, {
         closed: null,
-        parked: false,
+        graceUntil: null,
         tmux: null,
+        closeAfterTurn: false,
+        // A user reopened it, so the switch's stow claim is consumed: from
+        // here on the LAYOUT decides whether a switch-back touches it.
+        stowedBySwitch: false,
       });
       deps.refresh();
       try {
@@ -3709,11 +3822,22 @@ export async function resumeFlow(
   // Records the pin on THIS generation's record when the answer came from the
   // chain — a no-op when it was already there (the store's pin is write-once).
   await pinLaunch(deps, sessionId, routed);
-  // Reopening un-closes it (and un-parks it — a session the user reopened by
-  // hand must not be resumed a second time by the next workspace switch).
-  // `tmux: null` settles the detach-tier claim the same way the workspace
-  // restore does: the tab is back, the record must stop saying "hidden".
-  await deps.upsertRecord(sessionId, { closed: null, parked: false, tmux: null });
+  // Reopening un-closes it (and clears any grace claim — a session the user
+  // reopened by hand is level 1 again, and a countdown left behind would have
+  // the sweep kill the very tab they just opened). `tmux: null` settles the
+  // detach claim the same way the workspace restore does: the tab is back,
+  // the record must stop saying "hidden". `closeAfterTurn` goes with them —
+  // the mark was minted against a detached deadline, and surviving the
+  // re-attach would have the sweep close the tab the user just opened.
+  await deps.upsertRecord(sessionId, {
+    closed: null,
+    graceUntil: null,
+    tmux: null,
+    closeAfterTurn: false,
+    // The stow claim is consumed by the reopen (same as the delegate write
+    // above): a later user close must stay closed across a switch-back.
+    stowedBySwitch: false,
+  });
   await soloEnforce(deps, sessionId);
   deps.refresh();
   return true;
@@ -3787,11 +3911,18 @@ export async function configureProjectFlow(
         description: 'Start one on a specific account, whatever the routing says',
         action: 'sessionFrom',
       },
-      {
-        label: '$(layers) Switch Workspace…',
-        description: 'Show only this project’s tabs in this window',
-        action: 'workspace',
-      },
+      // No Switch Workspace row in folder mode: in-window switching does not
+      // exist there, and Open in New Window (below) IS the folder-mode way to
+      // "go to" a project.
+      ...(deps.lineageMode?.() === 'folder'
+        ? ([] as ActionPick[])
+        : [
+            {
+              label: '$(layers) Switch Workspace…',
+              description: 'Show only this project’s tabs in this window',
+              action: 'workspace',
+            },
+          ]),
       {
         label: '$(folder-opened) Open in New Window',
         description: 'The project’s directory, as an ordinary VS Code window',
@@ -4406,19 +4537,18 @@ async function addDirectoryToProject(
     );
     return false;
   }
-  // The same refusal the create flow makes, for the same reason: this is the
-  // other way a directory ends up claimed twice. Not applied to a DROP — a drag
-  // onto a project row is a move, and assignToProject deliberately takes the
-  // directory off its previous owner and says so.
+  // The same announcement the create flow makes, for the same reason: this is
+  // the other way a directory ends up claimed twice, claims are non-exclusive
+  // now, and the user deserves to hear "shared" at the moment they share it.
+  // Not raised on a DROP — a drag onto a project row is a move, and
+  // assignToProject deliberately takes the directory off its previous owner
+  // and says so.
   const claimed = projectClaiming(deps.allProjects(), dir, projectId);
   if (claimed) {
-    void vscode.window.showWarningMessage(
-      `Flock: "${claimed.name}" already covers ${dir}. Two projects on one ` +
-        'directory have no defined owner for the sessions in it — move the ' +
-        'directory there instead, or add a subdirectory of it here.',
-      { modal: true },
+    void vscode.window.showInformationMessage(
+      `Flock: "${claimed.name}" also covers ${dir} — sessions in there will ` +
+        'show under both projects.',
     );
-    return false;
   }
   await deps.upsertProject(projectId, { dirs: [...dirs.slice(1), dir] });
   log('project:', projectId, 'gained directory', dir);
@@ -4708,6 +4838,36 @@ async function refusedForeignClose(
   return true;
 }
 
+/** Does this record claim a live DETACHED process — counting down under a
+ *  grace deadline, or carrying a wrap name nothing has settled? The tier the
+ *  Close verbs and Delete must route through `killDetached` (the tree-reaping
+ *  kill), because there is no terminal to dispose and stamping the record
+ *  alone would leave the process running behind a row that says otherwise. */
+function claimsDetachedProcess(record: EditorialRecord | undefined): boolean {
+  return (
+    record?.graceUntil != null ||
+    (typeof record?.tmux === 'string' && record.tmux !== '')
+  );
+}
+
+/** Is this session's record bound to a LIVE window other than ours? The
+ *  cross-window RESTORE-RACE guard (see CommandDeps.boundToLiveForeignWindow):
+ *  another window's restore stamps `boundWindowId` at bind time but clears
+ *  the grace claim only after its launch resolves, so for a few seconds a
+ *  record can read as detached while its process already has a tab THERE —
+ *  and a kill issued on that reading ends the session out from under the
+ *  window that just attached it. Mirrors the lifecycle sweep's guard, and
+ *  defaults the same safe way round as hostOf: an absent dep or a throw
+ *  answers false, the pre-guard behaviour. */
+function boundToLiveForeignWindow(deps: CommandDeps, sessionId: string): boolean {
+  try {
+    return deps.boundToLiveForeignWindow?.(sessionId) === true;
+  } catch (err) {
+    logError('commands.boundToLiveForeignWindow', err);
+    return false;
+  }
+}
+
 async function closeFlow(
   deps: CommandDeps,
   sessionId: string,
@@ -4716,14 +4876,55 @@ async function closeFlow(
   if (await refusedForeignClose(deps, sessionId)) return;
 
   const closedTerminal = deps.closeTerminal(sessionId);
+  if (
+    !closedTerminal &&
+    claimsDetachedProcess(deps.getRecord(sessionId)) &&
+    // The restore-race guard: a live foreign window's binding means the
+    // "grace row" already has a tab THERE and its claim is only the stamp
+    // that window has not yet cleared. Killing would end a session someone
+    // is looking at, so this falls through to the announce path below —
+    // stamp the record, then say honestly that the session is still running.
+    !boundToLiveForeignWindow(deps, sessionId)
+  ) {
+    // A GRACE ROW: no terminal anywhere — the process lives detached in the
+    // private tmux server, and the Close verbs match on exactly this state
+    // (ContextToken 'hosted'). Stamping `closed` here while the wrap runs
+    // would be the record lying about the process for up to the rest of the
+    // grace window, so the kill goes through the wiring's detached funnel:
+    // tree-reaping kill, archived stamp, at-rest repair — the same path a
+    // grace expiry takes. Only the caller's extras (a summary) land after.
+    const ended = await deps.killDetached?.(sessionId);
+    if (ended === true) {
+      // The switch's stow marker clears on EVERY user close — the kill funnel
+      // (endDetached) deliberately preserves it because the sweep shares that
+      // path, so the user-verb half of "user closed stays closed" is written
+      // here, where only a user can reach.
+      await deps.upsertRecord(sessionId, {
+        stowedBySwitch: false,
+        ...(extra ?? {}),
+      });
+      log('close:', shortId(sessionId), '(detached wrap killed)');
+      deps.refresh();
+      return;
+    }
+  }
   await deps.upsertRecord(sessionId, {
     closed: nowIso(),
+    // A user verb closed this: whatever a switch once did, the record now
+    // says the USER wants it closed — a switch-back must not resume it.
+    stowedBySwitch: false,
     // Only OUR binding is cleared. Nulling it for a session hosted by another
     // window would break that window's cross-window focus until it happens to
     // rebind.
     ...(closedTerminal ? { boundWindowId: null } : {}),
     ...extra,
   });
+  // REPAIR AT REST (the 1→2 transition): every archived row should be
+  // provably resumable the moment it becomes one, not only when clicked. The
+  // repair's own quiet-window gate may skip a transcript the dying process
+  // wrote seconds ago — the on-resume-click repair is the second net, which
+  // is why the spec runs it at both points.
+  deps.repairResumeLeaf?.(sessionId);
   log(
     'close:',
     shortId(sessionId),
@@ -4739,6 +4940,45 @@ async function closeFlow(
         'running — only the editorial record was marked closed.',
     );
   }
+}
+
+/**
+ * CLOSE NOW — the user verb for "1→2 immediately", skipping every wait the
+ * lifecycle grants: a grace countdown is cut short (the detached process and
+ * its tree are killed), a close-after-turn mark is overtaken, a live tab is
+ * closed outright. `closeFlow` above covers the tab case; this exists for the
+ * rows that have NO terminal to dispose — a session counting down in the
+ * grace pool — where the honest action is the wiring's detached kill.
+ */
+async function closeNowFlow(deps: CommandDeps, sessionId: string): Promise<void> {
+  if (await refusedForeignClose(deps, sessionId)) return;
+  const detached = claimsDetachedProcess(deps.getRecord(sessionId));
+  const closedTerminal = deps.closeTerminal(sessionId);
+  if (!closedTerminal && detached) {
+    // A grace row: nothing bound anywhere, the process lives only in the
+    // private tmux server. The wiring kills it (tree and all), stamps the
+    // record archived and runs the at-rest repair — everything below would
+    // duplicate it.
+    const ended = await deps.killDetached?.(sessionId);
+    if (ended === true) {
+      // Same user-verb marker clear as closeFlow: the kill funnel keeps the
+      // switch's stow marker for the sweep's sake, and Close Now is exactly
+      // the user saying the opposite.
+      await deps.upsertRecord(sessionId, { stowedBySwitch: false });
+      deps.refresh();
+      return;
+    }
+  }
+  await deps.upsertRecord(sessionId, {
+    closed: nowIso(),
+    graceUntil: null,
+    tmux: null,
+    closeAfterTurn: false,
+    stowedBySwitch: false,
+    ...(closedTerminal ? { boundWindowId: null } : {}),
+  });
+  deps.repairResumeLeaf?.(sessionId);
+  deps.refresh();
 }
 
 // ------------------------------------------------------------------ accounts
@@ -5853,6 +6093,11 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     }
     if (await deps.focusWindowFor(id)) return;
 
+    // Folder mode: every tier below acts IN PLACE (attach, adopt, reveal,
+    // fork), and none of that is this window's to do for a session living in
+    // another folder — route it instead. See routeForeign.
+    if (await routeForeign(deps, id)) return;
+
     // Detach tier: a record naming a tmux session is OURS, running hidden in
     // the private server — a workspace switch parked it, so its tree row is
     // live while no window shows a tab. Focusing it means bringing the tab
@@ -6229,6 +6474,50 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     },
   );
 
+  register(
+    COMMANDS.closeSessionNow,
+    'close session now',
+    async (arg?: unknown) => {
+      const id = await targetSession(deps, arg, 'Close which session now?', {
+        liveOnly: false,
+      });
+      if (!id) return;
+      const label = labelFor(deps, id);
+      await closeNowFlow(deps, id);
+      vscode.window.setStatusBarMessage(
+        `Flock: closed "${label}" now — its row stays in the tree, click it to resume`,
+        5000,
+      );
+    },
+  );
+
+  register(
+    COMMANDS.togglePinSession,
+    'toggle keep awake',
+    async (arg?: unknown) => {
+      const id = await targetSession(deps, arg, 'Keep which session awake?', {
+        liveOnly: false,
+      });
+      if (!id) return;
+      const pinned = deps.getRecord(id)?.pinned !== true;
+      // Flipping the pin ON also withdraws a pending close-after-turn mark:
+      // "keep awake" that still closed at the end of the current turn would
+      // be a pin in name only.
+      await deps.upsertRecord(id, {
+        pinned,
+        ...(pinned ? { closeAfterTurn: false } : {}),
+      });
+      deps.refresh();
+      const label = labelFor(deps, id);
+      vscode.window.setStatusBarMessage(
+        pinned
+          ? `Flock: "${label}" is kept awake — exempt from auto-close until unpinned`
+          : `Flock: "${label}" follows the idle timer again`,
+        5000,
+      );
+    },
+  );
+
   // --------------------------------------------------------------- wrap
 
   register(COMMANDS.wrapSession, 'wrap session', async (arg?: unknown) => {
@@ -6285,15 +6574,45 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   // written by older versions read as deleted (state.sanitizeRecord).
 
   /**
+   * A row about to be DELETED that still claims a live detached process
+   * (grace countdown, or an unsettled wrap name) gets that process KILLED
+   * first, through the wiring's tree-reaping funnel. `deleted: true` removes
+   * the row unconditionally (lineage.ts), and a grace row is the process's
+   * ONLY surface — its tab is gone by definition — so deleting it unkilled
+   * would reconstruct the exact unrepresentable state this branch removes:
+   * running, and shown nowhere. Pinned or not: an explicit user delete
+   * OUTRANKS the pin — the pin exempts a session from the automatic sweeps,
+   * not from the user saying "remove this".
+   *
+   * A detached claim on a session whose terminal is bound HERE is a racing
+   * restore (the grace clears only after the launch resolves) — the tab is
+   * its surface and delete's contract is to never touch tabs, so the kill is
+   * skipped. Returns whether a process was actually ended, for the toast.
+   */
+  const endDetachedForDelete = async (sessionId: string): Promise<boolean> => {
+    if (!claimsDetachedProcess(deps.getRecord(sessionId))) return false;
+    if (hostOf(deps, sessionId) === 'here') return false;
+    // The bound-here skip above covers only OUR OWN restore race; the same
+    // race in another window looks identical from here except that the
+    // binding landed on a foreign windowId — the lifecycle sweep's guard,
+    // mirrored. Delete still removes the row (its contract), but the session
+    // that window just re-attached keeps running under its tab there.
+    if (boundToLiveForeignWindow(deps, sessionId)) return false;
+    return (await deps.killDetached?.(sessionId)) === true;
+  };
+
+  /**
    * Delete one or more rows, then offer one Undo for the lot.
    *
    * An Undo button rather than a confirmation modal, however many rows there
    * are. The action is view-level and fully reversible — nothing on disk is
-   * touched and no process is signalled — so a modal in front of every delete
-   * would cost more than the mistake does. But the way back has to be one
-   * click, not a command name the user has to know to go looking for, and it
-   * has to undo the WHOLE gesture: half a restored selection is a worse state
-   * than either end of it.
+   * touched, and a process is signalled only where the row was a live grace
+   * countdown (see endDetachedForDelete: a row must never outlive its
+   * process's last surface) — so a modal in front of every delete would cost
+   * more than the mistake does. But the way back has to be one click, not a
+   * command name the user has to know to go looking for, and it has to undo
+   * the WHOLE gesture: half a restored selection is a worse state than either
+   * end of it.
    */
   const deleteSessionsFlow = async (ids: string[]): Promise<void> => {
     if (ids.length === 0) return;
@@ -6302,17 +6621,37 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     const label = ids.length === 1 ? labelFor(deps, ids[0]) : '';
     // Sequential, not Promise.all: every write goes through the store's own
     // mutation queue anyway, and awaiting each keeps a failure attributable.
-    for (const id of ids) await deps.upsertRecord(id, { deleted: true });
-    log('delete:', ids.map(shortId).join(' '));
+    // The kill lands BEFORE the deleted flag — the order is the invariant:
+    // the row is the detached process's last surface, so the process must be
+    // gone before the row is.
+    let ended = 0;
+    for (const id of ids) {
+      if (await endDetachedForDelete(id)) ended++;
+      // `stowedBySwitch: false` because delete is a user verb: a deleted-then-
+      // restored row must not come back armed for a switch-back resume.
+      await deps.upsertRecord(id, { deleted: true, stowedBySwitch: false });
+    }
+    log(
+      'delete:',
+      ids.map(shortId).join(' '),
+      ...(ended > 0 ? [`(${String(ended)} detached process(es) ended first)`] : []),
+    );
     deps.refresh();
 
     const UNDO = 'Undo';
     const choice = await vscode.window.showInformationMessage(
-      ids.length === 1
-        ? `Removed "${label}" from the tree. The session and its transcript are ` +
-            'untouched; forks of it moved up to its parent.'
+      (ids.length === 1
+        ? `Removed "${label}" from the tree. The transcript is untouched; ` +
+          'forks of it moved up to its parent.'
         : `Removed ${ids.length} sessions from the tree. Their transcripts are ` +
-            'untouched; forks of them moved up to their parents.',
+          'untouched; forks of them moved up to their parents.') +
+        // Honest about the one thing Undo cannot bring back: the detached
+        // process a grace row was covering. The conversation itself is one
+        // resume away, exactly like any other archived session.
+        (ended > 0
+          ? ` ${String(ended)} detached process${ended === 1 ? ' was' : 'es were'} ` +
+            'ended first (a resume brings the conversation back).'
+          : ''),
       UNDO,
     );
     if (choice !== UNDO) return;
@@ -6396,12 +6735,26 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     if (!chosen || chosen.length === 0) return;
     // Sequential, not Promise.all: every write goes through the store's own
     // mutation queue anyway, and awaiting each keeps the failure attributable.
-    // The multi-select IS the confirmation. Rows only — a live pick keeps its
-    // process and its tab; delete's contract is the tree, never the terminal.
+    // The multi-select IS the confirmation. A pick with a TAB keeps its
+    // process and its tab (delete never touches terminals) — but a pick
+    // counting down in the grace pool has no tab, so its row is the process's
+    // last surface and the kill must land before the flag does (see
+    // endDetachedForDelete).
+    let ended = 0;
     for (const pick of chosen) {
-      await deps.upsertRecord(pick.sessionId, { deleted: true });
+      if (await endDetachedForDelete(pick.sessionId)) ended++;
+      // Same user-verb marker clear as deleteSessionsFlow.
+      await deps.upsertRecord(pick.sessionId, {
+        deleted: true,
+        stowedBySwitch: false,
+      });
     }
-    log('delete stale:', String(chosen.length), 'session(s) removed');
+    log(
+      'delete stale:',
+      String(chosen.length),
+      'session(s) removed',
+      ...(ended > 0 ? [`(${String(ended)} detached process(es) ended first)`] : []),
+    );
     deps.refresh();
     const UNDO = 'Undo';
     const choice = await vscode.window.showInformationMessage(
@@ -6675,12 +7028,18 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       // and it is what the session gets stamped with.
       const lane = deps.getSubproject?.(parsed.id);
       if (lane && lane.projectId === project.id) {
+        // Worktree-aware: a lane pinning a branch launches in that branch's
+        // checkout (see lanePlacement). The session keeps the LANE's name
+        // either way — the lane is the identity, the worktree is placement.
+        const placed = await lanePlacement(deps, lane);
         await startSessionInProjectDir(
           deps,
           project,
-          normalizeDir(lane.dir),
+          placed.dir,
           lane.name.trim() === '' ? baseName(lane.dir) : lane.name,
-          `in ${project.name}`,
+          placed.branch === ''
+            ? `in ${project.name}`
+            : `in ${project.name}, on ${placed.branch}`,
           lane.id,
         );
         return;
@@ -7709,6 +8068,20 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   // ------------------------------------------------------------ workspaces
 
   register(COMMANDS.switchWorkspace, 'switch workspace', async (arg?: unknown) => {
+    // FOLDER MODE has no in-window switching: the menu items are hidden by
+    // the CONTEXT_MODE when-clauses, but the palette can still find a command
+    // by name in the gap before the context lands (and keybindings always
+    // can), so the verb refuses for itself — and says what to do instead,
+    // because a silent no here reads as a bug.
+    if (deps.lineageMode?.() === 'folder') {
+      void vscode.window.showInformationMessage(
+        'Flock: this window is in folder mode — it always shows the folder ' +
+          'you opened, and other projects open in their own windows. To ' +
+          'switch projects inside one window, set `lineage.mode` to ' +
+          '"project".',
+      );
+      return;
+    }
     const direct = projectIdFromArg(arg);
     if (direct) {
       await deps.switchWorkspace(direct);

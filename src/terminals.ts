@@ -66,6 +66,7 @@ import type {
 } from './types';
 import { isEnvVarName } from './accounts';
 import { buildCodexArgs } from './codex';
+import { isPidAlive, listDescendants, reapSurvivors } from './procs';
 import {
   buildTmuxArgs,
   sessionIdOfTmuxName,
@@ -118,6 +119,21 @@ const ACTIVE_WAIT_MS = 600;
 const ACTIVE_LAST_WAIT_MS = 1000;
 const ACTIVE_POLL_MS = 30;
 
+/** Shutdown-time bare reap (see reapBareOnShutdown): how long to wait before
+ *  RE-probing a pty root that was still alive when its close event fired. On
+ *  a true window close VS Code's kill of the pty may land a beat after the
+ *  event; on a reload the root never dies at all. One short beat separates
+ *  the two without holding the dying host open. */
+const SHUTDOWN_REAP_PROBE_MS = 400;
+/** The escalation ladder's wait for that same path. REAP_WAIT_MS (1.5 s) is
+ *  sized for a close verb's fire-and-forget comfort; here the extension host
+ *  is dying under us and a ladder that cannot fit inside whatever time
+ *  remains reaps nothing at all — and the children re-parented the instant
+ *  the root died, so there is no parent-follows-child grace worth waiting
+ *  out. Best-effort by construction; the persisted-snapshot rescue at next
+ *  activation (extension.ts) is the reliable half. */
+const SHUTDOWN_REAP_WAIT_MS = 300;
+
 const MISSING_BINARY_MESSAGE =
   'Claude CLI not found — set lineage.claudeBinary to the full path of your ' +
   'claude executable.';
@@ -136,11 +152,27 @@ interface ExitEvent {
   sessionId: string;
   code: number | undefined;
   reason: ExitReason;
+  /** The tmux session that backed the terminal, when the launch was wrapped.
+   *  Carried on the event because the binding is already unbound by the time
+   *  subscribers run — and the SHUTDOWN listener in extension.ts needs it to
+   *  stamp the detach grace on a wrapped session the closing window is
+   *  leaving behind (a running process must never be deadline-less). */
+  tmuxName?: string;
 }
 
 interface BoundEntry {
   terminal: vscode.Terminal;
   binding: TerminalBinding;
+  /** BARE terminals only: the last descendant walk of `binding.pid`, taken at
+   *  pid resolution and refreshed by the lifecycle sweep's minute tick. The
+   *  post-mortem reap target list for a close the extension did NOT initiate
+   *  (the user's tab X): by the time that close event arrives the pty is
+   *  dead, the children have re-parented to PID 1 and a fresh ppid walk can
+   *  never find them again — so the honest targets are the pids that were
+   *  provably this root's descendants within the last minute. Pid reuse in
+   *  that window is the accepted residual risk (the reap probes liveness and
+   *  swallows ESRCH; macOS allocates pids upward). */
+  bareKids?: number[];
 }
 
 // ----------------------------------------------------------- host adapters
@@ -458,7 +490,23 @@ export class TerminalRegistry implements DisposableLike {
       const sessionId = nodeIdOfTerminal(terminal);
       if (!sessionId) continue;
       if (this.bound.has(sessionId) || this.claiming.has(sessionId)) continue;
-      fresh.push(this.bind(sessionId, terminal));
+      const binding = this.bind(sessionId, terminal);
+      fresh.push(binding);
+      // A revived BARE terminal needs its pid back (same rule as handleOpen:
+      // wrapped bindings get theirs from the pane lookup) — without it the
+      // close-time tree reap has no root to walk and silently degrades to the
+      // orphaning dispose this build exists to remove.
+      if (binding.tmuxName === undefined) {
+        void this.pidOf(terminal).then((pid) => {
+          if (
+            pid !== undefined &&
+            this.bound.get(sessionId)?.binding === binding
+          ) {
+            binding.pid = pid;
+            this.snapshotBareKidsSoon(sessionId);
+          }
+        });
+      }
     }
 
     // A terminal we had bound but that the host no longer lists is gone (a
@@ -520,6 +568,10 @@ export class TerminalRegistry implements DisposableLike {
       if (!sessionId || this.bound.has(sessionId)) continue;
       const binding = this.bind(sessionId, terminal);
       binding.pid = pid;
+      // Roster-pid adoptions are bare by construction (a wrapped terminal's
+      // pid is the tmux client's and never matches the roster) — arm the
+      // reap snapshot exactly as launch() does.
+      this.snapshotBareKidsSoon(sessionId);
       fresh.push(binding);
     }
 
@@ -771,6 +823,10 @@ export class TerminalRegistry implements DisposableLike {
     const stillOurs = this.bound.get(sessionId)?.binding === binding;
     if (pid !== undefined && stillOurs && tmuxName === undefined) {
       binding.pid = pid;
+      // A bare root's descendants can only be reaped from a list walked while
+      // they were still its descendants — start the snapshot the moment the
+      // root is known (the sweep tick keeps it fresh from here).
+      this.snapshotBareKidsSoon(sessionId);
     }
 
     if (pref === 'newWindow' && stillOurs) await this.moveToNewWindow(terminal);
@@ -934,6 +990,15 @@ export class TerminalRegistry implements DisposableLike {
    * caller that means "end this session" — the close verb — must say so and
    * the tmux session is killed too. Workspace parking never passes it; that
    * dispose IS the detach.
+   *
+   * For a BARE terminal (no wrap) the dispose IS the kill — of the pane root
+   * only. Its MCP children re-parent to PID 1 the instant the root dies, so
+   * the dispose is deferred behind a descendant walk (one `ps`, tens of
+   * milliseconds) and the whole tree is reaped after — the same walk-first /
+   * verify / escalate ladder every tmux kill runs, because a bare close that
+   * skips it is exactly how the 32 GB of orphaned `uv` wrappers accumulated.
+   * `true` therefore means "the close is UNDERWAY" on this tier; the unbind
+   * still arrives through the ordinary close event when the dispose lands.
    */
   closeTerminal(
     sessionId: string,
@@ -942,20 +1007,33 @@ export class TerminalRegistry implements DisposableLike {
     const entry = this.bound.get(sessionId);
     if (!entry) return false;
     const tmuxName = entry.binding.tmuxName;
-    try {
-      entry.terminal.dispose();
-    } catch (err) {
-      logError('terminals.closeTerminal', err);
-      return false;
-    }
-    if (opts?.killTmux === true && tmuxName !== undefined) {
-      this.killTmuxSoon(tmuxName, entry.binding.sessionId);
+    const barePid = tmuxName === undefined ? entry.binding.pid : undefined;
+    if (barePid !== undefined) {
+      // WALK BEFORE KILL (see src/procs.ts's header): fire-and-forget, but
+      // the dispose inside waits for the walk — a dead root's children can
+      // never be found again.
+      void this.disposeBareTree(entry, barePid);
+    } else {
+      try {
+        entry.terminal.dispose();
+      } catch (err) {
+        logError('terminals.closeTerminal', err);
+        return false;
+      }
+      if (opts?.killTmux === true && tmuxName !== undefined) {
+        this.killTmuxSoon(tmuxName, entry.binding.sessionId);
+      }
     }
     if (!this.closeWatched) {
       // No onDidCloseTerminal in this host: unbind ourselves so state does not
       // keep claiming the session is hosted here.
       this.bound.delete(sessionId);
-      this.exitEmitter.fire({ sessionId, code: undefined, reason: 'other' });
+      this.exitEmitter.fire({
+        sessionId,
+        code: undefined,
+        reason: 'other',
+        ...(tmuxName !== undefined ? { tmuxName } : {}),
+      });
       this.syncActive();
     }
     return true;
@@ -972,9 +1050,14 @@ export class TerminalRegistry implements DisposableLike {
       sessionId: string,
       code: number | undefined,
       reason: 'shutdown' | 'user' | 'other',
+      /** The wrap that backed the terminal, when there was one — see
+       *  ExitEvent.tmuxName for why it travels on the event. */
+      tmuxName?: string,
     ) => void,
   ): DisposableLike {
-    return this.exitEmitter.event((e) => cb(e.sessionId, e.code, e.reason));
+    return this.exitEmitter.event((e) =>
+      cb(e.sessionId, e.code, e.reason, e.tmuxName),
+    );
   }
 
   onDidChangeActive(cb: (sessionId: string | null) => void): DisposableLike {
@@ -1044,6 +1127,172 @@ export class TerminalRegistry implements DisposableLike {
         logError('terminals.tmuxKillSession', err);
       },
     );
+  }
+
+  // ------------------------------------------------------ bare-tree reaping
+  //
+  // The tmux tier funnels every kill through killTmuxSessionTree; this is the
+  // BARE tier's equivalent. A bare terminal's pty root IS the claude process
+  // (shellPath), and disposing it orphans the ~8 MCP children to PID 1 — the
+  // incident this branch exists to fix, just without the tmux server in the
+  // middle. Three pieces: a walk (injectable, defaults to procs.ts), a reap
+  // (same), and a per-binding descendant SNAPSHOT for the one path where a
+  // pre-kill walk is impossible — the user's own tab X, which reaches us only
+  // after the root is dead.
+
+  private walkDescendantsOf(rootPid: number): Promise<number[]> {
+    const walk = this.deps.listDescendants ?? listDescendants;
+    return Promise.resolve(walk(rootPid)).catch((err: unknown) => {
+      logError('terminals.listDescendants', err);
+      return [];
+    });
+  }
+
+  /** Fire-and-forget escalation over explicitly-walked pids. Quiet when
+   *  everything exited on its own — the log earns a line only when a signal
+   *  was actually needed, mirroring killTmuxSessionTree's report. */
+  private reapBareSoon(pids: readonly number[], sessionId: string): void {
+    if (pids.length === 0) return;
+    const reap = this.deps.reapSurvivors ?? reapSurvivors;
+    void Promise.resolve(reap(pids)).then(
+      (r) => {
+        if (r.termed > 0 || r.killed > 0) {
+          log(
+            `terminals: reaped bare tree of ${shortId(sessionId)} — ` +
+              `${String(r.exited)} exited on their own, ` +
+              `${String(r.termed)} SIGTERMed, ${String(r.killed)} SIGKILLed`,
+          );
+        }
+      },
+      (err: unknown) => logError('terminals.reapBare', err),
+    );
+  }
+
+  /** The extension-initiated bare close: walk FIRST (a dead root's children
+   *  have already re-parented and can never be found again), THEN dispose,
+   *  then verify/escalate on root + walked descendants. The dispose waits on
+   *  one `ps` — tens of milliseconds against a tab close, and the difference
+   *  between ending a session and orphaning its MCP servers. */
+  private async disposeBareTree(entry: BoundEntry, rootPid: number): Promise<void> {
+    const kids = await this.walkDescendantsOf(rootPid);
+    try {
+      entry.terminal.dispose();
+    } catch (err) {
+      // The dispose failed, so nothing died: reaping now would kill the tree
+      // out from under a tab that is still on screen.
+      logError('terminals.closeTerminal', err);
+      return;
+    }
+    // The root rides along, exactly as in killTmuxSessionTree: a claude that
+    // ignores its pty's death would otherwise survive as the biggest orphan.
+    this.reapBareSoon([rootPid, ...kids], entry.binding.sessionId);
+  }
+
+  /** Take (or retake) the descendant snapshot for one bare binding — the
+   *  post-mortem target list for a user tab X (see BoundEntry.bareKids). */
+  private snapshotBareKidsSoon(sessionId: string): void {
+    const entry = this.bound.get(sessionId);
+    if (!entry || entry.binding.tmuxName !== undefined) return;
+    const pid = entry.binding.pid;
+    if (pid === undefined) return;
+    void this.walkDescendantsOf(pid).then((kids) => {
+      // Still the same entry? A rebind moves the entry object under a new
+      // key; the object identity is what says the snapshot still applies.
+      const current = [...this.bound.values()].find((e) => e === entry);
+      if (current) current.bareKids = kids;
+    });
+  }
+
+  /** Refresh every bare binding's descendant snapshot. Called by the
+   *  extension's 60 s lifecycle sweep, so a tab-X reap never acts on targets
+   *  more than a minute old. A handful of `ps` calls a minute, machine-wide. */
+  refreshBareDescendants(): void {
+    if (this.disposed) return;
+    for (const sessionId of this.bound.keys()) {
+      this.snapshotBareKidsSoon(sessionId);
+    }
+  }
+
+  /** Every pid the persisted window-close rescue should remember: each bare
+   *  binding's root plus its last descendant snapshot, deduped. The wiring
+   *  writes these (with their ps start times) to globalStorage on the same
+   *  sweep tick that refreshes the snapshots, so what survives a crash or a
+   *  window close is at most a minute stale — and the NEXT activation's
+   *  rescue (procs.orphanRescueDecision) verifies identity per pid before it
+   *  signals anything, which is what makes acting on a persisted list honest.
+   *  Roots ride along deliberately: a claude that ignores its pty's death
+   *  orphans to PID 1 like any child and passes the same verification. */
+  bareSnapshotPids(): number[] {
+    const out = new Set<number>();
+    for (const entry of this.bound.values()) {
+      if (entry.binding.tmuxName !== undefined) continue;
+      const pid = entry.binding.pid;
+      if (pid !== undefined) out.add(pid);
+      for (const kid of entry.bareKids ?? []) out.add(kid);
+    }
+    return [...out];
+  }
+
+  /**
+   * The window-close half of the bare tier (reason 'shutdown', see
+   * handleClose). Post-mortem like the tab X — VS Code's pty teardown killed
+   * the root, so the snapshot is the target list — but with one decision the
+   * tab X never faces: reason 'shutdown' is ALSO what a window RELOAD
+   * reports, and a reload keeps the pty (and the whole claude tree) alive for
+   * revival. The root's own liveness is what separates the two — probe it
+   * now, and if it still breathes give VS Code's kill one short beat to land
+   * and probe once more; a root alive after that is a revival in progress and
+   * its tree must not be touched. Only the KIDS are signalled (the root's
+   * death is the premise that authorizes the reap), on the short ladder —
+   * the host is dying, so whatever this best effort misses is the persisted
+   * rescue's job at next activation.
+   */
+  private reapBareOnShutdown(entry: BoundEntry): void {
+    const rootPid = entry.binding.pid;
+    const kids = entry.bareKids ?? [];
+    // No root pid = no way to tell close from reload: do nothing here and
+    // leave the whole question to the verified rescue. No kids = nothing the
+    // root's death could have orphaned.
+    if (rootPid === undefined || kids.length === 0) return;
+    const alive = this.deps.isPidAlive ?? isPidAlive;
+    const reapKids = (): void => {
+      const reap =
+        this.deps.reapSurvivors ??
+        ((pids: readonly number[]) =>
+          reapSurvivors(pids, { waitMs: SHUTDOWN_REAP_WAIT_MS }));
+      void Promise.resolve(reap(kids)).then(
+        (r) => {
+          if (r.termed > 0 || r.killed > 0) {
+            log(
+              `terminals: shutdown-reaped bare tree of ` +
+                `${shortId(entry.binding.sessionId)} — ${String(r.exited)} ` +
+                `exited, ${String(r.termed)} SIGTERMed, ${String(r.killed)} ` +
+                `SIGKILLed`,
+            );
+          }
+        },
+        (err: unknown) => logError('terminals.reapBareShutdown', err),
+      );
+    };
+    try {
+      if (!alive(rootPid)) {
+        reapKids();
+        return;
+      }
+    } catch (err) {
+      logError('terminals.reapBareShutdown.probe', err);
+      return;
+    }
+    void delay(SHUTDOWN_REAP_PROBE_MS).then(() => {
+      try {
+        if (!alive(rootPid)) reapKids();
+        // Still alive: a reload's revival. The binding is gone but the
+        // process is not orphaned — handleOpen will re-bind it in the next
+        // incarnation of this very extension host.
+      } catch (err) {
+        logError('terminals.reapBareShutdown.reprobe', err);
+      }
+    });
   }
 
   /** Detach tier, re-resolved per launch (installing tmux or flipping
@@ -1348,6 +1597,7 @@ export class TerminalRegistry implements DisposableLike {
     void this.pidOf(terminal).then((pid) => {
       if (pid !== undefined && this.bound.get(sessionId)?.binding === binding) {
         binding.pid = pid;
+        this.snapshotBareKidsSoon(sessionId);
       }
     });
   }
@@ -1375,12 +1625,43 @@ export class TerminalRegistry implements DisposableLike {
     if (reason === 'user' && entry.binding.tmuxName !== undefined) {
       this.killTmuxSoon(entry.binding.tmuxName, sessionId);
     }
+    // The same tab X on a BARE terminal already killed the pane root — the
+    // pty died before this event fired, so a fresh walk would find nothing
+    // (the children re-parented the instant claude died). The SNAPSHOT is the
+    // honest target list here: pids that were provably this root's
+    // descendants within the last sweep tick. Extension-initiated disposes
+    // (reason Extension → 'other') never take this branch — closeTerminal
+    // already walked and reaped, and a second ladder would be noise.
+    if (reason === 'user' && entry.binding.tmuxName === undefined) {
+      const pid = entry.binding.pid;
+      this.reapBareSoon(
+        [...(pid !== undefined ? [pid] : []), ...(entry.bareKids ?? [])],
+        sessionId,
+      );
+    }
+    // WINDOW CLOSE (reason 'shutdown') on a BARE terminal: a wrapped session
+    // survives its window on purpose (revival) — a bare one CANNOT, because
+    // VS Code kills its pty root, and that kill is ours to clean up after:
+    // the ~8 MCP children re-parent to PID 1 and the tmux-only activation
+    // reconcile will never hunt them. Best-effort, from the same snapshot the
+    // tab-X reap uses; the persisted-snapshot rescue at next activation is
+    // the reliable backstop for a host that dies before this finishes.
+    if (reason === 'shutdown' && entry.binding.tmuxName === undefined) {
+      this.reapBareOnShutdown(entry);
+    }
     log(
       `terminals: ${shortId(sessionId)} closed (reason=${reason}, code=` +
         `${status?.code ?? 'n/a'})`,
     );
     try {
-      this.exitEmitter.fire({ sessionId, code: status?.code, reason });
+      this.exitEmitter.fire({
+        sessionId,
+        code: status?.code,
+        reason,
+        ...(entry.binding.tmuxName !== undefined
+          ? { tmuxName: entry.binding.tmuxName }
+          : {}),
+      });
     } catch (err) {
       logError('terminals.onDidExit', err);
     }

@@ -41,7 +41,34 @@ export interface TranscriptStats {
   lastPromptAt?: number;
   /** Context size of the last assistant turn, in tokens. */
   tokens?: number;
+  /** Epoch ms of the last REAL conversation record in the tail — any
+   *  `user`/`assistant` line with a timestamp, tool results and sidechains
+   *  included (a sub-agent writing is a session working). This is the idle
+   *  clock the lifecycle sweep (src/idleClose.ts) runs on, and it exists
+   *  because file MTIME is a liar here: hooks and last-prompt bookkeeping
+   *  touch the transcript without appending conversation, so an mtime-fed
+   *  timer keeps a long-abandoned session warm forever (measured on this
+   *  machine — the spec forbids mtime as an idleness source). */
+  lastRecordAt?: number;
+  /** The last conversation TEXT in the tail: the final assistant reply when
+   *  the window holds one, else the last real user prompt. This is what an
+   *  archived row shows when no close-with-summary was recorded — level 2
+   *  exists to answer "what did that branch conclude?" without resuming, and
+   *  the conclusion is the last thing said, not the last time something was.
+   *  Sidechains are skipped for the same reason isUserPrompt skips them: a
+   *  sub-agent's words are not the conversation's. Bounded to
+   *  LAST_EXCHANGE_MAX_CHARS at capture — this is a fact for a one-line
+   *  description and a hover, and an unbounded string would ride every
+   *  rebuild's stats map for nothing. */
+  lastExchange?: string;
 }
+
+/** How much of the last exchange to keep. Enough for a hover to say what the
+ *  session concluded; the row itself truncates much harder (a rendering
+ *  decision, so it lives in viewmodel.ts). Cut text gets a '…' HERE, because
+ *  downstream cannot tell a 400-char answer from the first 400 chars of a
+ *  longer one. */
+export const LAST_EXCHANGE_MAX_CHARS = 400;
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -243,6 +270,13 @@ export function readTailStats(
   }
   if (text === '') return out;
 
+  // The two candidates for lastExchange, tracked separately so the verdict at
+  // the end can prefer the assistant's reply over a prompt that came after it:
+  // an unanswered "also fix X" typed just before closing is not what the
+  // session concluded — the answer above it is.
+  let lastAssistantText: string | undefined;
+  let lastPromptText: string | undefined;
+
   const lines = text.split('\n');
   // Drop the first line unless the window happens to start exactly at a record
   // boundary: when the read covered the WHOLE file there is nothing to cut.
@@ -264,12 +298,45 @@ export function readTailStats(
         const parsed = Date.parse(ts);
         if (Number.isFinite(parsed)) out.lastPromptAt = parsed;
       }
+      const prompt = promptTextOf(rec);
+      if (prompt !== undefined) lastPromptText = prompt;
+    }
+
+    // The assistant half of lastExchange. promptTextOf reads message.content
+    // text blocks, which is the same shape assistant lines carry — a turn that
+    // was all tool calls has no text block and contributes nothing, exactly
+    // right for "what did it conclude". Sidechains are a sub-agent's words.
+    if (rec['type'] === 'assistant' && rec['isSidechain'] !== true) {
+      const reply = promptTextOf(rec);
+      if (reply !== undefined) lastAssistantText = reply;
+    }
+
+    // The idle clock: any real conversation record moves it (see the field's
+    // doc above) — but never a `system`/`summary`/hook line, which is exactly
+    // the traffic that made mtime unusable.
+    if (rec['type'] === 'user' || rec['type'] === 'assistant') {
+      const ts = rec['timestamp'];
+      if (typeof ts === 'string' && ts !== '') {
+        const parsed = Date.parse(ts);
+        if (Number.isFinite(parsed)) out.lastRecordAt = parsed;
+      }
     }
 
     const message = rec['message'];
     if (isPlainObject(message) && isPlainObject(message['usage'])) {
       const tokens = contextTokensOf(message['usage']);
       if (tokens > 0) out.tokens = tokens;
+    }
+  }
+
+  const exchange = lastAssistantText ?? lastPromptText;
+  if (exchange !== undefined) {
+    const trimmed = exchange.trim();
+    if (trimmed !== '') {
+      out.lastExchange =
+        trimmed.length > LAST_EXCHANGE_MAX_CHARS
+          ? trimmed.slice(0, LAST_EXCHANGE_MAX_CHARS - 1) + '…'
+          : trimmed;
     }
   }
   return out;

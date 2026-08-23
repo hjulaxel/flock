@@ -16,11 +16,14 @@ import {
   flattenNestedProjects,
   parentDir,
   BRANCH_AUTOSHOW_LIMIT,
+  ELSEWHERE_GROUP_KEY,
   isHiddenFolder,
   isWithin,
   matchProject,
+  matchProjects,
   normalizeDir,
   pathKey,
+  preferredClaimant,
   projectClaiming,
   projectDirs,
   providerOfProject,
@@ -285,6 +288,76 @@ describe('matchProject', () => {
   });
 });
 
+// Claims are NON-EXCLUSIVE (design/levels-and-modes.md): a directory listed by
+// two projects belongs to both for grouping. Depth stays singular — nesting is
+// still nesting — and derived (worktree) claims stay singular too.
+describe('matchProjects: non-exclusive claims', () => {
+  const alpha = project('id-b', 'Alpha', '/shared');
+  const beta = project('id-a', 'Beta', '/shared');
+  const outer = project('outer', 'Code', '/code');
+  const inner = project('inner', 'API', '/code/api');
+
+  it('maps a twice-claimed directory to BOTH projects, best first', () => {
+    const got = matchProjects([beta, alpha], '/shared/x');
+    expect(got.map((m) => m.project.id)).toEqual(['id-b', 'id-a']);
+    // Input order must not matter — the answer is stable across ticks.
+    expect(
+      matchProjects([alpha, beta], '/shared/x').map((m) => m.project.id),
+    ).toEqual(['id-b', 'id-a']);
+  });
+
+  it('keeps [0] exactly the single-winner answer', () => {
+    for (const cwd of ['/shared/x', '/code/api/src', '/code/web', '/nowhere']) {
+      const plural = matchProjects([alpha, beta, outer, inner], cwd);
+      const single = matchProject([alpha, beta, outer, inner], cwd);
+      expect(plural[0] ?? null).toEqual(single);
+    }
+  });
+
+  it('still lets the deeper claim win outright — nesting is not sharing', () => {
+    const got = matchProjects([outer, inner], '/code/api/src');
+    expect(got.map((m) => m.project.id)).toEqual(['inner']);
+  });
+
+  it('counts a project once however many of its directories match', () => {
+    const both = project('both', 'Both', '/shared', { dirs: ['/shared'] });
+    const got = matchProjects([both, alpha], '/shared/x');
+    // Once each; ordered by the name tie-break (Alpha before Both).
+    expect(got.map((m) => m.project.id)).toEqual(['id-b', 'both']);
+  });
+
+  it('never puts a derived claim beside an own one at equal depth', () => {
+    // `lister` states /code/app-feat-x; `owner` merely reaches it as a worktree
+    // of the repo at /code/app. A statement outranks an inference — the
+    // inference is not co-owner, it LOST.
+    const owner = project('owner', 'App', '/code/app');
+    const lister = project('lister', 'Feature', '/code/app-feat-x');
+    const worktrees = (p: ProjectRecord): readonly string[] =>
+      p.id === 'owner' ? ['/code/app-feat-x'] : [];
+    const got = matchProjects([owner, lister], '/code/app-feat-x/src', worktrees);
+    expect(got.map((m) => m.project.id)).toEqual(['lister']);
+  });
+
+  it('keeps an all-derived tie SINGULAR — a worktree has one owner', () => {
+    const repo = project('repo', 'App', '/code/app');
+    const sub = project('sub', 'Api', '/code/app/api');
+    const worktrees = (): readonly string[] => ['/code/app-feat-x'];
+    const got = matchProjects([sub, repo], '/code/app-feat-x/src', worktrees);
+    // ONE winner, and exactly the single-winner matcher's — the old tie-break
+    // survives whole for inferences.
+    expect(got).toHaveLength(1);
+    expect(got[0]).toEqual(
+      matchProject([sub, repo], '/code/app-feat-x/src', worktrees),
+    );
+  });
+
+  it('answers [] for an unknown or missing cwd', () => {
+    expect(matchProjects([outer], '/elsewhere')).toEqual([]);
+    expect(matchProjects([outer], undefined)).toEqual([]);
+    expect(matchProjects([], '/code')).toEqual([]);
+  });
+});
+
 describe('isHiddenFolder', () => {
   it('covers the directory and everything under it', () => {
     expect(isHiddenFolder(['/tmp/junk'], '/tmp/junk/run')).toBe(true);
@@ -525,6 +598,267 @@ function appWorktrees(dir: string) {
   const inRepo = APP_WORKTREES.some((w) => isWithin(w.dir, dir));
   return inRepo ? APP_WORKTREES : [];
 }
+
+// Non-exclusive claims in the grouping pass, and folder mode's scope fence.
+describe('computeGrouping: shared claims and folder scope', () => {
+  const cwds = cwdMap({
+    A: '/shared/x',
+    B: '/code/web',
+    C: '/elsewhere/deep',
+    D: undefined,
+  });
+
+  it('renders a twice-claimed session under BOTH projects', () => {
+    const result = grouping({
+      visibleRootIds: ['A'],
+      cwdOf: cwds,
+      projects: [
+        project('p1', 'Alpha', '/shared'),
+        project('p2', 'Beta', '/shared'),
+      ],
+    });
+    expect(result.projects.map((p) => p.label)).toEqual(['Alpha', 'Beta']);
+    expect(result.projects[0].rootIds).toEqual(['A']);
+    expect(result.projects[1].rootIds).toEqual(['A']);
+    expect(result.hiddenCount).toBe(0);
+  });
+
+  it('keeps the session while ANY claimant is open', () => {
+    const result = grouping({
+      visibleRootIds: ['A'],
+      cwdOf: cwds,
+      projects: [
+        project('p1', 'Alpha', '/shared', { hidden: true }),
+        project('p2', 'Beta', '/shared'),
+      ],
+    });
+    // Closing one of two projects sharing a directory must not take the
+    // other's rows with it.
+    expect(result.projects.map((p) => p.label)).toEqual(['Beta']);
+    expect(result.projects[0].rootIds).toEqual(['A']);
+    expect(result.hiddenCount).toBe(0);
+  });
+
+  it('counts the session hidden ONCE when every claimant is closed', () => {
+    const result = grouping({
+      visibleRootIds: ['A'],
+      cwdOf: cwds,
+      projects: [
+        project('p1', 'Alpha', '/shared', { hidden: true }),
+        project('p2', 'Beta', '/shared', { hidden: true }),
+      ],
+    });
+    expect(result.projects).toHaveLength(0);
+    expect(result.hiddenCount).toBe(1);
+    expect(result.loose).toEqual([]);
+  });
+
+  it('scopeDir drops sessions whose cwd is another folder, counted apart', () => {
+    const result = grouping({
+      visibleRootIds: ['A', 'B', 'C'],
+      cwdOf: cwds,
+      scopeDirs: ['/code'],
+      projects: [project('p1', 'Web', '/code/web')],
+    });
+    // B is under /code and claimed; A and C live elsewhere — other windows'
+    // work, so neither a bucket nor `hiddenCount` (nothing was HIDDEN).
+    expect(result.projects[0].rootIds).toEqual(['B']);
+    expect(result.folders).toEqual([]);
+    expect(result.loose).toEqual([]);
+    expect(result.outOfScopeCount).toBe(2);
+    expect(result.hiddenCount).toBe(0);
+  });
+
+  it('keeps a session with NO cwd despite the scope — unplaceable is not foreign', () => {
+    const result = grouping({
+      visibleRootIds: ['D'],
+      cwdOf: cwds,
+      scopeDirs: ['/code'],
+      projects: [],
+    });
+    expect(result.loose).toEqual(['D']);
+    expect(result.outOfScopeCount).toBe(0);
+  });
+
+  it('scopes nothing when scopeDir is empty or absent', () => {
+    const absent = grouping({ visibleRootIds: ['C'], cwdOf: cwds });
+    const empty = grouping({ visibleRootIds: ['C'], cwdOf: cwds, scopeDirs: [] });
+    expect(absent.loose).toEqual(['C']);
+    expect(empty.loose).toEqual(['C']);
+    expect(absent.outOfScopeCount).toBe(0);
+    expect(empty.outOfScopeCount).toBe(0);
+  });
+
+  it('applies the fence before hidden-folder counting', () => {
+    const result = grouping({
+      visibleRootIds: ['C'],
+      cwdOf: cwds,
+      scopeDirs: ['/code'],
+      hiddenFolders: ['/elsewhere'],
+      projects: [],
+    });
+    // C is both out of scope AND under a hidden folder: the fence answers
+    // first, so the user's hidden count stays a count of their own choices.
+    expect(result.outOfScopeCount).toBe(1);
+    expect(result.hiddenCount).toBe(0);
+  });
+
+  it('the fence is a UNION — a session under ANY opened folder is in scope', () => {
+    // The multi-root shape the fence must survive: a converted explorer-follow
+    // window (or a plain multi-root workspace) opened both folders, so work
+    // under the second is exactly as much this window's as work under the
+    // first. Fencing on folder[0] alone dropped it.
+    const result = grouping({
+      visibleRootIds: ['B', 'C'],
+      cwdOf: cwds,
+      scopeDirs: ['/code', '/elsewhere'],
+      projects: [],
+    });
+    expect(result.folders.flatMap((g) => g.rootIds).sort()).toEqual([
+      'B',
+      'C',
+    ]);
+    expect(result.outOfScopeCount).toBe(0);
+  });
+});
+
+describe('computeGrouping: the "Running elsewhere" appendix', () => {
+  const cwds = cwdMap({
+    A: '/shared/x',
+    C: '/elsewhere/deep',
+  });
+
+  it('routes a RUNNING out-of-scope root into `elsewhere`, never out of the tree', () => {
+    const result = grouping({
+      visibleRootIds: ['C'],
+      cwdOf: cwds,
+      scopeDirs: ['/code'],
+      projects: [],
+      hasRunning: () => true,
+    });
+    // Not dropped, not counted as out of scope — the row moved, the process
+    // stayed visible (the levels invariant).
+    expect(result.elsewhere?.rootIds).toEqual(['C']);
+    expect(result.elsewhere?.key).toBe(ELSEWHERE_GROUP_KEY);
+    expect(result.outOfScopeCount).toBe(0);
+  });
+
+  it('a non-running out-of-scope root is dropped and counted, as before', () => {
+    const result = grouping({
+      visibleRootIds: ['C'],
+      cwdOf: cwds,
+      scopeDirs: ['/code'],
+      projects: [],
+      hasRunning: () => false,
+    });
+    expect(result.elsewhere).toBeNull();
+    expect(result.outOfScopeCount).toBe(1);
+  });
+
+  it('rescues a RUNNING session whose every claimant is closed', () => {
+    const result = grouping({
+      visibleRootIds: ['A'],
+      cwdOf: cwds,
+      projects: [
+        project('p1', 'Alpha', '/shared', { hidden: true }),
+        project('p2', 'Beta', '/shared', { hidden: true }),
+      ],
+      hasRunning: () => true,
+    });
+    // Closing the projects hides their WORK; it must not hide a process that
+    // is still spending this machine's memory.
+    expect(result.elsewhere?.rootIds).toEqual(['A']);
+    expect(result.hiddenCount).toBe(0);
+  });
+
+  it('rescues a RUNNING root from a hidden folder — and only while it runs', () => {
+    // A hidden folder is a view preference; the levels invariant outranks it
+    // for exactly as long as a process lives. Dead: hidden as always.
+    const base = {
+      visibleRootIds: ['C'],
+      cwdOf: cwds,
+      projects: [],
+      hiddenFolders: ['/elsewhere'],
+    };
+    const running = grouping({ ...base, hasRunning: () => true });
+    expect(running.elsewhere?.rootIds).toEqual(['C']);
+    expect(running.hiddenCount).toBe(0);
+
+    const dead = grouping({ ...base, hasRunning: () => false });
+    expect(dead.elsewhere).toBeNull();
+    expect(dead.hiddenCount).toBe(1);
+  });
+
+  it('rescues a RUNNING root that onlyProjectSessions would drop', () => {
+    // C claims no project, so the filter drops it — unless it is running, in
+    // which case the appendix keeps the one row the badge needs to point at.
+    const base = {
+      visibleRootIds: ['C'],
+      cwdOf: cwds,
+      projects: [project('p1', 'Alpha', '/shared')],
+      onlyProjectSessions: true,
+    };
+    const running = grouping({ ...base, hasRunning: () => true });
+    expect(running.elsewhere?.rootIds).toEqual(['C']);
+    expect(running.hiddenCount).toBe(0);
+
+    const dead = grouping({ ...base, hasRunning: () => false });
+    expect(dead.elsewhere).toBeNull();
+    expect(dead.hiddenCount).toBe(1);
+  });
+
+  it('is null when nothing was rescued, and absent hasRunning rescues nothing', () => {
+    const scoped = grouping({
+      visibleRootIds: ['C'],
+      cwdOf: cwds,
+      scopeDirs: ['/code'],
+      projects: [],
+    });
+    expect(scoped.elsewhere).toBeNull();
+    expect(scoped.outOfScopeCount).toBe(1);
+  });
+
+  it('a throwing hasRunning degrades to the plain drop, never takes the tree down', () => {
+    const result = grouping({
+      visibleRootIds: ['C'],
+      cwdOf: cwds,
+      scopeDirs: ['/code'],
+      projects: [],
+      hasRunning: () => {
+        throw new Error('boom');
+      },
+    });
+    expect(result.elsewhere).toBeNull();
+    expect(result.outOfScopeCount).toBe(1);
+  });
+});
+
+describe('preferredClaimant: where a single-project action files', () => {
+  const alpha = project('p1', 'Alpha', '/shared');
+  const beta = project('p2', 'Beta', '/shared');
+
+  it('prefers the ACTIVE project among the claimants', () => {
+    const matches = matchProjects([alpha, beta], '/shared/x');
+    // Static tie-break says Alpha; the user is switched into Beta, and Beta
+    // claims the directory, so Beta files it.
+    expect(preferredClaimant(matches, 'p2')?.project.id).toBe('p2');
+  });
+
+  it('never lets an active NON-claimant steal the filing', () => {
+    const matches = matchProjects([alpha, beta], '/shared/x');
+    expect(preferredClaimant(matches, 'p9')?.project.id).toBe('p1');
+  });
+
+  it('is the static winner with no active project (folder mode, nothing switched)', () => {
+    const matches = matchProjects([alpha, beta], '/shared/x');
+    expect(preferredClaimant(matches, null)?.project.id).toBe('p1');
+    expect(preferredClaimant(matches, '')?.project.id).toBe('p1');
+  });
+
+  it('answers null for no claimants at all', () => {
+    expect(preferredClaimant([], 'p1')).toBeNull();
+  });
+});
 
 describe('computeGrouping: worktrees', () => {
   const projects = [project('p1', 'App', '/code/app')];

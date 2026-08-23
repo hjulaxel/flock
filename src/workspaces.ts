@@ -14,56 +14,75 @@
 //               rewrites terminal titles while running, so labels identify
 //               nothing). Sessions merely parked here by an earlier switch
 //               are not part of the layout and are not snapshotted.
-//   2. CLEAR  — hide what does not belong to the target project.
+//   2. CLEAR  — hide what does not belong to the target project. A switch
+//               NEVER parks: the old `parked` state (running, no tab, no
+//               distinct row, no cap, no reaper) is retired at schema v8 —
+//               it is how 84 detached sessions piled up unseen. Foreign
+//               sessions follow the LEVELS (design/levels-and-modes.md):
 //               * A DIRTY editor is never closed: unsaved work outranks tidy.
-//               * A foreign SESSION is PARKED, in one of two tiers:
-//                 DETACH (src/tmux.ts) — the session was launched inside the
-//                 private tmux server, so disposing its terminal kills only
-//                 the tmux client: the tab vanishes instantly and the claude
-//                 process KEEPS RUNNING, invisible. Busy sessions park like
-//                 idle ones — nothing is interrupted, so there is nothing to
-//                 spare. The record gets `parked` plus the tmux name, and the
-//                 switch back re-attaches.
-//                 KILL (the always-available fallback: no tmux, Windows, a
-//                 session launched outside the wrap) — the terminal is closed
-//                 outright, the claude process ends, instantly and silently
-//                 (an API dispose never raises the workbench's "terminate?"
-//                 dialog). The CONVERSATION is the durable thing (its
-//                 transcript); `--resume` brings it back whole, and the
-//                 re-key machinery absorbs the fresh generation id that
-//                 mints.
+//               * A foreign SESSION leaves the screen in one of two ways:
+//                 DETACH under GRACE (src/tmux.ts + src/idleClose.ts) — the
+//                 session was launched inside the private tmux server, so
+//                 disposing its terminal kills only the tmux client: the tab
+//                 vanishes instantly and the claude process keeps running for
+//                 `lineage.session.detachGraceMinutes`, so switching back
+//                 re-attaches instantly. Busy sessions detach like idle ones
+//                 — nothing is interrupted. The record gets `graceUntil` plus
+//                 the tmux name; the tree shows a COUNTDOWN row (the one
+//                 sanctioned detached-running state always renders), and at
+//                 the deadline the lifecycle sweep ends it to level 2.
+//                 CLOSE to level 2 (the always-available fallback: no tmux,
+//                 Windows, a session launched outside the wrap) — the
+//                 terminal is closed outright, the claude process ends,
+//                 instantly and silently (an API dispose never raises the
+//                 workbench's "terminate?" dialog). The record gets `closed`:
+//                 an ordinary archived row, and `--resume` brings the
+//                 conversation back whole (the re-key machinery absorbs the
+//                 fresh generation id that mints).
 //                 The terminal panel is NEVER involved in either tier: an
 //                 earlier design stowed sessions into it, which was slow
 //                 (each move is an active-terminal-addressed command that
 //                 must reveal, confirm and race), lossy (a lost race
 //                 stranded the session in the panel), and visible (the panel
-//                 popped open full of claude tabs). Parking by dispose is
+//                 popped open full of claude tabs). Clearing by dispose is
 //                 instant and leaves nothing to see.
-//               * A BUSY or WAITING foreign session in the KILL tier is never
-//                 parked — a turn in flight and a blocked permission dialog
-//                 both outrank tidiness the same way unsaved work does. Its
-//                 tab stays open, reported, and the next switch sweeps it
-//                 once it is idle (or detaches it, tmux having appeared).
+//               * A BUSY or WAITING foreign session in the CLOSE tier is
+//                 never closed — a turn in flight and a blocked permission
+//                 dialog both outrank tidiness the same way unsaved work
+//                 does. Its tab stays open, reported, and the next switch
+//                 sweeps it once it is idle (or detaches it, tmux having
+//                 appeared).
 //               * A terminal Flock does not own is never touched at all.
 //               * A tab the TARGET's own saved layout names is spared, even
 //                 when it sits outside every one of the project's directories:
 //                 closing it only to reopen it a moment later is churn the
 //                 user watches.
 //   3. RESTORE — reopen the target project's saved file tabs in their editor
-//               groups and bring its parked sessions back as editor tabs, in
-//               parallel: a DETACH-parked one re-attaches to its still-running
-//               process (`new-session -A` under the recorded name — the same
-//               argv resumes it instead if it died while hidden), a
-//               KILL-parked one is `--resume`d (capped). A parked session
-//               still LIVE somewhere with no tmux name is either panel-parked
-//               by an older build of this extension (moved home, one-shot
-//               migration) or hosted by another window (left alone).
+//               groups and bring its put-away sessions back as editor tabs,
+//               in parallel: one still under GRACE re-attaches to its
+//               running process (`new-session -A` under the recorded name —
+//               the same argv resumes it instead if it died while hidden),
+//               an ARCHIVED one named by the layout is `--resume`d (capped).
+//               An archived session still LIVE somewhere with no tmux name
+//               is either panel-parked by an older build of this extension
+//               (moved home, one-shot migration) or hosted by another window
+//               (left alone).
+//   4. REVEAL  — the deep switch's arrival gesture (design/levels-and-modes.md):
+//               the target (sub)project's folder is revealed in the Explorer
+//               and its git context — branch, worktree — lands in the summary
+//               line. Decided by src/deepSwitch.ts, performed by the wiring's
+//               `revealSwitchTarget` dep, and a pure courtesy: a switch without
+//               the dep, or whose reveal fails, is still a complete switch.
 //
-// A project CHAT is a session like any other for the purposes of a
-// switch — it is ours, it is project-scoped, so it is stowed away from other
-// projects and brought back to its own — but it is NOT part of any layout: it
-// is never snapshotted and never auto-resumed. A chat is asked for, not
-// restored.
+// A project CHAT leaves with its project like any other session of ours —
+// but it leaves by the KILL tier, always, wrapped or not. A chat is a
+// conversation ABOUT the project, opened on demand and asked for through Chat
+// History, never restored (src/chatAutoClose.ts: the close is a plain
+// terminal close, never a park; the conversation survives in Chat History).
+// Gracing one instead would mint a running detached chat — and chats have no
+// tree row, so that is a running process with NO surface anywhere, the exact
+// unrepresentable state this branch removes. It is NOT part of any layout:
+// never snapshotted, never auto-resumed.
 //
 // Webview tabs (Simple Browser and friends) are closed but NOT captured: the
 // tab API exposes a webview's viewType, not its URL, so restoring one
@@ -134,9 +153,12 @@ export interface SwitchPlan {
   keep: TabFacts[];
   /** Non-session tabs to close. */
   close: TabFacts[];
-  /** Session ids to PARK: their terminal is closed — the process ends, the
-   *  conversation stays in its transcript — and the record gets `parked`, so
-   *  the switch back resumes them. */
+  /** Session ids to PUT AWAY: their terminal is closed. A tmux-wrapped one
+   *  detaches under the grace deadline (`graceUntil` + countdown row, the
+   *  switch back re-attaches); a bare one's process ends and the record gets
+   *  `closed` — an archived row the switch back `--resume`s when its layout
+   *  names it. The field keeps its historical name: the plan's tests and
+   *  every caller read `park` as "leaves the screen". */
   park: string[];
   /** Foreign sessions that are BUSY (mid-turn) or WAITING (blocked on a
    *  dialog) — kept open and reported, exactly like dirty editors: work in
@@ -245,9 +267,9 @@ export function planSwitch(
  * What of the captured facts is actually THIS project's layout. Two kinds of
  * session are in the window but in no layout:
  *
- *   * one merely PARKED here — stowed into the panel by an earlier switch,
- *     still waiting for its own project. Snapshotting it would make restoring
- *     this project unstow a foreign session into it.
+ *   * one merely PUT AWAY here — a record still under a grace deadline whose
+ *     tab an earlier switch failed to fully clear. Snapshotting it would make
+ *     restoring this project revive a foreign session into it.
  *   * a project CHAT. A chat is a conversation ABOUT the project, not one
  *     of the tabs the project is worked in: it is opened on demand by the chat
  *     verb and closed when the thought is finished. Keeping it out of the
@@ -258,13 +280,13 @@ export function planSwitch(
  */
 export function layoutFacts(
   facts: readonly TabFacts[],
-  isParked: (sessionId: string) => boolean,
+  isStowed: (sessionId: string) => boolean,
 ): TabFacts[] {
   return facts.filter((t) => {
     if (t.kind !== 'session') return true;
     if (t.chat === true) return false;
     if (t.sessionId === undefined) return true;
-    return !isParked(t.sessionId);
+    return !isStowed(t.sessionId);
   });
 }
 
@@ -505,10 +527,19 @@ export interface WorkspaceManagerDeps {
    *  what makes a switch as fast as changing a tab. False when nothing is
    *  bound here or the dispose threw. */
   closeSessionTab(sessionId: string): boolean;
+  /** END a session for real: dispose its terminal AND kill the process —
+   *  through the tree-reaping funnel (killTmuxSessionTree for a wrap, the
+   *  registry's walk-before-dispose reap for a bare launch). The CHAT tier's
+   *  kill: a chat is never graced (it has no tree row to render a countdown
+   *  on), so a switch ends it outright and Chat History is how it is asked
+   *  for again. Optional: an older wiring (and every unit double) falls back
+   *  to `closeSessionTab` — the dispose still happens, the wrap of a wrapped
+   *  chat is then the activation reconcile's to end (unclaimed, no grace). */
+  endSessionTab?(sessionId: string): boolean;
   /** Is the session mid-turn (busy) or blocked on a dialog (waiting)? A
    *  switch never KILLS those — their tabs stay open and are reported. Only
-   *  consulted for the kill tier: a detach interrupts nothing, so a
-   *  tmux-backed session parks busy or not. */
+   *  consulted where the sweep would KILL: the bare tier, and every chat
+   *  (chats are killed, never detached, so a busy chat keeps its tab). */
   isSessionBusy(sessionId: string): boolean;
   /** Detach tier (src/tmux.ts): the tmux session name backing this session's
    *  terminal, when its launch was wrapped in the private server — undefined
@@ -560,6 +591,14 @@ export interface WorkspaceManagerDeps {
   setActive(projectId: string | null): Promise<void>;
   // config
   resumeSessions(): boolean;
+  /** `lineage.session.detachGraceMinutes` — how long a detached (tmux-backed)
+   *  session may keep running after its tab closes, so switching back
+   *  re-attaches instantly. The sweep in extension.ts ends it at the deadline.
+   *  Optional: an older wiring (and every unit double) behaves as the shipped
+   *  default. `0` means no grace — the record is written with an already-
+   *  expired deadline and the next sweep tick (within a minute) kills the
+   *  wrap, tree and all; the switch itself stays process-free either way. */
+  detachGraceMinutes?(): number;
   /** `lineage.soloSession` — the quality-of-life mode: at most one session
    *  tab open at a time. Read by `parkOthers` (which is a no-op without it)
    *  and by the restore step, which then brings back only the session the
@@ -580,6 +619,24 @@ export interface WorkspaceManagerDeps {
    *  is a unit double. A switch never depends on it — the tabs are the
    *  workspace, the Explorer is a view of it. */
   syncExplorer?(project: ProjectRecord | null): Promise<void>;
+  /** THE DEEP SWITCH's arrival gesture (design/levels-and-modes.md, project
+   *  mode): reveal the target (sub)project's folder in the Explorer and read
+   *  its git context — which branch, which worktree. The DECISION is
+   *  src/deepSwitch.ts (pure); this dep is the wiring that owns the worktree
+   *  probe, the lane lookup and the `revealInExplorer` call, none of which the
+   *  manager can reach. `trigger` is the session that caused an auto switch,
+   *  when there was one — its lane stamp is what narrows the reveal from the
+   *  project's root to the lane the user actually moved into.
+   *
+   *  Returns a fragment for the switch summary's comma list ("now on feat/x
+   *  (worktree app-feat-x)"), or '' when there is nothing worth a clause.
+   *  Optional, and a switch works identically without it (older wiring, unit
+   *  doubles): the reveal is a courtesy on top of the transaction, never a
+   *  step of it — which is also why the manager swallows its failures. */
+  revealSwitchTarget?(
+    project: ProjectRecord,
+    opts: { auto: boolean; trigger: string | null },
+  ): Promise<string>;
   /** Stop repainting the sidebar until `resumeViews`. A switch writes a record
    *  per parked and per restored session and closes a batch of tabs; each of
    *  those fires a state change, and rebuilding the forest on every one
@@ -603,14 +660,17 @@ const AUTO_SWITCH_COOLDOWN_MS = 2_000;
  *  claim that it is live. `claude agents --json` needs a tick or two to drop
  *  a process we disposed, and a rapid switch-back inside that window would
  *  otherwise read the stale row as "running in another window" and restore
- *  nothing — stranding the session parked. Comfortably above any roster
- *  refresh interval; comfortably below how long a stale flag could mislead. */
+ *  nothing — stranding the session archived. Comfortably above any roster
+ *  refresh interval; comfortably below how long a stale row could mislead.
+ *  NOT the detach grace (`lineage.session.detachGraceMinutes`): this is
+ *  roster-staleness bookkeeping measured in seconds, that is a lifecycle
+ *  deadline measured in minutes. */
 const KILL_GRACE_MS = 30_000;
 
 /** What one restore did. The verify pass needs no restored-id bookkeeping any
- *  more: parked sessions are resumed (never re-parked — the park set and the
- *  restore set are disjoint by project), and the close set was stripped of
- *  every identity this layout could reopen before anything closed at all
+ *  more: put-away sessions are resumed (never re-swept — the sweep set and
+ *  the restore set are disjoint by project), and the close set was stripped
+ *  of every identity this layout could reopen before anything closed at all
  *  (see `layoutIdentities`). */
 interface RestoreResult {
   files: number;
@@ -663,35 +723,36 @@ export class WorkspaceManager {
 
   /**
    * QUALITY-OF-LIFE (`lineage.soloSession`): one session tab at a time.
-   * Called by the wiring after a session's tab opened or was focused — park
-   * every OTHER session bound in this window, exactly the way a workspace
-   * switch parks a foreign one, so the two paths cannot disagree about what
-   * "parked" means:
+   * Called by the wiring after a session's tab opened or was focused — put
+   * away every OTHER session bound in this window, exactly the way a
+   * workspace switch puts away a foreign one, so the two paths cannot
+   * disagree about what leaving the screen means:
    *
-   *   * DETACH — tmux-wrapped: the tab closes, the process keeps running
-   *     hidden, and clicking the row re-attaches. Busy or not.
-   *   * KILL   — bare launch: the terminal is disposed and `--resume` brings
-   *     the conversation back from the tree. A BUSY or WAITING bare session
-   *     is spared — a turn in flight outranks tidiness here for the same
-   *     reason it does in a switch.
+   *   * DETACH under GRACE — tmux-wrapped: the tab closes, the process keeps
+   *     running until the grace deadline (a countdown row in the tree), and
+   *     clicking the row re-attaches. Busy or not.
+   *   * CLOSE to level 2 — bare launch: the terminal is disposed and
+   *     `--resume` brings the conversation back from the tree. A BUSY or
+   *     WAITING bare session is spared — a turn in flight outranks tidiness
+   *     here for the same reason it does in a switch.
    *
    * Returns null when the mode is off or a switch is mid-flight (the switch
    * owns the tabs right then and this must not fight it); otherwise how many
-   * tabs were parked — zero is the ordinary answer once the invariant holds.
+   * tabs were put away — zero is the ordinary answer once the invariant holds.
    *
    * `keepSessionId` is compared by CHAIN TIP: a re-keyed generation of the
    * kept conversation is the same tab, not a victim. Deliberately NOT gated
    * on `resumeSessions` (that setting is about what a switch restores
-   * unasked); every session parked here has a row in the tree, and the row
+   * unasked); every session put away here has a row in the tree, and the row
    * is how it comes back.
    *
    * A project CHAT is never a victim: it is not a session tab, and "every
-   * session parked here has a row" is exactly what a chat does not have —
-   * parking one because the user focused their pinned session throws away a
-   * conversation they were mid-thought in, with nothing on screen to say
-   * where it went. Its tab tidiness is the auto-close window
+   * session put away here has a row" is exactly what a chat does not have —
+   * sweeping one away because the user focused their pinned session throws
+   * away a conversation they were mid-thought in, with nothing on screen to
+   * say where it went. Its tab tidiness is the auto-close window
    * (`lineage.chat.autoCloseMinutes`), not solo mode. WORKSPACE-SWITCH
-   * parking is deliberately untouched: a foreign chat must still leave the
+   * sweeping is deliberately untouched: a foreign chat must still leave the
    * screen when its project does, or project A's chats sit on project B's
    * screen.
    */
@@ -730,8 +791,8 @@ export class WorkspaceManager {
     const parked = this.parkSweep(victims, writes);
     await Promise.all(writes);
     log(
-      `workspaces: solo — parked ${String(parked.detached + parked.killed)} ` +
-        `session tab(s) (${String(parked.detached)} detached, ` +
+      `workspaces: solo — put away ${String(parked.detached + parked.killed)} ` +
+        `session tab(s) (${String(parked.detached)} detached under grace, ` +
         `${String(parked.killed)} closed), keeping ${shortId(keepTip)}`,
     );
     this.deps.refresh();
@@ -829,9 +890,9 @@ export class WorkspaceManager {
     // Re-walk the host's terminals FIRST. A binding whose terminal died with a
     // missed close event, or a terminal revived by a window reload that
     // nothing has claimed yet, both make the plan below describe a window that
-    // no longer exists — and a park decision taken against a terminal that is
-    // gone marks the record `parked` while the tab it meant to move stays
-    // exactly where it is.
+    // no longer exists — and a put-away decision taken against a terminal that
+    // is gone writes the record a grace deadline while the tab it meant to
+    // move stays exactly where it is.
     try {
       this.deps.refreshBindings();
     } catch (err) {
@@ -847,19 +908,19 @@ export class WorkspaceManager {
     );
 
     // 1. SAVE the layout under the project being left (or re-saved). A
-    // session that is merely PARKED here is part of no layout: snapshotting
-    // it would make restoring THIS project resume a foreign session. Nor is a
-    // session whose cwd lies outside the project — a busy foreign session an
-    // earlier switch had to leave open is in the window, but it is not part
-    // of this project's layout, and the restore path would (rightly) refuse
-    // it anyway.
+    // session that is merely PUT AWAY here — still under a grace deadline —
+    // is part of no layout: snapshotting it would make restoring THIS project
+    // resume a foreign session. Nor is a session whose cwd lies outside the
+    // project — a busy foreign session an earlier switch had to leave open is
+    // in the window, but it is not part of this project's layout, and the
+    // restore path would (rightly) refuse it anyway.
     const currentProject = current !== null ? this.deps.getProject(current) : undefined;
     if (current !== null && currentProject) {
       const currentDirs = projectDirs(currentProject);
       const layout = layoutFacts(facts, (id) => {
         const record =
           this.deps.getRecord(this.safeTip(id)) ?? this.deps.getRecord(id);
-        return record?.parked === true;
+        return record?.graceUntil != null;
       }).filter(
         (t) =>
           t.kind !== 'session' ||
@@ -904,18 +965,23 @@ export class WorkspaceManager {
       facts,
       dirs,
       (id) => this.deps.sessionCwd(id),
-      // "Busy" spares a session from parking because a KILL-tier park aborts
-      // its turn. A tmux-backed session is parked by DETACH — the process
-      // keeps running, hidden — so being busy is no reason to keep its tab.
-      (id) => this.safeIsBusy(id) && this.safeTmuxName(id) === undefined,
+      // "Busy" spares a session from the sweep because the close tier aborts
+      // its turn. A tmux-backed session DETACHES under grace — the process
+      // keeps running, on a visible countdown — so being busy is no reason to
+      // keep its tab. A CHAT is the exception even when wrapped: chats are
+      // KILLED, never graced (parkSweep's chat tier), so a busy chat keeps
+      // its tab exactly like a busy bare session — never interrupted.
+      (id) =>
+        this.safeIsBusy(id) &&
+        (this.safeTmuxName(id) === undefined || this.isChat(id)),
     );
 
-    // Parking hides the tab and the switch back BRINGS IT BACK, so with
-    // resume turned off a park would be a session silently lost (kill tier)
-    // or invisibly running forever (detach tier — re-attach after a death
-    // while hidden is still a resume, which is exactly what the setting
-    // forbids). The honest degradation for both tiers is the busy treatment:
-    // the tab stays open, named in the report.
+    // Putting a session away assumes the switch back BRINGS IT BACK, so with
+    // resume turned off the close tier would be a session silently archived
+    // with no comeback, and the grace tier's re-attach after a death while
+    // hidden is still a resume — which is exactly what the setting forbids.
+    // The honest degradation for both tiers is the busy treatment: the tab
+    // stays open, named in the report.
     const resumeOk = this.safeResumeSessions();
     const parkIds = resumeOk ? plan.park : [];
     const parkSkipped = resumeOk ? 0 : plan.park.length;
@@ -966,12 +1032,13 @@ export class WorkspaceManager {
     // terminal editor tabs cannot invalidate the batch's api objects.
     let closed = await this.closeTabs(closeSet);
 
-    // PARK foreign sessions: dispose each terminal — instant, silent, no
+    // PUT AWAY foreign sessions: dispose each terminal — instant, silent, no
     // confirmation to wait on and no panel to reveal. This is the reason a
     // switch is as fast as changing a tab. A tmux-backed one thereby DETACHES
-    // (the process keeps working, hidden); a bare one dies and will be
-    // resumed. Busy bare sessions were kept by the plan; the record's
-    // `parked` flag (plus the tmux name, for detaches) is what tells the
+    // under a grace deadline (the process keeps working until the sweep's
+    // countdown ends — visible as a countdown row, never a hidden park); a
+    // bare one dies and its record is closed to level 2. The record's
+    // `graceUntil` (plus the tmux name) or `closed` stamp is what tells the
     // switch-back how to bring each one home.
     const park = this.parkSweep(parkIds, writes);
 
@@ -996,6 +1063,17 @@ export class WorkspaceManager {
 
     await this.deps.setActive(projectId);
 
+    // 5. REVEAL where the user has landed — the deep switch's arrival gesture:
+    // the target (sub)project's folder in the Explorer, plus the git context
+    // the summary line below narrates. BEFORE settleFocus on purpose: a
+    // `revealInExplorer` hands focus to the Explorer, and the switch's focus
+    // contract is that settleFocus decides LAST — the reveal orients the file
+    // tree, the settle puts the keyboard where the user asked. Failures are
+    // swallowed (and '' returned): the reveal is a courtesy on top of the
+    // transaction, and a switch that moved every tab correctly must not report
+    // failure because a git probe timed out.
+    const revealNote = await this.revealSwitchTarget(target, auto, trigger);
+
     // ONE focus decision, and it is the LAST thing the switch does.
     await this.settleFocus({ auto, trigger, wasActive, restored, parked: parkIds });
 
@@ -1010,12 +1088,21 @@ export class WorkspaceManager {
     const bits = [
       restored.files > 0 ? `${restored.files} tab${restored.files === 1 ? '' : 's'} restored` : '',
       restored.sessions > 0 ? `${restored.sessions} session${restored.sessions === 1 ? '' : 's'} resumed` : '',
+      // The git context the arrival reveal read ("now on feat/x"), so the one
+      // summary line answers "where am I?" as well as "what moved?".
+      revealNote,
       park.detached > 0
         ? `${park.detached} session${park.detached === 1 ? '' : 's'} hidden ` +
           '(still running — they come back when you switch back)'
         : '',
       park.killed > 0
-        ? `${park.killed} session${park.killed === 1 ? '' : 's'} parked (they resume when you switch back)`
+        ? `${park.killed} session${park.killed === 1 ? '' : 's'} closed (they resume when you switch back)`
+        : '',
+      // Chats do NOT come back on a switch-back — Chat History is how a chat
+      // is asked for — so their count says so instead of borrowing the
+      // sessions' "they resume" promise.
+      park.chats > 0
+        ? `${park.chats} chat${park.chats === 1 ? '' : 's'} closed (reopen from Chat History)`
         : '',
       closed > 0 ? `${closed} foreign tab${closed === 1 ? '' : 's'} closed` : '',
       // The remaining bits say WHY, not just how many: a count of tabs that
@@ -1263,62 +1350,138 @@ export class WorkspaceManager {
   }
 
   /**
-   * Park every session in `ids`: dispose its terminal and mark the record
-   * `parked`, in one synchronous sweep. There is nothing to confirm and
-   * nothing to race — `dispose` is not a workbench command resolved against
-   * some "active" instance, it acts on exactly the Terminal it is called on —
-   * which is why this replaced the old move-to-panel stow: that one was
-   * serial, slow (reveal + confirm + move per terminal) and lost races that
-   * stranded sessions in the panel.
+   * Put away every session in `ids`: dispose its terminal and write the
+   * record its LEVEL, in one synchronous sweep. There is nothing to confirm
+   * and nothing to race — `dispose` is not a workbench command resolved
+   * against some "active" instance, it acts on exactly the Terminal it is
+   * called on — which is why this replaced the old move-to-panel stow: that
+   * one was serial, slow (reveal + confirm + move per terminal) and lost
+   * races that stranded sessions in the panel.
    *
-   * Two tiers, decided per session by whether its terminal is tmux-backed:
-   * a DETACH records the tmux name next to the flag (the process is still
-   * running and the restore must re-attach, never `--resume`) and does NOT
-   * enter `recentlyKilled` — the roster's "live" row for it is the truth,
-   * not a stale echo. A KILL records `tmux: null` so no stale name from an
-   * earlier detach can outlive a park that really killed.
+   * Two tiers, decided per session by whether its terminal is tmux-backed —
+   * and NEITHER is the retired `parked` flag (running, invisible, unbounded):
    *
-   * The flag is written only when the dispose succeeded, so a record can
-   * never claim `parked` while the tab is still on screen.
+   *   DETACH under GRACE — only the tmux client died; the claude process
+   *   keeps running until `graceUntil`, so a switch-back re-attaches
+   *   instantly. The record gets the deadline plus the tmux name, which is
+   *   also what makes the state VISIBLE: the tree draws a countdown row from
+   *   it, and the lifecycle sweep (extension.ts, src/idleClose.ts) ends the
+   *   process at the deadline — killed to level 2 if idle, close-after-turn
+   *   if mid-turn. Grace `0` writes an already-expired deadline instead of
+   *   killing here: the sweep owns every kill (it reaps the process TREE),
+   *   and one extra minute of countdown is cheaper than a second kill path.
+   *   Does NOT enter `recentlyKilled` — the roster's "live" row for a
+   *   detached session is the truth, not a stale echo.
+   *
+   *   CLOSE to level 2 — a bare launch's process died with its terminal. The
+   *   record gets `closed`: an ordinary archived row, resumable from the
+   *   tree, and the switch-back `--resume`s it when the target's layout
+   *   names it. `tmux: null` rides along so no stale name from an earlier
+   *   detach can outlive a close that really killed. Every close runs the
+   *   at-rest resumeLeaf repair — a 1→2 transition mints an archived row,
+   *   and an archived row must be provably resumable the moment it exists.
+   *
+   *   A CHAT always takes a third tier — KILL, wrapped or not: dispose plus
+   *   the tree-reaping process kill (`endSessionTab`). A chat has no tree
+   *   row, so a graced chat would be a running process with NO surface
+   *   anywhere — the exact unrepresentable state the levels exist to remove.
+   *   Killed matches the chat's own philosophy (chatAutoClose.ts): the close
+   *   is a plain terminal close, never a park; the conversation survives in
+   *   Chat History, which is how a chat is asked for.
+   *
+   * The record is written only when the dispose succeeded, so it can never
+   * claim "put away" while the tab is still on screen.
    */
   private parkSweep(
     ids: readonly string[],
     writes: Array<Promise<void>>,
-  ): { detached: number; killed: number; failed: string[] } {
-    const out = { detached: 0, killed: 0, failed: [] as string[] };
+  ): { detached: number; killed: number; chats: number; failed: string[] } {
+    const out = { detached: 0, killed: 0, chats: 0, failed: [] as string[] };
     // Two bindings can share one chain tip (a re-key leaves the terminal
     // bound under its launch-time id while the row wears the new one), and the
-    // tip is what gets the record and what the restore path acts on. Park a
+    // tip is what gets the record and what the restore path acts on. Sweep a
     // tip once.
-    const parkedTips = new Set<string>();
+    const sweptTips = new Set<string>();
+    const graceMs = this.safeGraceMinutes() * 60_000;
     for (const sessionId of ids) {
       const tip = this.safeTip(sessionId);
-      if (parkedTips.has(tip)) continue;
+      if (sweptTips.has(tip)) continue;
       // Read the tmux name BEFORE the dispose: the close drops the binding
       // that carries it.
       const tmuxName = this.safeTmuxName(sessionId) ?? this.safeTmuxName(tip);
+      if (this.isChat(sessionId)) {
+        // The chat tier — see the contract above. The kill goes through the
+        // reaping funnel; `graceUntil: null` rides the write so no stale
+        // deadline from an older build can resurrect the grace this tier
+        // exists to forbid.
+        if (!this.safeEndSession(sessionId)) {
+          log('workspaces: sweep closed nothing for', shortId(sessionId));
+          out.failed.push(sessionId);
+          continue;
+        }
+        sweptTips.add(tip);
+        const killedAt = Date.now();
+        this.recentlyKilled.set(tip, killedAt);
+        this.recentlyKilled.set(sessionId, killedAt);
+        writes.push(
+          this.safeWrite(tip, {
+            closed: new Date(killedAt).toISOString(),
+            graceUntil: null,
+            tmux: null,
+          }),
+        );
+        this.deps.repairResumeLeaf?.(tip);
+        out.chats++;
+        continue;
+      }
       if (!this.safeCloseSession(sessionId)) {
-        log('workspaces: park closed nothing for', shortId(sessionId));
+        log('workspaces: sweep closed nothing for', shortId(sessionId));
         out.failed.push(sessionId);
         continue;
       }
-      parkedTips.add(tip);
+      sweptTips.add(tip);
+      const now = Date.now();
       if (tmuxName !== undefined) {
-        // DETACH: only the tmux client died. Park the ROW — the chain tip —
-        // with the name the restore must attach under.
-        writes.push(this.safeWrite(tip, { parked: true, tmux: tmuxName }));
+        // DETACH: only the tmux client died. The ROW — the chain tip — gets
+        // the deadline and the name the restore must attach under.
+        // `stowedBySwitch` rides along even though the grace itself already
+        // vouches for the restore: if the grace EXPIRES before the switch
+        // back (the sweep kills to level 2), the marker is what still says
+        // "the switch did this, bring it home" — where a user-closed session
+        // has no marker and stays closed.
+        writes.push(
+          this.safeWrite(tip, {
+            graceUntil: new Date(now + graceMs).toISOString(),
+            tmux: tmuxName,
+            stowedBySwitch: true,
+          }),
+        );
         out.detached++;
         continue;
       }
-      const now = Date.now();
       // Both ids: the roster may know the session under either, and the
       // restore path checks both before trusting a stale "live" row.
       this.recentlyKilled.set(tip, now);
       this.recentlyKilled.set(sessionId, now);
-      // Park the ROW — the chain tip — not necessarily the launch-time id the
+      // Close the ROW — the chain tip — not necessarily the launch-time id the
       // terminal was bound under: the tip is what the tree shows and what the
       // restore path acts on.
-      writes.push(this.safeWrite(tip, { parked: true, tmux: null }));
+      writes.push(
+        this.safeWrite(tip, {
+          closed: new Date(now).toISOString(),
+          tmux: null,
+          // The marker that distinguishes THIS close from every user close:
+          // the switch put the session away, so the switch back may bring it
+          // home. restoreSession's level-2 tier resumes ONLY records carrying
+          // it; every user verb clears it.
+          stowedBySwitch: true,
+        }),
+      );
+      // REPAIR AT REST: this write minted an archived row, and every 1→2
+      // transition runs the resumeLeaf repair so the row is provably
+      // resumable now, not only when clicked (the on-click repair remains
+      // the second net for a transcript the dying process wrote seconds ago).
+      this.deps.repairResumeLeaf?.(tip);
       out.killed++;
     }
     return out;
@@ -1364,8 +1527,6 @@ export class WorkspaceManager {
     writes: Array<Promise<void>>,
   ): Promise<RestoreResult> {
     const dirs = projectDirs(project);
-    // A project with no saved layout still has a restore to do: its CHAT is in
-    // no snapshot by design and comes home below on its own terms.
     const saved = this.savedTabs(project.id);
 
     const openNow = new Set<string>();
@@ -1384,9 +1545,9 @@ export class WorkspaceManager {
     }
 
     // A snapshot written by an older build can name sessions that were never
-    // this project's, and a stale `parked` flag can cover a foreign one.
+    // this project's, and a stale grace claim can cover a foreign one.
     // Restoring a project must only ever bring back ITS OWN sessions —
-    // everything else keeps its flag and waits for its own project's switch.
+    // everything else keeps its record and waits for its own project's switch.
     let own = plan.sessions.filter(
       (tab) =>
         tab.sessionId !== undefined &&
@@ -1394,24 +1555,24 @@ export class WorkspaceManager {
     );
     // SOLO MODE (`lineage.soloSession`): the switch brings back ONE session —
     // the one the layout says was in front, or failing that the first — and
-    // the rest stay parked, one row-click away. Restoring the whole set would
-    // open the very wall of tabs the mode exists to prevent, and then park
-    // all but one of them again on the first focus.
+    // the rest stay put away, one row-click away. Restoring the whole set
+    // would open the very wall of tabs the mode exists to prevent, and then
+    // sweep all but one of them away again on the first focus.
     const solo = this.safeSolo();
     if (solo && own.length > 1) {
       const front =
         own.find((tab) => tab.sessionId === plan.activeSessionId) ?? own[0];
       log(
         `workspaces: solo — restoring 1 of ${String(own.length)} saved ` +
-          'session(s); the rest stay parked (reopen them from the tree)',
+          'session(s); the rest stay put away (reopen them from the tree)',
       );
       own = front === undefined ? [] : [front];
     }
     if (own.length > MAX_AUTO_RESUME) {
       log(
         `workspaces: layout names ${own.length} sessions — resuming the ` +
-          `first ${MAX_AUTO_RESUME}, the rest stay parked (reopen them from ` +
-          'the tree)',
+          `first ${MAX_AUTO_RESUME}, the rest stay put away (reopen them ` +
+          'from the tree)',
       );
     }
     // IN PARALLEL, and this matters: each resume awaits its terminal's pid
@@ -1427,34 +1588,17 @@ export class WorkspaceManager {
         ),
       ),
     );
-    let sessions = outcomes.filter((o) => o !== false).length;
+    const sessions = outcomes.filter((o) => o !== false).length;
 
-    // The project's CHATS, the sessions no snapshot names. A chat is parked
-    // away from foreign projects like anything else of ours — that is what
-    // keeps project A's chats off project B's screen — so coming back to A has
-    // to bring them home, or the only way to see one again would be through the
-    // history picker. Parking closes the terminal, so coming home means
-    // resuming: `canLaunch` is true here — but ONLY a parked chat qualifies
-    // (restoreSession's `parked` gate), so a chat the USER closed stays closed
-    // until it is asked for, exactly as before.
-    //
-    // Read off the RECORDS rather than `project.chatSessionId`, which held the
-    // one id a project used to be limited to. The set is "every parked chat
-    // whose cwd is in this project", which is precisely the set `planSwitch`
-    // parked on the way out — park and restore stay each other's inverse, which
-    // is the property this has to have. A chat whose cwd is NOT in the project
-    // (a rootDir edited since it launched) is one this very switch just parked;
-    // restoring it in the same breath would leave a tab flapping and two
-    // contradictory `parked` writes racing to land.
-    for (const record of Object.values(this.safeRecords())) {
-      if (record?.chat !== true || record.parked !== true) continue;
-      if (!insideProject(dirs, this.deps.sessionCwd(record.id))) continue;
-      // Solo mode holds its one-tab budget across BOTH loops: a chat comes
-      // home only when no session tab did, and only one of them.
-      if (solo && sessions > 0) continue;
-      const outcome = await this.restoreSession(record.id, 1, true, writes);
-      if (outcome !== false) sessions++;
-    }
+    // The project's CHATS deliberately do NOT come back. A switch KILLS a
+    // chat on the way out (parkSweep's chat tier — never a grace, because a
+    // chat has no tree row to render a countdown on), so by the time this
+    // restore runs the chat is an ordinary level-2 conversation, and a
+    // level-2 chat is asked for through Chat History, never revived unasked.
+    // The comeback loop that used to live here was grace-gated; with the
+    // grace gone its condition is unsatisfiable by construction, and a chat
+    // record still carrying `graceUntil` from an older build is the lifecycle
+    // sweep's to end, not this restore's to resurrect.
 
     const out: RestoreResult = { files, sessions };
     if (plan.activeUri !== undefined) {
@@ -1491,23 +1635,31 @@ export class WorkspaceManager {
   }
 
   /**
-   * Bring one parked session of the target project home. Only sessions whose
-   * record still says `parked` are touched — a session the user closed for
-   * real since the snapshot must stay closed.
+   * Bring one put-away session of the target project home. Only a session the
+   * SWITCH can vouch for is touched: one still under a GRACE deadline (its
+   * process detached, likely running — only navigation ever writes a grace)
+   * or one ARCHIVED with the `stowedBySwitch` marker (the switch's own kill
+   * tier, or a grace the sweep since expired). The layout naming a session is
+   * NOT enough for the archived tier: the layout is a snapshot, and a user
+   * Close / Close Now / Delete performed AFTER it was saved is exactly the
+   * case the marker exists for — every user verb clears it, so "user closed
+   * stays closed" holds on the record itself, whatever the layout remembers.
+   * (Chats are in no layout — a switch KILLS them, and Chat History brings
+   * them back.)
    *
    * Three ways home, decided by the record:
    *
-   *   * ATTACH (detach tier) — the record carries a tmux name: the process
-   *     is (very likely) still running, hidden, and the ordinary launch verb
-   *     re-attaches to it, because a wrapped launch is `new-session -A` under
-   *     that recorded name. If it died while hidden, the SAME argv falls
-   *     through to its `--resume` instead — one command, both outcomes. The
-   *     roster's "live" is true for these, so it must not gate the restore,
-   *     and the resume cap does not apply: an attach spawns a tmux client,
-   *     not a claude process.
-   *   * RESUME (kill tier) — no tmux name: parking closed the terminal, so
-   *     the session is dead by construction and `--resume` (chain-tip
-   *     routed) brings the conversation back as a fresh editor tab.
+   *   * ATTACH (grace) — the record carries a tmux name under `graceUntil`:
+   *     the process is (very likely) still running, counting down, and the
+   *     ordinary launch verb re-attaches to it, because a wrapped launch is
+   *     `new-session -A` under that recorded name. If it died while hidden,
+   *     the SAME argv falls through to its `--resume` instead — one command,
+   *     both outcomes. The roster's "live" is true for these, so it must not
+   *     gate the restore, and the resume cap does not apply: an attach spawns
+   *     a tmux client, not a claude process.
+   *   * RESUME (level 2) — no tmux name: the session is dead by construction
+   *     and `--resume` (chain-tip routed) brings the conversation back as a
+   *     fresh editor tab.
    *   * UNSTOW — legacy migration: an older build parked sessions by moving
    *     their terminal into the terminal panel, where a still-live one may
    *     sit — that one is moved home rather than duplicated.
@@ -1521,25 +1673,57 @@ export class WorkspaceManager {
     try {
       const tip = this.safeTip(sessionId);
       const record = this.deps.getRecord(tip) ?? this.deps.getRecord(sessionId);
-      // The one place the persisted flag IS trusted, and it rests on an
-      // invariant this switch maintains by construction: park and restore act
-      // on disjoint session sets — a session is parked because it is foreign
-      // to the target, and restored because it belongs to it. So a `parked`
-      // read here can never be one this switch just wrote. A session the user
-      // closed for real since the snapshot has no flag and stays closed.
-      if (record?.parked !== true) return false;
+      // Rests on an invariant this switch maintains by construction: put-away
+      // and restore act on disjoint session sets — a session leaves the
+      // screen because it is foreign to the target, and comes home because it
+      // belongs to it. So a grace deadline read here can never be one this
+      // switch just wrote. A record on neither level-2 nor grace is live
+      // (hosted here or elsewhere) and has nothing to restore.
+      //
+      // The archived tier additionally demands the switch's own marker: a
+      // bare `closed` could just as well be the user's Close (from the tree,
+      // while this project was away) or the idle timer's — see the contract
+      // above. Grace needs no marker: only navigation detaches (a user verb
+      // on a grace row kills AND stamps closed), so a live deadline is the
+      // switch's own claim, and re-attaching costs no new process anyway.
+      const graced = record?.graceUntil != null;
+      const archived =
+        record?.closed != null && record?.stowedBySwitch === true;
+      if (record === undefined || (!graced && !archived)) return false;
 
-      // Written at park time, next to the flag it rides with. Its presence IS
-      // the tier decision — see parkSweep.
+      // Written by parkSweep next to the deadline it rides with. Its presence
+      // IS the tier decision. Only trusted under grace: a stale name on an
+      // archived record is a pointer at a session the sweep already killed.
       const tmuxName =
-        typeof record.tmux === 'string' && record.tmux !== ''
+        graced && typeof record.tmux === 'string' && record.tmux !== ''
           ? record.tmux
           : undefined;
 
-      const clearParked = (): void => {
-        writes.push(this.safeWrite(tip, { parked: false, tmux: null }));
+      // `closeAfterTurn` clears with the claim it rode in on: the mark is
+      // minted when a grace deadline lands on a busy session, and a mark that
+      // survived the re-attach would close the very tab this restore just
+      // brought home on its first idle tick — navigation mutating lifecycle.
+      // `stowedBySwitch` clears with them: the restore consumed the claim it
+      // carried, and a marker that outlived its restore would let a LATER
+      // user close be resurrected by the switch after next.
+      const clearStow = (): void => {
+        writes.push(
+          this.safeWrite(tip, {
+            graceUntil: null,
+            tmux: null,
+            closeAfterTurn: false,
+            stowedBySwitch: false,
+          }),
+        );
         if (tip !== sessionId) {
-          writes.push(this.safeWrite(sessionId, { parked: false, tmux: null }));
+          writes.push(
+            this.safeWrite(sessionId, {
+              graceUntil: null,
+              tmux: null,
+              closeAfterTurn: false,
+              stowedBySwitch: false,
+            }),
+          );
         }
       };
 
@@ -1559,7 +1743,7 @@ export class WorkspaceManager {
           // it is.
           const back = await this.queuedUnstow(tip);
           if (!back) return false;
-          clearParked();
+          clearStow();
           return 'unstowed';
         }
 
@@ -1574,10 +1758,11 @@ export class WorkspaceManager {
       //
       // The ordinary way into this state is the click that caused the switch:
       // `focusSession` on a session of another project resumes it, and
-      // `resumeFlow` clears `parked` only once the launch resolves, so the read
-      // above can still say "parked" about a tab that is already on screen.
-      // Also covers a park whose dispose failed. The flag is cleared either
-      // way — the record must stop claiming a visible tab is hidden.
+      // `resumeFlow` clears the grace claim only once the launch resolves, so
+      // the read above can still say "put away" about a tab that is already
+      // on screen. Also covers a sweep whose dispose failed. The claim is
+      // cleared either way — the record must stop saying a visible tab is
+      // hidden.
       //
       // Below the legacy unstow deliberately: that tier NEEDS its terminal
       // bound, because it moves the tab home instead of making one.
@@ -1586,7 +1771,7 @@ export class WorkspaceManager {
           `workspaces: ${shortId(sessionId)} already has a terminal here — ` +
             'nothing to restore',
         );
-        clearParked();
+        clearStow();
         return false;
       }
 
@@ -1627,7 +1812,7 @@ export class WorkspaceManager {
         ...(tmuxName !== undefined ? { tmuxName } : {}),
       });
       if (!binding) return false;
-      clearParked();
+      clearStow();
       writes.push(this.safeWrite(tip, { closed: null }));
       return tmuxName !== undefined ? 'attached' : 'resumed';
     } catch (err) {
@@ -1732,6 +1917,22 @@ export class WorkspaceManager {
     }
   }
 
+  /** The chat tier's kill: dispose AND end the process through the reaping
+   *  funnel. Falls back to the plain dispose when the wiring predates the
+   *  dep — degraded (a wrapped chat's process is then the reconcile's to
+   *  end), never a refusal, because the tab must still leave with its
+   *  project either way. */
+  private safeEndSession(sessionId: string): boolean {
+    try {
+      const end = this.deps.endSessionTab;
+      if (typeof end === 'function') return end.call(this.deps, sessionId);
+      return this.deps.closeSessionTab(sessionId);
+    } catch (err) {
+      logError('workspaces.endSession', err);
+      return false;
+    }
+  }
+
   private safeIsBusy(sessionId: string): boolean {
     try {
       return this.deps.isSessionBusy(sessionId);
@@ -1765,6 +1966,19 @@ export class WorkspaceManager {
     }
   }
 
+  /** `lineage.session.detachGraceMinutes`. Absent dep or a throw is the
+   *  shipped default (10) — the grace is what keeps a switch-back instant,
+   *  and a wiring gap must not silently downgrade every detach to a kill. */
+  private safeGraceMinutes(): number {
+    try {
+      const v = this.deps.detachGraceMinutes?.();
+      return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 10;
+    } catch (err) {
+      logError('workspaces.detachGraceMinutes', err);
+      return 10;
+    }
+  }
+
   /** `lineage.soloSession`. Absent dep or a throw is OFF — the mode parks
    *  tabs, and a mode that parks tabs must never be inferred. */
   private safeSolo(): boolean {
@@ -1787,6 +2001,25 @@ export class WorkspaceManager {
       await fn.call(this.deps, project);
     } catch (err) {
       logError('workspaces.syncExplorer', err);
+    }
+  }
+
+  /** The deep switch's arrival reveal, on syncExplorer's terms exactly: absent
+   *  dep and thrown error both degrade to "no reveal, no note" — the reveal is
+   *  a courtesy on top of the transaction, never a step of it. */
+  private async revealSwitchTarget(
+    project: ProjectRecord,
+    auto: boolean,
+    trigger: string | null,
+  ): Promise<string> {
+    const fn = this.deps.revealSwitchTarget;
+    if (!fn) return '';
+    try {
+      const note = await fn.call(this.deps, project, { auto, trigger });
+      return typeof note === 'string' ? note : '';
+    } catch (err) {
+      logError('workspaces.revealSwitchTarget', err);
+      return '';
     }
   }
 
@@ -1974,18 +2207,6 @@ export class WorkspaceManager {
     } catch (err) {
       logError('workspaces.tipOf', err);
       return sessionId;
-    }
-  }
-
-  /** Every editorial record, or none. A switch that cannot read the store
-   *  restores the layout it does know about rather than throwing halfway
-   *  through — the same rule every other `safe*` wrapper in here follows. */
-  private safeRecords(): Record<string, EditorialRecord> {
-    try {
-      return this.deps.allRecords() ?? {};
-    } catch (err) {
-      logError('workspaces.allRecords', err);
-      return {};
     }
   }
 

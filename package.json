@@ -274,6 +274,16 @@
         "category": "Flock"
       },
       {
+        "command": "lineage.closeSessionNow",
+        "title": "Close Now",
+        "category": "Flock"
+      },
+      {
+        "command": "lineage.togglePinSession",
+        "title": "Keep Awake (Toggle)",
+        "category": "Flock"
+      },
+      {
         "command": "lineage.wrapSession",
         "title": "Wrap Up Session",
         "category": "Flock"
@@ -582,7 +592,7 @@
       "view/title": [
         {
           "command": "lineage.switchWorkspace",
-          "when": "view == lineageProject",
+          "when": "view == lineageProject && lineage.mode == 'project'",
           "group": "navigation@0"
         },
         {
@@ -798,6 +808,16 @@
           "group": "2_close@2"
         },
         {
+          "command": "lineage.closeSessionNow",
+          "when": "view == lineageSessions && viewItem =~ /;grace;/",
+          "group": "2_close@1"
+        },
+        {
+          "command": "lineage.togglePinSession",
+          "when": "view == lineageSessions && (viewItem =~ /;hosted;/ || viewItem =~ /;grace;/)",
+          "group": "2_close@0"
+        },
+        {
           "command": "lineage.copySessionId",
           "when": "view == lineageSessions && viewItem =~ /;session;/",
           "group": "3_util@1"
@@ -984,6 +1004,10 @@
         }
       ],
       "commandPalette": [
+        {
+          "command": "lineage.switchWorkspace",
+          "when": "lineage.mode == 'project'"
+        },
         {
           "command": "lineage.focusSession",
           "when": "false"
@@ -1196,6 +1220,16 @@
           "command": "lineage.closeWithSummary",
           "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;hosted;/",
           "group": "2_close@2"
+        },
+        {
+          "command": "lineage.closeSessionNow",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;grace;/",
+          "group": "2_close@1"
+        },
+        {
+          "command": "lineage.togglePinSession",
+          "when": "webviewId == 'lineageSessionsInline' && (viewItem =~ /;hosted;/ || viewItem =~ /;grace;/)",
+          "group": "2_close@0"
         },
         {
           "command": "lineage.copySessionId",
@@ -1506,6 +1540,18 @@
           "minimum": 0,
           "markdownDescription": "A project chat's tab closes on its own after this many minutes without use. The conversation is kept — **Chat History…** on the project's row reopens it — so this tidies the tab, never the words. A chat that is busy or waiting is never touched, and neither is the tab you are looking at. `0` turns it off."
         },
+        "lineage.session.closeAfterMinutes": {
+          "type": "number",
+          "default": 30,
+          "minimum": 0,
+          "markdownDescription": "Any session's tab closes on its own after this many minutes without real activity (measured on the transcript, not file timestamps). The conversation is kept — its row stays in the tree as an archived session, and one click resumes it — so this tidies the process, never the words. A busy or waiting session is marked *close after this turn* instead and closes once idle; the tab you are looking at and any session pinned with **Keep Awake** are never touched. `0` turns it off."
+        },
+        "lineage.session.detachGraceMinutes": {
+          "type": "number",
+          "default": 10,
+          "minimum": 0,
+          "markdownDescription": "When a workspace switch (or solo mode) closes a tmux-wrapped session's tab, the process keeps running detached for this many minutes so switching back reattaches instantly — shown in the tree as a countdown row. At the deadline an idle session is closed to an archived row; a busy one closes after its turn ends. At most 8 sessions run detached at once; overflow closes the oldest idle one first. `0` disables the grace — the tab still closes instantly, and the process is ended by the next sweep within a minute."
+        },
         "lineage.launch.mode": {
           "type": "string",
           "default": "flock",
@@ -1586,10 +1632,23 @@
           "default": false,
           "description": "Also show a toast with a Focus button when a session finishes a turn while you are not looking at it. Off by default — with many parallel sessions the bell and the dots carry the same information without the interruptions."
         },
+        "lineage.mode": {
+          "type": "string",
+          "enum": [
+            "folder",
+            "project"
+          ],
+          "enumDescriptions": [
+            "Native VS Code: a window is the folder you opened. The sidebar shows the sessions under that folder, grouped by the projects that claim them; other projects' work routes to their own windows. No in-window switching — the switch verbs and the workspace status-bar item are hidden, and file tabs are never touched.",
+            "One window spans many projects and switches between them transactionally: switching saves the layout you leave and restores the target's. The pre-0.2 behaviour, still additionally gated by lineage.workspaces.enabled."
+          ],
+          "default": "folder",
+          "markdownDescription": "What a window is. `folder` (the default): the window is the folder you opened — the tree scopes itself to sessions under it, and working on another project means going to that project's own window. `project`: one window switches between project workspaces via the status-bar switcher. Navigation never changes a session's lifecycle in either mode: closed tabs get a grace countdown in the tree, then archive to a click-to-resume row."
+        },
         "lineage.workspaces.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Show the workspace switcher in the status bar. A workspace scopes this window to one project: switching saves the current tab layout under the project you leave, hides what does not belong to the target, and restores the target's saved layout. Foreign sessions are parked: with tmux installed (see `lineage.tmux`) their tab hides while the conversation keeps running — busy ones included — and reattaches when you switch back; without tmux the terminal closes and the conversation resumes from its transcript, in which case busy sessions are never closed. Unsaved editors and terminals Flock does not own are never touched. The terminal panel is never used. KNOWN ISSUE in 0.1.2: a switch decides membership by containment while the sidebar decides it by longest match, so if one project's directory contains another's the two disagree and both projects' saved layouts can name the same session. If your projects nest, leave workspace mode or turn this off."
+          "description": "Show the workspace switcher in the status bar (project mode only — in folder mode, `lineage.mode` hides it whatever this says). A workspace scopes this window to one project: switching saves the current tab layout under the project you leave, hides what does not belong to the target, and restores the target's saved layout. Foreign session tabs close under a detach grace: with tmux installed (see `lineage.tmux`) the conversation keeps running detached for `lineage.session.detachGraceMinutes` — a countdown row in the tree, click to reattach — and archives to a click-to-resume row after that; without tmux the terminal closes and the conversation resumes from its transcript, in which case busy sessions are never closed. Unsaved editors and terminals Flock does not own are never touched. The terminal panel is never used."
         },
         "lineage.workspaces.resumeSessions": {
           "type": "boolean",

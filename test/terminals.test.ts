@@ -777,6 +777,354 @@ describe('closing a wrapped session: user close KILLS, parking detaches', () => 
         .onDidCloseTerminal;
     }
   });
+
+  it('the exit event carries the tmux name — the shutdown stamp reads it', () => {
+    // On reason 'shutdown' the wiring stamps `graceUntil` + the wrap name on
+    // the record (a window close must never leave a running wrap
+    // deadline-less), and by the time subscribers run the binding is already
+    // unbound — the event is the only place the name can still travel.
+    let closeHandler: ((t: unknown) => void) | undefined;
+    (
+      vscodeMock.window as {
+        onDidCloseTerminal?: (h: (t: unknown) => void) => { dispose(): void };
+      }
+    ).onDidCloseTerminal = (h) => {
+      closeHandler = h;
+      return { dispose() {} };
+    };
+    const registry = new TerminalRegistry({ claudeBinary: () => null });
+    const seen: Array<{ reason: string; tmuxName?: string }> = [];
+    registry.onDidExit((_id, _code, reason, tmuxName) => {
+      seen.push({ reason, ...(tmuxName !== undefined ? { tmuxName } : {}) });
+    });
+    const terminal = { exitStatus: { code: 0, reason: 1 } }; // Shutdown
+    seed(registry, terminal, TMUX_NAME);
+
+    closeHandler?.(terminal);
+
+    expect(seen).toEqual([{ reason: 'shutdown', tmuxName: TMUX_NAME }]);
+    registry.dispose();
+    delete (vscodeMock.window as { onDidCloseTerminal?: unknown })
+      .onDidCloseTerminal;
+  });
+});
+
+// ---------------------------------------------- bare-tree reaping (procs.ts)
+//
+// A bare terminal's pty root IS claude, and disposing it orphans the ~8 MCP
+// children to PID 1 — the incident, minus the tmux server. The registry now
+// walks the tree BEFORE the dispose and reaps after; the user's own tab X
+// (post-mortem: the pty died before the event fired) reaps from the last
+// snapshot instead. Both ladders act on explicitly-walked pids only.
+
+describe('closing a bare terminal reaps its process tree', () => {
+  const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
+
+  function seedBare(
+    registry: TerminalRegistry,
+    terminal: unknown,
+    over: { pid?: number; bareKids?: number[] } = {},
+  ): void {
+    (
+      registry as unknown as {
+        bound: Map<string, { terminal: unknown; binding: unknown; bareKids?: number[] }>;
+      }
+    ).bound.set(CHILD, {
+      terminal,
+      binding: {
+        nodeId: CHILD,
+        sessionId: CHILD,
+        terminalName: 'claude',
+        createdAt: 1,
+        ...(over.pid !== undefined ? { pid: over.pid } : {}),
+      },
+      ...(over.bareKids !== undefined ? { bareKids: over.bareKids } : {}),
+    });
+  }
+
+  it('closeTerminal walks the descendants BEFORE the dispose, then reaps root + kids', async () => {
+    // The order is the whole mechanism: the instant the root dies its
+    // children re-parent to PID 1 and a ppid walk can never find them again.
+    const order: string[] = [];
+    const reaped: number[][] = [];
+    const registry = new TerminalRegistry({
+      claudeBinary: () => null,
+      listDescendants: async (root) => {
+        order.push(`walk:${root}`);
+        return [43, 44];
+      },
+      reapSurvivors: async (pids) => {
+        order.push('reap');
+        reaped.push([...pids]);
+        return { exited: pids.length, termed: 0, killed: 0 };
+      },
+    });
+    seedBare(registry, { dispose: () => order.push('dispose') }, { pid: 42 });
+
+    expect(registry.closeTerminal(CHILD, { killTmux: true })).toBe(true);
+    await settle();
+
+    expect(order).toEqual(['walk:42', 'dispose', 'reap']);
+    // The root rides along — a claude that ignores its pty's death would
+    // otherwise survive as the biggest orphan of all.
+    expect(reaped).toEqual([[42, 43, 44]]);
+    registry.dispose();
+  });
+
+  it('a dispose that throws reaps NOTHING — the tab is still on screen', async () => {
+    const reaped: number[][] = [];
+    const registry = new TerminalRegistry({
+      claudeBinary: () => null,
+      listDescendants: async () => [43],
+      reapSurvivors: async (pids) => {
+        reaped.push([...pids]);
+        return { exited: 0, termed: 0, killed: 0 };
+      },
+    });
+    seedBare(
+      registry,
+      {
+        dispose: () => {
+          throw new Error('host refused');
+        },
+      },
+      { pid: 42 },
+    );
+
+    registry.closeTerminal(CHILD);
+    await settle();
+
+    expect(reaped).toEqual([]);
+    registry.dispose();
+  });
+
+  it('a bare binding with NO pid degrades to the plain dispose', async () => {
+    // No root means no honest targets: the reap never guesses.
+    const order: string[] = [];
+    const registry = new TerminalRegistry({
+      claudeBinary: () => null,
+      listDescendants: async (root) => {
+        order.push(`walk:${root}`);
+        return [];
+      },
+      reapSurvivors: async () => {
+        order.push('reap');
+        return { exited: 0, termed: 0, killed: 0 };
+      },
+    });
+    seedBare(registry, { dispose: () => order.push('dispose') });
+
+    expect(registry.closeTerminal(CHILD)).toBe(true);
+    await settle();
+
+    expect(order).toEqual(['dispose']);
+    registry.dispose();
+  });
+
+  it("the user's tab X reaps from the SNAPSHOT — the pty is already dead", async () => {
+    // Reason User=3 arrives post-mortem: the children re-parented the moment
+    // claude died, so the fresh walk is impossible and the last snapshot
+    // (taken at pid resolution, refreshed each sweep tick) is the honest
+    // target list. Extension=4 is our own closeTerminal, which already
+    // walked and reaped — a second ladder would be noise.
+    for (const [reason, expectReap] of [
+      [3, true],
+      [4, false],
+    ] as const) {
+      const reaped: number[][] = [];
+      let closeHandler: ((t: unknown) => void) | undefined;
+      (
+        vscodeMock.window as {
+          onDidCloseTerminal?: (h: (t: unknown) => void) => { dispose(): void };
+        }
+      ).onDidCloseTerminal = (h) => {
+        closeHandler = h;
+        return { dispose() {} };
+      };
+      const registry = new TerminalRegistry({
+        claudeBinary: () => null,
+        reapSurvivors: async (pids) => {
+          reaped.push([...pids]);
+          return { exited: pids.length, termed: 0, killed: 0 };
+        },
+      });
+      const terminal = { exitStatus: { code: 0, reason } };
+      seedBare(registry, terminal, { pid: 42, bareKids: [43, 44] });
+
+      closeHandler?.(terminal);
+      await settle();
+
+      expect(reaped, `reason ${reason}`).toEqual(
+        expectReap ? [[42, 43, 44]] : [],
+      );
+      registry.dispose();
+      delete (vscodeMock.window as { onDidCloseTerminal?: unknown })
+        .onDidCloseTerminal;
+    }
+  });
+
+  it('WINDOW CLOSE reaps the snapshot KIDS once the root is provably dead', async () => {
+    // Reason Shutdown=1 is both a window close AND a window reload; only a
+    // close kills the pty root. Root dead = close: the kids re-parented to
+    // PID 1 the moment it died and are ours to end. The root itself is never
+    // signalled — its death is the premise that authorizes the reap.
+    const reaped: number[][] = [];
+    const probed: number[] = [];
+    let closeHandler: ((t: unknown) => void) | undefined;
+    (
+      vscodeMock.window as {
+        onDidCloseTerminal?: (h: (t: unknown) => void) => { dispose(): void };
+      }
+    ).onDidCloseTerminal = (h) => {
+      closeHandler = h;
+      return { dispose() {} };
+    };
+    const registry = new TerminalRegistry({
+      claudeBinary: () => null,
+      isPidAlive: (pid) => {
+        probed.push(pid);
+        return false; // the pty kill already landed
+      },
+      reapSurvivors: async (pids) => {
+        reaped.push([...pids]);
+        return { exited: pids.length, termed: 0, killed: 0 };
+      },
+    });
+    const terminal = { exitStatus: { code: undefined, reason: 1 } };
+    seedBare(registry, terminal, { pid: 42, bareKids: [43, 44] });
+
+    closeHandler?.(terminal);
+    await settle();
+
+    expect(probed).toEqual([42]);
+    expect(reaped).toEqual([[43, 44]]);
+    registry.dispose();
+    delete (vscodeMock.window as { onDidCloseTerminal?: unknown })
+      .onDidCloseTerminal;
+  });
+
+  it('a window RELOAD (root still alive after the re-probe) reaps NOTHING — revival in progress', async () => {
+    // The same reason Shutdown with the pty kept for revival: the whole tree
+    // is a live session the next extension-host incarnation will re-bind.
+    // The first probe finds the root alive, the delayed re-probe confirms it,
+    // and the kids are left exactly where they are.
+    const reaped: number[][] = [];
+    let closeHandler: ((t: unknown) => void) | undefined;
+    (
+      vscodeMock.window as {
+        onDidCloseTerminal?: (h: (t: unknown) => void) => { dispose(): void };
+      }
+    ).onDidCloseTerminal = (h) => {
+      closeHandler = h;
+      return { dispose() {} };
+    };
+    const registry = new TerminalRegistry({
+      claudeBinary: () => null,
+      isPidAlive: () => true,
+      reapSurvivors: async (pids) => {
+        reaped.push([...pids]);
+        return { exited: 0, termed: 0, killed: 0 };
+      },
+    });
+    const terminal = { exitStatus: { code: undefined, reason: 1 } };
+    seedBare(registry, terminal, { pid: 42, bareKids: [43, 44] });
+
+    closeHandler?.(terminal);
+    // Past the re-probe delay (SHUTDOWN_REAP_PROBE_MS), so a wrong decision
+    // would have fired by now.
+    await new Promise((r) => setTimeout(r, 550));
+
+    expect(reaped).toEqual([]);
+    registry.dispose();
+    delete (vscodeMock.window as { onDidCloseTerminal?: unknown })
+      .onDidCloseTerminal;
+  });
+
+  it('a root that dies a beat AFTER the close event is caught by the re-probe', async () => {
+    // The true-close race: VS Code's SIGHUP may land after the close event
+    // fires. First probe alive, one beat, second probe dead — reap.
+    const reaped: number[][] = [];
+    let alive = true;
+    let closeHandler: ((t: unknown) => void) | undefined;
+    (
+      vscodeMock.window as {
+        onDidCloseTerminal?: (h: (t: unknown) => void) => { dispose(): void };
+      }
+    ).onDidCloseTerminal = (h) => {
+      closeHandler = h;
+      return { dispose() {} };
+    };
+    const registry = new TerminalRegistry({
+      claudeBinary: () => null,
+      isPidAlive: () => alive,
+      reapSurvivors: async (pids) => {
+        reaped.push([...pids]);
+        return { exited: pids.length, termed: 0, killed: 0 };
+      },
+    });
+    const terminal = { exitStatus: { code: undefined, reason: 1 } };
+    seedBare(registry, terminal, { pid: 42, bareKids: [43] });
+
+    closeHandler?.(terminal);
+    alive = false; // the pty kill lands during the probe delay
+    await new Promise((r) => setTimeout(r, 550));
+
+    expect(reaped).toEqual([[43]]);
+    registry.dispose();
+    delete (vscodeMock.window as { onDidCloseTerminal?: unknown })
+      .onDidCloseTerminal;
+  });
+
+  it('bareSnapshotPids is the persisted ledger: roots + kids, deduped, bare only', () => {
+    const registry = new TerminalRegistry({ claudeBinary: () => null });
+    seedBare(registry, {}, { pid: 42, bareKids: [43, 44, 42] });
+    (
+      registry as unknown as {
+        bound: Map<string, { terminal: unknown; binding: unknown }>;
+      }
+    ).bound.set('wrapped', {
+      terminal: {},
+      binding: {
+        nodeId: 'wrapped',
+        sessionId: 'wrapped',
+        terminalName: 'claude',
+        createdAt: 1,
+        pid: 99,
+        tmuxName: 'lineage-x', // wrapped: the tmux reconcile owns this one
+      },
+    });
+    expect(registry.bareSnapshotPids().sort()).toEqual([42, 43, 44]);
+    registry.dispose();
+  });
+
+  it('refreshBareDescendants retakes the snapshot the tab-X reap acts on', async () => {
+    const walks: number[] = [];
+    let kids = [43];
+    const registry = new TerminalRegistry({
+      claudeBinary: () => null,
+      listDescendants: async (root) => {
+        walks.push(root);
+        return kids;
+      },
+      reapSurvivors: async () => ({ exited: 0, termed: 0, killed: 0 }),
+    });
+    seedBare(registry, {}, { pid: 42 });
+
+    registry.refreshBareDescendants();
+    await settle();
+    kids = [43, 45]; // a new MCP child spawned since
+    registry.refreshBareDescendants();
+    await settle();
+
+    expect(walks).toEqual([42, 42]);
+    const entry = (
+      registry as unknown as {
+        bound: Map<string, { bareKids?: number[] }>;
+      }
+    ).bound.get(CHILD);
+    expect(entry?.bareKids).toEqual([43, 45]);
+    registry.dispose();
+  });
 });
 
 describe('reassociateFromTmux (app-restart path for wrapped terminals)', () => {

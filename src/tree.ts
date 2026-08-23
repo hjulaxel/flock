@@ -7,12 +7,12 @@
 
 import * as vscode from 'vscode';
 import {
-  ATTENTION_BADGE_ENABLED,
   BRAND_COLOR_ID,
   COMMANDS,
   DEFAULT_PROVIDER,
   PROVIDERS,
   PROVIDER_MEDIA_DIR,
+  RUNNING_BADGE_ENABLED,
   TREE_DND_MIME,
   VIEW_ID,
   contextValueOf,
@@ -40,6 +40,7 @@ import type {
 import { log, logError } from './log';
 import { projectUri, sessionUri } from './decorations';
 import {
+  ELSEWHERE_GROUP_KEY,
   branchIndexForCwd,
   computeGrouping,
   projectBranchList,
@@ -57,6 +58,8 @@ const EMPTY_GROUPING: GroupingResult = {
   folders: [],
   loose: [],
   hiddenCount: 0,
+  outOfScopeCount: 0,
+  elsewhere: null,
 };
 
 const EMPTY_FOREST: SessionForest = {
@@ -82,14 +85,18 @@ import {
   branchTokens,
   formatAge,
   formatBranchSync,
+  formatGraceCountdown,
   formatPullRequestChip,
   formatTokens,
   projectContextValue,
   pullRequestLines,
+  runningCountOf,
   sessionContextValue,
+  sessionSnippet,
   statusDescriptor,
   statusTone,
   subprojectRowKey,
+  subtreeHasRunning,
 } from './viewmodel';
 
 export {
@@ -162,6 +169,11 @@ function groupingSignature(
    *  project, so without it the cached grouping would keep drawing the old rows
    *  until some unrelated roster tick happened to change the forest. */
   lanes: readonly SubprojectRecord[] = [],
+  /** Folder mode's scope (GroupingInput.scopeDirs), pre-joined by the caller.
+   *  In the signature because flipping `lineage.mode` changes it without
+   *  changing the forest, and the cached grouping would otherwise keep the
+   *  other mode's rows until an unrelated roster tick. */
+  scopeDirs = '',
 ): string {
   const p = projects
     .map(
@@ -184,7 +196,7 @@ function groupingSignature(
         `${x.id}\u0000${x.projectId}\u0000${x.name}\u0000${x.dir}`,
     )
     .join('\u0002');
-  return `${groupByFolder ? '1' : '0'}${onlyProjectSessions ? '1' : '0'}${branchRows ? '1' : '0'}|${p}|${hiddenFolders.join('\u0002')}|${l}`;
+  return `${groupByFolder ? '1' : '0'}${onlyProjectSessions ? '1' : '0'}${branchRows ? '1' : '0'}|${p}|${hiddenFolders.join('\u0002')}|${l}|${scopeDirs}`;
 }
 
 // ---------------------------------------------------------------- provider
@@ -319,6 +331,12 @@ export class LineageTreeProvider
     const branchRows =
       this.safe('branchRows', () => this.deps.branchRows?.(), false) === true;
     const lanes = this.safe('subprojects', () => this.deps.subprojects?.(), []);
+    const scopeDirs =
+      this.safe<readonly string[] | undefined>(
+        'scopeDirs',
+        () => this.deps.scopeDirs?.(),
+        undefined,
+      ) ?? [];
 
     const signature = groupingSignature(
       projects,
@@ -331,6 +349,7 @@ export class LineageTreeProvider
       // to change the forest.
       branchRows,
       lanes,
+      scopeDirs.join('\u0002'),
     );
     if (
       this.groupCacheForest === forest &&
@@ -347,6 +366,16 @@ export class LineageTreeProvider
         hiddenFolders,
         groupByFolder,
         onlyProjectSessions,
+        // Folder mode's fence — every real folder this window opened, or []
+        // when project mode (or an empty window) scopes nothing. A grouping
+        // input rather than a forest one so the counts and both view styles
+        // read the same fence.
+        scopeDirs,
+        // The invariant's escape hatch: lets the grouping route a filtered
+        // RUNNING root into the "Running elsewhere" appendix instead of
+        // dropping its row. Liveness is a forest fact, so the lookup lives
+        // here and the pure grouping just asks.
+        hasRunning: (rootId) => subtreeHasRunning(forest, rootId),
         // The NAMED subprojects, and the stamp that says which one a session was
         // started in. Both are grouping inputs rather than rendering ones: which
         // row a session belongs to must be the same answer in both view styles.
@@ -518,6 +547,9 @@ export class LineageTreeProvider
         ...grouping.projects.flatMap((p) => p.rootIds),
         ...grouping.folders.flatMap((g) => g.rootIds),
         ...grouping.loose,
+        // The "Running elsewhere" appendix renders rows too — a waiting
+        // session there shows its dot, so the count must see it.
+        ...(grouping.elsewhere?.rootIds ?? []),
       ];
       const seen = new Set<string>();
       const stack = [...roots];
@@ -543,17 +575,42 @@ export class LineageTreeProvider
     }
   }
 
+  /** RUNNING sessions machine-wide — level 1 plus the grace countdown — for
+   *  the container badge. Straight through viewmodel.runningCountOf so this
+   *  surface and the inline one can never disagree on the number; see its doc
+   *  for why the count is machine-wide while attentionCount above stays a
+   *  rendered-rows traversal. */
+  runningCount(): number {
+    try {
+      return runningCountOf(this.forest());
+    } catch (err) {
+      logError('tree.runningCount', err);
+      return 0;
+    }
+  }
+
   private isCollapsed(el: TreeNode): boolean {
     return this.collapsedKeys.has(nodeKey(el));
   }
 
+  /** The one row whose expansion DEFAULT is inverted (see groupItem): the
+   *  "Running elsewhere" appendix starts collapsed, so its state needs its own
+   *  bit — the collapsedKeys shadow only remembers collapses. */
+  private elsewhereExpanded = false;
+
   /** Wired by registerTree() from TreeView.onDidExpandElement. */
   noteExpanded(el: TreeNode): void {
+    if (el.type === 'group' && el.key === ELSEWHERE_GROUP_KEY) {
+      this.elsewhereExpanded = true;
+    }
     this.collapsedKeys.delete(nodeKey(el));
   }
 
   /** Wired by registerTree() from TreeView.onDidCollapseElement. */
   noteCollapsed(el: TreeNode): void {
+    if (el.type === 'group' && el.key === ELSEWHERE_GROUP_KEY) {
+      this.elsewhereExpanded = false;
+    }
     if (this.collapsedKeys.size > CACHE_SOFT_LIMIT) this.collapsedKeys.clear();
     this.collapsedKeys.add(nodeKey(el));
   }
@@ -578,6 +635,10 @@ export class LineageTreeProvider
           ...grouping.projects.filter((p) => (p.depth ?? 0) === 0),
           ...grouping.folders,
           ...grouping.loose.map((id) => this.sessionRef(id)),
+          // The "Running elsewhere" appendix, LAST: running sessions the
+          // fences filtered out keep one row here (see GroupingResult), so
+          // the machine-wide badge always has rows to point at.
+          ...(grouping.elsewhere !== null ? [grouping.elsewhere] : []),
         ];
       }
 
@@ -1014,6 +1075,31 @@ export class LineageTreeProvider
   }
 
   private groupItem(el: GroupNode): vscode.TreeItem {
+    // The "Running elsewhere" appendix inverts the expansion DEFAULT: an
+    // ordinary folder group is the user's work and opens expanded, where this
+    // group is a ledger of other windows' running processes — present so the
+    // invariant holds, collapsed so it never competes with the work. The
+    // shadow-expansion cache only records collapses (the expanded default
+    // needs no memory), so the inverted default keeps its own expanded set.
+    if (el.key === ELSEWHERE_GROUP_KEY) {
+      const item = new vscode.TreeItem(
+        el.label,
+        this.elsewhereExpanded
+          ? vscode.TreeItemCollapsibleState.Expanded
+          : vscode.TreeItemCollapsibleState.Collapsed,
+      );
+      item.id = `group:${el.key}`;
+      item.description = `${el.rootIds.length}`;
+      item.iconPath = new vscode.ThemeIcon('server-process');
+      // Its own token, NOT 'group': the folder verbs (hide, open in window)
+      // act on a directory this row does not have.
+      item.contextValue = contextValueOf(['elsewhere']);
+      item.tooltip =
+        'Running sessions this window’s filters would otherwise hide — ' +
+        'other folders’ work, or closed projects’. Each still costs this ' +
+        'machine memory; close or route them from here.';
+      return item;
+    }
     const item = new vscode.TreeItem(
       el.label,
       this.isCollapsed(el)
@@ -1104,6 +1190,14 @@ export class LineageTreeProvider
       tokens,
       age,
       status,
+      // The grace countdown and the archived conclusion — the same two parts,
+      // in the same order, as the inline surface's description (see
+      // viewmodel.pushSession for why each earns the width it does). Neither
+      // renderer is allowed its own opinion about how a row reads.
+      node.graceDeadlineAt !== undefined
+        ? formatGraceCountdown(node.graceDeadlineAt - Date.now())
+        : '',
+      node.archived ? sessionSnippet(node) : '',
       hostMarker(host ?? 'none') ?? '',
       node.hidden ? 'hidden' : '',
     ]
@@ -1224,7 +1318,15 @@ export class LineageTreeProvider
             )
           : project;
       }
-      return grouping.folders.find((g) => g.rootIds.indexOf(el.id) >= 0);
+      const folder = grouping.folders.find(
+        (g) => g.rootIds.indexOf(el.id) >= 0,
+      );
+      if (folder) return folder;
+      // A filtered-out running session's one row hangs under the appendix.
+      return grouping.elsewhere !== null &&
+        grouping.elsewhere.rootIds.indexOf(el.id) >= 0
+        ? grouping.elsewhere
+        : undefined;
     } catch (err) {
       logError('tree.getParent', err);
       return undefined;
@@ -1237,6 +1339,10 @@ export class LineageTreeProvider
     try {
       const md = new vscode.MarkdownString();
       md.isTrusted = true;
+      // The elsewhere appendix set its (static) tooltip on the item itself —
+      // rebuilding the folder hover here would replace it with a path-and-count
+      // for a row that has no path.
+      if (el.type === 'group' && el.key === ELSEWHERE_GROUP_KEY) return item;
       if (el.type === 'group') this.appendGroupTooltip(md, el);
       else if (el.type === 'project') this.appendProjectTooltip(md, el);
       else if (el.type === 'branch') this.appendBranchTooltip(md, el);
@@ -1369,6 +1475,20 @@ export class LineageTreeProvider
           : ''
       }`,
     );
+    // The sentence behind the row's countdown — same wording as the inline
+    // sidebar's hover (viewmodel.sessionTooltip), so the two cannot drift.
+    if (typeof node.graceDeadlineAt === 'number') {
+      let iso = '';
+      try {
+        iso = new Date(node.graceDeadlineAt).toISOString();
+      } catch {
+        iso = '';
+      }
+      lines.push(
+        'detached: tab closed, process kept for instant re-attach' +
+          (iso !== '' ? ` — closes at ${iso}` : ''),
+      );
+    }
     if (node.hidden) {
       lines.push('hidden: sorted last, not counted in the badge');
     }
@@ -1396,6 +1516,12 @@ export class LineageTreeProvider
     // state.json — and the input box that collects it promises it is "recorded
     // on the node", so the node is where it has to be readable.
     if (node.summary) lines.push(`summary: ${mdEscape(node.summary)}`);
+    // The fallback conclusion where no summary was written — the longer text
+    // behind the archived row's snippet, same rule as the inline hover.
+    else if (node.lastExchange !== undefined) {
+      const exchange = sessionSnippet(node, 4000);
+      if (exchange !== '') lines.push(`last exchange: ${mdEscape(exchange)}`);
+    }
 
     for (const line of lines) md.appendMarkdown(`- ${line}\n`);
   }
@@ -1660,15 +1786,18 @@ export function registerTree(deps: TreeDeps): TreeController {
 
   const updateBadge = (): void => {
     try {
-      // Counted over the RENDERED tree, not the raw forest — see
-      // LineageTreeProvider.attentionCount(). Not counted at all while the
+      // The RUNNING count — level 1 plus the grace countdown — because the
+      // badge is the levels invariant as a number (see RUNNING_BADGE_ENABLED
+      // in types.ts for why attention lost this slot). Counted over the
+      // RENDERED tree, not the raw forest — see
+      // LineageTreeProvider.runningCount(). Not counted at all while the
       // badge is off: 0 falls through to `undefined` below, which clears it.
-      const count = ATTENTION_BADGE_ENABLED ? provider.attentionCount() : 0;
+      const count = RUNNING_BADGE_ENABLED ? provider.runningCount() : 0;
       view.badge =
         typeof count === 'number' && count > 0
           ? {
               value: count,
-              tooltip: `${count} session${count === 1 ? '' : 's'} waiting on you`,
+              tooltip: `${count} session${count === 1 ? '' : 's'} running`,
             }
           : undefined;
     } catch (err) {

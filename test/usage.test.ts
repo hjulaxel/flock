@@ -11,6 +11,7 @@ import * as path from 'node:path';
 
 import {
   HEAD_MAX_BYTES,
+  LAST_EXCHANGE_MAX_CHARS,
   TAIL_MAX_BYTES,
   TranscriptStatsCache,
   contextTokensOf,
@@ -148,15 +149,30 @@ describe('readTailStats', () => {
     expect(readTailStats(file)).toEqual({
       lastPromptAt: Date.parse(T2),
       tokens: 1000,
+      // The idle clock: the newest REAL record of any kind — here the
+      // assistant line still working at T3.
+      lastRecordAt: Date.parse(T3),
+      // The archived-row snippet source: the assistant's last words.
+      lastExchange: 'hi',
     });
   });
 
   it('is silent about what it cannot see rather than guessing', () => {
     const noPrompt = write('b.jsonl', [assistant(T1, { input_tokens: 7 })]);
-    expect(readTailStats(noPrompt)).toEqual({ tokens: 7 });
+    expect(readTailStats(noPrompt)).toEqual({
+      tokens: 7,
+      lastRecordAt: Date.parse(T1),
+      lastExchange: 'hi',
+    });
 
+    // A window with no assistant text falls back to the last PROMPT for the
+    // exchange: an unanswered question is still what the session was about.
     const noUsage = write('c.jsonl', [prompt(T1)]);
-    expect(readTailStats(noUsage)).toEqual({ lastPromptAt: Date.parse(T1) });
+    expect(readTailStats(noUsage)).toEqual({
+      lastPromptAt: Date.parse(T1),
+      lastRecordAt: Date.parse(T1),
+      lastExchange: 'do the thing',
+    });
 
     expect(readTailStats(path.join(root, 'nope.jsonl'))).toEqual({});
     expect(readTailStats(write('empty.jsonl', []))).toEqual({});
@@ -176,6 +192,8 @@ describe('readTailStats', () => {
     expect(readTailStats(file)).toEqual({
       lastPromptAt: Date.parse(T1),
       tokens: 3,
+      lastRecordAt: Date.parse(T2),
+      lastExchange: 'hi',
     });
   });
 
@@ -206,6 +224,58 @@ describe('readTailStats', () => {
     // transcript — which is every brand-new session.
     const file = write('f.jsonl', [prompt(T1)]);
     expect(readTailStats(file).lastPromptAt).toBe(Date.parse(T1));
+  });
+});
+
+describe('readTailStats: lastExchange — what the session concluded', () => {
+  it('prefers the assistant’s reply over a prompt typed after it', () => {
+    // An unanswered "also fix X" typed just before closing is not the
+    // conclusion; the answer above it is.
+    const file = write('x1.jsonl', [
+      assistant(T1, { output_tokens: 1 }),
+      prompt(T2, 'also fix the other thing'),
+    ]);
+    expect(readTailStats(file).lastExchange).toBe('hi');
+  });
+
+  it('skips a sub-agent’s words — a sidechain is not the conversation', () => {
+    const file = write('x2.jsonl', [
+      assistant(T1, { output_tokens: 1 }),
+      {
+        type: 'assistant',
+        timestamp: T2,
+        isSidechain: true,
+        message: { content: [{ type: 'text', text: 'sub-agent noise' }] },
+      },
+    ]);
+    expect(readTailStats(file).lastExchange).toBe('hi');
+  });
+
+  it('contributes nothing for an all-tool-calls turn', () => {
+    // No text block, no conclusion — right for a turn that only ran tools.
+    const file = write('x3.jsonl', [
+      {
+        type: 'assistant',
+        timestamp: T1,
+        message: { content: [{ type: 'tool_use', name: 'Bash' }] },
+      },
+    ]);
+    expect(readTailStats(file).lastExchange).toBeUndefined();
+  });
+
+  it('caps at LAST_EXCHANGE_MAX_CHARS with a visible cut', () => {
+    const long = 'y'.repeat(LAST_EXCHANGE_MAX_CHARS * 2);
+    const file = write('x4.jsonl', [
+      {
+        type: 'assistant',
+        timestamp: T1,
+        message: { content: [{ type: 'text', text: long }] },
+      },
+    ]);
+    const got = readTailStats(file).lastExchange;
+    expect(got).toBeDefined();
+    expect(got!.length).toBe(LAST_EXCHANGE_MAX_CHARS);
+    expect(got!.endsWith('…')).toBe(true);
   });
 });
 

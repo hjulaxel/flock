@@ -23,7 +23,6 @@
 import * as vscode from 'vscode';
 
 import {
-  ATTENTION_BADGE_ENABLED,
   BRAND_COLOR_ID,
   COMMANDS,
   DEFAULT_BRANCH_DISPLAY,
@@ -31,6 +30,7 @@ import {
   PROVIDERS,
   PROVIDER_IDS,
   PROVIDER_MEDIA_DIR,
+  RUNNING_BADGE_ENABLED,
   RUNNING_COLOR_ID,
   isSessionId,
 } from './types';
@@ -44,6 +44,7 @@ import { log, logError } from './log';
 import { buildDemoProject } from './demoProject';
 import {
   BRANCH_COLOR_COUNT,
+  ELSEWHERE_GROUP_KEY,
   computeGrouping,
   projectBranchList,
 } from './projects';
@@ -54,8 +55,10 @@ import {
   buildViewModel,
   folderRowKey,
   projectRowKey,
+  runningCountOf,
   sessionRowKey,
   subprojectRowKey,
+  subtreeHasRunning,
 } from './viewmodel';
 import type { ViewRow } from './viewmodel';
 
@@ -288,6 +291,8 @@ const EMPTY_GROUPING: GroupingResult = {
   folders: [],
   loose: [],
   hiddenCount: 0,
+  outOfScopeCount: 0,
+  elsewhere: null,
 };
 
 const EMPTY_FOREST: SessionForest = {
@@ -402,7 +407,16 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
    *  to yet. Only the client can say when it is listening, so this tracks its
    *  one announcement and is cleared for every fresh page. */
   private clientReady = false;
-  private readonly collapsed = new Set<string>();
+  /** SEEDED with the "Running elsewhere" appendix key: that one row inverts
+   *  the expansion default (a ledger of other windows' running processes must
+   *  not open on top of this window's work), and seeding the collapse is how
+   *  an all-default-expanded model expresses it. The prune exempts the key —
+   *  the group comes and goes with the filters, and pruning its seed while it
+   *  was absent would flip its default to expanded for the rest of the
+   *  window. */
+  private readonly collapsed = new Set<string>([
+    folderRowKey(ELSEWHERE_GROUP_KEY),
+  ]);
 
   private lastForest: SessionForest = EMPTY_FOREST;
   private groupCacheForest: SessionForest | null = null;
@@ -455,6 +469,21 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
           () => this.deps.onlyProjectSessions(),
           false,
         ),
+        // Folder mode's fence — every real folder this window opened, or []
+        // when project mode (or an empty window) scopes nothing. Read per
+        // grouping like every other setting here; the mode flip triggers a
+        // rebuild, so the forest-identity cache key above still invalidates
+        // in time.
+        scopeDirs:
+          this.safe<readonly string[] | undefined>(
+            'scopeDirs',
+            () => this.deps.scopeDirs?.(),
+            undefined,
+          ) ?? [],
+        // The invariant's escape hatch — see GroupingInput.hasRunning: a
+        // filtered RUNNING root files into the "Running elsewhere" appendix
+        // instead of losing its row.
+        hasRunning: (rootId) => subtreeHasRunning(forest, rootId),
         worktreesOf: (dir) =>
           this.safe('worktreesOf', () => this.deps.worktreesOf?.(dir) ?? [], []),
         // `lineage.git.branches`. Read per grouping like every other setting
@@ -675,6 +704,18 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  /** RUNNING sessions machine-wide — what the container badge shows. See
+   *  viewmodel.runningCountOf for the predicate and for why this counts
+   *  processes rather than attention (or rendered rows). */
+  runningCount(): number {
+    try {
+      return runningCountOf(this.forest());
+    } catch (err) {
+      logError('webtree.runningCount', err);
+      return 0;
+    }
+  }
+
   /** provider id -> {light, dark} webview uris for its brand mark. */
   private iconMap(webview: vscode.Webview): Record<string, { light: string; dark: string }> {
     const out: Record<string, { light: string; dark: string }> = {};
@@ -875,13 +916,15 @@ ${branchPaletteCss()}  }
     const view = this.view;
     if (!view) return;
     try {
-      // Off for now — 0 clears the badge via the `undefined` arm below.
-      const count = ATTENTION_BADGE_ENABLED ? this.attentionCount() : 0;
+      // The RUNNING count — the levels invariant as a number (see
+      // RUNNING_BADGE_ENABLED in types.ts for why attention lost this slot).
+      // While off, 0 clears the badge via the `undefined` arm below.
+      const count = RUNNING_BADGE_ENABLED ? this.runningCount() : 0;
       view.badge =
         count > 0
           ? {
               value: count,
-              tooltip: `${count} session${count === 1 ? '' : 's'} waiting on you`,
+              tooltip: `${count} session${count === 1 ? '' : 's'} running`,
             }
           : undefined;
     } catch (err) {
@@ -937,6 +980,9 @@ ${branchPaletteCss()}  }
       }
     }
     for (const g of grouping.folders) live.add(folderRowKey(g.key));
+    // Always "live": the appendix comes and goes with the filters, and its
+    // collapsed seed (see the field) must survive the spells it is absent.
+    live.add(folderRowKey(ELSEWHERE_GROUP_KEY));
     for (const key of Array.from(this.collapsed)) {
       if (filtered && !key.startsWith('session:')) continue;
       if (!live.has(key)) this.collapsed.delete(key);
@@ -993,6 +1039,15 @@ ${branchPaletteCss()}  }
       if (g.rootIds.includes(top) && this.collapsed.delete(folderRowKey(g.key))) {
         changed = true;
       }
+    }
+    // The appendix group too: a bell click on a "Running elsewhere" session
+    // must open the group its row is filed under, seeded collapse or not.
+    if (
+      grouping.elsewhere !== null &&
+      grouping.elsewhere.rootIds.includes(top) &&
+      this.collapsed.delete(folderRowKey(grouping.elsewhere.key))
+    ) {
+      changed = true;
     }
     if (changed) this.groupCacheForest = null;
     await this.selectRow(sessionRowKey(sessionId));
@@ -1180,7 +1235,12 @@ ${branchPaletteCss()}  }
           const set = this.collapsed;
           if (set.has(key)) set.delete(key);
           else {
-            if (set.size > CACHE_SOFT_LIMIT) set.clear();
+            if (set.size > CACHE_SOFT_LIMIT) {
+              set.clear();
+              // Re-seed the one row whose DEFAULT is collapsed (see the field)
+              // — the wipe resets to defaults, and its default is shut.
+              set.add(folderRowKey(ELSEWHERE_GROUP_KEY));
+            }
             set.add(key);
           }
           this.post();

@@ -6,13 +6,18 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  SNIPPET_MAX_CHARS,
   attentionCountOf,
   badgeGlyph,
   buildViewModel,
   folderRowKey,
+  formatGraceCountdown,
   projectRowKey,
+  runningCountOf,
   sessionBranchLine,
   sessionRowKey,
+  sessionSnippet,
+  subtreeHasRunning,
 } from '../src/viewmodel';
 import type { ViewModelInput } from '../src/viewmodel';
 import { STATUS_DOT } from '../src/types';
@@ -25,6 +30,7 @@ import type {
   SessionForest,
   SessionNode,
 } from '../src/types';
+import { ELSEWHERE_GROUP_KEY } from '../src/projects';
 import type { GroupingResult } from '../src/projects';
 
 const A = '0f00000a-0000-4000-8000-00000000000a';
@@ -72,6 +78,8 @@ const EMPTY_GROUPING: GroupingResult = {
   folders: [],
   loose: [],
   hiddenCount: 0,
+  outOfScopeCount: 0,
+  elsewhere: null,
 };
 
 function input(
@@ -1016,6 +1024,283 @@ describe('attentionCountOf', () => {
       node(B, { parentId: A, status: 'waiting', attention: 'waiting' }),
     ]);
     expect(attentionCountOf(forest, { ...EMPTY_GROUPING, loose: [A] })).toBe(1);
+  });
+});
+
+// ---------------------------------------------------- the three visual states
+
+describe('formatGraceCountdown', () => {
+  it('rounds UP to whole minutes — a countdown never claims time it lost', () => {
+    expect(formatGraceCountdown(9 * 60_000 + 41_000)).toBe('closing in 10m');
+    expect(formatGraceCountdown(60_000)).toBe('closing in 1m');
+    expect(formatGraceCountdown(20_000)).toBe('closing in 1m');
+  });
+
+  it('says "closing now" past the deadline — the row must not go quiet', () => {
+    // A busy session outlives its deadline on purpose (close-after-turn);
+    // its row keeps saying the process is on its way out.
+    expect(formatGraceCountdown(0)).toBe('closing now');
+    expect(formatGraceCountdown(-5_000)).toBe('closing now');
+  });
+
+  it('renders nothing for a non-number, same rule as formatAge', () => {
+    expect(formatGraceCountdown(Number.NaN)).toBe('');
+    expect(formatGraceCountdown(Number.POSITIVE_INFINITY)).toBe('');
+  });
+});
+
+describe('buildViewModel: the grace countdown state', () => {
+  const graceAt = NOW + 9 * 60_000 + 41_000;
+
+  it('puts the countdown in the description and the token in the context', () => {
+    const rows = buildViewModel(
+      input(forestOf([node(A, { graceDeadlineAt: graceAt })]), { loose: [A] }),
+    );
+    expect(rows[0].description).toContain('closing in 10m');
+    const viewItem = rows[0].context.viewItem as string;
+    // Grace is a THIRD token beside live + ownership, never a replacement:
+    // the row keeps every live verb and gains Close Now / Keep Awake.
+    expect(viewItem).toContain(';grace;');
+    expect(viewItem).toContain(';live;');
+    expect(viewItem).toContain(';hosted;');
+  });
+
+  it('keeps the token and says "closing now" past the deadline', () => {
+    const rows = buildViewModel(
+      input(forestOf([node(A, { graceDeadlineAt: NOW - 1_000 })]), {
+        loose: [A],
+      }),
+    );
+    expect(rows[0].description).toContain('closing now');
+    expect(rows[0].context.viewItem as string).toContain(';grace;');
+  });
+
+  it('spells out the deal and the absolute deadline in the hover', () => {
+    const rows = buildViewModel(
+      input(forestOf([node(A, { graceDeadlineAt: graceAt })]), { loose: [A] }),
+    );
+    expect(rows[0].tooltip).toContain(
+      'detached: tab closed, process kept for instant re-attach',
+    );
+    expect(rows[0].tooltip).toContain(
+      `closes at ${new Date(graceAt).toISOString()}`,
+    );
+  });
+
+  it('never marks a row that is not under grace', () => {
+    const rows = buildViewModel(input(forestOf([node(A)]), { loose: [A] }));
+    expect(rows[0].description).not.toContain('closing');
+    expect(rows[0].context.viewItem as string).not.toContain(';grace;');
+  });
+
+  it('never marks an archived row — a dead process has nothing to count down', () => {
+    // buildForest only stamps live nodes, but the context builder must hold the
+    // line on its own: the grace verbs act on a process, and there is none.
+    const rows = buildViewModel(
+      input(
+        forestOf([
+          node(A, { archived: true, status: 'exited', graceDeadlineAt: graceAt }),
+        ]),
+        { loose: [A] },
+      ),
+    );
+    expect(rows[0].context.viewItem as string).not.toContain(';grace;');
+  });
+});
+
+describe('sessionSnippet: what a level-2 row concluded', () => {
+  it('prefers the summary the user wrote for exactly this line', () => {
+    expect(
+      sessionSnippet(
+        node(A, { summary: 'shipped it', lastExchange: 'the long answer' }),
+      ),
+    ).toBe('shipped it');
+  });
+
+  it('falls back to the last exchange, collapsed to one line', () => {
+    expect(
+      sessionSnippet(node(A, { lastExchange: 'done —\n  see\tsrc/x.ts' })),
+    ).toBe('done — see src/x.ts');
+  });
+
+  it('truncates with a visible cut at the cap', () => {
+    const got = sessionSnippet(node(A, { lastExchange: 'z'.repeat(200) }));
+    expect(got.length).toBe(SNIPPET_MAX_CHARS);
+    expect(got.endsWith('…')).toBe(true);
+  });
+
+  it('is empty when the node has neither', () => {
+    expect(sessionSnippet(node(A))).toBe('');
+  });
+});
+
+describe('buildViewModel: the archived conclusion', () => {
+  it('surfaces the snippet on an archived row', () => {
+    const rows = buildViewModel(
+      input(
+        forestOf([
+          node(A, {
+            archived: true,
+            status: 'exited',
+            lastExchange: 'concluded: use BM25',
+          }),
+        ]),
+        { loose: [A] },
+      ),
+    );
+    expect(rows[0].description).toContain('concluded: use BM25');
+  });
+
+  it('withholds it from a live row — its last line is on screen in its tab', () => {
+    const rows = buildViewModel(
+      input(
+        forestOf([node(A, { lastExchange: 'concluded: use BM25' })]),
+        { loose: [A] },
+      ),
+    );
+    expect(rows[0].description).not.toContain('concluded');
+  });
+
+  it('puts the longer text in the hover when no summary was written', () => {
+    const rows = buildViewModel(
+      input(
+        forestOf([
+          node(A, {
+            archived: true,
+            status: 'exited',
+            lastExchange: 'concluded: use BM25',
+          }),
+        ]),
+        { loose: [A] },
+      ),
+    );
+    expect(rows[0].tooltip).toContain('last exchange: concluded: use BM25');
+  });
+
+  it('does not double up in the hover when a summary exists', () => {
+    const rows = buildViewModel(
+      input(
+        forestOf([
+          node(A, {
+            archived: true,
+            status: 'exited',
+            summary: 'shipped it',
+            lastExchange: 'the long answer',
+          }),
+        ]),
+        { loose: [A] },
+      ),
+    );
+    expect(rows[0].tooltip).toContain('summary: shipped it');
+    expect(rows[0].tooltip).not.toContain('last exchange:');
+  });
+});
+
+describe('runningCountOf', () => {
+  it('counts every live process — grace and unknown status included', () => {
+    const forest = forestOf([
+      node(A, { status: 'busy' }),
+      node(B, { status: 'idle', graceDeadlineAt: NOW + 60_000 }),
+      node(C, { status: 'unknown' }),
+    ]);
+    expect(runningCountOf(forest)).toBe(3);
+  });
+
+  it('counts nothing that is over — archived, exited, ghost', () => {
+    const forest = forestOf([
+      node(A, { archived: true, status: 'exited' }),
+      node(B, { status: 'exited' }),
+      node(C, { ghost: true, status: 'exited' }),
+    ]);
+    expect(runningCountOf(forest)).toBe(0);
+  });
+
+  it('still counts a MUTED live row — the process is no less real', () => {
+    // attentionCountOf excludes hidden rows because muting means "stop
+    // demanding me"; the running count is about processes, and a muted row is
+    // still on screen (sorted last, greyed).
+    const forest = forestOf([node(A, { status: 'busy', hidden: true })]);
+    expect(runningCountOf(forest)).toBe(1);
+  });
+
+  it('counts MACHINE-WIDE — a live row a filter removed still counts', () => {
+    // The badge is the levels invariant as a number: a running process costs
+    // the machine the same memory whichever window's filters apply, so every
+    // window shows the same count. The rows keep up from the other side — a
+    // filtered RUNNING root renders in the "Running elsewhere" group.
+    const forest = forestOf([node(A, { status: 'busy' })]);
+    expect(runningCountOf(forest)).toBe(1);
+  });
+
+  it('counts a live row inside a collapsed parent', () => {
+    const forest = forestOf([
+      node(A, { visibleChildren: [B] }),
+      node(B, { parentId: A, status: 'busy' }),
+    ]);
+    expect(runningCountOf(forest)).toBe(2);
+  });
+});
+
+describe('buildViewModel: the "Running elsewhere" appendix row', () => {
+  const elsewhere = {
+    type: 'group' as const,
+    key: ELSEWHERE_GROUP_KEY,
+    cwd: '',
+    label: 'Running elsewhere',
+    rootIds: [B],
+  };
+
+  it('renders LAST, wears its own token, and lists its sessions when expanded', () => {
+    const rows = buildViewModel(
+      input(forestOf([node(A), node(B, { status: 'busy' })]), {
+        loose: [A],
+        elsewhere,
+      }),
+    );
+    const last = rows[rows.length - 2];
+    expect(last?.kind).toBe('folder');
+    expect(last?.label).toBe('Running elsewhere');
+    // Its own token, NOT ';group;': the folder verbs act on a directory this
+    // row does not have.
+    expect(last?.context.viewItem).toContain(';elsewhere;');
+    expect(last?.context.viewItem).not.toContain(';group;');
+    expect(rows[rows.length - 1]?.key).toBe(sessionRowKey(B));
+  });
+
+  it('collapsed (the host seeds the key), only the header renders', () => {
+    const rows = buildViewModel(
+      input(
+        forestOf([node(B, { status: 'busy' })]),
+        { elsewhere },
+        { collapsed: new Set([folderRowKey(elsewhere.key)]) },
+      ),
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.label).toBe('Running elsewhere');
+    expect(rows[0]?.expanded).toBe(false);
+  });
+
+  it('absent, nothing extra renders', () => {
+    const rows = buildViewModel(input(forestOf([node(A)]), { loose: [A] }));
+    expect(rows).toHaveLength(1);
+  });
+});
+
+describe('subtreeHasRunning', () => {
+  it('finds a running descendant through the visible chain', () => {
+    const forest = forestOf([
+      node(A, { archived: true, status: 'exited', visibleChildren: [B] }),
+      node(B, { parentId: A, status: 'busy' }),
+    ]);
+    expect(subtreeHasRunning(forest, A)).toBe(true);
+  });
+
+  it('is false for an all-over subtree and an unknown root', () => {
+    const forest = forestOf([node(A, { archived: true, status: 'exited' })]);
+    expect(subtreeHasRunning(forest, A)).toBe(false);
+    expect(subtreeHasRunning(forest, 'ffffffff-0000-4000-8000-00000000ffff')).toBe(
+      false,
+    );
   });
 });
 

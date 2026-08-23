@@ -250,6 +250,9 @@ function sanitizeRecord(key: string, value: unknown): EditorialRecord | null {
     'notify',
     'parked',
     'chat',
+    'pinned',
+    'closeAfterTurn',
+    'stowedBySwitch',
   ] as const) {
     if (rec[k] !== undefined && typeof rec[k] !== 'boolean') delete rec[k];
   }
@@ -260,6 +263,21 @@ function sanitizeRecord(key: string, value: unknown): EditorialRecord | null {
   // next read here.
   if (rec.hidden === true) rec.deleted = true;
   delete rec.hidden;
+  // `parked` is retired too (schema v8) — it was the invisible
+  // running-but-unshown state that let detached sessions pile up unseen. A
+  // parked record reads as ARCHIVED: closed (level 2 — no process, a visible
+  // resumable row), tmux name discarded (the activation reconcile ends the
+  // process itself; it derives the session id from the live tmux name, so the
+  // record-side copy is not needed and must not keep routing resumes into a
+  // session about to die). The closed stamp is the record's own `updatedAt`,
+  // NEVER now — see the rule above: stamping now at load would make a stale
+  // record win every merge it touches. Living here rather than in a one-shot
+  // ladder step, on the hidden→deleted precedent: a mixed install's old
+  // window keeps re-writing `parked: true` with a newer updatedAt and wins the
+  // whole-record merge, and this flip re-converges it on every read.
+  if (rec.parked === true && rec.closed == null) rec.closed = rec.updatedAt;
+  if (rec.parked === true) rec.tmux = null;
+  delete rec.parked;
   for (const k of [
     'title',
     'summary',
@@ -271,7 +289,7 @@ function sanitizeRecord(key: string, value: unknown): EditorialRecord | null {
   ] as const) {
     if (rec[k] !== undefined && typeof rec[k] !== 'string') delete rec[k];
   }
-  for (const k of ['closed', 'boundWindowId', 'tmux'] as const) {
+  for (const k of ['closed', 'boundWindowId', 'tmux', 'graceUntil'] as const) {
     if (rec[k] !== undefined && rec[k] !== null && typeof rec[k] !== 'string') {
       delete rec[k];
     }
@@ -519,12 +537,21 @@ function sanitizeSubproject(key: string, value: unknown): SubprojectRecord | nul
   if (dir === '') return null;
 
   const rawName = typeof value.name === 'string' ? value.name.trim() : '';
+  // The PINNED BRANCH (see SubprojectRecord.branch). Carried verbatim apart
+  // from a trim, because it has to MATCH what `git worktree list` reports —
+  // slugging or case-folding it would quietly unpin every branch with a
+  // separator in its name. Capped at git's own per-component practical limit
+  // rather than at the name cap: a 61-character branch is legal and truncating
+  // it would produce a pin that can never match anything.
+  const rawBranch =
+    typeof value.branch === 'string' ? value.branch.trim().slice(0, 255) : '';
   const stamp = isNonEmptyString(value.createdAt) ? value.createdAt : nowIso();
   return {
     id: key,
     projectId,
     name: rawName.slice(0, MAX_PROJECT_NAME_LEN),
     dir,
+    ...(rawBranch === '' ? {} : { branch: rawBranch }),
     createdAt: stamp,
     updatedAt: isNonEmptyString(value.updatedAt) ? value.updatedAt : stamp,
   };
@@ -555,6 +582,20 @@ function sanitizeWindow(key: string, value: unknown): WindowRecord | null {
   if (!isNonEmptyString(win.publishedAt)) win.publishedAt = nowIso();
   if (win.folder !== undefined && typeof win.folder !== 'string') {
     delete win.folder;
+  }
+  // The multi-root folder list (windowForDir's routing input). Junk entries
+  // are dropped rather than the whole list: one bad element must not make a
+  // window unroutable when the rest of the list is fine.
+  if (win.folders !== undefined) {
+    if (Array.isArray(win.folders)) {
+      const folders = win.folders.filter(
+        (f): f is string => typeof f === 'string' && f !== '',
+      );
+      if (folders.length > 0) win.folders = folders;
+      else delete win.folders;
+    } else {
+      delete win.folders;
+    }
   }
   return win as unknown as WindowRecord;
 }
@@ -817,6 +858,28 @@ export function migrateState(raw: unknown): LineageState {
   if (version < 6) working = migrateV5ToV6(working);
   // v6 -> v7 is purely additive: named subprojects arrive as an empty map, so
   // every project keeps drawing exactly the directory rows it drew before.
+  // v7 -> v8 retires `parked`. The record rewrite is NOT a ladder step: it
+  // lives in sanitizeRecord below (the hidden→deleted precedent), because a
+  // mixed install's old window keeps re-writing `parked: true` and winning the
+  // newest-wins merge — only a flip applied on every read converges. The step
+  // here is the one-time LOG someone will come asking about ("where did my
+  // parked sessions go?"), and the processes those records left running are
+  // ended by the activation-time tmux reconcile in extension.ts — this ladder
+  // is pure and synchronous and must never touch a process.
+  if (version < 8 && isPlainObject(working.records)) {
+    const parked = Object.values(working.records).filter(
+      (r) => isPlainObject(r) && r.parked === true,
+    ).length;
+    if (parked > 0) {
+      log(
+        'state: v7 -> v8 —',
+        String(parked),
+        'parked record(s) become archived rows (closed, resumable from the ' +
+          'tree); any process they left running is ended by the activation ' +
+          'reconcile',
+      );
+    }
+  }
 
   const out: Record<string, unknown> = { ...working }; // keeps unknown keys
 

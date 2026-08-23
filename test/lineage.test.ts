@@ -443,7 +443,10 @@ function forestOf(
     showGhosts?: boolean;
     onlyActive?: boolean;
     activityMtimes?: ReadonlyMap<string, number>;
-    tailStats?: ReadonlyMap<string, { lastPromptAt?: number; tokens?: number }>;
+    tailStats?: ReadonlyMap<
+      string,
+      { lastPromptAt?: number; tokens?: number; lastExchange?: string }
+    >;
     archived?: ArchivedSession[];
   } = {},
 ) {
@@ -993,12 +996,86 @@ describe('buildForest', () => {
   it('ignores a junk or absent entry rather than writing a junk field', () => {
     const f = forestOf([live(CHILD), live(PARENT)], {}, {
       tailStats: new Map([
-        [CHILD, { lastPromptAt: Number.NaN, tokens: 0 }],
+        [CHILD, { lastPromptAt: Number.NaN, tokens: 0, lastExchange: '  ' }],
       ]),
     });
     expect(f.nodes.get(CHILD)?.lastPromptAt).toBeUndefined();
     expect(f.nodes.get(CHILD)?.tokens).toBeUndefined();
+    expect(f.nodes.get(CHILD)?.lastExchange).toBeUndefined();
     expect(f.nodes.get(PARENT)?.lastPromptAt).toBeUndefined();
+  });
+
+  it('carries the last exchange onto live and archived nodes alike', () => {
+    // The fact is the same either way; it is the RENDERERS that decide an
+    // archived row is the one place it earns width.
+    const f = forestOf([live(CHILD)], {}, {
+      archived: [
+        {
+          sessionId: PARENT,
+          transcriptPath: '/tmp/p.jsonl',
+          endedAt: 4_999_000,
+          bytes: 10,
+        },
+      ],
+      tailStats: new Map([
+        [CHILD, { lastExchange: 'live conclusion' }],
+        [PARENT, { lastExchange: 'archived conclusion' }],
+      ]),
+    });
+    expect(f.nodes.get(CHILD)?.lastExchange).toBe('live conclusion');
+    expect(f.nodes.get(PARENT)?.lastExchange).toBe('archived conclusion');
+  });
+
+  // The detach grace, as a renderable fact — the one sanctioned
+  // detached-running state must reach the renderers or it is the old
+  // invisible `parked` under a new name.
+  it('stamps graceDeadlineAt on a live node from record.graceUntil', () => {
+    const f = forestOf([live(CHILD)], {}, {
+      records: {
+        [CHILD]: record({ graceUntil: '2026-08-23T10:00:00.000Z' }),
+      },
+    });
+    expect(f.nodes.get(CHILD)?.graceDeadlineAt).toBe(
+      Date.parse('2026-08-23T10:00:00.000Z'),
+    );
+  });
+
+  it('leaves it off for a cleared, absent or unparseable deadline', () => {
+    // null is the cleared state (same convention as record.tmux); garbage is
+    // read by the sweep as "expired" and the process ends within a minute, so
+    // the honest render is a plain live row, not a fabricated countdown.
+    const f = forestOf(
+      [live(CHILD), live(PARENT), live(OTHER)],
+      {},
+      {
+        records: {
+          [CHILD]: record({ graceUntil: null }),
+          [PARENT]: record({ id: PARENT }),
+          [OTHER]: record({ id: OTHER, graceUntil: 'not a timestamp' }),
+        },
+      },
+    );
+    expect(f.nodes.get(CHILD)?.graceDeadlineAt).toBeUndefined();
+    expect(f.nodes.get(PARENT)?.graceDeadlineAt).toBeUndefined();
+    expect(f.nodes.get(OTHER)?.graceDeadlineAt).toBeUndefined();
+  });
+
+  it('never stamps an ARCHIVED node — its leftover deadline is a kept promise', () => {
+    const f = forestOf([], {}, {
+      archived: [
+        {
+          sessionId: CHILD,
+          transcriptPath: '/tmp/x.jsonl',
+          endedAt: 4_999_000,
+          bytes: 10,
+        },
+      ],
+      records: {
+        [CHILD]: record({ graceUntil: '2026-08-23T10:00:00.000Z' }),
+      },
+    });
+    expect(f.nodes.get(CHILD)?.archived).toBe(true);
+    expect(f.nodes.get(CHILD)?.graceDeadlineAt).toBeUndefined();
   });
 });
 

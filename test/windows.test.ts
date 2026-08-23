@@ -207,3 +207,41 @@ describe('registerFocusIntegration: publish() bounds the asExternalUri RPC', () 
     expect(calls).toBe(2);
   });
 });
+
+describe('registerFocusIntegration: publish() publishes the REAL folders', () => {
+  // The routing regression this guards: a converted explorer-follow window
+  // published its Flock anchor as `folder`, which made windowForDir route
+  // work under the window's real roots AWAY from it (nothing is "under" an
+  // empty anchor). The wiring's realFolders() strips the anchor; publish()
+  // must put its first entry in `folder` (old readers) and all of them in
+  // `folders` (multi-root routing).
+  it('folder = first real folder, folders = all of them', async () => {
+    stubEnv(async () => ({ toString: () => HANDLE_WITH_QUERY }));
+    const deps = {
+      ...makeDeps(),
+      realFolders: (): readonly string[] => ['/code/app', '/code/lib'],
+    };
+
+    await registerFocusIntegration(deps);
+
+    expect(deps.calls).toHaveLength(1);
+    expect(deps.calls[0].folder).toBe('/code/app');
+    expect(deps.calls[0].folders).toEqual(['/code/app', '/code/lib']);
+  });
+
+  it('a window with no real folder publishes neither field', async () => {
+    // An empty window, or a converted window whose only folder IS the anchor:
+    // it hosts nothing, and publishing an anchor path would invite routing.
+    stubEnv(async () => ({ toString: () => HANDLE_WITH_QUERY }));
+    const deps = {
+      ...makeDeps(),
+      realFolders: (): readonly string[] => [],
+    };
+
+    await registerFocusIntegration(deps);
+
+    expect(deps.calls).toHaveLength(1);
+    expect(deps.calls[0].folder).toBeUndefined();
+    expect(deps.calls[0].folders).toBeUndefined();
+  });
+});

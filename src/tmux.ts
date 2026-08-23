@@ -55,7 +55,8 @@ import { execFile } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-import { logError } from './log';
+import { log, logError } from './log';
+import { listDescendants, reapSurvivors } from './procs';
 import { isSessionId } from './types';
 import type { TmuxSpawn } from './types';
 
@@ -368,6 +369,107 @@ export function killTmuxSession(
       resolve(false);
     }
   });
+}
+
+/**
+ * Pure. `list-sessions -F '#{session_name}'` output as names. Blank lines are
+ * skipped, never fatal.
+ */
+export function parseTmuxSessions(stdout: string): string[] {
+  return stdout
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l !== '');
+}
+
+/**
+ * Every session alive on the PRIVATE server, by name — the reconcile's read
+ * side. Comparing this list against state is how an activation finds the two
+ * lies a crash or an old build can leave behind: a process running that no
+ * window claims and no grace covers (killed, to level 2), and a record naming
+ * a tmux session that no longer exists (name cleared). Only the `-L lineage`
+ * socket — the user's own tmux server is never listed, let alone touched.
+ *
+ * Never throws; no server (the everyday case — `exit-empty` kills ours with
+ * its last session) and no tmux both read as an empty list.
+ */
+export function listTmuxSessions(binary: string): Promise<string[]> {
+  return new Promise((resolve) => {
+    try {
+      execFile(
+        binary,
+        ['-L', TMUX_SOCKET, 'list-sessions', '-F', '#{session_name}'],
+        { timeout: 2000 },
+        (err, stdout) => {
+          resolve(err ? [] : parseTmuxSessions(stdout));
+        },
+      );
+    } catch (err) {
+      logError('tmux.listSessions', err);
+      resolve([]);
+    }
+  });
+}
+
+/** The injectable seams of `killTmuxSessionTree`, for tests. Defaults are the
+ *  real helpers in this file and src/procs.ts. */
+export interface KillTreeDeps {
+  panePid?: (binary: string, name: string) => Promise<number | undefined>;
+  killSession?: (binary: string, name: string) => Promise<boolean>;
+  listDescendants?: (rootPid: number) => Promise<number[]>;
+  reapSurvivors?: (
+    pids: readonly number[],
+  ) => Promise<{ exited: number; termed: number; killed: number }>;
+}
+
+/**
+ * End a wrapped session AND its process tree. `killTmuxSession` alone kills
+ * the pane root; the ~8 MCP children each session spawns are orphaned to
+ * PID 1 and keep running — which, at scale, was the 32 GB incident this
+ * branch exists to fix. So every kill path funnels through here instead:
+ *
+ *   walk the descendants FIRST (a dead root's children have already
+ *   re-parented and can never be found again), then kill-session, then verify
+ *   the tree exited and escalate on survivors — by pid, never by name
+ *   pattern, because other live sessions run the identical server binaries.
+ *
+ * Returns whether the kill-session itself succeeded, same contract as
+ * `killTmuxSession`; the reap is best-effort behind it and reports to the log.
+ * A session already dead (kill returns false) still gets no reap — there was
+ * no walk, so there are no honest targets.
+ */
+export async function killTmuxSessionTree(
+  binary: string,
+  name: string,
+  deps: KillTreeDeps = {},
+): Promise<boolean> {
+  const panePid = deps.panePid ?? queryPanePid;
+  const killSession = deps.killSession ?? killTmuxSession;
+  const walk = deps.listDescendants ?? ((pid: number) => listDescendants(pid));
+  const reap = deps.reapSurvivors ?? ((pids: readonly number[]) => reapSurvivors(pids));
+
+  const rootPid = await panePid(binary, name);
+  const descendants = rootPid !== undefined ? await walk(rootPid) : [];
+  const ok = await killSession(binary, name);
+  if (!ok) return false;
+  // The root rides along: kill-session ends the pane process via the server,
+  // but a claude that ignores its pty's death would otherwise survive as the
+  // biggest orphan of all.
+  const targets = rootPid !== undefined ? [rootPid, ...descendants] : [];
+  if (targets.length > 0) {
+    void reap(targets).then(
+      (r) => {
+        if (r.termed > 0 || r.killed > 0) {
+          log(
+            `tmux: reaped ${name} — ${String(r.exited)} exited on their own, ` +
+              `${String(r.termed)} SIGTERMed, ${String(r.killed)} SIGKILLed`,
+          );
+        }
+      },
+      (err: unknown) => logError('tmux.killSessionTree.reap', err),
+    );
+  }
+  return ok;
 }
 
 /**

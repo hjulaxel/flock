@@ -1551,13 +1551,15 @@ describe('the subproject verbs', () => {
     ]);
   });
 
-  it('refuses a directory another project already covers', async () => {
-    // Two projects listing one directory have no defined owner for the sessions
-    // in it — see projects.projectClaiming.
+  it('announces a directory another project already covers, and adds it anyway', async () => {
+    // Claims are NON-EXCLUSIVE (see projects.matchProjects): the directory
+    // joins this project too, the lane is created, and grouping shows the
+    // sessions there under both claimants. What survives of the old refusal is
+    // the announcement — the user hears "shared" at the moment they share it.
     scriptPicks(ELSEWHERE);
     scriptDialog('/code/other');
     scriptName('Other');
-    const warned = scriptConfirm(undefined);
+    const informed = told();
     const other = projectOf({
       id: 'p2',
       name: 'other',
@@ -1571,11 +1573,18 @@ describe('the subproject verbs', () => {
 
     await run(COMMANDS.newSubproject, { type: 'project', projectId: 'p1' });
 
-    expect(calls.projectPatches).toEqual([]);
-    // And no lane either: a lane on a directory this project cannot claim would
-    // draw a row that holds nothing.
-    expect(store.written).toEqual([]);
-    expect(warned.asked.join(' ')).toContain('other');
+    expect(calls.projectPatches).toEqual([
+      { id: 'p1', patch: { dirs: ['/code/other'] } },
+    ]);
+    expect(store.written).toHaveLength(1);
+    expect(store.written[0].patch).toMatchObject({
+      projectId: 'p1',
+      name: 'Other',
+      dir: '/code/other',
+    });
+    // The other claimant is NAMED — an accident announced is an accident the
+    // user can still undo.
+    expect(informed.messages.join(' ')).toContain('other');
   });
 
   // --------------------------------------------------- the two lane-only verbs
@@ -1795,6 +1804,78 @@ describe('the subproject verbs', () => {
     expect(calls.launches[0].title).toBe('api');
   });
 
+  it("a lane pinning a branch launches in that branch's CHECKOUT — worktree-aware placement", async () => {
+    const two = app();
+    const store = laneStore([lane({ branch: 'feat/x' })]);
+    const { deps, calls } = chatDeps(two, { projects: [two] });
+    Object.assign(deps as object, store.deps);
+    const probed: string[] = [];
+    (deps as { worktreesFor?: unknown }).worktreesFor = async (dir: string) => {
+      probed.push(dir);
+      return [
+        { dir: '/code/app', branch: 'main', head: 'a', detached: false },
+        { dir: '/code/app-feat-x', branch: 'feat/x', head: 'b', detached: false },
+      ];
+    };
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.newSessionInSubproject, {
+      type: 'subproject',
+      projectId: 'p1',
+      dir: '/code/app',
+      id: 'lane-1',
+    });
+
+    // Probed at the lane's own directory — the only address the lane has.
+    expect(probed).toEqual(['/code/app']);
+    expect(calls.launches).toHaveLength(1);
+    // The launch followed the BRANCH; the session keeps the LANE's name — the
+    // lane is the identity, the worktree is placement.
+    expect(calls.launches[0].cwd).toBe('/code/app-feat-x');
+    expect(calls.launches[0].title).toBe('Server rewrite');
+    expect(calls.launches[0].subprojectId).toBe('lane-1');
+  });
+
+  it('a pin with no checkout falls back to the lane directory — never refuses, never creates', async () => {
+    const two = app();
+    const store = laneStore([lane({ branch: 'feat/gone' })]);
+    const { deps, calls } = chatDeps(two, { projects: [two] });
+    Object.assign(deps as object, store.deps);
+    (deps as { worktreesFor?: unknown }).worktreesFor = async () => [
+      { dir: '/code/app', branch: 'main', head: 'a', detached: false },
+    ];
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.newSessionInSubproject, {
+      type: 'subproject',
+      projectId: 'p1',
+      dir: '/code/app',
+      id: 'lane-1',
+    });
+
+    expect(calls.launches).toHaveLength(1);
+    expect(calls.launches[0].cwd).toBe('/code/app');
+  });
+
+  it('a wiring without worktreesFor places by the lane directory — the pre-pin behaviour', async () => {
+    // Also every unpinned lane's path: no pin, no probe, no redirect.
+    const two = app();
+    const store = laneStore([lane({ branch: 'feat/x' })]);
+    const { deps, calls } = chatDeps(two, { projects: [two] });
+    Object.assign(deps as object, store.deps);
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.newSessionInSubproject, {
+      type: 'subproject',
+      projectId: 'p1',
+      dir: '/code/app',
+      id: 'lane-1',
+    });
+
+    expect(calls.launches).toHaveLength(1);
+    expect(calls.launches[0].cwd).toBe('/code/app');
+  });
+
   it('refuses a directory the project no longer covers', async () => {
     const messages = told();
     const { deps, calls } = chatDeps(app(), { projects: [app()] });
@@ -1833,6 +1914,7 @@ describe('newProject: one directory, no confirmation step', () => {
     delete (mockCommands as CommandHost).executeCommand;
     delete (mockWindow as DialogHost).showOpenDialog;
     delete (mockWindow as QuickPickHost).showQuickPick;
+    delete (mockWindow as QuickPickHost).showInformationMessage;
     delete (mockWindow as WarningHost).showWarningMessage;
   });
 
@@ -1879,12 +1961,17 @@ describe('newProject: one directory, no confirmation step', () => {
     expect(calls.projectPatches).toEqual([]);
   });
 
-  it('refuses a directory an existing project already covers', async () => {
-    const warned: string[] = [];
-    (mockWindow as WarningHost).showWarningMessage = async (message) => {
-      warned.push(message);
+  it('announces a directory an existing project already covers, and creates anyway', async () => {
+    // Claims are NON-EXCLUSIVE (see projects.matchProjects): the second project
+    // is created on the shared directory and its sessions show under both. The
+    // old modal refusal survives only as an announcement naming the other
+    // claimant.
+    const informed: string[] = [];
+    (mockWindow as QuickPickHost).showInformationMessage = async (message) => {
+      informed.push(message);
       return undefined;
     };
+    (mockCommands as CommandHost).executeCommand = async () => undefined;
     (mockWindow as DialogHost).showOpenDialog = async () => [
       { fsPath: '/code/app' },
     ];
@@ -1899,8 +1986,14 @@ describe('newProject: one directory, no confirmation step', () => {
 
     await run(COMMANDS.newProject);
 
-    expect(calls.projectPatches).toEqual([]);
-    expect(warned.join(' ')).toContain('subproject');
+    expect(calls.projectPatches).toHaveLength(1);
+    expect(calls.projectPatches[0].patch).toMatchObject({
+      rootDir: '/code/app',
+    });
+    // Not "app": the name defaults from the directory's basename, and "app" is
+    // taken — nextFreeName steps past the collision.
+    expect(calls.projectPatches[0].patch.name).not.toBe('app');
+    expect(informed.join(' ')).toContain('app');
   });
 });
 
@@ -2041,7 +2134,7 @@ describe('detach tier: resumeFlow is the attach verb for hidden sessions', () =>
     // A kill park writes `tmux: null` — that is NOT a detached session.
     const killed: CommandDeps = {
       ...deps,
-      getRecord: () => rec({ tmux: null, parked: true }),
+      getRecord: () => rec({ tmux: null, graceUntil: null }),
     };
     expect(await detachedTmuxName(killed, VALID)).toBeUndefined();
     // No probe wired (every unit double): recorded names only.
@@ -2077,7 +2170,7 @@ describe('detach tier: resumeFlow is the attach verb for hidden sessions', () =>
       // answering. The probe is ground truth, so deriving is safe here.
       const killed: CommandDeps = {
         ...deps,
-        getRecord: () => rec({ tmux: null, parked: true }),
+        getRecord: () => rec({ tmux: null, graceUntil: null }),
         tmuxSessionLive: async () => false,
       };
 
@@ -2134,7 +2227,7 @@ describe('detach tier: resumeFlow is the attach verb for hidden sessions', () =>
     const live: CommandDeps = {
       ...deps,
       getForest: () => forestOf([node(VALID, { status: 'busy' })]),
-      getRecord: () => rec({ tmux: TMUX, parked: true }),
+      getRecord: () => rec({ tmux: TMUX, graceUntil: '2099-01-01T00:00:00.000Z' }),
       hasTranscript: () => true,
       launchSession: async (opts) => {
         calls.launches.push(opts);
@@ -2156,10 +2249,18 @@ describe('detach tier: resumeFlow is the attach verb for hidden sessions', () =>
         tmuxName: TMUX,
       }),
     ]);
-    // The tab is back: the record must stop claiming "hidden".
+    // The tab is back: the record must stop claiming "hidden" — and a
+    // close-after-turn mark minted against the detached deadline clears with
+    // it, or the sweep would close the tab the user just re-attached.
     expect(calls.records).toContainEqual({
       id: VALID,
-      patch: { closed: null, parked: false, tmux: null },
+      patch: {
+        closed: null,
+        graceUntil: null,
+        tmux: null,
+        closeAfterTurn: false,
+        stowedBySwitch: false,
+      },
     });
   });
 
@@ -3313,6 +3414,238 @@ describe('close refuses a session running outside Flock', () => {
   });
 });
 
+// ------------------------------------------- close/delete on a GRACE row
+//
+// A grace row is a RUNNING process whose only surface is the tree row — its
+// tab is gone by definition. Two verbs used to be able to make that process
+// invisible: Close stamped `closed` while the wrap ran on (the record lying
+// for up to the rest of the grace window), and Delete removed the row without
+// killing anything (running + shown nowhere — the exact unrepresentable state
+// the levels exist to remove, permanent when the record was pinned). Both now
+// route the process through the wiring's tree-reaping `killDetached` FIRST.
+
+describe('close and delete on a grace row kill the detached process first', () => {
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockWindow as { showWarningMessage?: unknown }).showWarningMessage;
+    delete (mockWindow as { showInformationMessage?: unknown })
+      .showInformationMessage;
+    delete (mockWindow as { showQuickPick?: unknown }).showQuickPick;
+    delete (mockWindow as { setStatusBarMessage?: unknown }).setStatusBarMessage;
+  });
+
+  const SESSION = uuid(1);
+  const GRACE = '2099-01-01T00:00:00.000Z';
+
+  interface GraceHarness {
+    /** Everything the flow did, in order: 'killDetached' entries interleaved
+     *  with 'upsert:<flag>' entries — the ORDER is the invariant under test
+     *  (the process must be gone before its last row is). */
+    order: string[];
+    patches: Array<{ id: string; patch: Partial<EditorialRecord> }>;
+    warnings: string[];
+    run: (command: string, arg?: unknown) => Promise<void>;
+  }
+
+  function graceHarness(over: {
+    record?: Partial<EditorialRecord>;
+    killResult?: boolean;
+    host?: 'here' | 'flock' | 'foreign' | 'none';
+    forest?: SessionForest;
+    /** The cross-window restore-race guard's answer: the record is bound to
+     *  a LIVE window that is not this one. Absent = dep unwired (old
+     *  wirings), which must read as false. */
+    foreignLive?: boolean;
+  }): GraceHarness {
+    const order: string[] = [];
+    const patches: Array<{ id: string; patch: Partial<EditorialRecord> }> = [];
+    const warnings: string[] = [];
+    (
+      mockWindow as {
+        showWarningMessage?: (m: unknown) => Promise<unknown>;
+      }
+    ).showWarningMessage = async (message) => {
+      warnings.push(String(message));
+      return undefined;
+    };
+    // The delete flows end on an information toast with an Undo button;
+    // returning undefined is "no Undo". The stale picker's QuickPick is
+    // scripted per test where needed.
+    (
+      mockWindow as { showInformationMessage?: () => Promise<unknown> }
+    ).showInformationMessage = async () => undefined;
+    (
+      mockWindow as { setStatusBarMessage?: (m: string, ms?: number) => void }
+    ).setStatusBarMessage = () => {};
+
+    const hostAnswer = over.host;
+    const { deps } = chatDeps(undefined);
+    const withGrace: AccountCommandDeps = {
+      ...deps,
+      getForest: () => over.forest ?? forestOf([node(SESSION)]),
+      getRecord: (id) =>
+        id === SESSION && over.record !== undefined
+          ? { id, createdAt: GRACE, updatedAt: GRACE, ...over.record }
+          : undefined,
+      upsertRecord: async (id, patch) => {
+        for (const key of Object.keys(patch)) order.push(`upsert:${key}`);
+        patches.push({ id, patch });
+      },
+      closeTerminal: () => false, // a grace row has no terminal anywhere
+      killDetached: async () => {
+        order.push('killDetached');
+        return over.killResult ?? true;
+      },
+      ...(hostAnswer === undefined ? {} : { hostOf: () => hostAnswer }),
+      ...(over.foreignLive === undefined
+        ? {}
+        : { boundToLiveForeignWindow: () => over.foreignLive === true }),
+    };
+    const harness = withRegisteredCommands(withGrace);
+    return { order, patches, warnings, run: (c, a) => harness.run(c, a ?? SESSION) };
+  }
+
+  it('DELETE kills the graced wrap BEFORE writing deleted', async () => {
+    const h = graceHarness({ record: { graceUntil: GRACE, tmux: 'lineage-x' } });
+    await h.run(COMMANDS.deleteSession);
+    // The write also clears the switch's stow marker — delete is a user verb.
+    expect(h.order).toEqual([
+      'killDetached',
+      'upsert:deleted',
+      'upsert:stowedBySwitch',
+    ]);
+    expect(h.patches).toContainEqual({
+      id: SESSION,
+      patch: { deleted: true, stowedBySwitch: false },
+    });
+  });
+
+  it('an explicit DELETE outranks the pin — pinned graced rows are killed too', async () => {
+    // The permanent variant of the leak: pinned + graced + deleted was a
+    // process that ran FOREVER with no row and no reaper (the sweep skips
+    // pinned records before any grace handling). The pin exempts a session
+    // from the automatic sweeps, not from the user saying "remove this".
+    const h = graceHarness({
+      record: { graceUntil: GRACE, tmux: 'lineage-x', pinned: true },
+    });
+    await h.run(COMMANDS.deleteSession);
+    expect(h.order[0]).toBe('killDetached');
+  });
+
+  it('DELETE on a plain archived row signals nothing', async () => {
+    const h = graceHarness({ record: { closed: GRACE } });
+    await h.run(COMMANDS.deleteSession);
+    expect(h.order).toEqual(['upsert:deleted', 'upsert:stowedBySwitch']);
+  });
+
+  it('DELETE spares a detached claim whose terminal is bound HERE', async () => {
+    // A restore clears the grace only after its launch resolves, so a bound
+    // tab can briefly coexist with the claim. The tab is the surface then,
+    // and delete's contract is to never touch tabs — killing would end the
+    // session the user just re-attached.
+    const h = graceHarness({
+      record: { graceUntil: GRACE, tmux: 'lineage-x' },
+      host: 'here',
+    });
+    await h.run(COMMANDS.deleteSession);
+    expect(h.order).toEqual(['upsert:deleted', 'upsert:stowedBySwitch']);
+  });
+
+  it('DELETE spares a claim bound to a LIVE foreign window — the cross-window restore race', async () => {
+    // Window B's restore stamps boundWindowId at bind time but clears the
+    // grace claim only after its launch resolves, so for a few seconds this
+    // record reads as detached HERE while the process has a tab THERE. The
+    // bound-here skip cannot see that; the sweep's live-foreign-window guard
+    // (mirrored into the delete flow) is what does. The row still goes —
+    // delete's contract — but nothing is signalled.
+    const h = graceHarness({
+      record: { graceUntil: GRACE, tmux: 'lineage-x' },
+      foreignLive: true,
+    });
+    await h.run(COMMANDS.deleteSession);
+    expect(h.order).toEqual(['upsert:deleted', 'upsert:stowedBySwitch']);
+  });
+
+  it('CLOSE on a claim a live foreign window owns falls back to stamp-and-warn', async () => {
+    // Same race, Close verb: killing would end the session window B just
+    // re-attached, so the flow takes the announce path instead — stamp the
+    // record closed and say honestly that the session is still running.
+    const h = graceHarness({
+      record: { graceUntil: GRACE, tmux: 'lineage-x' },
+      foreignLive: true,
+    });
+    await h.run(COMMANDS.closeSession);
+    expect(h.order).not.toContain('killDetached');
+    expect(h.patches.some((p) => typeof p.patch.closed === 'string')).toBe(true);
+    expect(h.warnings.some((w) => w.includes('still'))).toBe(true);
+  });
+
+  it('the Delete Stale picker kills graced picks first, same order', async () => {
+    (
+      mockWindow as {
+        showQuickPick?: (items: unknown[]) => Promise<unknown[]>;
+      }
+    ).showQuickPick = async (items) => items; // tick every offered row
+    const h = graceHarness({
+      record: { graceUntil: GRACE, tmux: 'lineage-x' },
+      forest: forestOf([node(SESSION, { lastActiveAt: NOW - 100 * HOUR })]),
+    });
+    await h.run(COMMANDS.deleteStale, undefined as unknown as string);
+    expect(h.order).toEqual([
+      'killDetached',
+      'upsert:deleted',
+      'upsert:stowedBySwitch',
+    ]);
+  });
+
+  it('CLOSE on a grace row routes through killDetached — no stamp, no warning', async () => {
+    // The old behaviour stamped `closed` while the process ran (the record
+    // lying for up to the rest of the grace window) and then warned "still
+    // running". The kill funnel already stamps the record archived, so the
+    // flow writes nothing of its own and has nothing to warn about.
+    const h = graceHarness({ record: { graceUntil: GRACE, tmux: 'lineage-x' } });
+    await h.run(COMMANDS.closeSession);
+    // The one write after the kill is the user-verb marker clear — the kill
+    // funnel keeps `stowedBySwitch` for the sweep's sake, so Close clears it.
+    expect(h.order).toEqual(['killDetached', 'upsert:stowedBySwitch']);
+    expect(h.warnings).toEqual([]);
+  });
+
+  it('CLOSE WITH SUMMARY lands the summary after the kill settled the record', async () => {
+    (
+      mockWindow as { showInputBox?: () => Promise<string> }
+    ).showInputBox = async () => 'traced the leak to the park path';
+    const h = graceHarness({ record: { graceUntil: GRACE, tmux: 'lineage-x' } });
+    await h.run(COMMANDS.closeWithSummary);
+    delete (mockWindow as { showInputBox?: unknown }).showInputBox;
+    expect(h.order).toEqual([
+      'killDetached',
+      'upsert:stowedBySwitch',
+      'upsert:summary',
+    ]);
+    expect(h.patches).toContainEqual({
+      id: SESSION,
+      patch: {
+        stowedBySwitch: false,
+        summary: 'traced the leak to the park path',
+      },
+    });
+  });
+
+  it('CLOSE falls back to the honest stamp-and-warn when the kill fails', async () => {
+    // killDetached returning false means the wiring found no wrap to end —
+    // the record's claim was stale. The flow keeps its old shape then:
+    // stamp closed, and say why the row may still read live.
+    const h = graceHarness({
+      record: { graceUntil: GRACE, tmux: 'lineage-x' },
+      killResult: false,
+    });
+    await h.run(COMMANDS.closeSession);
+    expect(h.order[0]).toBe('killDetached');
+    expect(h.patches.some((p) => typeof p.patch.closed === 'string')).toBe(true);
+  });
+});
+
 // --------------------------------------------------- lineage.launch.mode
 //
 // The verb layer's whole part in delegation: decide the launch is not ours to
@@ -3692,7 +4025,7 @@ describe('resume hands a plain reopen to the launch delegate', () => {
     // delegate's UI, but back.
     const patch = h.calls.records.find((r) => r.id === SESSION)?.patch;
     expect(patch?.closed).toBeNull();
-    expect(patch?.parked).toBe(false);
+    expect(patch?.graceUntil).toBeNull();
   });
 
   it('launches here when the delegate declines, throws, or is unwired', async () => {
@@ -3968,7 +4301,7 @@ describe('a session that never took a turn opens by starting', () => {
     // The same bookkeeping a resume does: a row with a tab must not read as
     // closed, and must not be resumed a second time by the next switch.
     const patch = h.calls.records.find((r) => r.id === SESSION)?.patch;
-    expect(patch).toMatchObject({ closed: null, parked: false, tmux: null });
+    expect(patch).toMatchObject({ closed: null, graceUntil: null, tmux: null });
   });
 
   it('replays the ancestor when the unstarted row is a FORK', async () => {
@@ -4942,5 +5275,198 @@ describe('the add / import flows', () => {
       // Not even a receipt: nothing happened, and saying so twice is noise.
       expect(saidInfo).toEqual([]);
     });
+  });
+});
+
+// ------------------------------------------------- folder mode: route, never adopt
+//
+// A window in folder mode IS the folder it opened. A session living in another
+// folder is another window's work: clicking or resuming it here must ROUTE —
+// to the window that has it bound, else to a window on its folder, else to an
+// OFFER of a new window — and never attach, adopt, fork or resume in place.
+// The decision helpers are src/modes.ts; what is under test here is that the
+// verbs actually stop at the fence.
+
+describe('folder mode: foreign rows route to their own window', () => {
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockWindow as { showInformationMessage?: unknown })
+      .showInformationMessage;
+  });
+
+  const SESSION = uuid(7);
+
+  function routeHarness(over: {
+    cwd?: string;
+    choose?: string;
+    focusWindowFor?: (id: string) => Promise<boolean>;
+    focusWindowForDir?: (dir: string, id?: string) => Promise<boolean>;
+  }): {
+    told: string[];
+    opened: Array<[string, boolean]>;
+    calls: ChatCalls;
+    run: (command: string, arg: string) => Promise<void>;
+  } {
+    const told: string[] = [];
+    const opened: Array<[string, boolean]> = [];
+    (
+      mockWindow as {
+        showInformationMessage?: (
+          m: unknown,
+          ...rest: unknown[]
+        ) => Promise<unknown>;
+      }
+    ).showInformationMessage = async (message) => {
+      told.push(String(message));
+      return over.choose;
+    };
+    const other = projectOf({ id: 'p9', name: 'other', rootDir: '/code/other' });
+    const { deps, calls } = chatDeps(undefined, { projects: [other] });
+    const harness = withRegisteredCommands({
+      ...deps,
+      getForest: () =>
+        forestOf([
+          node(SESSION, {
+            status: 'idle',
+            cwd: over.cwd ?? '/code/other/task',
+            roster: { sessionId: SESSION, pid: 4242 },
+          }),
+        ]),
+      lineageMode: () => 'folder',
+      scopeDirs: () => ['/code/app'],
+      focusWindowFor: over.focusWindowFor ?? (async () => false),
+      ...(over.focusWindowForDir === undefined
+        ? {}
+        : { focusWindowForDir: over.focusWindowForDir }),
+      openProject: async (fsPath, newWindow) => {
+        opened.push([fsPath, newWindow]);
+      },
+      markSeen: async () => undefined,
+    });
+    return { told, opened, calls, run: (c, a) => harness.run(c, a) };
+  }
+
+  it('routes to the window that has the session bound, and stops', async () => {
+    const focused: string[] = [];
+    const h = routeHarness({
+      focusWindowFor: async (id) => {
+        focused.push(id);
+        return true;
+      },
+    });
+    await h.run(COMMANDS.focusSession, SESSION);
+    expect(focused).toEqual([SESSION]);
+    expect(h.told).toEqual([]);
+    expect(h.calls.launches).toEqual([]);
+  });
+
+  it('falls to the window whose folder covers the cwd', async () => {
+    const routed: Array<[string, string | undefined]> = [];
+    const h = routeHarness({
+      focusWindowForDir: async (dir, id) => {
+        routed.push([dir, id]);
+        return true;
+      },
+    });
+    await h.run(COMMANDS.focusSession, SESSION);
+    // Routed by the session's OWN cwd — the deepest-folder resolver wants the
+    // real path, not the project claim.
+    expect(routed).toEqual([['/code/other/task', SESSION]]);
+    expect(h.told).toEqual([]);
+    expect(h.calls.launches).toEqual([]);
+  });
+
+  it('offers a NEW window on the owning claim — and never resumes here', async () => {
+    const h = routeHarness({
+      focusWindowForDir: async () => false,
+      choose: 'Open in New Window',
+    });
+    await h.run(COMMANDS.focusSession, SESSION);
+    // The offer names the project's claimed directory, and accepting opens
+    // THAT in a new window: the new window's scope is the whole project.
+    expect(h.told[0]).toContain('/code/other');
+    expect(h.opened).toEqual([['/code/other', true]]);
+    // Nothing was adopted in place: no launch, no fork dialog beyond the offer.
+    expect(h.calls.launches).toEqual([]);
+  });
+
+  it('routes a RESUME too — level 2 elsewhere is still elsewhere', async () => {
+    const routed: string[] = [];
+    const h = routeHarness({
+      focusWindowForDir: async (dir) => {
+        routed.push(dir);
+        return true;
+      },
+    });
+    await h.run(COMMANDS.resumeSession, SESSION);
+    expect(routed).toEqual(['/code/other/task']);
+    expect(h.calls.launches).toEqual([]);
+  });
+
+  it('leaves an in-scope session to the ordinary tiers', async () => {
+    const routed: string[] = [];
+    const h = routeHarness({
+      cwd: '/code/app/src',
+      focusWindowForDir: async (dir) => {
+        routed.push(dir);
+        return true;
+      },
+    });
+    await h.run(COMMANDS.focusSession, SESSION);
+    // The fence did not fire; the flow fell through to the last-resort dialog
+    // exactly as it does without a mode.
+    expect(routed).toEqual([]);
+    expect(h.told[0]).toContain('outside Flock');
+  });
+});
+
+describe('folder mode: the switch verb refuses', () => {
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockWindow as { showInformationMessage?: unknown })
+      .showInformationMessage;
+  });
+
+  it('refuses with directions instead of switching', async () => {
+    const told: string[] = [];
+    (
+      mockWindow as { showInformationMessage?: (m: unknown) => Promise<unknown> }
+    ).showInformationMessage = async (message) => {
+      told.push(String(message));
+      return undefined;
+    };
+    const switched: Array<string | null> = [];
+    const { deps } = chatDeps(projectOf());
+    const harness = withRegisteredCommands({
+      ...deps,
+      lineageMode: () => 'folder',
+      switchWorkspace: async (projectId: string | null) => {
+        switched.push(projectId);
+      },
+    });
+    await harness.run(COMMANDS.switchWorkspace, {
+      type: 'project',
+      projectId: 'p1',
+    });
+    expect(switched).toEqual([]);
+    expect(told[0]).toContain('folder mode');
+    expect(told[0]).toContain('lineage.mode');
+  });
+
+  it('switches as before in project mode', async () => {
+    const switched: Array<string | null> = [];
+    const { deps } = chatDeps(projectOf());
+    const harness = withRegisteredCommands({
+      ...deps,
+      lineageMode: () => 'project',
+      switchWorkspace: async (projectId: string | null) => {
+        switched.push(projectId);
+      },
+    });
+    await harness.run(COMMANDS.switchWorkspace, {
+      type: 'project',
+      projectId: 'p1',
+    });
+    expect(switched).toEqual(['p1']);
   });
 });

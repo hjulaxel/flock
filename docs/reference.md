@@ -534,7 +534,13 @@ The red dot is an **unread marker**. It appears when a session completes a turn
 focus that session. Red rather than green because it is the one row asking for
 you — green is what everything else on screen uses to mean "nothing to do here".
 It rolls up onto the project row, so a collapsed project still shows there is
-something to come back to, and the badge on the view is the count of red dots.
+something to come back to. The numeric badge on the view container counts
+something else: how many sessions are **running on this machine** — open tabs
+plus any closing countdown, in every window — so a number you did not expect is
+a process you did not know about. When a running session's row would be
+filtered out of this window (another folder's work in folder mode, a closed
+project's), it renders in a collapsed **Running elsewhere** group at the bottom
+instead: the badge never counts a process you cannot see and act on.
 
 The **bell** — leftmost in the view title — lists the latest finished sessions,
 unseen above a divider, then history, each with its project and how long ago it
@@ -584,7 +590,12 @@ Switching:
 3. **restores** the target's saved layout: files reopen in their editor groups,
    parked sessions re-attach to the tmux session they were detached from, and one
    that died while out of sight is resumed from its transcript;
-4. **lands** on one tab, chosen rather than raced. When the switch happened
+4. **reveals** where you landed: a manual switch selects the target's folder in
+   the Explorer, and the summary line names the branch checked out there — for a
+   subproject that pins a branch, the folder is whatever worktree has that branch
+   checked out today. Purely a courtesy: a folder outside git reveals silently,
+   and no switch ever creates a worktree;
+5. **lands** on one tab, chosen rather than raced. When the switch happened
    because you clicked a session of another project, that is the session you end
    up in; otherwise it is the tab the target's layout was left on, file or
    session.
@@ -919,7 +930,7 @@ manifest.
 `lineage.viewStyle` chooses how the Sessions view is drawn:
 
 - **`inline`** (default) — the extension draws the rows, which is what makes
-  renaming in place possible. Right-click menus, theming, the attention badge
+  renaming in place possible. Right-click menus, theming, the view badge
   and dragging a session onto a project all work as normal.
 - **`native`** — the built-in VS Code tree widget. Better keyboard and screen
   reader support, but rename opens a box at the top of the window instead of on

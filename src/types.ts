@@ -87,14 +87,23 @@ export const STATUS_DOT = '●';
  *  mark should start from that answer rather than rediscover it. */
 export const CLOSED_DOT = '○';
 /** The numeric badge on the Flock view container (the activity-bar logo):
- *  how many rendered rows carry a lit attention dot. DEACTIVATED for now —
- *  flip to `true` to bring it back, no other change needed. Both surfaces
- *  (native tree and inline webview) read this at the one line where they
- *  write `view.badge`, and both write `undefined` while it is off, so the
- *  badge clears rather than freezing at its last value. The counters behind
- *  it — `LineageTreeProvider.attentionCount` and `attentionCountOf` — stay
- *  live and tested; only the publish is switched off. */
-export const ATTENTION_BADGE_ENABLED = false;
+ *  how many RUNNING sessions the tree is answering for — level 1 and the
+ *  grace countdown together, i.e. every live process with a row.
+ *
+ *  The slot used to count attention (lit dots) and was deactivated; the
+ *  running count takes it because it is the number the levels design exists
+ *  to make countable. "No running process without a visible row" is only an
+ *  invariant you can trust if the count of processes is ON the container —
+ *  the 84-detached-sessions incident was survivable precisely because nothing
+ *  anywhere showed "84". Attention lost the slot but not its surfaces: the
+ *  dots, the bell and `lineage.hasUnseen` all still carry it, and
+ *  `attentionCountOf` stays live and tested.
+ *
+ *  Flip to `false` to clear the badge — both surfaces (native tree and inline
+ *  webview) read this at the one line where they write `view.badge`, and both
+ *  write `undefined` while it is off, so the badge clears rather than
+ *  freezing at its last value. */
+export const RUNNING_BADGE_ENABLED = true;
 export const CONTEXT_HOOKS_INSTALLED = 'lineage.hooksInstalled';
 /** True while any rendered session is done-and-not-looked-at. Drives the bell
  *  icon in the view title: `bell-dot` when set, plain `bell` when not — two
@@ -157,6 +166,14 @@ export const CONTEXT_MANY_ACCOUNTS = 'lineage.manyAccounts';
  *  Flock view in the Explorer of every install that never opened a
  *  project. */
 export const CONTEXT_EXPLORER_FOLLOW = 'lineage.explorerFollow';
+/** The `lineage.mode` value ('folder' | 'project'), mirrored for the
+ *  manifest's when-clauses: a contributed menu item cannot read a setting
+ *  through anything but `config.*`, and gating on the RESOLVED mode (defaults
+ *  and garbage values folded in by modes.normalizeMode) has to match what the
+ *  code actually does — `config.lineage.mode == 'project'` would disagree with
+ *  the code the moment a settings file carries a typo. Written at activation
+ *  and on every configuration change. */
+export const CONTEXT_MODE = 'lineage.mode';
 
 // ------------------------------------------------------------------ schema
 
@@ -172,8 +189,19 @@ export const CONTEXT_EXPLORER_FOLLOW = 'lineage.explorerFollow';
  *  and state.migrateV5ToV6 for the write. Sessions are not touched and do not
  *  need to be: membership has always been derived from the cwd, so a session
  *  that was under the child's row is under the child's DIRECTORY row afterwards.
+ *
+ *  v8 RETIRES `parked` — the invisible running-but-unshown state that let 84
+ *  detached sessions (~670 processes) pile up unseen. Every record with
+ *  `parked: true` is flipped to archived (a `closed` stamp, `tmux` cleared) —
+ *  level 2: no process, a visible resumable row. The flip lives in
+ *  state.sanitizeRecord rather than in a one-shot ladder step, on the
+ *  hidden→deleted precedent, so a mixed install whose old window keeps
+ *  re-writing `parked: true` converges again on every read. The processes those
+ *  records left running are ended by the activation-time tmux reconcile
+ *  (extension.ts), which needs no record-side name — the tmux session name
+ *  encodes the session id.
  */
-export const STATE_SCHEMA_VERSION = 7;
+export const STATE_SCHEMA_VERSION = 8;
 
 /** The first schema version written by a build in which branch rows are OFF by
  *  default. 0.1.1 and earlier drew a row per checkout unconditionally and wrote
@@ -684,6 +712,17 @@ export const COMMANDS = {
   renameSessionInline: 'lineage.renameSessionInline',
   closeSession: 'lineage.closeSession',
   closeWithSummary: 'lineage.closeWithSummary',
+  /** End the session to level 2 IMMEDIATELY, skipping every wait: a grace
+   *  countdown is cut short (the detached process is killed, tree and all), a
+   *  live tab is closed. The user verb for "1→2 now" where `closeSession`
+   *  covers only a session with a terminal to close. */
+  closeSessionNow: 'lineage.closeSessionNow',
+  /** Toggle the keep-awake pin (EditorialRecord.pinned): a pinned session is
+   *  exempt from the idle timer, grace expiry and pool eviction — for long
+   *  autonomous runs that look idle between turns. One toggle verb rather than
+   *  a pin/unpin pair because the pinned state has no menu token yet; the verb
+   *  reports which way it flipped. */
+  togglePinSession: 'lineage.togglePinSession',
   wrapSession: 'lineage.wrapSession',
   copySessionId: 'lineage.copySessionId',
   // TWO verbs on a row, no third: CLOSE ends the tab (the row stays,
@@ -1067,6 +1106,25 @@ export const CONFIG_KEYS = {
    *  never touched. The decision is chatAutoCloseVictims
    *  (src/chatAutoClose.ts); extension.ts sweeps on a timer. */
   chatAutoCloseMinutes: 'chat.autoCloseMinutes',
+  /** How long ANY session tab may sit idle before it closes itself to level 2
+   *  (an archived row, one click from resuming), in minutes; 0 disables. The
+   *  generalization of `chat.autoCloseMinutes` to every session: the process
+   *  is a warm cache over the transcript, and a cache nobody has read for
+   *  half an hour is paid for in memory (~390 MB + ~8 MCP children each). The
+   *  active tab, busy/waiting sessions (marked close-after-turn instead) and
+   *  pinned sessions are never touched. Decision: idleCloseDecisions
+   *  (src/idleClose.ts); extension.ts sweeps on the same 60 s timer as the
+   *  chat sweep. Idleness is the last REAL transcript record's timestamp,
+   *  never file mtime — hooks touch transcripts without new content. */
+  sessionCloseAfterMinutes: 'session.closeAfterMinutes',
+  /** How long a tab-close (workspace switch, solo mode) may leave a
+   *  tmux-wrapped session running DETACHED so re-attach is instant, in
+   *  minutes; 0 closes immediately. The one sanctioned detached-running
+   *  state, and it always renders — the tree shows a countdown row. At the
+   *  deadline: idle → closed to level 2; busy → close-after-turn. The pool is
+   *  capped (idleClose.GRACE_POOL_CAP = 8); overflow closes oldest-idle
+   *  first. */
+  sessionDetachGraceMinutes: 'session.detachGraceMinutes',
   /** Who OPENS a conversation: Flock's own tmux-backed terminal, or another
    *  extension's commands (see src/hosts.ts's delegate table). Consulted for a
    *  NEW conversation and for a plain RESUME of an unpinned one — a fork has
@@ -1207,7 +1265,17 @@ export const CONFIG_KEYS = {
   // Notifications
   notificationsEnabled: 'notifications.enabled',
   notificationsPopup: 'notifications.popup',
-  // Workspaces
+  /** `lineage.mode` — what a WINDOW is. `folder` (the default): the window is
+   *  the folder you opened, the tree scopes itself to sessions under it, and
+   *  in-window project switching does not exist — no switch verb, no workspace
+   *  status-bar item, workspaces.ts save/clear/restore never runs; other
+   *  projects' rows route to their own windows. `project`: one window spans
+   *  many projects and switches between them transactionally (the pre-mode
+   *  behaviour, still additionally gated by `workspaces.enabled` below).
+   *  Parsing and the gates live in src/modes.ts; the value is mirrored into
+   *  the CONTEXT_MODE key for the manifest's when-clauses. */
+  mode: 'mode',
+  // Workspaces (project mode)
   workspacesEnabled: 'workspaces.enabled',
   workspacesResumeSessions: 'workspaces.resumeSessions',
   workspacesAutoSwitch: 'workspaces.autoSwitch',
@@ -1484,6 +1552,25 @@ export interface SessionNode {
    *  so the tooltip can show it — otherwise the text the user typed would be
    *  reachable only by hand-reading state.json. */
   summary?: string;
+  /** The last real conversation text visible in the transcript's bounded tail
+   *  — the final assistant reply when the window holds one, else the last user
+   *  prompt (see usage.readTailStats). This is what an ARCHIVED row shows when
+   *  no `summary` was recorded: level 2 exists to answer "what did that branch
+   *  conclude?" without resuming, and the age alone answers only "when".
+   *  Carried on every node the tail sweep covered (the fact is the same for a
+   *  live session), but only archived rows RENDER it — a live conversation's
+   *  last line is on screen in its own tab. */
+  lastExchange?: string;
+  /** Epoch ms of `record.graceUntil` — this session is running DETACHED under
+   *  the detach grace (tab closed, process alive so re-attach is instant), and
+   *  this is when the sweep will end it. The one sanctioned detached-running
+   *  state, and the spec's condition for sanctioning it is that the row must
+   *  say so: renderers draw a countdown from this. Present only on LIVE nodes
+   *  — an archived record's stale deadline describes a process that no longer
+   *  exists — and kept even past expiry, because a busy session outlives its
+   *  deadline on purpose (close-after-turn) and a row must never go quiet
+   *  while its process runs. */
+  graceDeadlineAt?: number;
   /** The session finished a turn (`doneAt`) and the user has not looked at it
    *  since — the attention dot. Computed per build from the editorial record;
    *  `undefined` means "not tracked" (notifications off for this session, or a
@@ -1963,6 +2050,22 @@ export interface SubprojectRecord {
    * still starts sessions where it says.
    */
   dir: string;
+  /**
+   * The lane's PINNED BRANCH — the one piece of git context a lane may carry.
+   *
+   * When set, the lane's work is the BRANCH, and `dir` is only where the branch
+   * happened to live when the lane was made: the deep switch reveals (and the
+   * lane's `+` starts sessions in) whatever checkout has this branch out TODAY,
+   * which for a worktree-per-agent workflow moves as worktrees come and go. See
+   * src/deepSwitch.ts for the resolution rule; the fallback when no checkout
+   * has the branch is always `dir` itself — nothing on a switch path ever
+   * CREATES a worktree (that stays a user-confirmed verb, src/worktrees.ts).
+   *
+   * Optional, and absent means "the directory answers on its own" — every lane
+   * from before this field behaves exactly as it always did. Short name
+   * (`feat/x`), never a full ref.
+   */
+  branch?: string;
   /** TOMBSTONE, exactly as ProjectRecord.deleted is and for the same reason: a
    *  dropped key is indistinguishable from "the other window has not heard of it
    *  yet", and any window still holding the lane re-adds it on its next write. */
@@ -2039,13 +2142,28 @@ export type ContextToken =
   | 'notified'
   /** OWNERSHIP pair, always exactly one of the two on a LIVE session row, for
    *  the same reason as the two pairs above. `hosted` means Flock can honestly
-   *  end this session — its tab is here, another Flock window has it, or a
-   *  workspace switch parked it — and is what the Close verbs match on.
+   *  end this session — its tab is here, another Flock window has it, or it
+   *  runs detached under the grace — and is what the Close verbs match on.
    *  `foreign` means the process belongs to something else (a terminal, the
    *  Claude Code extension, another app), where a close could only write a
    *  timestamp onto a conversation that carries on running. See src/hosts.ts. */
   | 'hosted'
   | 'foreign'
+  /** This session runs DETACHED under the grace countdown
+   *  (SessionNode.graceDeadlineAt): its tab is gone, its process is alive so
+   *  re-attach is instant, and the sweep will end it at the deadline. A THIRD
+   *  token beside 'live' + the ownership pair, never a replacement for them —
+   *  a grace row keeps every live verb (it IS live) and gains the two that only
+   *  make sense while the countdown runs: Close Now (why wait out the timer)
+   *  and Keep Awake (make the timer never fire). */
+  | 'grace'
+  /** The "Running elsewhere" GROUP row — the collapsed appendix folder mode
+   *  renders for running sessions its filters would otherwise drop (cwd
+   *  outside the window's folders, or every claiming project closed). Its own
+   *  token rather than 'group' so the folder verbs (hide, open) never appear
+   *  on a row that is not a folder: it has no cwd and exists purely so that
+   *  "every running process has a row in every window" survives the fences. */
+  | 'elsewhere'
   /** One branch row under a project. Its own token rather than reusing
    *  'project': the two rows carry the same projectId and would otherwise match
    *  each other's `when` clauses, putting the project's whole context menu —
@@ -2217,26 +2335,60 @@ export interface EditorialRecord {
    *  silencing a session is what `notify: false` is for, and conflating the two
    *  would make a one-click × the most destructive control in the popup. */
   notifyDismissedAt?: string;
-  // ---- workspaces ---------------------------------------------------------
-  /** Put away by a WORKSPACE SWITCH: its terminal was closed — the claude
-   *  process ended; the conversation lives on in its transcript — to clear
-   *  the window for another project, and switching back RESUMES it
-   *  (`--resume`, chain-tip routed). The terminal panel is never involved:
-   *  an older build stowed parked sessions into it instead, and a still-live
-   *  one from those days is moved home as a one-shot migration. The row
-   *  renders normally — parking is bookkeeping, not a user verb, so it must
-   *  not grey anything. Membership needs no special case: any non-deleted
-   *  record survives the `showArchived` gate. */
+  // ---- lifecycle ----------------------------------------------------------
+  /** RETIRED at schema v8. The old workspace switch wrote `parked: true` —
+   *  running (or resumable) but with no tab and no distinct row — and that
+   *  invisible, unbounded state is how 84 detached sessions (~670 processes,
+   *  32 GB) accumulated unseen. The state is now unrepresentable: a session is
+   *  level 1 (running, shown), level 2 (`closed` set — no process, archived
+   *  row, click to resume) or level 3 (`deleted`). sanitizeRecord reads a
+   *  persisted `parked: true` (written by older builds) as archived — `closed`
+   *  stamped, `tmux` cleared — and drops the field, so no record carries it
+   *  past a load. Kept typed because foreign state files written by older
+   *  windows still carry it and the sanitizer needs the name. */
   parked?: boolean;
-  /** DETACH-tier parking (see src/tmux.ts). The private tmux session
-   *  (`tmux -L lineage …`) this conversation was detached into when a switch
-   *  parked it: the terminal — only the tmux CLIENT — was disposed and the
-   *  claude process kept running, invisible. Written at park time next to
-   *  `parked`; kill-tier parks write `null` instead so a stale name can never
-   *  survive a park that really killed. Cleared (null) when a restore
-   *  re-attaches. While set, ANY resume of this conversation must go through
-   *  `new-session -A` under this name — a plain `--resume` would start a
-   *  second claude beside the one still running. */
+  /** THE DETACH GRACE — the one sanctioned running-but-detached state, and it
+   *  always renders (a countdown row in the tree). ISO deadline: closing this
+   *  session's tab (a workspace switch, solo mode) left its tmux-wrapped
+   *  process running so re-attach is instant, and at this moment the sweep
+   *  ends it to level 2 (or, mid-turn, marks it `closeAfterTurn`). Written by
+   *  the detach sweep next to `tmux`; cleared (`null`) together with it when a
+   *  re-attach settles the claim. The pool of graced sessions is capped
+   *  (idleClose.GRACE_POOL_CAP); overflow closes oldest-idle first. */
+  graceUntil?: string | null;
+  /** THE KEEP-AWAKE PIN: this session is exempt from every automatic close —
+   *  the idle timer, grace expiry, grace-pool eviction. For long autonomous
+   *  runs that look idle between turns. A pinned session is still level 1
+   *  with a visible row; the pin holds a process open, never hides one. */
+  pinned?: boolean;
+  /** CLOSE-AFTER-THIS-TURN — the spec's queue, not a state. Set instead of
+   *  closing when the idle timer (or an expired grace) lands on a BUSY or
+   *  WAITING session: a turn in flight and a blocked permission dialog outrank
+   *  tidiness everywhere in this extension. The sweep closes the session and
+   *  clears the mark on the first tick that finds it idle; the user looking at
+   *  the tab (active) also clears it — re-engagement outranks the queue. */
+  closeAfterTurn?: boolean;
+  /** STOWED BY A SWITCH — the workspace switch (and nothing else) put this
+   *  session away, so the switch back may bring it home. Written by
+   *  parkSweep's detach and kill tiers next to the grace deadline / `closed`
+   *  stamp, and it is what lets the restore tell close-by-switch from
+   *  close-by-user: an archived record WITHOUT this marker was closed by a
+   *  user verb (Close, Close Now, Delete, a tab ×) or by the idle timer, and
+   *  a saved layout naming it must NOT resurrect it — "user closed stays
+   *  closed" held on the record itself, because the layout alone cannot say
+   *  what happened after it was saved. Survives the sweep's grace-expiry kill
+   *  on purpose (the timer finishing what the switch started is still the
+   *  switch's doing); cleared by the restore that consumes it and by every
+   *  user verb that touches the session's lifecycle. */
+  stowedBySwitch?: boolean;
+  /** The private tmux session (`tmux -L lineage …`, see src/tmux.ts) this
+   *  conversation's process runs detached in while under `graceUntil`: the
+   *  terminal — only the tmux CLIENT — was disposed and the claude process
+   *  kept running. Written by the detach sweep next to `graceUntil`; cleared
+   *  (null) when a re-attach or a kill settles it. While set, ANY resume of
+   *  this conversation must go through `new-session -A` under this name — a
+   *  plain `--resume` would start a second claude beside the one still
+   *  running. */
   tmux?: string | null;
   // ---- project chat -------------------------------------------------------
   /** This session is a project CHAT — a scratch conversation about the project
@@ -2270,7 +2422,18 @@ export interface FocusHandle {
 export interface WindowRecord {
   windowId: string;      // random uuid minted per activation
   focusHandle: FocusHandle;
-  folder?: string;       // first workspace folder fsPath, if any
+  /** First REAL workspace folder fsPath, if any. "Real" excludes the Flock
+   *  anchor a converted explorer-follow window carries at folder[0] — an
+   *  empty directory nothing runs in, so publishing it made the window
+   *  unroutable (nothing is "under" it) while hiding the folders that ARE
+   *  its identity. Kept as the single-folder field older readers know. */
+  folder?: string;
+  /** EVERY real workspace folder, in workspace order (anchor excluded, same
+   *  rule as `folder`). What modes.windowForDir routes on, so a multi-root
+   *  window is the target for work under any of its roots, not only the
+   *  first. Absent on records published by older builds — readers fall back
+   *  to `folder`. */
+  folders?: readonly string[];
   pid: number;           // extension-host pid, used to prune dead windows
   publishedAt: string;   // ISO
 }
@@ -2570,6 +2733,15 @@ export interface TreeDeps {
   hiddenFolders(): string[];
   /** Only show sessions that belong to a project (config). */
   onlyProjectSessions(): boolean;
+  /** FOLDER MODE's scope: every REAL folder this window opened (the Flock
+   *  anchor excluded), or undefined/empty when nothing is scoped (project
+   *  mode, or an empty window). Feeds GroupingInput.scopeDirs — sessions
+   *  whose cwd is known and outside ALL of them are another window's rows,
+   *  not this one's. A list because converted explorer-follow windows and
+   *  ordinary multi-root workspaces open several folders, each of which is
+   *  "the folder you opened". Optional so an older wiring (and every unit
+   *  double) keeps the machine-wide tree it always had. */
+  scopeDirs?(): readonly string[] | undefined;
   /** The view's session selection changed: these ids, in display order.
    *
    *  Reported UP rather than read down, because only the view knows it — the
@@ -2738,6 +2910,25 @@ export interface TerminalDeps {
    *  inactive), never by workspace parking, which detaches. Absent = a
    *  user-closed wrapped session keeps running hidden. */
   tmuxKillSession?(name: string): Promise<boolean>;
+  /** BARE tier's half of the tree reap (src/procs.ts): the live descendants
+   *  of a pid, walked via ps. A bare terminal's dispose kills only the pane
+   *  root — its ~8 MCP children re-parent to PID 1 and keep running — so the
+   *  registry walks the tree BEFORE disposing and reaps the survivors after.
+   *  Injectable for tests; absent = the real walker in src/procs.ts. */
+  listDescendants?(rootPid: number): Promise<number[]>;
+  /** The escalation ladder behind the walk above: verify the walked pids
+   *  exited, SIGTERM the survivors, SIGKILL the stubborn — each signal to an
+   *  explicit pid, never a name pattern. Injectable for tests; absent = the
+   *  real ladder in src/procs.ts. */
+  reapSurvivors?(
+    pids: readonly number[],
+  ): Promise<{ exited: number; termed: number; killed: number }>;
+  /** The `kill(pid, 0)` liveness probe (src/procs.ts isPidAlive). The
+   *  shutdown-time bare reap uses it to tell a window CLOSE (the pty root is
+   *  dead — its orphans may be reaped) from a window RELOAD (the pty
+   *  survives for revival — touching its tree would kill a live session).
+   *  Injectable for tests; absent = the real probe. */
+  isPidAlive?(pid: number): boolean;
 }
 
 /** Detach tier (src/tmux.ts). How to wrap a session launch in the private
@@ -2754,6 +2945,13 @@ export interface WindowDeps {
   publishWindow(rec: WindowRecord): Promise<void>;
   /** Called when our UriHandler receives /focus; sessionId from the query. */
   onFocusRequest(sessionId: string | null): void;
+  /** The window's REAL workspace folders, in order — the Flock anchor (an
+   *  empty directory the explorer-follow feature parks at folder[0] of a
+   *  converted window) already filtered out by the wiring, which is the one
+   *  place that knows the anchor's path. What `WindowRecord.folder`/`folders`
+   *  publish; absent (older wirings, unit doubles) falls back to the raw
+   *  workspace folder list, which is correct for every unconverted window. */
+  realFolders?(): readonly string[];
 }
 
 export interface HookDeps {
@@ -3075,8 +3273,44 @@ export interface CommandDeps {
   renameTerminal(sessionId: string, name: string): Promise<boolean>;
   sendTextToSession(sessionId: string, text: string): boolean;
   closeTerminal(sessionId: string): boolean;
+  /** End a DETACHED session's process — one under a grace countdown, whose
+   *  terminal is already gone so `closeTerminal` has nothing to dispose. Kills
+   *  the recorded tmux session and its process TREE (~8 MCP children — see
+   *  src/procs.ts), stamps the record archived and runs the at-rest repair.
+   *  The Close Now verb's second tier. Optional: a wiring without it (and
+   *  every unit double) archives the record and leaves the process to the
+   *  sweep's grace expiry, which is late but never wrong. */
+  killDetached?(sessionId: string): Promise<boolean>;
+  /** Does some record on this session's generation chain name a LIVE window
+   *  other than this one (`boundWindowId` against the pruned window list)?
+   *  The cross-window RESTORE RACE guard, mirroring the lifecycle sweep's:
+   *  another window's restore binds the terminal and stamps `boundWindowId`
+   *  first, but clears `graceUntil`/`tmux` only after its launch resolves —
+   *  a seconds-wide window in which the record still reads as a detached
+   *  claim while the process already has a tab THERE. Killing on that claim
+   *  would end the session out from under the window that just attached it,
+   *  so Delete and the Close verbs skip the kill when this answers true.
+   *  Optional: absent (older wirings, unit doubles) reads as false, the
+   *  pre-guard behaviour. */
+  boundToLiveForeignWindow?(sessionId: string): boolean;
   // windows (F)
   focusWindowFor(sessionId: string): Promise<boolean>;
+  /** Raise the window whose opened folder contains `dir` (deepest wins — see
+   *  modes.windowForDir), revealing `sessionId` there once it is up. False when
+   *  no live window covers the directory, which is the caller's cue to offer a
+   *  NEW window instead. Folder mode's routing arm; optional so an older
+   *  wiring (and every unit double) simply has no cross-folder routing. */
+  focusWindowForDir?(dir: string, sessionId?: string): Promise<boolean>;
+  /** `lineage.mode`, resolved (src/modes.ts). Optional: absent — every unit
+   *  double, an older wiring — reads as no mode machinery at all, i.e. nothing
+   *  gated and nothing routed, which is exactly the pre-mode behaviour. */
+  lineageMode?(): 'folder' | 'project';
+  /** FOLDER MODE's fence, when there is one: every real folder this window
+   *  opened (anchor excluded), or undefined when nothing is fenced (project
+   *  mode, an empty window, a unit double). The same value TreeDeps.scopeDirs
+   *  feeds the grouping, so the verbs and the rows can never disagree about
+   *  which sessions are this window's to act on. */
+  scopeDirs?(): readonly string[] | undefined;
   // surfaces (F)
   openProject(fsPath: string, newWindow: boolean): Promise<void>;
   // hooks (G)
@@ -3130,6 +3364,16 @@ export interface CommandDeps {
   /** `lineage.git.worktreePath` — the pattern a new worktree's path is built
    *  from. Absent falls back to the shipped default. */
   worktreePathPattern?(): string;
+  /** The repository's checkouts at `dir` — a WARMED read of the same cache the
+   *  views group with (src/git.ts), awaited so the answer is real rather than
+   *  whatever the cache held. For the one verb that places a session by a
+   *  lane's pinned branch (see SubprojectRecord.branch): a stale list would
+   *  start the session in a worktree that was removed a minute ago. NOT gated
+   *  on `lineage.git.branches` — that setting hides the branch ROWS; the data
+   *  path stays live so placement works with the rows off. Absent (older
+   *  wiring, unit doubles) reads as "no checkouts": the lane's own directory
+   *  answers, which is the pre-pin behaviour. */
+  worktreesFor?(dir: string): Promise<readonly Worktree[]>;
   /** The repository's local branches, most recently committed first. Read once,
    *  when the user opens the New Worktree picker; [] leaves the picker as a
    *  free-text field, which is the half of it that needs no git. */

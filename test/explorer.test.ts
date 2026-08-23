@@ -16,6 +16,7 @@ import {
   ExplorerSync,
   desiredFolders,
   isAnchored,
+  nonAnchorFolders,
   planSplice,
   withAnchorName,
   workspaceFileJson,
@@ -96,6 +97,41 @@ describe('explorer: isAnchored', () => {
   it('is false for an empty window and for an empty anchor path', () => {
     expect(isAnchored([], ANCHOR)).toBe(false);
     expect(isAnchored([anchorFolder], '')).toBe(false);
+  });
+});
+
+// --------------------------------------------------------- nonAnchorFolders
+
+describe('explorer: nonAnchorFolders', () => {
+  it('strips the anchor and keeps every real folder, order intact', () => {
+    // The converted-window shape: anchor first, the user's folders after. The
+    // real folders are the window's identity — what the folder-mode fence
+    // scopes to and what the WindowRecord publishes for routing.
+    expect(nonAnchorFolders(ANCHOR, [ANCHOR, '/a', '/b'])).toEqual([
+      '/a',
+      '/b',
+    ]);
+  });
+
+  it('strips the anchor wherever it sits, however it is spelled', () => {
+    // A rearranged window is degraded for splices (isAnchored says no) but
+    // its real folders are still its real folders.
+    expect(
+      nonAnchorFolders(ANCHOR, ['/a', `${ANCHOR}/`, '/b']),
+    ).toEqual(['/a', '/b']);
+    expect(nonAnchorFolders(ANCHOR, [ANCHOR.toUpperCase(), '/a'])).toEqual([
+      '/a',
+    ]);
+  });
+
+  it('drops junk entries and passes unconverted windows through unchanged', () => {
+    expect(nonAnchorFolders(ANCHOR, ['', '/a'])).toEqual(['/a']);
+    expect(nonAnchorFolders(ANCHOR, ['/x', '/y'])).toEqual(['/x', '/y']);
+    expect(nonAnchorFolders(ANCHOR, [])).toEqual([]);
+  });
+
+  it('an empty anchor path strips nothing', () => {
+    expect(nonAnchorFolders('', ['/a'])).toEqual(['/a']);
   });
 });
 
