@@ -577,19 +577,44 @@ nothing asks a question. Turn that off with `lineage.workspaces.autoSwitch`. You
 can always switch explicitly with the `$(layers)` status-bar item, the palette
 (**Flock: Switch Workspace…**), or a project row's context menu.
 
+### Where you are
+
+The `$(layers)` item says where the conversation **in front** is, not merely
+which project the window was last switched to — `Magma Score › ingest`, with the
+branch when the branch is not the one you would assume (a linked worktree, a
+detached HEAD, a lane's pinned branch, or any name that is not `main`, `master`,
+`trunk` or `develop`). It moves on **focus**, so switching between two lanes of
+one project — which is not a workspace switch at all — is visible. The Explorer's
+**Project** view carries the same answer as a row of its own, untruncated.
+
+When the window and the keyboard disagree — you focused a conversation belonging
+to another project, with auto-switching off — the line carries both names
+(`App → API`) and clicking it switches straight to the one you are in. A project
+you have **closed** is never named there: putting one away removes its rows, and
+this must not become the one place it comes back.
+
+In **folder mode** there is no workspace to name, so the item appears only when it
+has a lane or a branch to report, and clicking it jumps to the session's row.
+
 Switching:
 
 1. **saves** the current layout — file tabs with their editor groups and
    pinning, plus your session tabs, including which tab had the keyboard —
    under the project you are leaving;
-2. **hides** what does not belong to the target. A foreign *session* is
-   **parked**: its terminal closes, and with tmux the conversation **keeps
-   running** in the private server, hidden. Nothing asks to terminate. Unsaved
+2. **hides** what does not belong to the target. A foreign *session* leaves the
+   screen one of two ways. With tmux it **detaches under a grace**: the tab
+   closes, the conversation keeps running in the private server, and its row
+   shows a **countdown** — the one detached-running state that always has a row,
+   because a running process with nothing on screen is the state this design
+   exists to make unreachable. At the deadline it ends to level 2 (no process, an
+   archived row, `--resume` brings the conversation back whole). Without tmux it
+   closes to level 2 straight away. Nothing ever asks to terminate. Unsaved
    editors are never closed, terminals Flock does not own are never touched, and
-   a session mid-turn is left open rather than interrupted;
+   a session mid-turn is never killed;
 3. **restores** the target's saved layout: files reopen in their editor groups,
-   parked sessions re-attach to the tmux session they were detached from, and one
-   that died while out of sight is resumed from its transcript;
+   sessions still under the grace re-attach to the tmux session they were
+   detached from, and one that ended (or died) while out of sight is resumed from
+   its transcript;
 4. **reveals** where you landed: a manual switch selects the target's folder in
    the Explorer, and the summary line names the branch checked out there — for a
    subproject that pins a branch, the folder is whatever worktree has that branch

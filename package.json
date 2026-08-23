@@ -896,6 +896,11 @@
           "group": "3_remove@1"
         },
         {
+          "command": "lineage.switchWorkspace",
+          "group": "0_open@0",
+          "when": "view == lineageSessions && viewItem =~ /;project;/ && lineage.mode == 'project'"
+        },
+        {
           "command": "lineage.newSessionInProject",
           "group": "0_open@1",
           "when": "view == lineageSessions && viewItem =~ /;project;/"
@@ -1328,6 +1333,11 @@
           "command": "lineage.createPullRequest",
           "when": "config.lineage.git.branches && webviewId == 'lineageSessionsInline' && viewItem =~ /;branch;/ && viewItem =~ /;checkout;/ && config.lineage.git.pullRequests && !(viewItem =~ /;pullRequest;/)",
           "group": "0_open@5"
+        },
+        {
+          "command": "lineage.switchWorkspace",
+          "group": "0_open@0",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/ && lineage.mode == 'project'"
         },
         {
           "command": "lineage.newSessionInProject",

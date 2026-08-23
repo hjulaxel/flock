@@ -26,13 +26,14 @@ import {
   preferredClaimant,
   projectClaiming,
   projectDirs,
+  projectReach,
   providerOfProject,
   subprojectLabels,
   SUBPROJECT_MIN,
   validateProjectName,
 } from '../src/projects';
 import type { GroupingInput } from '../src/projects';
-import type { EditorialRecord, ProjectRecord } from '../src/types';
+import type { EditorialRecord, ProjectRecord, Worktree } from '../src/types';
 
 // ------------------------------------------------------------------ helpers
 
@@ -285,6 +286,62 @@ describe('matchProject', () => {
     const b = project('id-a', 'Beta', '/shared');
     expect(matchProject([a, b], '/shared/x')?.project.id).toBe('id-b');
     expect(matchProject([b, a], '/shared/x')?.project.id).toBe('id-b');
+  });
+});
+
+describe('projectReach: worktree membership, asked the same way everywhere', () => {
+  const app = project('app', 'App', '/code/app');
+  const probe = (dir: string): Worktree[] =>
+    dir === '/code/app'
+      ? [
+          { dir: '/code/app', branch: 'main', head: 'a', detached: false },
+          { dir: '/code/app-feat-x', branch: 'feat/x', head: 'b', detached: false },
+        ]
+      : [];
+
+  it('hands a project every checkout of the repositories its directories sit in', () => {
+    const reach = projectReach(probe);
+    expect(reach(app)).toEqual(['/code/app', '/code/app-feat-x']);
+  });
+
+  it('makes a session in a LINKED checkout belong to the project', () => {
+    // The whole point: nobody registers `~/code/app-feat-x`, worktrees come and
+    // go several times a day, and every surface has to agree that a session
+    // running there is this project's.
+    const reach = projectReach(probe);
+    expect(matchProject([app], '/code/app-feat-x/src', reach)?.project.id).toBe(
+      'app',
+    );
+    // Derived, not own — which is what keeps it losing to an explicit claim.
+    expect(matchProject([app], '/code/app-feat-x', reach)?.own).toBe(false);
+    // ...and without the resolver there is no match at all, which is exactly
+    // what every non-grouping caller used to get.
+    expect(matchProject([app], '/code/app-feat-x/src')).toBeNull();
+  });
+
+  it('memoizes per project for the life of the resolver', () => {
+    let calls = 0;
+    const counted = (dir: string): Worktree[] => {
+      calls += 1;
+      return probe(dir);
+    };
+    const reach = projectReach(counted);
+    reach(app);
+    reach(app);
+    expect(calls).toBe(1);
+    // A FRESH resolver probes again — the memo must not outlive the tick that
+    // built it, or a removed worktree keeps answering.
+    projectReach(counted)(app);
+    expect(calls).toBe(2);
+  });
+
+  it('answers empty for no probe, and survives one that throws', () => {
+    expect(projectReach(undefined)(app)).toEqual([]);
+    expect(
+      projectReach(() => {
+        throw new Error('git missing');
+      })(app),
+    ).toEqual([]);
   });
 });
 

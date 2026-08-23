@@ -8,6 +8,38 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Added
 
+- **The window says where you are, not just which project it was switched
+  to.** One status-bar line, read off the conversation in FRONT rather than off
+  the last switch: `Magma Score › ingest` with the branch when the branch is
+  worth naming. It updates on FOCUS, which is the point — moving between two
+  lanes of one project is not a switch (the auto-switch correctly returns early,
+  the project did not change) and until now no surface noticed the most common
+  move of the day. The Explorer's **Project** view renders the same decision as
+  a row of its own, untruncated, so the two cannot disagree: one answer
+  (`src/whereami.ts`), two surfaces.
+  It knows when the window and the keyboard disagree. Focus a conversation
+  belonging to another project — auto-switching off, or its project closed — and
+  the line carries both names (`App → API`) and the click goes straight to the
+  one you are actually in, instead of opening a picker to re-answer a question
+  the line already answered. A CLOSED project is never offered: putting one away
+  removes its rows everywhere, and the status bar must not become the one place
+  it reappears.
+  The branch appears when it is not the branch you would assume: a linked
+  worktree, a detached HEAD, a lane's pinned branch, or simply a name that is
+  not `main`/`master`/`trunk`/`develop`. A repository's own checkout sitting on
+  a feature branch is what a repository looks like while somebody works in it,
+  and that is the fact the line exists to carry; `main` on a checkout that has
+  never left `main` is a segment that spends the space and says nothing.
+  **Folder mode gets the half that applies to it.** The item used to be hidden
+  there outright, and the reason was sound — a window that IS its folder has no
+  workspace to name, and a click that opens a refusal is worse than no item. The
+  lane and the branch are a different kind of fact, so the line appears in folder
+  mode exactly when it has one of them to report, and its click jumps to the
+  session's row: a verb that always works.
+- **Switch to a project from its own row.** `Switch Workspace` joins the project
+  row's context menu in both trees, in project mode only. The switcher was
+  reachable from the status bar and the palette, and not from the row you were
+  already looking at.
 - **Compaction has a mark of its own: a purple ring, then a purple dot.** A
   compacting session was wearing two costumes in turn, neither of them its
   own — `claude agents --json` reports it as plainly `busy`, so the row drew
@@ -78,6 +110,30 @@ All notable changes to Flock are recorded here. The format follows
   guaranteed front door, decided once per install and never re-asked.
 
 ### Fixed
+
+- **Worktree membership is now asked the same way everywhere.** A session running
+  in a linked checkout — `~/app-feat-x`, a worktree of the repository at
+  `~/app` — belongs to the project rooted at `~/app` without anybody registering
+  that path, and for a while only the sidebar's grouping knew it. Every other
+  surface asked the same question without worktree reach and got `null`:
+  focus-follows-project did not follow you into a worktree, the Explorer did not
+  re-root there, the provider glyph fell back to the default beside a row filed
+  under a project set to something else, and the project's unseen dot stayed
+  dark. All five now go through one resolver (`projects.projectReach`).
+- **The Explorer no longer re-roots on the strength of the wrong claimant.**
+  Claims are plural and their order is a stable alphabetical tie-break, so a
+  directory listed by two projects reported the alphabetical winner — and asking
+  for that head meant that working in a shared directory of the project you were
+  switched INTO re-rooted the file tree at that project's main folder, because
+  the head named the other one and a foreign match reads as "no answer".
+- **The Project header's "showing" mark cannot point at a root that is not
+  there.** It was recomputed from where the active session is; when the front
+  conversation belonged to none of the project's directories the follow listener
+  correctly left the tree alone while the recomputed mark moved to the main
+  directory on its own. It is now read back off the live folder list.
+- **The Project header's session count agrees with the rows beneath it.** It
+  counted only the tie-break's winner, so a twice-claimed session drew a row
+  under both projects and was counted for one.
 
 - **Opening a chat no longer hijacks the solo pin.** With `lineage.soloSession`
   on, asking a side question about the session you were working in parked that

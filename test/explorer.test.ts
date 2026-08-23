@@ -561,6 +561,35 @@ describe('explorer: ExplorerSync', () => {
 
 // ------------------------------------------------------- the anchor's label
 
+describe('explorer: currentRoots — the mark reads off the tree', () => {
+  it('reports the live folder list with the anchor dropped', () => {
+    const h = host([anchorFolder, { path: '/code/lib' }]);
+    expect(new ExplorerSync(h, ANCHOR).currentRoots()).toEqual(['/code/lib']);
+  });
+
+  it('follows a splice, so it cannot name a root that is not there', async () => {
+    // The disagreement this exists to remove: the header used to RECOMPUTE which
+    // directory the tree was showing from where the active session is, and when
+    // the front conversation belonged to none of the project's directories the
+    // follow listener correctly left the tree alone while the recomputed mark
+    // moved to the project's main folder on its own.
+    const h = host([anchorFolder]);
+    const sync = new ExplorerSync(h, ANCHOR);
+    expect(sync.currentRoots()).toEqual([]);
+    await sync.sync(project({ dirs: ['/Users/x/sandbox'] }));
+    expect(sync.currentRoots()).toContain('/Users/x/sandbox');
+  });
+
+  it('is empty, not an error, when the host throws', () => {
+    const h = host([anchorFolder], {
+      folders: () => {
+        throw new Error('no workspace');
+      },
+    });
+    expect(new ExplorerSync(h, ANCHOR).currentRoots()).toEqual([]);
+  });
+});
+
 describe('explorer: the anchor carries the project name', () => {
   /** A host whose anchor label actually follows the on-disk rename, i.e. a
    *  workbench that applies the edit — the case this design is betting on. */

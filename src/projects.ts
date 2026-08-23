@@ -1291,6 +1291,46 @@ function projectWorktrees(
 }
 
 /**
+ * The `extraDirs` argument every "which project owns this cwd" question wants,
+ * built once and memoized per project.
+ *
+ * WHY THIS IS SHARED RATHER THAN INLINE. Worktree reach is not a decoration on
+ * the sidebar — it is part of what a project IS: a session running in
+ * `~/app-feat-x`, a linked checkout of the repository at `~/app`, belongs to the
+ * project rooted at `~/app` even though nobody listed that path (see
+ * matchProjects' `extraDirs`). For a while only `computeGrouping` passed it, so
+ * the sidebar filed such a session under the project while every other surface
+ * asked the same question WITHOUT reach and got `null`: the auto-switch did not
+ * follow focus into a worktree, the Explorer did not re-root there, the
+ * provider glyph fell back to the default, and the project's unseen dot stayed
+ * dark. This is the same union-and-dedupe `computeGrouping` runs (both go
+ * through `projectWorktrees`), exported so that every other surface can ask the
+ * question the same way — a surface that disagrees about membership is
+ * indistinguishable from a bug, because it is one.
+ *
+ * MEMOIZED PER PROJECT, NOT PER CALL: the union-and-dedupe below is not free
+ * and a window with forty live sessions would otherwise run it forty times over
+ * the same handful of projects. The cache lives as long as the returned
+ * function, so callers with a loop build ONE resolver outside it — and callers
+ * asking a single question build a throwaway, which is what keeps a moved or
+ * removed worktree from being remembered past the tick that saw it.
+ */
+export function projectReach(
+  worktreesOf: ((dir: string) => readonly Worktree[]) | undefined,
+): (project: ProjectRecord) => readonly string[] {
+  const cache = new Map<string, readonly string[]>();
+  return (project: ProjectRecord): readonly string[] => {
+    const id = typeof project?.id === 'string' ? project.id : '';
+    if (id === '') return [];
+    const hit = cache.get(id);
+    if (hit !== undefined) return hit;
+    const dirs = projectWorktrees(project, worktreesOf).map((w) => w.dir);
+    cache.set(id, dirs);
+    return dirs;
+  };
+}
+
+/**
  * Worktrees → the chips under a project row, in display order.
  *
  * Order is the whole of the colour contract, because `colorIndex` is just a

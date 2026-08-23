@@ -52,6 +52,17 @@ export type ProjectViewRow =
       current: boolean;
       showing: boolean;
     }
+  /**
+   * WHERE THE FRONT CONVERSATION IS, when it is somewhere worth naming: a lane
+   * of this project, or a branch that is not the one you would assume.
+   *
+   * Directly under the project row, because it is the same kind of fact — a
+   * caption on the tree below, not one of its roots. Emitted only when
+   * src/whereami.ts says there is something to say, so a project whose sessions
+   * all run in its main directory on its main branch draws exactly the rows it
+   * always did.
+   */
+  | { kind: 'here'; lane: string; branch: string; detached: boolean }
   /** Anchored, but no project is active — the Explorer shows nothing of ours. */
   | { kind: 'none' }
   /** Not a Flock workspace: the feature has never been set up here. */
@@ -71,6 +82,11 @@ export interface ProjectViewDeps {
   /** The directory the folder tree is rooted at under `'directory'` scope.
    *  Optional; absent falls back to the project's main directory. */
   currentDir?(): string | undefined;
+  /** Where the conversation in front is — the decision src/whereami.ts already
+   *  made for the status bar, handed here rather than re-derived, so the two
+   *  surfaces cannot disagree about which lane you are in. Optional: absent
+   *  means the view draws no `here` row, which is what it did before. */
+  here?(): { lane: string; branch: string; detached: boolean } | undefined;
   /** Fires whenever the model behind the rows moved — the same signal the
    *  sidebar repaints on. */
   onDidChangeData(listener: () => void): DisposableLike;
@@ -84,7 +100,11 @@ export interface ProjectViewDeps {
 export function projectRows(
   project: ProjectRecord | undefined,
   anchored: boolean,
-  opts: { scope?: ExplorerScope; currentDir?: string } = {},
+  opts: {
+    scope?: ExplorerScope;
+    currentDir?: string;
+    here?: { lane: string; branch: string; detached: boolean };
+  } = {},
 ): ProjectViewRow[] {
   if (!anchored) return [{ kind: 'setup' }];
   if (!project) return [{ kind: 'none' }];
@@ -98,8 +118,26 @@ export function projectRows(
   const wanted = pathKey(normalizeDir(opts.currentDir ?? ''));
   const found = wanted === '' ? -1 : dirs.findIndex((d) => pathKey(d) === wanted);
   const currentIndex = found < 0 ? 0 : found;
+  // Nothing to say is the common case, and it draws nothing: a `here` row that
+  // read "main, no lane" on every project would be a permanent row carrying no
+  // information — which is the argument the project row's own description makes
+  // against printing the directory list twice.
+  const here = opts.here;
+  const saysSomething =
+    here !== undefined &&
+    (here.lane !== '' || here.branch !== '' || here.detached);
   return [
     { kind: 'project', project },
+    ...(saysSomething && here !== undefined
+      ? [
+          {
+            kind: 'here' as const,
+            lane: here.lane,
+            branch: here.branch,
+            detached: here.detached,
+          },
+        ]
+      : []),
     ...dirs.map((path, i) => ({
       kind: 'dir' as const,
       path,
@@ -144,15 +182,17 @@ export class ProjectViewProvider
     let anchored = false;
     let scope: ExplorerScope | undefined;
     let currentDir: string | undefined;
+    let here: { lane: string; branch: string; detached: boolean } | undefined;
     try {
       project = this.deps.activeProject();
       anchored = this.deps.anchored();
       scope = this.deps.scope?.();
       currentDir = this.deps.currentDir?.();
+      here = this.deps.here?.();
     } catch (err) {
       logError('projectview.getChildren', err);
     }
-    return projectRows(project, anchored, { scope, currentDir });
+    return projectRows(project, anchored, { scope, currentDir, here });
   }
 
   getTreeItem(row: ProjectViewRow): vscode.TreeItem {
@@ -161,6 +201,8 @@ export class ProjectViewProvider
         return this.projectItem(row.project);
       case 'dir':
         return this.dirItem(row);
+      case 'here':
+        return this.hereItem(row);
       case 'none':
         return this.actionItem(
           'No active project',
@@ -204,6 +246,50 @@ export class ProjectViewProvider
       command: COMMANDS.switchWorkspace,
       title: 'Switch Workspace',
     };
+    return item;
+  }
+
+  /**
+   * The `here` row. Label first, then the branch as the description — the lane
+   * is the answer to "which piece of work", the branch is the answer to "on
+   * what", and the first is the one somebody scans for.
+   *
+   * NOT CLICKABLE. Every other row in this view goes somewhere; this one is a
+   * caption, and the place it would take you to is the session you are already
+   * in. A row that navigates to where you already are is a control that appears
+   * to do nothing.
+   */
+  private hereItem(row: {
+    lane: string;
+    branch: string;
+    detached: boolean;
+  }): vscode.TreeItem {
+    const label = row.lane !== '' ? row.lane : 'You are here';
+    const item = new vscode.TreeItem(
+      label,
+      vscode.TreeItemCollapsibleState.None,
+    );
+    item.iconPath = new vscode.ThemeIcon(
+      row.lane !== '' ? 'arrow-small-right' : 'git-branch',
+    );
+    item.description = row.detached
+      ? 'detached HEAD'
+      : row.branch === ''
+        ? undefined
+        : row.branch;
+    item.tooltip = [
+      row.lane !== ''
+        ? `The conversation in front is in the "${row.lane}" lane.`
+        : 'Where the conversation in front is.',
+      row.detached
+        ? 'Its checkout has a detached HEAD.'
+        : row.branch !== ''
+          ? `On ${row.branch} — a branch worth naming, so not the repository's main checkout.`
+          : '',
+    ]
+      .filter((s) => s !== '')
+      .join('\n');
+    item.contextValue = 'lineageProjectHere';
     return item;
   }
 

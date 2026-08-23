@@ -198,6 +198,45 @@ name is **project mode** — keep "workflow" out of identifiers.)
 - The switch NEVER parks: foreign sessions follow levels (grace countdown,
   then level 2). Delete the park path from workspaces.ts CLEAR.
 
+### Where am I — the mirror (built)
+
+Project mode's promise is that the window follows you. The tabs, the Explorer's
+folder tree and the sidebar's selection all move; none of them SAID so, and the
+status bar named the project of the last SWITCH — the one fact still true after
+everything else had moved on.
+
+`src/whereami.ts` (pure) decides one answer from the conversation in FRONT
+(switcher.frontSession), and two surfaces render it: the status-bar line and a
+row in the Explorer's Project view. One decision, two renderings — a second
+derivation is a second chance to disagree.
+
+- It updates on FOCUS, not on switching. A move between two lanes of one project
+  is not a switch (the auto-switch returns early, correctly — the project did not
+  change), and it is most of the day for one-lane-per-worktree work.
+- It reports a DISAGREEMENT rather than hiding it: window set up for A, keyboard
+  in B, both names, and the click goes to B. A CLOSED project is skipped — putting
+  one away removes its rows everywhere, and this must not become the one place it
+  reappears.
+- The branch appears only when it is not the one you would assume: a linked
+  worktree, a detached HEAD, a lane's pin, or a name that is not a trunk name
+  (`main`/`master`/`trunk`/`develop`/`default`). The main checkout of a repository
+  sitting on a feature branch IS the interesting case; `main` on a checkout that
+  has never left `main` is a segment that says nothing.
+- An UNPLACED conversation (a directory no project claims) gets the project name
+  and nothing else. Naming that directory's branch under this project's heading is
+  a sentence nobody can act on — found by running the decision over real state.
+- FOLDER MODE gets the half that applies: no workspace to name, so the line
+  appears only when it carries a lane or a branch (`beyondTheFolder`), and its
+  click jumps to the row rather than offering a switch that would refuse.
+
+One ownership rule, everywhere. `matchProjects`' worktree reach (`extraDirs`) is
+what makes a session in `~/app-feat-x` belong to the project at `~/app`. For a
+while only `computeGrouping` passed it, so the sidebar filed such a session under
+its project while every other question about it was asked without reach and
+answered `null` — focus-follows did not follow into a worktree, the Explorer did
+not re-root, the glyph fell back, the unseen dot stayed dark. `projects.projectReach`
+is now the one resolver; membership is one rule or it is a bug.
+
 ### Directory ↔ project mapping (many-to-many)
 
 One directory may be covered by several projects (e.g. worked on as a

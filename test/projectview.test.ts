@@ -141,6 +141,98 @@ describe('projectview: rows', () => {
 
 // ------------------------------------------------------------- the provider
 
+describe('projectview: the `here` row', () => {
+  const HERE = { lane: 'ingest', branch: 'feat/x', detached: false };
+
+  it('sits directly under the project, above the directories', () => {
+    const rows = projectRows(project({ dirs: ['/Users/x/code/api'] }), true, {
+      here: HERE,
+    });
+    expect(rows.map((r) => r.kind)).toEqual(['project', 'here', 'dir', 'dir']);
+  });
+
+  it('draws nothing when there is nothing to say', () => {
+    // The common case: no lane, and a branch whereAmI decided was not worth
+    // naming. A permanent row carrying no information is worse than no row.
+    const rows = projectRows(project(), true, {
+      here: { lane: '', branch: '', detached: false },
+    });
+    expect(rows.map((r) => r.kind)).toEqual(['project', 'dir']);
+  });
+
+  it('draws for a lane alone, and for a branch alone', () => {
+    const laneOnly = projectRows(project(), true, {
+      here: { lane: 'ingest', branch: '', detached: false },
+    });
+    expect(laneOnly.map((r) => r.kind)).toContain('here');
+    const branchOnly = projectRows(project(), true, {
+      here: { lane: '', branch: 'feat/x', detached: false },
+    });
+    expect(branchOnly.map((r) => r.kind)).toContain('here');
+    const detachedOnly = projectRows(project(), true, {
+      here: { lane: '', branch: '', detached: true },
+    });
+    expect(detachedOnly.map((r) => r.kind)).toContain('here');
+  });
+
+  it('is absent entirely for a wiring that does not supply one', () => {
+    expect(projectRows(project(), true).map((r) => r.kind)).toEqual([
+      'project',
+      'dir',
+    ]);
+  });
+
+  it('labels itself with the lane, and the branch as its description', () => {
+    const provider = new ProjectViewProvider(deps({ here: () => HERE }));
+    const row = provider
+      .getChildren()
+      .find((r) => r.kind === 'here') as ProjectViewRow;
+    const item = provider.getTreeItem(row) as {
+      label?: string;
+      description?: string;
+    };
+    expect(item.label).toBe('ingest');
+    expect(item.description).toBe('feat/x');
+  });
+
+  it('says detached rather than naming an empty branch', () => {
+    const provider = new ProjectViewProvider(
+      deps({ here: () => ({ lane: '', branch: '', detached: true }) }),
+    );
+    const row = provider
+      .getChildren()
+      .find((r) => r.kind === 'here') as ProjectViewRow;
+    const item = provider.getTreeItem(row) as {
+      label?: string;
+      description?: string;
+    };
+    expect(item.label).toBe('You are here');
+    expect(item.description).toBe('detached HEAD');
+  });
+
+  it('does not navigate — the place it names is where you already are', () => {
+    const provider = new ProjectViewProvider(deps({ here: () => HERE }));
+    const row = provider
+      .getChildren()
+      .find((r) => r.kind === 'here') as ProjectViewRow;
+    // commandOf reports '' for a row with no command at all.
+    expect(commandOf(provider, row)).toBe('');
+  });
+
+  it('survives a `here` dep that throws', () => {
+    const provider = new ProjectViewProvider(
+      deps({
+        here: () => {
+          throw new Error('nope');
+        },
+      }),
+    );
+    // The whole getChildren try/catch degrades to the setup row rather than
+    // taking the Explorer down with it.
+    expect(() => provider.getChildren()).not.toThrow();
+  });
+});
+
 describe('projectview: provider', () => {
   it('is flat — no row has children', () => {
     const provider = new ProjectViewProvider(deps());

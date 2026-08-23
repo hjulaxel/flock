@@ -438,6 +438,35 @@ export class ExplorerSync {
     }
   }
 
+  /**
+   * The directories the folder tree is ACTUALLY rooted at right now — the live
+   * folder list with the anchor dropped, in workbench order.
+   *
+   * Read back rather than remembered, for the same reason `anchorLabel` is. The
+   * caller that wants this is the header view, which marks which directory the
+   * tree below it is showing, and recomputing that mark from "where the active
+   * session is" made it possible for the mark and the tree to disagree: when the
+   * front conversation belongs to no directory of this project the follow
+   * listener correctly leaves the tree ALONE, while a recomputed mark fell back
+   * to the project's main directory and pointed at a root that was not there.
+   * A mark read off the thing it describes cannot be wrong.
+   *
+   * Under `'directory'` scope there is exactly one entry; under `'project'`
+   * scope there is one per directory and nothing marks them.
+   */
+  currentRoots(): string[] {
+    try {
+      return this.host
+        .folders()
+        .slice(1)
+        .map((f) => normalizeDir(f.path))
+        .filter((d) => d !== '');
+    } catch (err) {
+      logError('explorer.currentRoots', err);
+      return [];
+    }
+  }
+
   /** The scope the HOST reports right now. Read per sync rather than cached so
    *  flipping the setting takes effect on the next switch, and defaulting to
    *  `'project'` so a host that does not implement it behaves as before. */

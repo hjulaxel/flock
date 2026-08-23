@@ -100,12 +100,14 @@ import {
   tmuxInstallHint,
 } from './tmux';
 import {
+  type ProjectMatch,
   matchProject,
   matchProjects,
   preferredClaimant,
   normalizeDir,
   pathKey,
   projectDirs,
+  projectReach,
   providerOfProject,
   validateProjectName,
 } from './projects';
@@ -179,6 +181,7 @@ import { BranchListCache } from './branchList';
 import { recommendedNotice } from './recommend';
 import { chatAutoCloseVictims } from './chatAutoClose';
 import { frontSession, mayFollowSelection } from './switcher';
+import { type WhereAmI, whereAmI } from './whereami';
 import { registerShellsView } from './shellsView';
 import { CompactionTracker } from './compaction';
 import { planDeepReveal } from './deepSwitch';
@@ -1392,11 +1395,22 @@ export async function activate(
     cfg().get<string>(CONFIG_KEYS.viewStyle) === 'native' ? 'native' : 'inline';
 
   /** Refresh whichever view is on screen. Both are cheap no-ops when hidden. */
+  /** Repaint the "where am I" status line. Late-bound like `isWorkspaceSwitching`:
+   *  the real function is `updateWorkspaceStatusBar`, defined with the rest of
+   *  the workspace wiring hundreds of lines below, and the events that ought to
+   *  repaint it (a landed worktree probe, a forest change) start firing before
+   *  then. A no-op until it exists is right — there is no item yet to be wrong. */
+  let refreshWhereAmI = (): void => {};
+
   const refreshViews = (): void => {
     // Suspended for the duration of a workspace switch — see suspendViews.
     if (viewsSuspended) return;
     treeController?.refresh();
     webtreeController?.refresh();
+    // Same signal, same suspension: a landed git probe or a new roster tick can
+    // change which branch the line names, and a status bar that only repaints on
+    // a SWITCH would sit on a stale answer until the next one.
+    refreshWhereAmI();
   };
 
   // Git worktree discovery, shared by both views and by the chip verb.
@@ -2031,6 +2045,43 @@ export async function activate(
     if (projectCache === null) projectCache = store.getProjects();
     return projectCache;
   };
+
+  /**
+   * WHICH PROJECTS OWN A DIRECTORY — the one answer every surface in this file
+   * asks for, and the one place worktree reach is supplied.
+   *
+   * `matchProjects`' `extraDirs` is what makes a session in `~/app-feat-x` — a
+   * linked checkout of the repository at `~/app` — belong to the project rooted
+   * at `~/app` without anybody registering that path. For a while `computeGrouping`
+   * was the ONLY caller that passed it, so the sidebar filed such a session under
+   * its project while every other question about the same session was asked
+   * without reach and answered `null`: focus-follows-project did not follow into a
+   * worktree, the Explorer did not re-root there, the provider glyph fell back to
+   * the default and the project's unseen dot stayed dark. Membership is one rule
+   * or it is a bug, so it is asked in one place.
+   *
+   * The resolver is built PER CALL (projects.projectReach memoizes for its own
+   * lifetime): worktrees are created and removed several times a day, and a
+   * long-lived cache would answer for a checkout that is no longer there. A
+   * caller with a LOOP passes its own hoisted `reach` so the memo does its job.
+   */
+  const projectReachNow = (): ((p: ProjectRecord) => readonly string[]) =>
+    projectReach((dir) => worktrees.get(dir));
+
+  const claimantsOf = (
+    cwd: string | undefined,
+    reach: (p: ProjectRecord) => readonly string[] = projectReachNow(),
+  ): ProjectMatch[] => matchProjects(allProjects(), cwd, reach);
+
+  /** The single project a single-project question should answer with: the
+   *  ACTIVE one when it is among the claimants (the spec's "prefer the active
+   *  project in project mode"), else the static tie-break. */
+  const claimantOf = (
+    cwd: string | undefined,
+    preferProjectId?: string | null,
+    reach?: (p: ProjectRecord) => readonly string[],
+  ): ProjectMatch | null =>
+    preferredClaimant(claimantsOf(cwd, reach), preferProjectId ?? null);
   context.subscriptions.push(
     store.onDidChange(() => {
       projectCache = null;
@@ -2296,13 +2347,15 @@ export async function activate(
     if (unseenProjectsCache) return unseenProjectsCache;
     const out = new Set<string>();
     try {
+      // One resolver for the whole loop — see projectReachNow.
+      const reach = projectReachNow();
       for (const node of forest.nodes.values()) {
         if (node.unseen !== true || node.hidden) continue;
         // EVERY claimant, not one: a twice-claimed session renders under both
         // project rows (see matchProjects), so the dot has to light both — a
         // row showing the session while its sibling carries the green mark
         // would read as two different sessions.
-        for (const match of matchProjects(allProjects(), node.cwd)) {
+        for (const match of claimantsOf(node.cwd, reach)) {
           if (match.project.hidden !== true) out.add(match.project.id);
         }
       }
@@ -2316,6 +2369,13 @@ export async function activate(
   // Rebound to the real WorkspaceManager below (it does not exist yet, and
   // terminal events can fire during activation's awaits).
   let isWorkspaceSwitching = (): boolean => false;
+  /** The project this window is switched to, safe to ask DURING activation.
+   *  Same late-binding as `isWorkspaceSwitching` and for the same reason —
+   *  `workspaceManager` is a `const` declared hundreds of lines below, so a
+   *  render triggered by a terminal event before then would not read `undefined`
+   *  from it, it would throw on the temporal dead zone. Null until the manager
+   *  exists, which reads as "no active project": the honest answer that early. */
+  let activeProjectIdNow = (): string | null => null;
 
   // Looking at a session clears its dot: the terminal becoming ACTIVE in this
   // window is the strongest "the user is looking" signal the API offers.
@@ -2353,7 +2413,11 @@ export async function activate(
     // set to.
     if (sessionProviderFor(sessionId) === 'codex') return 'codex';
     const cwd = forest.nodes.get(sessionId)?.cwd ?? record?.cwd;
-    const match = matchProject(allProjects(), cwd);
+    // Through claimantOf, so the glyph is decided by the same ownership rule
+    // that decided the ROW the session is filed under — including worktree
+    // reach, without which a session in a linked checkout drew the default
+    // mark while sitting under a project set to another provider.
+    const match = claimantOf(cwd, activeProjectIdNow());
     return match ? providerOfProject(match.project) : DEFAULT_PROVIDER;
   };
 
@@ -2923,6 +2987,10 @@ export async function activate(
       registry.onDidChangeActive((sessionId) => {
         if (sessionId !== null) noteFrontSession(sessionId);
         followFrontSession();
+        // The line follows the FRONT conversation, so this is its primary
+        // signal — and the only one that fires for a move BETWEEN LANES of one
+        // project, which no switch and no forest change reports.
+        refreshWhereAmI();
       }),
     );
   } catch (err) {
@@ -3069,9 +3137,18 @@ export async function activate(
     try {
       const sessionId = registry.activeSessionId();
       if (!sessionId) return undefined;
-      const match = matchProject(allProjects(), cwdOfSession(sessionId));
-      if (!match || match.project.id !== project.id) return undefined;
-      return match.dir;
+      // THIS project's claim, not the tie-break's winner. Claims are plural
+      // (matchProjects): a directory two projects list answers with a stable
+      // alphabetical head, and asking for the head here meant that working in a
+      // shared directory of the project you are switched INTO re-rooted the
+      // Explorer at that project's main folder — because the head named the
+      // other one, and a foreign match reads as "no answer". The question this
+      // function actually asks is "does THIS project claim where the active
+      // session is, and at which of its directories".
+      const claim = claimantsOf(cwdOfSession(sessionId)).find(
+        (m) => m.project.id === project.id,
+      );
+      return claim?.dir;
     } catch (err) {
       logError('extension.activeSessionDir', err);
       return undefined;
@@ -3899,6 +3976,7 @@ export async function activate(
     resumeViews,
   });
   isWorkspaceSwitching = () => workspaceManager.isSwitching();
+  activeProjectIdNow = () => workspaceManager.activeProjectId();
 
   /**
    * `lineage.soloSession`, second half: pin the kept session's editor tab so
@@ -4288,10 +4366,7 @@ export async function activate(
         // project outranks the tie-break among actual claimants (the spec's
         // "prefer the ACTIVE project in project mode"), which turns the
         // shared-directory case into the no-op two lines down.
-        const match = preferredClaimant(
-          matchProjects(allProjects(), cwd),
-          workspaceManager.activeProjectId(),
-        );
+        const match = claimantOf(cwd, workspaceManager.activeProjectId());
         if (!match || match.project.hidden === true) return;
         if (match.project.id === workspaceManager.activeProjectId()) return;
         log(
@@ -4314,48 +4389,130 @@ export async function activate(
     }),
   );
 
-  /** `$(layers) <project>` in the status bar; clicking opens the switcher.
-   *  Gated on `lineage.workspaces.enabled` and re-evaluated on config change. */
+  /**
+   * WHERE AM I — one status-bar item, in both modes, saying where the
+   * conversation in front is. `src/whereami.ts` decides the words; this reads
+   * the world and paints.
+   *
+   * The two modes ask for different things from it, and the difference is which
+   * project the line is ABOUT:
+   *
+   *   * PROJECT MODE — the window's active workspace, plus the lane and branch
+   *     of whatever has the keyboard. Clicking switches; when the front
+   *     conversation belongs to another project the click goes straight there.
+   *   * FOLDER MODE — there is no workspace to name (the window IS its folder,
+   *     and switching does not exist here), so the item appears only when the
+   *     line says something the folder does not: a lane, or a branch that is not
+   *     the one you would assume. That is `beyondTheFolder`. Clicking jumps to
+   *     the row instead of offering a switch that would refuse — the reason the
+   *     item was hidden outright in folder mode before, and the reason it can
+   *     come back now that it has a verb that works.
+   */
   let workspaceStatusBar: vscode.StatusBarItem | undefined;
+  /** The last answer, for the OTHER surface that shows it — the Explorer's
+   *  Project view reads this instead of re-deriving the lane and the branch, so
+   *  the two can never disagree. Null until the first paint. */
+  let lastWhereAmI: WhereAmI | null = null;
   const updateWorkspaceStatusBar = (): void => {
     try {
-      // The Explorer header names the same thing the status bar does, so it
-      // repaints on the same signal — and BEFORE the enabled check below, or
-      // turning the status bar off would silently freeze the header too.
-      refreshExplorerHeader();
       const w: Partial<typeof vscode.window> = vscode.window;
-      // Hidden in FOLDER MODE, whatever `workspaces.enabled` says: a window
-      // that IS its folder has no workspace to name, and a status-bar item
-      // whose click opens a refusal is worse than no item.
-      if (
-        !projectSwitchingOn(
-          lineageMode(),
-          boolCfg(CONFIG_KEYS.workspacesEnabled, true),
-        )
-      ) {
-        workspaceStatusBar?.hide();
-        return;
-      }
+      const switching = projectSwitchingOn(
+        lineageMode(),
+        boolCfg(CONFIG_KEYS.workspacesEnabled, true),
+      );
+      const activeId = switching ? workspaceManager.activeProjectId() : null;
+      // In FOLDER MODE the project the line is about is the one claiming the
+      // front conversation, not a window-level active project — there is none,
+      // and a stale id left over from a project-mode session must not become
+      // one. Resolved from the claim list below, so `active` and `claimants`
+      // cannot name different projects.
+      const project = activeId ? store.getProject(activeId) : undefined;
+      // WHERE AM I, not merely which project was switched to last. The line is
+      // read off the conversation in FRONT (src/whereami.ts for the whole
+      // argument): moving between two lanes of one project is not a switch, so
+      // before this there was no surface that noticed the most common move of
+      // the day. Everything here is a cache read — `worktrees.get` never blocks
+      // and repaints through `refreshViews` when its probe lands — so this is
+      // cheap enough to run on every focus change.
+      const front = frontSessionId();
+      const cwd = front !== null ? cwdOfSession(front) : undefined;
+      const laneId =
+        front !== null ? store.getSessionSubproject(front) : undefined;
+      const claimants = claimantsOf(cwd);
+      // THE PROJECT THE LINE IS ABOUT. Project mode: the window's active
+      // workspace. Folder mode: whichever project claims the front
+      // conversation — drawn from the SAME claim list, so `active` and
+      // `claimants` can never name different projects and the foreign branch
+      // (which folder mode has no verb for) is unreachable there.
+      const named =
+        project ??
+        (switching
+          ? undefined
+          : claimants.find((m) => m.project.hidden !== true)?.project);
+      const here = whereAmI({
+        active: named ?? null,
+        sessionId: front,
+        cwd,
+        claimants,
+        lane: laneId !== undefined ? store.getSubproject(laneId) : null,
+        worktrees: cwd !== undefined ? worktrees.get(cwd) : [],
+        ...(switching ? {} : { clickHint: 'Click to jump to the session.' }),
+      });
+      lastWhereAmI = here;
+      // The Explorer header renders the SAME answer, so it repaints here — after
+      // the answer exists, and before anything below can return early. Both of
+      // the returns below are ordinary states (folder mode with nothing to add;
+      // a host with no status bar at all), and neither may leave the header
+      // frozen on a stale lane.
+      refreshExplorerHeader();
+      // The item itself, created on first need. A host without one — the unit
+      // doubles, a future workbench that drops the API — still gets everything
+      // above: the answer is computed and the Explorer's half of it is drawn.
       if (!workspaceStatusBar) {
         if (typeof w.createStatusBarItem !== 'function') return;
         workspaceStatusBar = w.createStatusBarItem(
           vscode.StatusBarAlignment.Left,
           90,
         );
-        workspaceStatusBar.command = COMMANDS.switchWorkspace;
         context.subscriptions.push(workspaceStatusBar);
       }
-      const activeId = workspaceManager.activeProjectId();
-      const project = activeId ? store.getProject(activeId) : undefined;
-      workspaceStatusBar.text = `$(layers) ${project ? project.name : 'No Workspace'}`;
-      workspaceStatusBar.tooltip = project
-        ? `Flock workspace: ${project.name} — click to switch`
-        : 'Flock: click to scope this window to a project workspace';
+      // FOLDER MODE keeps its silence unless the line has earned it — see the
+      // header above. `hide()` rather than never creating the item, so flipping
+      // between lanes brings it back without a reload.
+      //
+      // `named === undefined` is the "No Workspace" line, and it is included in
+      // that silence: the right answer in project mode (an unscoped window, and
+      // the click is the invitation to scope it), a meaningless one in folder
+      // mode, where there is no workspace to be without.
+      if (!switching && (named === undefined || !here.beyondTheFolder)) {
+        workspaceStatusBar.hide();
+        return;
+      }
+      workspaceStatusBar.text = here.text;
+      workspaceStatusBar.tooltip = here.tooltip;
+      // The click resolves the disagreement the line just reported: straight to
+      // the project the conversation is in, rather than through a picker that
+      // would ask the user to re-answer it. In folder mode there is no switch to
+      // offer, so it jumps to the row — a verb that always works.
+      workspaceStatusBar.command = !switching
+        ? COMMANDS.focusSessionsView
+        : here.switchTo === null
+          ? COMMANDS.switchWorkspace
+          : {
+              command: COMMANDS.switchWorkspace,
+              title: 'Switch Workspace',
+              // The TREE-ROW shape, not a bare id: `projectIdFromArg` reads
+              // `{type:'project', projectId}` and nothing else, deliberately, so
+              // that no project verb can be handed a directory row by accident.
+              // A string here would silently fall through to the picker.
+              arguments: [{ type: 'project', projectId: here.switchTo }],
+            };
       workspaceStatusBar.show();
     } catch (err) {
       logError('extension.workspaceStatusBar', err);
     }
   };
+  refreshWhereAmI = updateWorkspaceStatusBar;
   updateWorkspaceStatusBar();
 
   /** `lineage.explorerFollow` — see CONTEXT_EXPLORER_FOLLOW for why it is not
@@ -4395,22 +4552,46 @@ export async function activate(
     // Counted over the RENDERED forest, the same population the sidebar shows,
     // so the header's number and the sidebar's rows never disagree.
     sessionCount: (projectId) => {
-      const projects = allProjects();
+      // EVERY claimant, for the reason projectsWithUnseen gives: a twice-claimed
+      // session draws a row under both projects, so counting only the tie-break's
+      // winner made this header disagree with the rows directly under it.
+      const reach = projectReachNow();
       let n = 0;
       for (const node of forest.nodes.values()) {
-        if (matchProject(projects, node.cwd)?.project.id === projectId) n += 1;
+        if (claimantsOf(node.cwd, reach).some((m) => m.project.id === projectId)) {
+          n += 1;
+        }
       }
       return n;
     },
     scope: () => explorerScope(),
     // The header names the directories; this is what marks the one the folder
-    // tree below is actually rooted at. Same resolver the sync uses, so the
-    // `showing` mark cannot drift from what is on screen.
+    // tree below is actually rooted at — READ BACK from the live folder list
+    // rather than recomputed. Recomputing it meant the mark could point at a
+    // root that was not there: when the front conversation belongs to none of
+    // this project's directories the follow listener correctly leaves the tree
+    // alone, while `explorerDirFor` fell back to the project's main directory
+    // and the mark moved on its own. Falls back to the computed answer only
+    // when the live list has nothing to report (an unconverted window).
     currentDir: () => {
+      const live = explorerSync.currentRoots()[0];
+      if (live !== undefined) return live;
       const id = workspaceManager.activeProjectId();
       const active = id ? store.getProject(id) : undefined;
       return explorerDirFor(active ?? null);
     },
+    // The `here` row: read off the status line's answer, never re-derived. A
+    // FOREIGN answer contributes nothing — its lane and branch belong to a
+    // project this view is not showing, and whereAmI blanks them for exactly
+    // that reason.
+    here: () =>
+      lastWhereAmI === null
+        ? undefined
+        : {
+            lane: lastWhereAmI.lane,
+            branch: lastWhereAmI.branch,
+            detached: lastWhereAmI.detached,
+          },
     onDidChangeData: (listener) => onForestChanged.event(listener),
   });
   context.subscriptions.push(projectViewController);
