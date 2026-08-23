@@ -1455,6 +1455,16 @@
         }
       },
       {
+        "id": "lineage.compacting",
+        "description": "Status dot for a session being compacted \u2014 a hollow ring while the compaction runs, a full dot once it has finished with nothing behind it.",
+        "defaults": {
+          "light": "charts.purple",
+          "dark": "charts.purple",
+          "highContrast": "charts.purple",
+          "highContrastLight": "charts.purple"
+        }
+      },
+      {
         "id": "lineage.closed",
         "description": "Row colour for a session that is over: closed, exited, or an inferred ancestor. Used by the built-in tree view, which has no other way to dim a row.",
         "defaults": {

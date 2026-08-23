@@ -15,7 +15,7 @@
 // native tree and the webview must render identically, and two copies of "how a
 // row reads" would diverge on the first change. tree.ts re-exports them.
 
-import { STATUS_DOT, contextValueOf } from './types';
+import { CLOSED_DOT, STATUS_DOT, contextValueOf } from './types';
 import type {
   BranchInfo,
   BranchStatus,
@@ -440,7 +440,9 @@ export function statusDescriptor(node: SessionNode): string {
   }
 }
 
-/** How the status dot is lit: 'running' amber, 'done' red. 'idle' and 'closed'
+/** How the status dot is lit: 'running' amber, 'done' red, and the two purple
+ *  compaction phases — 'compacting' a hollow ring, 'compacted' a full dot.
+ *  'idle' and 'closed'
  *  are tones with NO glyph — the row is known-quiet or known-over, which is
  *  worth a word in the hover and worth drawing nothing for, because a tree where
  *  every quiet row still carries a mark teaches the eye to ignore marks. They
@@ -449,7 +451,13 @@ export function statusDescriptor(node: SessionNode): string {
  *  hover names them differently.
  *  undefined = no tone at all: a row put away, or one whose state we genuinely
  *  do not know. */
-export type StatusTone = 'idle' | 'running' | 'done' | 'closed';
+export type StatusTone =
+  | 'idle'
+  | 'running'
+  | 'done'
+  | 'closed'
+  | 'compacting'
+  | 'compacted';
 
 /**
  * The one definition of what the dot means, shared by all three surfaces (the
@@ -475,6 +483,25 @@ export type StatusTone = 'idle' | 'running' | 'done' | 'closed';
 export function statusTone(node: SessionNode): StatusTone | undefined {
   if (node.hidden) return undefined;
   if (node.ghost || node.archived || node.status === 'exited') return 'closed';
+  // Compaction, inserted ABOVE the three status rules and below nothing else
+  // that draws. Both phases are computed by src/compaction.ts, which has
+  // already applied every rule about when a phase is live — including that
+  // 'compacted' loses to a session the roster reports as busy, which is what
+  // "and there is no other command behind it" means. So there is exactly one
+  // precedence decision left here, and it is this: a compaction OUTRANKS the
+  // status underneath it.
+  //
+  // For 'compacting' that is the whole point. A compacting session reports
+  // `busy` — reading the status first would draw the amber running dot and the
+  // ring would never appear, which is precisely the bug this replaces.
+  //
+  // For 'compacted' it outranks 'done' and 'idle', and it has to: a compaction
+  // ends with the session quiet and waiting, so deferring to those would mean
+  // the purple dot never drew either. It is not a demotion of the attention
+  // dot — a freshly compacted conversation is not asking you for anything, and
+  // the moment it does (a new turn, hence `busy`) compaction.phaseOf withholds
+  // the phase and the ordinary tones resume.
+  if (node.compaction !== undefined) return node.compaction;
   if (node.attention === 'waiting' || node.status === 'waiting') {
     return node.unseen === false ? 'idle' : 'done';
   }
@@ -501,7 +528,16 @@ export function statusTone(node: SessionNode): StatusTone | undefined {
  *  the side of every finished session is what teaches the eye to stop reading
  *  the column the lit dots live in. */
 export function badgeGlyph(tone: StatusTone | undefined): string | undefined {
-  return tone === 'running' || tone === 'done' ? STATUS_DOT : undefined;
+  // The ring is a CHARACTER here and a 1px border in webtree.css, which is the
+  // same split the filled dot already lives with (see the comment in
+  // webtree.js's row renderer): a FileDecoration badge can only ever be text,
+  // so the native tree spells the ring '○' while the webview draws it. Both
+  // are the same 8px circle with nothing in the middle, which is all the two
+  // surfaces have to agree on.
+  if (tone === 'compacting') return CLOSED_DOT;
+  return tone === 'running' || tone === 'done' || tone === 'compacted'
+    ? STATUS_DOT
+    : undefined;
 }
 
 /** The `;a;b;c;` token string both the native `viewItem =~ /;x;/` clauses and
@@ -2443,6 +2479,8 @@ const TONE_WORDS: Record<StatusTone, string> = {
   running: 'running',
   done: 'finished — waiting on you',
   closed: 'closed',
+  compacting: 'compacting',
+  compacted: 'compacted — nothing running',
 };
 
 /** `undefined` for anything that is not a finite epoch-ms number, so callers
@@ -2531,7 +2569,14 @@ function sessionTooltip(
 
 /** True when a session in (or under) `rootIds` is unseen-done. Walks
  *  visibleChildren, so a row removed from view can never light a dot no click
- *  can clear. */
+ *  can clear.
+ *
+ *  A session currently drawing a COMPACTION mark is excluded, for the same
+ *  reason the dot itself is: statusTone gives compaction precedence over
+ *  'done', so counting one here would roll a red dot up onto the project row
+ *  above a child whose own dot is purple — a parent contradicting its child,
+ *  which is the one thing a roll-up must never do. The session is still in the
+ *  bell's list, which is a history of what finished rather than a mark. */
 export function subtreeHasUnseen(
   forest: SessionForest,
   rootIds: readonly string[],
@@ -2545,7 +2590,9 @@ export function subtreeHasUnseen(
     seen.add(id);
     const node = forest.nodes.get(id);
     if (!node) continue;
-    if (node.unseen === true && !node.hidden) return true;
+    if (node.unseen === true && !node.hidden && node.compaction === undefined) {
+      return true;
+    }
     stack.push(...node.visibleChildren);
   }
 }

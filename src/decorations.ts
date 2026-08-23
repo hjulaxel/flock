@@ -11,6 +11,8 @@
 import * as vscode from 'vscode';
 import {
   CLOSED_COLOR_ID,
+  CLOSED_DOT,
+  COMPACTING_COLOR_ID,
   DONE_COLOR_ID,
   RUNNING_COLOR_ID,
   SESSION_URI_SCHEME,
@@ -196,6 +198,23 @@ export class SessionDecorationProvider implements vscode.FileDecorationProvider 
       }
 
       const tone = statusTone(node);
+      // Compaction first, matching statusTone's own precedence — see the note
+      // there. Two marks, one colour: the hollow ring while it runs, the full
+      // dot once it has settled and nothing is behind it.
+      if (tone === 'compacting') {
+        return makeDecoration(
+          CLOSED_DOT,
+          'compacting',
+          new vscode.ThemeColor(COMPACTING_COLOR_ID),
+        );
+      }
+      if (tone === 'compacted') {
+        return makeDecoration(
+          STATUS_DOT,
+          'compacted — nothing running',
+          new vscode.ThemeColor(COMPACTING_COLOR_ID),
+        );
+      }
       if (tone === 'done') {
         // An unseen-done idle session finished a turn rather than blocking on
         // a dialog; say which it is.

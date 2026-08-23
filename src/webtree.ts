@@ -25,6 +25,7 @@ import * as vscode from 'vscode';
 import {
   BRAND_COLOR_ID,
   COMMANDS,
+  COMPACTING_COLOR_ID,
   DEFAULT_BRANCH_DISPLAY,
   DONE_COLOR_ID,
   PROVIDERS,
@@ -841,13 +842,15 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
     /* Our contributed colours, handed to the client under stable names. The
        workbench publishes every contributed id as --vscode-<id with dots as
        dashes>, so a user's theme override reaches this view too. The status dot
-       has exactly TWO lit tones here: idle draws no dot at all, and neither does
-       a closed row — that one is dimmed instead, which needs no colour of its
-       own (the contributed lineage.closed still colours the native tree's row,
-       where there is no way to dim one). See webtree.css. */
+       has exactly THREE lit colours here — running, done, and the one purple
+       both compaction phases share — while idle draws no dot at all, and
+       neither does a closed row: that one is dimmed instead, which needs no
+       colour of its own (the contributed lineage.closed still colours the
+       native tree's row, where there is no way to dim one). See webtree.css. */
     --lineage-brand: var(--vscode-${BRAND_COLOR_ID.replace(/\./g, '-')});
     --lineage-running: var(--vscode-${RUNNING_COLOR_ID.replace(/\./g, '-')});
     --lineage-done: var(--vscode-${DONE_COLOR_ID.replace(/\./g, '-')});
+    --lineage-compacting: var(--vscode-${COMPACTING_COLOR_ID.replace(/\./g, '-')});
 ${branchPaletteCss()}  }
 </style>
 <title>Flock</title>

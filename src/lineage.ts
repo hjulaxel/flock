@@ -31,6 +31,7 @@ import {
   shortId,
   type ArchivedSession,
   type ArgvScanResult,
+  type CompactionPhase,
   type EditorialRecord,
   type LineageEdge,
   type NodeAttention,
@@ -507,6 +508,28 @@ export interface BuildForestInput {
     string,
     { lastPromptAt?: number; tokens?: number; lastExchange?: string }
   >;
+  /** sessionId → the compaction phase to draw, from the in-memory
+   *  CompactionTracker (src/compaction.ts). A LOOKUP rather than a map of raw
+   *  facts, because the tracker's answer depends on the chain (a compaction
+   *  re-mints the id, so the start and the finish arrive under different ones)
+   *  and on the live status — neither of which this module knows about. Absent,
+   *  or answering undefined, is the ordinary case: a session in no compaction
+   *  phase draws exactly the dots it drew before this existed.
+   *
+   *  LIVE ROWS ONLY. An archived node's phase would describe a process that has
+   *  already exited, and 'closed' outranks every compaction mark anyway.
+   *
+   *  `status` is handed over rather than looked up because the tracker needs
+   *  it — the resting purple dot means "compacted, and nothing behind it", so a
+   *  session the roster reports as busy again withholds it — and this is the
+   *  one place the DERIVED status exists. Asking the caller to re-derive it
+   *  from the raw entry would be a second copy of deriveStatus's decision
+   *  table, which is exactly the drift the two existing copies are pinned
+   *  against by a test. */
+  compactionOf?: (
+    sessionId: string,
+    status: SessionStatus,
+  ) => CompactionPhase | undefined;
   opts?: {
     showGhosts?: boolean; // default true
     now?: number;         // default Date.now()
@@ -754,6 +777,14 @@ export function buildForest(input: BuildForestInput): SessionForest {
     if (!node.hidden && !node.deleted) {
       const unseen = deriveUnseen(status, record, notificationsDefault);
       if (unseen !== undefined) node.unseen = unseen;
+    }
+    // Same two exclusions as the unseen dot above and for the same reason: a
+    // muted row must carry no lit mark at all, and a deleted one has no row for
+    // a mark to sit on. The tracker owns every other rule about when a phase is
+    // live — see src/compaction.ts.
+    if (!node.hidden && !node.deleted) {
+      const phase = input?.compactionOf?.(id, status);
+      if (phase !== undefined) node.compaction = phase;
     }
     if (record?.notify === false) node.notifyMuted = true;
     nodes.set(id, node);

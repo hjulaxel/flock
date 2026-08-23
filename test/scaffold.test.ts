@@ -12,13 +12,18 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import {
+  BRAND_COLOR_ID,
   BRANCH_FEATURE_SWITCHES,
+  CLOSED_COLOR_ID,
   COMMANDS,
+  COMPACTING_COLOR_ID,
   CONFIG_SECTION,
+  DONE_COLOR_ID,
   EXTENSION_ID,
   PROVIDERS,
   PROVIDER_IDS,
   PROVIDER_MEDIA_DIR,
+  RUNNING_COLOR_ID,
   SESSION_ID_RE,
   STATE_SCHEMA_VERSION,
   contextValueOf,
@@ -111,6 +116,26 @@ describe('scaffold: the shared types contract', () => {
     ) as { contributes: { commands: { command: string }[] } };
     const contributed = pkg.contributes.commands.map((c) => c.command).sort();
     expect(contributed).toEqual([...Object.values(COMMANDS)].sort());
+  });
+
+  // A ThemeColor naming an id the manifest does not contribute resolves to
+  // nothing — the badge simply renders in the theme's own foreground, which
+  // for the compaction ring means an indistinguishable grey circle and no
+  // error anywhere. Only a cross-check catches it.
+  it('contributes every colour id the code paints with', () => {
+    const pkg = JSON.parse(
+      fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'),
+    ) as { contributes: { colors: { id: string }[] } };
+    const contributed = new Set(pkg.contributes.colors.map((c) => c.id));
+    for (const id of [
+      BRAND_COLOR_ID,
+      RUNNING_COLOR_ID,
+      DONE_COLOR_ID,
+      CLOSED_COLOR_ID,
+      COMPACTING_COLOR_ID,
+    ]) {
+      expect(contributed.has(id)).toBe(true);
+    }
   });
 
   // `lineage.showBranchesAndWorktrees` writes six settings and its partner writes

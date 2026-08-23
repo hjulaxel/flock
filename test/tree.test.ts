@@ -20,6 +20,8 @@ import {
   TREE_DND_MIME,
   CLOSED_COLOR_ID,
   DONE_COLOR_ID,
+  CLOSED_DOT,
+  COMPACTING_COLOR_ID,
   RUNNING_COLOR_ID,
   STATUS_DOT,
 } from '../src/types';
@@ -1177,6 +1179,32 @@ describe('SessionDecorationProvider.provideFileDecoration', () => {
     const d = p.provideFileDecoration(sessionUri(A) as never);
     expect(d?.badge).toBe(STATUS_DOT);
     expect((d?.color as unknown as { id: string }).id).toBe(RUNNING_COLOR_ID);
+  });
+
+  it('rings a compacting session in purple rather than running-amber', () => {
+    // A compaction reports `busy`, so without the tone this row wore the amber
+    // dot for work nobody asked for — then the red one when it finished.
+    const p = build([node(A, { status: 'busy', compaction: 'compacting' })]);
+    const d = p.provideFileDecoration(sessionUri(A) as never);
+    expect(d?.badge).toBe(CLOSED_DOT);
+    expect((d?.color as unknown as { id: string }).id).toBe(COMPACTING_COLOR_ID);
+    expect(d?.tooltip).toBe('compacting');
+  });
+
+  it('fills the purple dot once the compaction has settled', () => {
+    // Same colour, filled — and it outranks the 'waiting' underneath it,
+    // because a compaction ends with the session quiet and the purple would
+    // otherwise never draw.
+    const p = build([
+      node(A, {
+        status: 'waiting',
+        attention: 'waiting',
+        compaction: 'compacted',
+      }),
+    ]);
+    const d = p.provideFileDecoration(sessionUri(A) as never);
+    expect(d?.badge).toBe(STATUS_DOT);
+    expect((d?.color as unknown as { id: string }).id).toBe(COMPACTING_COLOR_ID);
   });
 
   // Greys the ghost, draws no mark: an empty ring here would say what the grey

@@ -69,22 +69,32 @@ export const BRAND_COLOR_ID = 'lineage.brand';
 export const RUNNING_COLOR_ID = 'lineage.running';
 export const DONE_COLOR_ID = 'lineage.done';
 export const CLOSED_COLOR_ID = 'lineage.closed';
+/** Compaction — both phases, ring and dot alike. ONE colour id for two marks
+ *  on purpose: they are the same fact at two moments, and a theme that
+ *  retunes the purple must not be able to retune only half of it. Purple is
+ *  the one signal hue the sidebar had left (amber is running, red is
+ *  attention, green is the brand), and the branch palette already spends it
+ *  on "merged" — which is the same idea, a thing that has settled. */
+export const COMPACTING_COLOR_ID = 'lineage.compacting';
 /** The single glyph the status dot is drawn with. A FileDecoration badge is
  *  capped at two graphemes by the workbench, which is the whole reason status
  *  is a dot and not a word. */
 export const STATUS_DOT = '●';
-/** RETIRED. The hollow ring a closed row used to carry at its right edge.
- *  Nothing paints it now: a closed row is already dimmed, its logo greyed and
- *  (in the native tree) its label greyed by the decoration's colour, so the ring
- *  was a second mark saying what the row said anyway — and a column of empty
- *  circles beside every finished session is exactly the "every row carries a
- *  mark" noise the lit dots exist to stand out from.
+/** The HOLLOW ring, at the right edge — the native tree's half of the purple
+ *  ring webtree.css draws with a border.
  *
- *  The constant stays for the same reason EditorialRecord.hidden does: the
- *  character was a considered choice (deliberately not '◌' U+25CC, which is
- *  absent from the workbench's UI-font fallbacks and renders as tofu in a
- *  FileDecoration badge), and a future surface that wants a printable "over"
- *  mark should start from that answer rather than rediscover it. */
+ *  Retired once and brought back for a different job. It used to mark a CLOSED
+ *  row, and that was wrong for the reason STATUS_DOT's note gives: a closed row
+ *  is already dimmed and its logo greyed, so the ring was a second mark for
+ *  something the row had already said, and a column of empty circles beside
+ *  every finished session is exactly the noise the lit dots exist to stand out
+ *  from. Compaction-in-flight is the opposite case — a transient state nothing
+ *  else on the row reports, on a handful of rows at a time — which is precisely
+ *  what a mark is for.
+ *
+ *  The character was a considered choice then and stands now: deliberately NOT
+ *  '◌' U+25CC, which is absent from the workbench's UI-font fallbacks and
+ *  renders as tofu in a FileDecoration badge. */
 export const CLOSED_DOT = '○';
 /** The numeric badge on the Flock view container (the activity-bar logo):
  *  how many RUNNING sessions the tree is answering for — level 1 and the
@@ -1357,6 +1367,11 @@ export const DEFAULT_BUSY_STALE_MINUTES = 5;
 
 export type SessionKind = 'interactive' | 'background' | 'unknown';
 export type SessionStatus = 'busy' | 'waiting' | 'idle' | 'exited' | 'unknown';
+/** The two lit compaction phases — see src/compaction.ts, which owns every
+ *  rule about when a session is in one. Declared HERE rather than there for
+ *  the reason at the top of this file: types.ts imports nothing, so every
+ *  layer can depend on it, and SessionNode needs this name. */
+export type CompactionPhase = 'compacting' | 'compacted';
 export type NodeAttention = 'none' | 'waiting';
 /** How a parent edge was established, listed in the order the resolver tries
  *  them: the first source that answers wins (see the cascade in lineage.ts). */
@@ -1577,6 +1592,16 @@ export interface SessionNode {
    *  node kind that has no unseen state), which the renderers treat as the
    *  older, unseen-blind behaviour. */
   unseen?: boolean;
+  /** This conversation is being compacted right now (`'compacting'` — the
+   *  purple ring), or was just compacted and nothing has been asked of it
+   *  since (`'compacted'` — the full purple dot). Absent on every session that
+   *  is in neither phase, which is nearly all of them nearly all of the time.
+   *
+   *  Computed per build from the in-memory CompactionTracker (src/compaction.ts)
+   *  rather than read off the editorial record: a compaction phase is a fact
+   *  about a running process, minutes long, and writing it to disk would
+   *  outlive the process it describes. */
+  compaction?: CompactionPhase;
   /** This session's notifications are EXPLICITLY off (`record.notify ===
    *  false`) — the row draws a struck-through bell to say so. Only the explicit
    *  per-session mute sets it, never the global `lineage.notifications.enabled`

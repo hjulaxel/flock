@@ -20,7 +20,7 @@ import {
   subtreeHasRunning,
 } from '../src/viewmodel';
 import type { ViewModelInput } from '../src/viewmodel';
-import { STATUS_DOT } from '../src/types';
+import { CLOSED_DOT, STATUS_DOT } from '../src/types';
 import type {
   BranchStatus,
   ProviderId,
@@ -669,10 +669,63 @@ describe('buildViewModel: row content', () => {
   it('badgeGlyph gives only the lit tones a character', () => {
     expect(badgeGlyph('running')).toBe(STATUS_DOT);
     expect(badgeGlyph('done')).toBe(STATUS_DOT);
+    // Compaction: the same filled dot once it has settled, the hollow ring
+    // while it runs. The webview draws both in CSS and only asks whether there
+    // is anything to draw; the native tree types these two characters into a
+    // FileDecoration badge, which can hold nothing else.
+    expect(badgeGlyph('compacted')).toBe(STATUS_DOT);
+    expect(badgeGlyph('compacting')).toBe(CLOSED_DOT);
     // Nothing for the quiet tones, 'closed' included.
     expect(badgeGlyph('closed')).toBeUndefined();
     expect(badgeGlyph('idle')).toBeUndefined();
     expect(badgeGlyph(undefined)).toBeUndefined();
+  });
+
+  describe('the compaction mark', () => {
+    const rowOf = (over: Partial<SessionNode>): { badge?: string; badgeKind?: string; tooltip: string } => {
+      const row = buildViewModel(
+        input(forestOf([node(A, over)]), { loose: [A] }),
+      )[0] as { badge?: string; badgeKind?: string; tooltip: string };
+      return row;
+    };
+
+    it('rings a compacting session instead of drawing it as running', () => {
+      // The whole point: a compacting session reports `busy`, and before this
+      // the row wore the amber running dot for work nobody asked for.
+      const row = rowOf({ status: 'busy', compaction: 'compacting' });
+      expect(row.badgeKind).toBe('compacting');
+      expect(row.badge).toBe(CLOSED_DOT);
+      expect(row.tooltip).toContain('compacting');
+    });
+
+    it('fills the dot when the compaction is over and nothing is behind it', () => {
+      // A compaction ends with the session quiet and waiting, which is the red
+      // attention dot's territory — so the purple has to outrank it, or it
+      // would never draw at all. Withholding the phase while the session is
+      // busy again is src/compaction.ts's job, not this one's.
+      const row = rowOf({
+        status: 'waiting',
+        attention: 'waiting',
+        compaction: 'compacted',
+      });
+      expect(row.badgeKind).toBe('compacted');
+      expect(row.badge).toBe(STATUS_DOT);
+      expect(row.tooltip).toContain('compacted');
+    });
+
+    it('still refuses a lit mark to a row that was put away', () => {
+      // Hide is "stop telling me about this one", and it outranks every tone —
+      // compaction included.
+      const row = rowOf({ hidden: true, compaction: 'compacting' });
+      expect(row.badgeKind).toBeUndefined();
+      expect(row.badge).toBeUndefined();
+    });
+
+    it('lets a closed row stay closed', () => {
+      const row = rowOf({ archived: true, compaction: 'compacted' });
+      expect(row.badgeKind).toBe('closed');
+      expect(row.badge).toBeUndefined();
+    });
   });
 
   // The struck-through bell, right of the name.

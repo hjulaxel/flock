@@ -173,6 +173,7 @@ import {
 import { BranchListCache } from './branchList';
 import { recommendedNotice } from './recommend';
 import { chatAutoCloseVictims } from './chatAutoClose';
+import { CompactionTracker } from './compaction';
 import { planDeepReveal } from './deepSwitch';
 import { WorktreeCache, branchRowsAdvice } from './git';
 import { BranchStatusCache } from './gitBranches';
@@ -619,6 +620,25 @@ export async function activate(
     sessionId,
     ...chainIndex.membersOf(sessionId).filter((m) => m !== sessionId),
   ];
+
+  /**
+   * Which conversations are mid-compaction, and which have just finished one.
+   * The purple ring and the purple dot — see src/compaction.ts for the rules
+   * and for why compaction needed a mark of its own at all.
+   *
+   * IN MEMORY, never on disk. A compaction phase is a fact about a running
+   * process that lasts minutes; an editorial record outlives the process by
+   * design, so a phase written there would be a stale ring on a row whose
+   * session ended last Tuesday.
+   *
+   * Fed from four places, all of them below: the PreCompact hook (in), the
+   * SessionStart-`compact` and Stop hooks and the roster's own busy→quiet
+   * transition (out), and UserPromptSubmit plus the quiet→busy transition
+   * (something is behind it now, so the dot clears). Every read and clear goes
+   * through `chainAliases`, because a compaction re-mints the session id and
+   * the two ends of one compaction therefore arrive under different ones.
+   */
+  const compaction = new CompactionTracker();
 
   let lastEntries: RosterEntry[] = [];
   let haveRoster = false;
@@ -1295,6 +1315,14 @@ export async function activate(
     // activityMtimes above, and for the same reason: a superseded generation's
     // id would never match a live entry's collapsed one.
     const tailStats = tailStatsFor(liveIds, collapsed.records);
+    // The compaction phases, asked per row rather than handed over as a map:
+    // the answer depends on the CHAIN (a compaction re-mints the id, so the
+    // PreCompact and its completion arrive under different generations) and on
+    // the live status, and buildForest knows about neither. Pruned first, so a
+    // window left open for a week cannot accumulate phases for sessions that
+    // are long gone.
+    const compactionNow = Date.now();
+    compaction.prune(new Set(liveIds), compactionNow);
     forest = buildForest({
       entries: entries2,
       resolutions,
@@ -1303,6 +1331,8 @@ export async function activate(
       archived: archived2,
       activityMtimes,
       tailStats,
+      compactionOf: (id, status) =>
+        compaction.phaseOf(chainAliases(id), compactionNow, status === 'busy'),
       opts: {
         showGhosts: boolCfg(CONFIG_KEYS.showGhosts, true),
         notificationsDefault: boolCfg(CONFIG_KEYS.notificationsEnabled, true),
@@ -2072,6 +2102,24 @@ export async function activate(
       present.add(node.id);
       const prev = prevStatusById.get(node.id);
       prevStatusById.set(node.id, node.status);
+      // The compaction half of the same two transitions, and it runs BEFORE
+      // the `hidden` gate below on purpose: hiding a row is "stop telling me
+      // about this one", not "freeze its state", and a hidden session whose
+      // compaction finished must still stop being mid-compaction — or
+      // unhiding it weeks later would produce a ring for a compaction that
+      // ended before lunch. (buildForest is what keeps a hidden row's mark off
+      // the screen, exactly as it does for the unseen dot.)
+      //
+      // This is the hook-free path to both edges: quiet→busy means something
+      // is behind the compaction now, busy→quiet means it is over. Slower than
+      // the hooks above by up to one poll interval, and the only path at all
+      // when hooks are off.
+      const aliases = chainAliases(node.id);
+      if (prev === 'busy' && node.status !== 'busy') {
+        compaction.noteFinish(aliases, Date.now());
+      } else if (prev !== undefined && prev !== 'busy' && node.status === 'busy') {
+        compaction.clearSettled(aliases);
+      }
       if (node.hidden) continue;
       // The turn ended: it was working, now it is not.
       if (prev === 'busy' && (node.status === 'waiting' || node.status === 'idle')) {
@@ -2604,6 +2652,39 @@ export async function activate(
     // asking for the user, same urgency.)
     if (e.sessionId && (e.event === 'Stop' || e.event === 'Notification')) {
       noteSessionDone(e.sessionId);
+    }
+    // ---- compaction (src/compaction.ts) -------------------------------
+    //
+    // PreCompact is the ONLY signal that a compaction has begun: the roster
+    // reports a compacting session as plainly `busy`, and the transcript's
+    // compact_boundary record is not written until it is already over. Hence
+    // the fifth hook event, and hence PLUGIN_VERSION 4.
+    //
+    // Out again on any of three, whichever lands first — the successor
+    // generation being minted, the turn ending, or (in detectTurnTransitions
+    // below) the roster simply going quiet. Three, because nothing in this
+    // extension is allowed to REQUIRE hooks: with them off the ring never
+    // appears at all, which is the old behaviour and fine, but a ring that
+    // appeared must always be able to come down.
+    if (e.sessionId) {
+      const aliases = chainAliases(e.sessionId);
+      if (e.event === 'PreCompact') {
+        compaction.noteStart(e.sessionId, Date.now());
+      } else if (
+        e.event === 'Stop' ||
+        (e.event === 'SessionStart' && e.source === 'compact')
+      ) {
+        compaction.noteFinish(aliases, Date.now());
+      } else if (e.event === 'UserPromptSubmit') {
+        // A new prompt IS the "other command behind it" the resting dot
+        // promises there is none of, and it arrives a poll interval before the
+        // roster would say so. Settled phases only — `/compact` is itself a
+        // prompt, and clearing outright here would take down the ring the
+        // PreCompact immediately after it is about to raise.
+        compaction.clearSettled(aliases);
+      } else if (e.event === 'SessionEnd') {
+        compaction.clear(aliases);
+      }
     }
     pokeNow();
   };

@@ -138,13 +138,17 @@ afterEach(() => {
 });
 
 describe('hooks: generated plugin files', () => {
-  it('renders exactly the five events, each running HOOK_COMMAND', () => {
+  it('renders exactly the six events, each running HOOK_COMMAND', () => {
     const parsed = JSON.parse(renderHooksJson()) as {
       hooks: Record<string, Array<{ hooks: Array<Record<string, string>> }>>;
     };
     expect(Object.keys(parsed.hooks).sort()).toEqual(
       [
         'Notification',
+        // v4. The only signal that a compaction has STARTED — the roster says
+        // `busy` and the transcript's compact_boundary record does not exist
+        // until it is over. See src/compaction.ts.
+        'PreCompact',
         'SessionEnd',
         'SessionStart',
         'Stop',
