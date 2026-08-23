@@ -8,6 +8,49 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Added
 
+- **Compaction has a mark of its own: a purple ring, then a purple dot.** A
+  compacting session was wearing two costumes in turn, neither of them its
+  own — `claude agents --json` reports it as plainly `busy`, so the row drew
+  the amber running dot for work nobody asked for, and when the compaction
+  ended and the session went quiet it drew the red attention dot, which means
+  "this one wants you". Compaction is neither, and now says so: a **hollow
+  purple ring** while it runs, and a **full purple dot** once it is done with
+  nothing behind it. The moment anything is behind it — a new prompt, a new
+  turn — the ordinary tones resume. The shape is the tree's own ring-to-fill
+  grammar (a ring is a node with more to come, a filled dot is where the line
+  stops), and the colour is themeable as `lineage.compacting`.
+  Detecting the start of a compaction needed a new signal — the roster says
+  `busy` and nothing else, and the transcript's `compact_boundary` record is
+  not written until it is over — so the hooks plugin gained a sixth event,
+  `PreCompact`, which self-heal installs silently. Hooks are still never
+  required: with them off the ring simply never appears, and the way *out* of
+  the phase has three independent signals so a ring that appeared can always
+  come down. The rules are pure and tested (`src/compaction.ts`).
+- **A Shells view — the terminals this window is actually running.** A third
+  section under Sessions and Accounts, shipped collapsed: one row per bound
+  terminal, with the pid running in it, whether it is wrapped in tmux, and how
+  old it is. Clicking a row brings that terminal to the front. The tree
+  deliberately hides all of this — it collapses a conversation's generations
+  onto one row so the machinery underneath stops being your problem — and this
+  is where it stops being hidden, for the times when it *is*: a session that
+  will not focus, a wrap you want to confirm, an editor that has quietly
+  accumulated eleven terminals. **This window only**, said on the view itself:
+  a terminal belongs to the window that made it. Turn the section off with
+  `lineage.shells.section`.
+- **The tree is now the session switcher — `lineage.sessionSwitching`.** The
+  back arrow at the top of the Claude Code extension's panel leaves your
+  conversation for an agent list that knows nothing about forks, projects or
+  worktrees, and is very easy to hit by accident. Flock cannot intercept that
+  click — it is a route change inside another extension's webview, with no tab,
+  title, command or context key on the outside of it — so instead it makes
+  sure the place you land is already right. The row of whatever conversation is
+  in front now stays **selected**, so the tree never loses your place; and
+  `alt+left`, while Claude Code has focus, puts the **keyboard** on that row so
+  the up and down arrows move you between sessions from there (**Flock: Show
+  Current Session in the Sidebar** in the palette does the same). Following is
+  gated on the tree being visible, so a collapsed sidebar never springs open.
+  Set `lineage.sessionSwitching` to `claude` to turn both halves off and keep
+  the agent list.
 - **Idle chat tabs close themselves — `lineage.chat.autoCloseMinutes`.** A
   project chat is a scratch conversation whose normal ending is abandonment,
   and it has no tree row for solo mode or a workspace switch to tidy behind —
