@@ -860,6 +860,24 @@ export const COMMANDS = {
   /** Rename a NAMED subproject. Only on a lane — an implicit directory row has
    *  no name of its own to change (its label is the directory's). */
   renameSubproject: 'lineage.renameSubproject',
+  /**
+   * Re-file an EXISTING session into one of its project's lanes, or out of every
+   * lane.
+   *
+   * The missing half of named lanes. A lane's stamp
+   * (`EditorialRecord.subprojectId`) was written at LAUNCH and nowhere else, so
+   * the only way into a lane was to start a session from the lane's own `+` —
+   * which means every conversation that predates the lane, and every one started
+   * from the project's `+` or from a terminal, could never be filed in it.
+   * Measured on a real store: two live lanes, 556 session records, and not one
+   * stamp between them.
+   *
+   * `StateStore.moveSessionSubproject` is deliberately a DIFFERENT writer from
+   * the launch path's `setSessionSubproject`, so "the launch must not overwrite
+   * an existing stamp" and "the user may change their mind" stay separate rules.
+   * This is the verb behind the second one.
+   */
+  moveSessionToLane: 'lineage.moveSessionToLane',
   /** REMOVED — `lineage.moveProject`, "Move Project…". Re-filed a project under
    *  another one. Nesting projects inside projects is retired: a subproject is a
    *  directory now (see `newSubproject`), so there is no parent to pick. The id
@@ -3542,6 +3560,11 @@ export interface CommandDeps {
   /** Tombstone a lane. Leaves every session's stamp alone — see
    *  StateStore.deleteSubproject. */
   deleteSubproject?(id: string): Promise<void>;
+  /** The lane a session is filed under, resolved over its generation CHAIN —
+   *  `StateStore.getSessionSubproject`. Optional: absent means the picker cannot
+   *  mark a current lane and offers no "no subproject" exit, which is the
+   *  degradation a wiring without lanes wants anyway. */
+  getSessionLane?(sessionId: string): string | undefined;
   /** Re-file one session into a lane, or out of every lane (`null`). */
   moveSessionSubproject?(
     sessionId: string,

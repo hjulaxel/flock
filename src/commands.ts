@@ -72,6 +72,7 @@ import type {
   Worktree,
 } from './types';
 import {
+  type ProjectMatch,
   buildProjectTree,
   chatsForProject,
   isWithin,
@@ -4376,6 +4377,152 @@ async function renameSubprojectFlow(
 }
 
 /**
+ * The project a SESSION belongs to, worktree reach included — asked with one git
+ * call instead of a scan.
+ *
+ * The synchronous `extraDirs` resolver (projects.projectReach) answers this on
+ * the render path by probing every project's directories. A user-facing verb
+ * behind a picker can do better: probe the SESSION's own directory once, and the
+ * repository's MAIN checkout — git's first `worktree list` stanza, which
+ * parseWorktreeList preserves — is what the owning project claims. One call, and
+ * it asks the question the right way round.
+ *
+ * Falls back to no answer rather than to a guess: a directory in no repository
+ * that no project lists genuinely belongs to nothing.
+ */
+async function projectForSession(
+  deps: CommandDeps,
+  cwd: string | undefined,
+): Promise<ProjectMatch | null> {
+  const direct = matchProject(deps.allProjects(), cwd);
+  if (direct) return direct;
+  if (cwd === undefined || cwd === '' || deps.worktreesFor === undefined) {
+    return null;
+  }
+  let list: readonly Worktree[] = [];
+  try {
+    list = await deps.worktreesFor(cwd);
+  } catch (err) {
+    logError('commands.projectForSession', err);
+    return null;
+  }
+  const main = list[0]?.dir;
+  return main === undefined || main === ''
+    ? null
+    : matchProject(deps.allProjects(), main);
+}
+
+/**
+ * Re-file one session into a lane of its project, or out of every lane.
+ *
+ * THE MISSING HALF OF NAMED LANES. The stamp (EditorialRecord.subprojectId) was
+ * written at LAUNCH and nowhere else, so the only way into a lane was to start a
+ * session from the lane's own `+` — which left out every conversation that
+ * predates the lane, every one started from the project's `+`, and every one
+ * started in a terminal. Measured on a real store: two live lanes, 556 session
+ * records, not one stamp between them. A lane you cannot put existing work into
+ * is half a feature — the rows are there and the work that belongs in them is
+ * not.
+ *
+ * THE PROJECT IS DERIVED FROM THE SESSION, never taken from the invocation. The
+ * question "which lanes may this session join" has one right answer — the lanes
+ * of whichever project claims its directory — and reading it off the row that was
+ * clicked would let a session filed under one project be offered another
+ * project's lanes, producing a stamp no reader would ever resolve.
+ *
+ * "No lane" is not a delete. Clearing the stamp puts the session back to being
+ * placed by DIRECTORY, which is where every session Flock did not start already
+ * sits, and the dialog says so — "remove" beside a list of conversations reads
+ * like something worse than it is.
+ */
+async function moveSessionToLaneFlow(
+  deps: CommandDeps,
+  sessionId: string,
+): Promise<void> {
+  if (deps.moveSessionSubproject === undefined) return;
+  const cwd =
+    deps.getForest().nodes.get(sessionId)?.cwd ??
+    deps.getRecord(sessionId)?.cwd;
+  const match = await projectForSession(deps, cwd);
+  if (!match) {
+    void vscode.window.showInformationMessage(
+      cwd === undefined || cwd === ''
+        ? 'Flock: this session has no directory on record, so no project ' +
+            'claims it and there is no subproject to file it in.'
+        : `Flock: no project covers ${cwd}, so there is no subproject to file ` +
+            'this session in. Add that directory to a project first.',
+    );
+    return;
+  }
+  const project = match.project;
+  const lanes = (deps.allSubprojects?.() ?? []).filter(
+    (l) => l.projectId === project.id,
+  );
+  if (lanes.length === 0) {
+    void vscode.window.showInformationMessage(
+      `Flock: "${project.name}" has no named subprojects yet. Add one with ` +
+        '"Add Subproject…" on its row, then file sessions into it.',
+    );
+    return;
+  }
+  const current = deps.getSubproject === undefined ? undefined : currentLaneOf(deps, sessionId);
+
+  interface LanePick extends vscode.QuickPickItem {
+    laneId: string | null;
+  }
+  const items: LanePick[] = lanes
+    .map((l) => ({
+      label: l.name.trim() === '' ? baseName(l.dir) : l.name,
+      ...(l.id === current ? { description: 'currently filed here' } : {}),
+      detail:
+        l.branch === undefined || l.branch === ''
+          ? l.dir
+          : `${l.dir} — pinned to ${l.branch}`,
+      laneId: l.id as string | null,
+    }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+  if (current !== undefined) {
+    items.push({
+      label: 'No subproject',
+      description: 'file it by directory instead',
+      detail:
+        'Nothing stops and nothing moves on disk — the session goes back to ' +
+        'being placed by its directory.',
+      laneId: null,
+    });
+  }
+
+  const chosen = await vscode.window.showQuickPick(items, {
+    placeHolder: `File this session under which subproject of ${project.name}?`,
+    matchOnDetail: true,
+  });
+  if (!chosen || chosen.laneId === current) return;
+  await deps.moveSessionSubproject(sessionId, chosen.laneId);
+  log(
+    'session:',
+    shortId(sessionId),
+    chosen.laneId === null
+      ? 'filed by directory again'
+      : `filed under lane ${chosen.laneId}`,
+  );
+  deps.refresh();
+}
+
+/** The lane a session is filed under right now, over the generation CHAIN — the
+ *  store resolves the stamp there, so a `/clear`ed conversation reports the lane
+ *  it was started in rather than nothing. A stamp naming a deleted lane resolves
+ *  to undefined, which reads correctly as "not filed anywhere". */
+function currentLaneOf(
+  deps: CommandDeps,
+  sessionId: string,
+): string | undefined {
+  const id = deps.getSessionLane?.(sessionId);
+  if (typeof id !== 'string' || id === '') return undefined;
+  const lane = deps.getSubproject?.(id);
+  return lane && lane.deleted !== true ? id : undefined;
+}
+
+/**
  * REMOVE a lane.
  *
  * Removes a NAME, and nothing else. The directory stays on disk and stays the
@@ -6847,6 +6994,19 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     if (!direct) return;
     await renameSubprojectFlow(deps, direct.projectId, direct.id);
   });
+
+  // File an EXISTING session under one of its project's subprojects. The
+  // counterpart to a lane's `+`, which was the only way in — see
+  // COMMANDS.moveSessionToLane.
+  register(
+    COMMANDS.moveSessionToLane,
+    'move session to subproject',
+    async (arg?: unknown) => {
+      const id = sessionIdFromArg(arg);
+      if (id === undefined) return;
+      await moveSessionToLaneFlow(deps, deps.tipOf(id));
+    },
+  );
 
   register(COMMANDS.removeSubproject, 'remove subproject', async (arg?: unknown) => {
     const direct = subprojectArgOf(arg);

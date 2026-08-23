@@ -348,11 +348,13 @@ and `~/code/api` can both be projects and each session lands in the right one.
 Nothing is written to your session records, so renaming a project, adding a
 directory, or deleting it entirely never rewrites session state.
 
-A right-click gives you seven things — **New Session**, **New Chat**, **Old
-Chats…**, **Add Subproject**, **Rename Project**, **Close Project**, **Delete
-Project** — and **Settings**, which holds what a project *is* rather than what you
-do to it: which directory is the main one, which to remove, the provider, the AI
-account, **Switch Workspace…** and **Open in New Window**. Deleting a project
+A right-click gives you eight things — **Switch Workspace…** (project mode only:
+scope this window to this project, from the row you are already looking at),
+**New Session**, **New Chat**, **Old Chats…**, **Add Subproject**, **Rename
+Project**, **Close Project**, **Delete Project** — and **Settings**, which holds
+what a project *is* rather than what you do to it: which directory is the main
+one, which to remove, the provider, the AI account, **Switch Workspace…** again
+and **Open in New Window**. Deleting a project
 removes the grouping only — never a directory, session or transcript.
 
 Dragging a session onto a project row adds that session's directory to the
@@ -398,6 +400,15 @@ assigned to a lane: the sessions that were there before, and any started by hand
 terminal since. **That row goes away by itself once it is empty**, so filing the last
 one leaves you with the lanes and nothing else. It is a remainder, not a permanent
 leftover bucket.
+
+**Move to Subproject…**, on a session row, is how work gets filed. It offers the
+subprojects of the project *that session* is in — derived from the session's own
+directory, not from the row you clicked, and reaching a session in a linked
+worktree through the repository it belongs to. Starting a session from a lane's
+`+` files it there from the beginning; this is for everything that was already
+running, which is most of what is in a folder the day you name a lane in it.
+**No subproject** takes one back out, and is not a delete: the session returns to
+being placed by its directory.
 
 **Rename Subproject** and **Remove Subproject** are on a lane. Removing one removes
 a **name**: the directory stays, nothing running stops, and the sessions filed there

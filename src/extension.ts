@@ -5377,6 +5377,9 @@ export async function activate(
     // need are wired onto the tree deps above.
     allSubprojects: () => store.getSubprojects(),
     getSubproject: (id) => store.getSubproject(id),
+    // Resolved over the generation CHAIN by the store, so a `/clear`ed
+    // conversation reports the lane it was started in rather than nothing.
+    getSessionLane: (id) => store.getSessionSubproject(id),
     upsertSubproject: (id, patch) => store.upsertSubproject(id, patch),
     deleteSubproject: (id) => store.deleteSubproject(id),
     moveSessionSubproject: (sessionId, subprojectId) =>

@@ -1412,6 +1412,182 @@ describe('the subproject verbs', () => {
     ...over,
   });
 
+  // ------------------------------------------------ filing existing work
+  //
+  // The missing half of named lanes: the stamp was written at LAUNCH and nowhere
+  // else, so a conversation that predated the lane could never join it. Measured
+  // on a real store before this verb existed: two live lanes, 556 session
+  // records, not one stamp between them.
+
+  /** Collects re-filings, and reports the lane a session is already in. */
+  function laneMoves(current?: string): {
+    deps: Record<string, unknown>;
+    moved: { sessionId: string; laneId: string | null }[];
+  } {
+    const moved: { sessionId: string; laneId: string | null }[] = [];
+    return {
+      deps: {
+        getSessionLane: () => current,
+        moveSessionSubproject: async (
+          sessionId: string,
+          laneId: string | null,
+        ) => {
+          moved.push({ sessionId, laneId });
+        },
+      },
+      moved,
+    };
+  }
+
+  const SESSION = uuid(7);
+
+  /** Deps with one session sitting in `cwd`. */
+  function withSessionAt(cwd: string, projects: ProjectRecord[]) {
+    const { deps } = chatDeps(projects[0], { projects });
+    (deps as { getForest: () => SessionForest }).getForest = () =>
+      forestOf([node(SESSION, { cwd })]);
+    return deps;
+  }
+
+  it('offers the lanes of the project the SESSION is in', async () => {
+    const picks = scriptPicks('Server rewrite');
+    const store = laneStore([lane(), lane({ id: 'lane-2', name: 'Bug hunt' })]);
+    const moves = laneMoves();
+    const deps = withSessionAt('/code/app/src', [app()]);
+    Object.assign(deps as object, store.deps, moves.deps);
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.moveSessionToLane, { type: 'session', id: SESSION });
+
+    expect(picks.offered[0]).toEqual(['Bug hunt', 'Server rewrite']);
+    // No "No subproject" exit: this session is not filed anywhere yet, so there
+    // is nothing to take it out of.
+    expect(picks.offered[0]).not.toContain('No subproject');
+    expect(moves.moved).toEqual([{ sessionId: SESSION, laneId: 'lane-1' }]);
+  });
+
+  it('offers the way OUT only when the session is filed somewhere', async () => {
+    const picks = scriptPicks('No subproject');
+    const store = laneStore([lane()]);
+    const moves = laneMoves('lane-1');
+    const deps = withSessionAt('/code/app', [app()]);
+    Object.assign(deps as object, store.deps, moves.deps);
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.moveSessionToLane, { type: 'session', id: SESSION });
+
+    expect(picks.offered[0]).toContain('No subproject');
+    // Clearing the stamp is a null, not a delete — the session goes back to
+    // being placed by its directory.
+    expect(moves.moved).toEqual([{ sessionId: SESSION, laneId: null }]);
+  });
+
+  it('writes nothing when the chosen lane is the one it is already in', async () => {
+    scriptPicks('Server rewrite');
+    const store = laneStore([lane()]);
+    const moves = laneMoves('lane-1');
+    const deps = withSessionAt('/code/app', [app()]);
+    Object.assign(deps as object, store.deps, moves.deps);
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.moveSessionToLane, { type: 'session', id: SESSION });
+    expect(moves.moved).toEqual([]);
+  });
+
+  it('writes nothing when the picker is cancelled', async () => {
+    scriptPicks(undefined);
+    const store = laneStore([lane()]);
+    const moves = laneMoves();
+    const deps = withSessionAt('/code/app', [app()]);
+    Object.assign(deps as object, store.deps, moves.deps);
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.moveSessionToLane, { type: 'session', id: SESSION });
+    expect(moves.moved).toEqual([]);
+  });
+
+  it('never offers ANOTHER project\'s lanes', async () => {
+    // The project is derived from the SESSION, never from the row that was
+    // clicked: a stamp naming a lane of a project that does not claim the
+    // session is a stamp no reader would ever resolve.
+    const picks = scriptPicks(undefined);
+    const other = projectOf({
+      id: 'p2',
+      name: 'api',
+      rootDir: '/code/api',
+      dirs: [],
+    });
+    const store = laneStore([
+      lane({ id: 'mine', name: 'app lane', projectId: 'p1' }),
+      lane({ id: 'theirs', name: 'api lane', projectId: 'p2', dir: '/code/api' }),
+    ]);
+    const moves = laneMoves();
+    const deps = withSessionAt('/code/api/src', [app(), other]);
+    Object.assign(deps as object, store.deps, moves.deps);
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.moveSessionToLane, { type: 'session', id: SESSION });
+    expect(picks.offered[0]).toEqual(['api lane']);
+  });
+
+  it('says so rather than opening an empty picker when the project has no lanes', async () => {
+    const picks = scriptPicks(undefined);
+    const said = told();
+    const store = laneStore([]);
+    const moves = laneMoves();
+    const deps = withSessionAt('/code/app', [app()]);
+    Object.assign(deps as object, store.deps, moves.deps);
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.moveSessionToLane, { type: 'session', id: SESSION });
+
+    expect(picks.offered).toEqual([]);
+    expect(said.messages.join(' ')).toContain('no named subprojects yet');
+    expect(moves.moved).toEqual([]);
+  });
+
+  it('says so when no project covers the session at all', async () => {
+    const said = told();
+    const store = laneStore([lane()]);
+    const moves = laneMoves();
+    const deps = withSessionAt('/somewhere/loose', [app()]);
+    Object.assign(deps as object, store.deps, moves.deps);
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.moveSessionToLane, { type: 'session', id: SESSION });
+
+    expect(said.messages.join(' ')).toContain('no project covers');
+    expect(moves.moved).toEqual([]);
+  });
+
+  it('reaches a session in a LINKED CHECKOUT through the repository it belongs to', async () => {
+    // A worktree of the project's repository. Nobody listed that path and
+    // nobody should have to — worktrees come and go several times a day. One
+    // probe of the session's own directory names the repository's main checkout,
+    // and the project that claims THAT is the project whose lanes are offered.
+    const picks = scriptPicks('Server rewrite');
+    const store = laneStore([lane()]);
+    const moves = laneMoves();
+    const deps = withSessionAt('/code/app-feat-x/src', [app()]);
+    const probed: string[] = [];
+    Object.assign(deps as object, store.deps, moves.deps, {
+      worktreesFor: async (dir: string) => {
+        probed.push(dir);
+        return [
+          { dir: '/code/app', branch: 'main', head: 'a', detached: false },
+          { dir: '/code/app-feat-x', branch: 'feat/x', head: 'b', detached: false },
+        ];
+      },
+    });
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.moveSessionToLane, { type: 'session', id: SESSION });
+
+    expect(probed).toEqual(['/code/app-feat-x/src']);
+    expect(picks.offered[0]).toEqual(['Server rewrite']);
+    expect(moves.moved).toEqual([{ sessionId: SESSION, laneId: 'lane-1' }]);
+  });
+
   it('makes a NAMED lane in a directory the project already covers', async () => {
     // THE CASE v7 EXISTS FOR: two subprojects in one folder. Nothing on disk tells
     // them apart, so the name is the whole of what is created — no directory is

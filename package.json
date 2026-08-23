@@ -187,6 +187,11 @@
         "icon": "$(add)"
       },
       {
+        "command": "lineage.moveSessionToLane",
+        "title": "Move to Subproject...",
+        "category": "Flock"
+      },
+      {
         "command": "lineage.renameSubproject",
         "title": "Rename Subproject...",
         "category": "Flock"
@@ -806,6 +811,11 @@
           "group": "1_actions@2"
         },
         {
+          "command": "lineage.moveSessionToLane",
+          "when": "view == lineageSessions && viewItem =~ /;session;/",
+          "group": "1_actions@3"
+        },
+        {
           "command": "lineage.switchSessionAccount",
           "when": "view == lineageSessions && viewItem =~ /;session;/ && lineage.manyAccounts",
           "group": "1_actions@3"
@@ -1223,6 +1233,11 @@
           "command": "lineage.renameSessionInline",
           "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;session;/",
           "group": "1_actions@2"
+        },
+        {
+          "command": "lineage.moveSessionToLane",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;session;/",
+          "group": "1_actions@3"
         },
         {
           "command": "lineage.switchSessionAccount",

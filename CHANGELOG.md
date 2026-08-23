@@ -40,6 +40,19 @@ All notable changes to Flock are recorded here. The format follows
   row's context menu in both trees, in project mode only. The switcher was
   reachable from the status bar and the palette, and not from the row you were
   already looking at.
+- **Move to Subproject… — the missing half of named subprojects.** A
+  subproject's stamp was written at LAUNCH and nowhere else, so the only way into
+  one was to start a session from its `+`: every conversation that predated the
+  subproject, every one started from the project's `+`, and every one started in
+  a terminal could never be filed in it. Measured on a real store before this
+  existed — two live subprojects, 556 session records, not one stamp between
+  them. It is now a verb on the session row in both trees, and it offers the
+  subprojects of the project **the session is in**, derived from the session's
+  own directory rather than from the row that was clicked (a stamp naming
+  another project's subproject is one no reader would ever resolve). A session in
+  a linked worktree is reached through the repository it belongs to, in one git
+  call. "No subproject" is not a delete: the session goes back to being placed by
+  its directory, where every session Flock did not start already sits.
 - **Compaction has a mark of its own: a purple ring, then a purple dot.** A
   compacting session was wearing two costumes in turn, neither of them its
   own — `claude agents --json` reports it as plainly `busy`, so the row drew
