@@ -111,7 +111,7 @@ const EMPTY_GROUPING: GroupingResult = {
   loose: [],
   hiddenCount: 0,
   outOfScopeCount: 0,
-  elsewhere: null,
+  hiddenRunning: null,
 };
 
 function input(

@@ -1579,6 +1579,13 @@
           "minimum": 0,
           "markdownDescription": "When a workspace switch (or solo mode) closes a tmux-wrapped session's tab, the process keeps running detached for this many minutes so switching back reattaches instantly — shown in the tree as a countdown row. At the deadline an idle session is closed to an archived row; a busy one closes after its turn ends. At most 8 sessions run detached at once; overflow closes the oldest idle one first. `0` disables the grace — the tab still closes instantly, and the process is ended by the next sweep within a minute."
         },
+        "lineage.session.reloadGraceSeconds": {
+          "type": "number",
+          "default": 45,
+          "minimum": 0,
+          "maximum": 60,
+          "markdownDescription": "How many seconds a session may keep running after the window that owned it closed. This is a measurement, not a reprieve: VS Code reports a window **reload** and a window **close** identically, so the only way to tell them apart is to wait — a reload comes back and reattaches, a close never does. At the deadline the session settles to an archived row you can resume, because a folder no window has open should have nothing running in it. Keep this low; raise it only if reloads on this machine are slow enough to lose sessions. `0` ends sessions the moment the window goes, which also means every reload loses them."
+        },
         "lineage.launch.mode": {
           "type": "string",
           "default": "flock",
@@ -1853,7 +1860,7 @@
           {
             "id": "flock.sessions",
             "title": "The tree starts empty",
-            "description": "Nothing you ran before Flock, and nothing running in another terminal, appears until you say so \u2014 and nothing rings the bell either. Two doors bring your history in.\n[Open the Sessions view](command:workbench.view.extension.lineage)",
+            "description": "Nothing you ran before Flock, and nothing running in another terminal, appears until you say so — and nothing rings the bell either. Two doors bring your history in.\n[Open the Sessions view](command:workbench.view.extension.lineage)",
             "media": {
               "markdown": "media/walkthrough/sessions.md"
             },

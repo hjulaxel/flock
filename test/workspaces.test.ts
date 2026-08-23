@@ -2079,6 +2079,46 @@ describe('workspaces: solo mode (lineage.soloSession)', () => {
     expect(calls.written.some((w) => w.id === S1)).toBe(false);
   });
 
+  // `stowedBySwitch` is the switch's claim ticket: restoreSession resumes a
+  // level-2 row ONLY when it carries the marker. Folder mode has no switch, so
+  // solo mode there must not mint tickets nothing will ever redeem — it was
+  // reaching straight into the switcher's machinery, marker included.
+  it('stamps stowedBySwitch by default — the switch will come back for these', async () => {
+    const { deps, calls } = harness({
+      bindings: () => [binding(S1, 'keep'), binding(S2, 'tmux'), binding(S3, 'bare')],
+      tmuxNameOf: (id) => (id === S2 ? TMUX_S2 : undefined),
+      soloSession: () => true,
+    });
+
+    expect(await new WorkspaceManager(deps).parkOthers(S1)).toBe(2);
+    // Both tiers carry it: the graced one and the closed one.
+    expect(calls.written.find((w) => w.id === S2)?.patch.stowedBySwitch).toBe(true);
+    expect(calls.written.find((w) => w.id === S3)?.patch.stowedBySwitch).toBe(true);
+  });
+
+  it('omits it when the caller says there is no switch to come back', async () => {
+    const { deps, calls } = harness({
+      bindings: () => [binding(S1, 'keep'), binding(S2, 'tmux'), binding(S3, 'bare')],
+      tmuxNameOf: (id) => (id === S2 ? TMUX_S2 : undefined),
+      soloSession: () => true,
+    });
+
+    expect(
+      await new WorkspaceManager(deps).parkOthers(S1, { stow: false }),
+    ).toBe(2);
+    const graced = calls.written.find((w) => w.id === S2);
+    const closed = calls.written.find((w) => w.id === S3);
+    expect(graced?.patch.stowedBySwitch).toBe(false);
+    expect(closed?.patch.stowedBySwitch).toBe(false);
+    // Everything ELSE about the two tiers is unchanged — folder mode still
+    // graces a wrapped session and still closes a bare one. Only the claim
+    // ticket goes.
+    expect(typeof graced?.patch.graceUntil).toBe('string');
+    expect(graced?.patch.tmux).toBe(TMUX_S2);
+    expect(typeof closed?.patch.closed).toBe('string');
+    expect(closed?.patch.tmux).toBeNull();
+  });
+
   it('spares a busy BARE session — a park there would abort its turn', async () => {
     const { deps, calls } = harness({
       bindings: () => [binding(S1, 'keep'), binding(S2, 'busy bare')],

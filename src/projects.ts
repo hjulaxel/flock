@@ -1688,13 +1688,22 @@ export interface GroupingInput {
   scopeDirs?: readonly string[];
   /**
    * Does this root's visible subtree contain a RUNNING process? The escape
-   * hatch on EVERY drop computeGrouping makes — the scope fence, the
-   * all-claimants-closed drop, folder-hiding and onlyProjectSessions alike: a
-   * running session may be filtered into the collapsed "Running elsewhere"
-   * group (see GroupingResult.elsewhere) but never OUT of the tree — "every
-   * running process has a row in every window" outranks every fence and
-   * filter, because an invisible running state is the incident this design
-   * exists to prevent. A lookup rather than data on the root ids because
+   * hatch on every drop computeGrouping makes EXCEPT the scope fence — the
+   * all-claimants-closed drop, folder-hiding and onlyProjectSessions: a
+   * running session those would hide files into the collapsed "Still running"
+   * group (see GroupingResult.hiddenRunning) rather than out of the tree,
+   * because a view PREFERENCE must never hide a process this window owns.
+   *
+   * The scope fence is deliberately NOT rescued, and that is the difference
+   * between a preference and a boundary. In folder mode a session under
+   * another folder is not this window's at all: no verb here can reach it, no
+   * click here can start it (the pickers never offer it), so a row for it
+   * would be a row you cannot act on. Its own window shows it, and if no
+   * window has that folder open then nothing of its is running — window close
+   * ends a folder's sessions (see the reload grace in extension.ts) and the
+   * next activation's reconcile kills whatever a force-quit left behind. The
+   * invariant survives by making the state unreachable instead of by
+   * reporting it. A lookup rather than data on the root ids because
    * liveness lives on the forest, which this pure module never sees; absent
    * (older wirings, tests that predate it) means nothing is rescued, which is
    * the pre-invariant behaviour.
@@ -1818,35 +1827,42 @@ export interface GroupingResult {
   loose: string[];
   /** How many root sessions were removed by folder-hiding / project-only /
    *  every-claimant-closed. Running roots are never in this count — they go
-   *  to `elsewhere`, same rule as the scope fence below. */
+   *  to `hiddenRunning`. */
   hiddenCount: number;
   /** How many root sessions `scopeDirs` excluded — other folders' work, at
    *  home in other windows. Zero whenever no scope was given. Kept apart from
    *  `hiddenCount` so "you hid N" never inflates with rows the user never
-   *  hid. Running roots are never in this count — they go to `elsewhere`. */
+   *  hid. Running roots ARE counted here, unlike every other drop: the fence
+   *  is a boundary, not a view preference (see GroupingInput.hasRunning). */
   outOfScopeCount: number;
   /**
-   * The "Running elsewhere" group, or null when no filter dropped a running
-   * root. The visibility half of the levels invariant: a RUNNING session whose
-   * cwd the scope fence excludes, whose every claiming project is closed,
-   * whose folder the user hid, or that onlyProjectSessions would drop,
-   * still costs memory on this machine — so instead of being dropped (a
-   * running process with no row in this window) it files into this one
-   * collapsed appendix group. Rendered LAST and collapsed by default: it is a
-   * ledger, not a workspace — the rows exist so the badge's machine-wide count
-   * always has rows to point at, and so Close Now / routing verbs are one
-   * click away, not so another folder's work competes for attention.
+   * The "Still running" group, or null when no view preference dropped a
+   * running root. The visibility half of the levels invariant: a RUNNING
+   * session whose every claiming project is closed, whose folder the user hid,
+   * or that onlyProjectSessions would drop is a session THIS window owns — it
+   * is inside `scopeDirs`, its verbs work here, and it spends this machine's
+   * memory. Dropping it would leave a running process with no row in the very
+   * window that owns it, so instead it files into this one collapsed appendix.
+   * Rendered LAST and collapsed by default: it is a ledger, not a workspace —
+   * the rows exist so the running badge always has rows to point at, and so
+   * Close Now is one click away.
+   *
+   * NEVER a home for out-of-scope work: the scope fence drops those outright,
+   * so every member of this group is inside `scopeDirs`. That is what makes
+   * the group actionable — a row here has working verbs, where a row for
+   * another folder's session would have none.
+   *
    * Built here rather than in the renderers so both view styles show the same
    * rows in the same order (the reason every other grouping decision is here).
    */
-  elsewhere: GroupNode | null;
+  hiddenRunning: GroupNode | null;
 }
 
-/** GroupNode.key of the "Running elsewhere" group. NUL-prefixed so no real
+/** GroupNode.key of the "Still running" group. NUL-prefixed so no real
  *  cwd (the other keyspace GroupNode uses) can ever collide with it. */
-export const ELSEWHERE_GROUP_KEY = '\u0000running-elsewhere';
+export const HIDDEN_RUNNING_GROUP_KEY = '\u0000hidden-running';
 /** Its label. Words, not a path: the group has no directory of its own. */
-export const ELSEWHERE_GROUP_LABEL = 'Running elsewhere';
+export const HIDDEN_RUNNING_GROUP_LABEL = 'Still running';
 
 function cmp(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
@@ -1928,7 +1944,7 @@ function sameBranches(
  *   3. then onlyProjectSessions (if any project exists) removes the rest.
  *
  * No rule, however, ever removes a root whose subtree still has a RUNNING
- * process: those file into the "Running elsewhere" appendix instead (see
+ * process: those file into the "Still running" appendix instead (see
  * GroupingInput.hasRunning) — a filter is a view preference and the levels
  * invariant outranks it for exactly as long as the process lives.
  *
@@ -1994,14 +2010,14 @@ export function computeGrouping(
   for (const p of projects) claimed.set(p.id, []);
 
   const leftover: string[] = [];
-  const elsewhereRoots: string[] = [];
+  const hiddenRunningRoots: string[] = [];
   let hiddenCount = 0;
   let outOfScopeCount = 0;
   const scopes = (input?.scopeDirs ?? [])
     .map((d) => normalizeDir(d))
     .filter((d) => d !== '');
   // The invariant's escape hatch: a dropped root whose subtree still has a
-  // running process goes to the "Running elsewhere" appendix instead of
+  // running process goes to the "Still running" appendix instead of
   // vanishing. Total on purpose — a throwing lookup must not take the tree
   // down, and "not provably running" degrades to the plain drop.
   const running = (rootId: string): boolean => {
@@ -2014,19 +2030,33 @@ export function computeGrouping(
 
   for (const rootId of input?.visibleRootIds ?? []) {
     const cwd = input.cwdOf(rootId);
-    // FOLDER MODE's fence, before any other rule: a session another folder's
-    // window owns is not hidden here, not filed here, not loose here — it is
-    // simply not this window's. Known cwds only; see GroupingInput.scopeDirs
-    // for why an unplaceable session stays. UNLESS it is running: a running
-    // process must keep a row in every window (the appendix group), because
-    // the memory it costs is machine-wide even when the work is not ours.
+    // FOLDER MODE's fence, before any other rule and WITHOUT the running
+    // escape hatch every rule below gets: a session another folder's window
+    // owns is not hidden here, not filed here, not loose here, not appended
+    // here — it is simply not this window's, running or not.
+    //
+    // The fence is a BOUNDARY, where everything below is a view PREFERENCE,
+    // and the invariant treats the two differently on purpose. A preference
+    // must never hide a process this window owns, because the user could
+    // otherwise lose track of work they can still act on. The fence hides
+    // work this window has no verb for: folder mode never offers to start or
+    // resume another folder's session (the pickers are scoped, and there is
+    // no routing verb any more), so a row here could only ever be a row you
+    // cannot use. Showing it would trade a real invariant for a decorative
+    // one — and it is not needed, because the state it guarded against is now
+    // unreachable rather than merely reported: window close ends a folder's
+    // sessions after the reload grace, and the next activation's reconcile
+    // kills whatever a force-quit stranded. Nothing runs in a folder no
+    // window has open.
+    //
+    // Known cwds only; see GroupingInput.scopeDirs for why an unplaceable
+    // session stays.
     if (
       scopes.length > 0 &&
       normalizeDir(cwd) !== '' &&
       !scopes.some((scope) => isWithin(scope, cwd ?? ''))
     ) {
-      if (running(rootId)) elsewhereRoots.push(rootId);
-      else outOfScopeCount++;
+      outOfScopeCount++;
       continue;
     }
     // Matched against ALL projects, CLOSED ones included (the user-facing verb
@@ -2061,7 +2091,7 @@ export function computeGrouping(
       // (collapsed, at the bottom) while refusing the part no view option may
       // do: hide a process that is still spending this machine's memory.
       if (!filed) {
-        if (running(rootId)) elsewhereRoots.push(rootId);
+        if (running(rootId)) hiddenRunningRoots.push(rootId);
         else hiddenCount++;
       }
       continue;
@@ -2074,12 +2104,12 @@ export function computeGrouping(
     // process lives, and the moment it exits the root drops here as it always
     // did.
     if (isHiddenFolder(hiddenFolders, cwd)) {
-      if (running(rootId)) elsewhereRoots.push(rootId);
+      if (running(rootId)) hiddenRunningRoots.push(rootId);
       else hiddenCount++;
       continue;
     }
     if (hasProjects && input.onlyProjectSessions) {
-      if (running(rootId)) elsewhereRoots.push(rootId);
+      if (running(rootId)) hiddenRunningRoots.push(rootId);
       else hiddenCount++;
       continue;
     }
@@ -2241,14 +2271,14 @@ export function computeGrouping(
     // GroupNode-shaped so both renderers draw it with their existing group
     // row machinery; cwd '' because the group has no directory (its members
     // each have their own, shown on their rows).
-    elsewhere:
-      elsewhereRoots.length > 0
+    hiddenRunning:
+      hiddenRunningRoots.length > 0
         ? {
             type: 'group',
-            key: ELSEWHERE_GROUP_KEY,
+            key: HIDDEN_RUNNING_GROUP_KEY,
             cwd: '',
-            label: ELSEWHERE_GROUP_LABEL,
-            rootIds: elsewhereRoots,
+            label: HIDDEN_RUNNING_GROUP_LABEL,
+            rootIds: hiddenRunningRoots,
           }
         : null,
   };
@@ -2307,12 +2337,12 @@ function reuseUnchanged(
   // Same identity-reuse for the appendix group — it is a rendered row like
   // any folder, and handing the workbench a fresh object every refresh would
   // collapse it back the moment the user had expanded it.
-  const elsewhere =
-    next.elsewhere !== null &&
-    prev.elsewhere !== null &&
-    sameIds(prev.elsewhere.rootIds, next.elsewhere.rootIds)
-      ? prev.elsewhere
-      : next.elsewhere;
+  const hiddenRunning =
+    next.hiddenRunning !== null &&
+    prev.hiddenRunning !== null &&
+    sameIds(prev.hiddenRunning.rootIds, next.hiddenRunning.rootIds)
+      ? prev.hiddenRunning
+      : next.hiddenRunning;
 
-  return { ...next, projects, folders, elsewhere };
+  return { ...next, projects, folders, hiddenRunning };
 }

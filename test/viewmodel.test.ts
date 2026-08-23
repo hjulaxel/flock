@@ -30,7 +30,7 @@ import type {
   SessionForest,
   SessionNode,
 } from '../src/types';
-import { ELSEWHERE_GROUP_KEY } from '../src/projects';
+import { HIDDEN_RUNNING_GROUP_KEY } from '../src/projects';
 import type { GroupingResult } from '../src/projects';
 
 const A = '0f00000a-0000-4000-8000-00000000000a';
@@ -79,7 +79,7 @@ const EMPTY_GROUPING: GroupingResult = {
   loose: [],
   hiddenCount: 0,
   outOfScopeCount: 0,
-  elsewhere: null,
+  hiddenRunning: null,
 };
 
 function input(
@@ -1280,7 +1280,7 @@ describe('runningCountOf', () => {
     // The badge is the levels invariant as a number: a running process costs
     // the machine the same memory whichever window's filters apply, so every
     // window shows the same count. The rows keep up from the other side — a
-    // filtered RUNNING root renders in the "Running elsewhere" group.
+    // filtered RUNNING root renders in the "Still running" group.
     const forest = forestOf([node(A, { status: 'busy' })]);
     expect(runningCountOf(forest)).toBe(1);
   });
@@ -1292,14 +1292,37 @@ describe('runningCountOf', () => {
     ]);
     expect(runningCountOf(forest)).toBe(2);
   });
+
+  // The badge must count what the window can SHOW. Folder mode's fence drops
+  // other folders' rows outright, so a machine-wide number here would be a
+  // badge you cannot click through — the same defect as a rowless process,
+  // pointing the other way.
+  it('excludes out-of-scope sessions when a scope is given', () => {
+    const forest = forestOf([
+      node(A, { cwd: '/code/app/src', status: 'busy' }),
+      node(B, { cwd: '/code/other', status: 'busy' }),
+    ]);
+    expect(runningCountOf(forest, ['/code/app'])).toBe(1);
+    // No scope (project mode, an empty window, an older wiring): unchanged.
+    expect(runningCountOf(forest)).toBe(2);
+    expect(runningCountOf(forest, [])).toBe(2);
+  });
+
+  it('still counts a session whose cwd it cannot place', () => {
+    // modes.outsideScope's asymmetry, carried through: only a POSITIVE
+    // "elsewhere" excludes. An unplaceable session keeps its row, so it keeps
+    // its place in the count.
+    const forest = forestOf([node(A, { status: 'busy' })]);
+    expect(runningCountOf(forest, ['/code/app'])).toBe(1);
+  });
 });
 
-describe('buildViewModel: the "Running elsewhere" appendix row', () => {
+describe('buildViewModel: the "Still running" appendix row', () => {
   const elsewhere = {
     type: 'group' as const,
-    key: ELSEWHERE_GROUP_KEY,
+    key: HIDDEN_RUNNING_GROUP_KEY,
     cwd: '',
-    label: 'Running elsewhere',
+    label: 'Still running',
     rootIds: [B],
   };
 
@@ -1307,12 +1330,12 @@ describe('buildViewModel: the "Running elsewhere" appendix row', () => {
     const rows = buildViewModel(
       input(forestOf([node(A), node(B, { status: 'busy' })]), {
         loose: [A],
-        elsewhere,
+        hiddenRunning: elsewhere,
       }),
     );
     const last = rows[rows.length - 2];
     expect(last?.kind).toBe('folder');
-    expect(last?.label).toBe('Running elsewhere');
+    expect(last?.label).toBe('Still running');
     // Its own token, NOT ';group;': the folder verbs act on a directory this
     // row does not have.
     expect(last?.context.viewItem).toContain(';elsewhere;');
@@ -1324,12 +1347,12 @@ describe('buildViewModel: the "Running elsewhere" appendix row', () => {
     const rows = buildViewModel(
       input(
         forestOf([node(B, { status: 'busy' })]),
-        { elsewhere },
+        { hiddenRunning: elsewhere },
         { collapsed: new Set([folderRowKey(elsewhere.key)]) },
       ),
     );
     expect(rows).toHaveLength(1);
-    expect(rows[0]?.label).toBe('Running elsewhere');
+    expect(rows[0]?.label).toBe('Still running');
     expect(rows[0]?.expanded).toBe(false);
   });
 

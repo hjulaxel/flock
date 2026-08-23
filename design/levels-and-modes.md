@@ -22,6 +22,52 @@ Two principles, adopted as invariants:
 2. **No running process without a visible row, and navigation never mutates
    lifecycle.** Invisible states rot; visible states self-regulate.
 
+   *Amended after the first build shipped* — see "The strict fence" below. The
+   invariant is scoped to the window that OWNS the work: no running process
+   without a row **in the window whose folder it is in**. A window is not
+   required to report other folders' processes, because the folder-mode rules
+   below make it impossible for another folder to have any while no window has
+   it open. Reachability, not reporting, is what keeps the invariant.
+
+### The strict fence (supersedes the machine-wide appendix)
+
+Folder mode shows **only the folder you opened**. An out-of-scope session gets
+no row at all — running or not, no "Running elsewhere" appendix. To work on
+another project you open its folder in its own window.
+
+The reasoning, in order:
+
+1. A row you cannot act on is not visibility. Folder mode has no verb that
+   reaches another folder, so a foreign row could only ever be a refusal.
+2. So the state must be made **unreachable rather than reported**. Three
+   things do that together:
+   - the **launch fence** — `extension.ts`'s `launchSession` dep refuses any
+     `cwd` outside the window's folders. Every create and resume path funnels
+     through it, so this is a property of the extension, not of however many
+     verbs remembered to ask;
+   - **window close ends the folder's sessions** (see the reload grace);
+   - the **activation reconcile** kills any `-L lineage` session no live window
+     covers, which is the only backstop a force-quit leaves.
+3. The appendix group survives, renamed **"Still running"**, for what it was
+   always actually for: work **inside** this window's scope that the user's own
+   filter (hidden folder, closed project, `onlyProjectSessions`) would hide.
+   That is a view *preference* and may not hide a live process. The scope fence
+   is a *boundary* and may. Every member of the group has working verbs.
+4. The running **badge is window-scoped** for the same reason — a count with no
+   rows behind it is the same defect pointing the other way.
+
+Two leaks this closed, both found by running the first build:
+
+- `routeForeign` was wired to the **resume** path only, so the whole
+  new-session family (project, directory, branch, worktree, subproject) could
+  launch into another folder from a folder-mode window. Observed: a BASALT
+  session running inside a `lineage-sessions` window with no row for it. Fixed
+  by moving the fence to `launchSession`. `routeForeign` stays — it is how a
+  cross-folder notification takes you to the right window.
+- `lineage.soloSession` called `workspaceManager.parkOthers`, the switcher's
+  own park, and so stamped `stowedBySwitch` in a mode with no switch to redeem
+  it. Solo now passes `{ stow: mode === 'project' }`.
+
 ## The three levels
 
 | Level | Process | UI | Meaning |
@@ -62,6 +108,25 @@ re-attach is instant. Constraints that make this safe:
 - the grace pool is capped (default 8); overflow closes oldest-idle first;
 - at expiry, if idle → kill to level 2; if busy → close-after-turn.
 This is the ONLY detached-running state, and it always renders.
+
+### Reload grace — window close, and why it is not instant
+
+`lineage.session.reloadGraceSeconds` (default 45, capped at 60). A closed
+window's sessions **end**, at level 2: with the strict fence no other window
+would show them, so surviving the window would mean running where nothing can
+see them.
+
+It is a short grace and not an immediate kill because **VS Code reports a
+window RELOAD and a window CLOSE with the same terminal exit reason** and gives
+the extension no way to distinguish them. A reload comes back and reattaches
+within a second (the reattach clears the deadline); a close never does. The
+grace *is* that measurement — not a park, not a reprieve. Hence seconds rather
+than the detach grace's minutes.
+
+Pinned sessions are **not** exempt any more. The pin means "the idle sweep must
+not close me while I work", which is a promise about a window that exists; it
+cannot mean "outlive every window", because there would be no row anywhere to
+act on the survivor from.
 
 ## Mechanics
 
@@ -104,11 +169,17 @@ name is **project mode** — keep "workflow" out of identifiers.)
 - Tree scope: sessions whose cwd is under the opened folder, **grouped by
   owning project** — a directory may belong to SEVERAL projects (see mapping
   below), so one group per claiming project, plus an ungrouped remainder.
-- A row belonging to another project (or a cross-project notification —
-  waiting, permission-blocked, finished) routes to that project's WINDOW via
-  windows.ts's published focus handle (built, measured); if no window has it,
-  offer `vscode.openFolder(…, { forceNewWindow: true })`. Never switch in
-  place.
+  Everything else gets **no row** (see "The strict fence").
+- You cannot start or resume another folder's session here. The launch fence
+  refuses it; the pickers that end in a launch don't offer it
+  (`modes.launchableProjects`). No option that says no when clicked.
+- **Cross-folder notifications still cross** — waiting, permission-blocked,
+  finished. Following one routes to that project's WINDOW via windows.ts's
+  published focus handle; if no window has it, offer
+  `vscode.openFolder(…, { forceNewWindow: true })`. That is `routeForeign`, and
+  it is the one sanctioned way another folder's work reaches you: it comes to
+  you when it wants something, rather than sitting in your tree. Never switch
+  in place.
 - Flock never touches file tabs in folder mode. Session tabs are governed by
   levels only.
 

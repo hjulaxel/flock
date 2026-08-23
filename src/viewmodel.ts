@@ -33,6 +33,7 @@ import type {
   SubprojectNode,
 } from './types';
 import { branchIndexForCwd, unbranchedRoots } from './projects';
+import { outsideScope } from './modes';
 import type { GroupingResult } from './projects';
 import { hostMarker, hostTooltipLine } from './hosts';
 import type { SessionHost } from './hosts';
@@ -2404,12 +2405,20 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
   for (const folder of input.grouping.folders) pushFolder(folder);
   for (const id of input.grouping.loose) pushSession(id, 0, [], 0);
 
-  // The "Running elsewhere" appendix, LAST and collapsed by default (the host
+  // The "Still running" appendix, LAST and collapsed by default (the host
   // seeds its key into the collapsed set — see webtree.ts): running sessions
-  // the fences filtered out keep one row here so the machine-wide badge always
-  // has rows to point at. A ledger, not a workspace, hence the tail position.
-  const elsewhere = input.grouping.elsewhere;
-  if (elsewhere !== null) {
+  // in THIS window's scope that a view preference filtered out keep one row
+  // here, so the running badge always has rows to point at and Close Now stays
+  // one click away. A ledger, not a workspace, hence the tail position.
+  //
+  // Out-of-scope sessions never reach here — the scope fence drops them (see
+  // GroupingResult.hiddenRunning) — so every row in this group has verbs that
+  // work. `?? null` because a pre-rename wiring or an older fixture can hand
+  // in `undefined`, and a missing appendix must render as no appendix rather
+  // than take the whole view down.
+  const stillRunning = input.grouping.hiddenRunning ?? null;
+  if (stillRunning !== null) {
+    const elsewhere = stillRunning;
     const key = folderRowKey(elsewhere.key);
     const expanded = !collapsed.has(key);
     rows.push({
@@ -2616,7 +2625,7 @@ export function attentionCountOf(
     ...grouping.loose,
     // The "Running elsewhere" appendix renders rows too — a waiting session
     // in it shows its dot, so the count must see it or badge and dots argue.
-    ...(grouping.elsewhere?.rootIds ?? []),
+    ...(grouping.hiddenRunning?.rootIds ?? []),
   ];
   const seen = new Set<string>();
   const stack = [...roots];
@@ -2656,10 +2665,24 @@ export function attentionCountOf(
  * muted — row still counts here and is excluded by attentionCountOf: muting
  * silences the dot, not the process.)
  */
-export function runningCountOf(forest: SessionForest): number {
+export function runningCountOf(
+  forest: SessionForest,
+  /** Folder mode's scope, when there is one (TreeDeps.scopeDirs). The badge
+   *  must count what THIS window can show, and the strict scope fence drops
+   *  other folders' rows outright — so a machine-wide count would be a number
+   *  with no rows behind it, which is precisely the regression the appendix
+   *  group was once introduced to fix. Undefined (project mode, an empty
+   *  window, an older wiring) counts everything, as it always did. */
+  scopeDirs?: readonly string[],
+): number {
   let count = 0;
   for (const node of forest.nodes.values()) {
-    if (!node.ghost && !node.archived && node.status !== 'exited') count++;
+    if (node.ghost || node.archived || node.status === 'exited') continue;
+    // Same asymmetry as modes.outsideScope, and for the same reason: only a
+    // POSITIVE "that path is elsewhere" excludes. A session whose cwd this
+    // window cannot place still has a row here, so it still counts.
+    if (outsideScope(scopeDirs, node.cwd)) continue;
+    count++;
   }
   return count;
 }

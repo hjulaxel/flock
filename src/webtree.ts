@@ -45,7 +45,7 @@ import { log, logError } from './log';
 import { buildDemoProject } from './demoProject';
 import {
   BRANCH_COLOR_COUNT,
-  ELSEWHERE_GROUP_KEY,
+  HIDDEN_RUNNING_GROUP_KEY,
   computeGrouping,
   projectBranchList,
 } from './projects';
@@ -293,7 +293,7 @@ const EMPTY_GROUPING: GroupingResult = {
   loose: [],
   hiddenCount: 0,
   outOfScopeCount: 0,
-  elsewhere: null,
+  hiddenRunning: null,
 };
 
 const EMPTY_FOREST: SessionForest = {
@@ -416,7 +416,7 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
    *  was absent would flip its default to expanded for the rest of the
    *  window. */
   private readonly collapsed = new Set<string>([
-    folderRowKey(ELSEWHERE_GROUP_KEY),
+    folderRowKey(HIDDEN_RUNNING_GROUP_KEY),
   ]);
 
   private lastForest: SessionForest = EMPTY_FOREST;
@@ -705,12 +705,13 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  /** RUNNING sessions machine-wide — what the container badge shows. See
-   *  viewmodel.runningCountOf for the predicate and for why this counts
-   *  processes rather than attention (or rendered rows). */
+  /** RUNNING sessions this window can SHOW — what the container badge shows.
+   *  See viewmodel.runningCountOf for the predicate, for why this counts
+   *  processes rather than attention (or rendered rows), and for why the
+   *  folder-mode scope bounds it. */
   runningCount(): number {
     try {
-      return runningCountOf(this.forest());
+      return runningCountOf(this.forest(), this.deps.scopeDirs?.());
     } catch (err) {
       logError('webtree.runningCount', err);
       return 0;
@@ -985,7 +986,7 @@ ${branchPaletteCss()}  }
     for (const g of grouping.folders) live.add(folderRowKey(g.key));
     // Always "live": the appendix comes and goes with the filters, and its
     // collapsed seed (see the field) must survive the spells it is absent.
-    live.add(folderRowKey(ELSEWHERE_GROUP_KEY));
+    live.add(folderRowKey(HIDDEN_RUNNING_GROUP_KEY));
     for (const key of Array.from(this.collapsed)) {
       if (filtered && !key.startsWith('session:')) continue;
       if (!live.has(key)) this.collapsed.delete(key);
@@ -1046,9 +1047,9 @@ ${branchPaletteCss()}  }
     // The appendix group too: a bell click on a "Running elsewhere" session
     // must open the group its row is filed under, seeded collapse or not.
     if (
-      grouping.elsewhere !== null &&
-      grouping.elsewhere.rootIds.includes(top) &&
-      this.collapsed.delete(folderRowKey(grouping.elsewhere.key))
+      grouping.hiddenRunning !== null &&
+      grouping.hiddenRunning.rootIds.includes(top) &&
+      this.collapsed.delete(folderRowKey(grouping.hiddenRunning.key))
     ) {
       changed = true;
     }
@@ -1273,7 +1274,7 @@ ${branchPaletteCss()}  }
               set.clear();
               // Re-seed the one row whose DEFAULT is collapsed (see the field)
               // — the wipe resets to defaults, and its default is shut.
-              set.add(folderRowKey(ELSEWHERE_GROUP_KEY));
+              set.add(folderRowKey(HIDDEN_RUNNING_GROUP_KEY));
             }
             set.add(key);
           }

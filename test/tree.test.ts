@@ -367,10 +367,13 @@ describe('LineageTreeProvider.getChildren', () => {
     expect(p.getChildren(ref(D))).toEqual([]);
   });
 
-  it('a RUNNING out-of-scope session renders LAST, in the "Running elsewhere" group', () => {
-    // Folder mode's fence would drop B's row — but B is running, and a running
-    // process keeps a row in every window (the levels invariant). The dead
-    // out-of-scope session C is dropped as before.
+  it('drops an out-of-scope session ENTIRELY, running or not — no appendix row', () => {
+    // Folder mode's fence is a boundary, not a filter: B is running and still
+    // gets no row here, because this window has no verb that could act on it
+    // (the launch fence in extension.ts refuses a foreign cwd outright). Its
+    // own window shows it; if no window has /code/other open then nothing of
+    // its is running at all — window close ends a folder's sessions after the
+    // reload grace. The dead out-of-scope session C is dropped as always.
     const h = harness(
       forestOf([
         node(A, { cwd: '/code/app/src', status: 'busy' }),
@@ -384,9 +387,33 @@ describe('LineageTreeProvider.getChildren', () => {
     });
 
     const roots = p.getChildren();
+    // Only A survives, and nothing appendix-shaped was appended.
+    expect(roots.map((r) => (r as { id?: string }).id ?? null)).toEqual([A]);
+    expect(
+      roots.some((r) => (r as GroupNode).label === 'Still running'),
+    ).toBe(false);
+  });
+
+  it('still appends IN-SCOPE running work a view preference hid', () => {
+    // The appendix survives for what it was always for: a session this window
+    // owns, that the user's own filter would hide. B is inside the scope and
+    // in a hidden folder — rescued, and its verbs work.
+    const h = harness(
+      forestOf([
+        node(A, { cwd: '/code/app/src', status: 'busy' }),
+        node(B, { cwd: '/code/app/vendor', status: 'busy' }),
+      ]),
+    );
+    h.setHiddenFolders(['/code/app/vendor']);
+    const p = new LineageTreeProvider({
+      ...h.deps,
+      scopeDirs: () => ['/code/app'],
+    });
+
+    const roots = p.getChildren();
     const last = roots[roots.length - 1] as GroupNode;
     expect(last.type).toBe('group');
-    expect(last.label).toBe('Running elsewhere');
+    expect(last.label).toBe('Still running');
     expect(last.rootIds).toEqual([B]);
     // Its children are ordinary session rows, one click from Close Now.
     expect(p.getChildren(last)).toEqual([ref(B)]);
@@ -620,7 +647,7 @@ describe('LineageTreeProvider.attentionCount', () => {
   // behind it") by dropping the count to zero — but the honest fix for a
   // RUNNING session was never to drop the count, it was to give it the row:
   // hidden-folder and onlyProjectSessions drops now rescue running roots into
-  // "Running elsewhere" exactly like the scope fence and closed projects do,
+  // "Still running" exactly like the scope fence and closed projects do,
   // so the dot renders and the badge counts what the tree shows. (A waiting
   // session is by definition a running one; dead sessions still drop and
   // still count nothing — see the projects describe below.)
@@ -639,7 +666,7 @@ describe('LineageTreeProvider.attentionCount', () => {
     expect(p.attentionCount()).toBe(1);
   });
 
-  it('counts a WAITING session of a hidden project — it renders in "Running elsewhere"', () => {
+  it('counts a WAITING session of a hidden project — it renders in "Still running"', () => {
     // A waiting session is a running one, and closing its project no longer
     // drops its row (that hid a live process): it files into the collapsed
     // appendix group instead, dot and all — so the badge counts what the
@@ -673,7 +700,7 @@ describe('LineageTreeProvider.runningCount', () => {
     // The count is the levels invariant as a number: a running process costs
     // the machine the same memory whichever window's filters apply, so no
     // filter may shrink it. (Filtered RUNNING roots keep a row too — the
-    // "Running elsewhere" group — for the fence and closed-project drops.)
+    // "Still running" group — for the fence and closed-project drops.)
     const h = harness(forestOf([node(A, { cwd: '/tmp/alpha', status: 'busy' })]));
     h.setHiddenFolders(['/tmp/alpha']);
     const p = new LineageTreeProvider(h.deps);
@@ -811,14 +838,14 @@ describe('LineageTreeProvider projects', () => {
     // FLIPPED with the appendix rescue: the fixture's sessions are live
     // (status 'idle' is a running process), and no view preference may hide a
     // process that is still spending this machine's memory — so hiding
-    // /elsewhere re-files C under "Running elsewhere" instead of dropping it.
+    // /elsewhere re-files C under "Still running" instead of dropping it.
     const h = harness(forest());
     h.setHiddenFolders(['/elsewhere']);
     const p = new LineageTreeProvider(h.deps);
     expect((p.getChildren() as GroupNode[]).map((g) => g.label)).toEqual([
       'src',
       'web',
-      'Running elsewhere',
+      'Still running',
     ]);
 
     // The half the verb actually promises: once nothing runs there, a hidden
@@ -836,7 +863,7 @@ describe('LineageTreeProvider projects', () => {
     const roots = pd.getChildren();
     expect(roots).toHaveLength(1);
     expect(
-      roots.some((r) => (r as GroupNode).label === 'Running elsewhere'),
+      roots.some((r) => (r as GroupNode).label === 'Still running'),
     ).toBe(false);
   });
 
@@ -852,7 +879,7 @@ describe('LineageTreeProvider projects', () => {
     const roots = p.getChildren();
     expect(roots).toHaveLength(2); // the project + the appendix
     expect((roots[0] as ProjectGroupNode).rootIds).toEqual([A]);
-    expect((roots[1] as GroupNode).label).toBe('Running elsewhere');
+    expect((roots[1] as GroupNode).label).toBe('Still running');
 
     const dead = harness(
       forestOf([
