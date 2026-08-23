@@ -153,6 +153,39 @@ export function windowForDir(
 }
 
 /**
+ * The projects this window could actually START a session in: those with at
+ * least one directory inside `scopeDirs`.
+ *
+ * For the pickers that END IN A LAUNCH. The launch fence (extension.ts's
+ * `launchSession` dep) is what makes a foreign launch impossible; this is what
+ * keeps the user from being offered one and then refused. An option that says
+ * no when clicked is the cumbersome half of the experience, not a safeguard —
+ * and the administrative pickers (set-account, rename, delete) deliberately do
+ * NOT use this, because they act on the record, not on this machine.
+ *
+ * Two deliberate refusals to over-filter:
+ *
+ *   * No scope (project mode, an empty window) returns everything, same
+ *     passthrough as every other rule here.
+ *   * A scope that matches NOTHING also returns everything. An empty picker
+ *     tells the user less than a full one — this window's folder simply has no
+ *     project on it yet, and the ordinary flow (which will name the project,
+ *     or fall through to the fence's own message) is more use than a dead
+ *     list. Filtering is a courtesy; the fence is the rule.
+ */
+export function launchableProjects<T extends { dirs?: readonly string[] }>(
+  scopeDirs: readonly string[] | undefined,
+  projects: readonly T[],
+  dirsOf: (project: T) => readonly string[],
+): readonly T[] {
+  if (scopeDirs === undefined || scopeDirs.length === 0) return projects;
+  const inScope = projects.filter((p) =>
+    dirsOf(p).some((dir) => !outsideScope(scopeDirs, dir)),
+  );
+  return inScope.length > 0 ? inScope : projects;
+}
+
+/**
  * The folder a NEW window should open on to adopt a session, when no live
  * window covers it: the owning project's matched directory, else the session's
  * own cwd. The project's claim is preferred over the bare cwd because the new

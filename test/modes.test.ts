@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   DEFAULT_MODE,
+  launchableProjects,
   normalizeMode,
   openTargetFor,
   outsideScope,
@@ -197,5 +198,48 @@ describe('openTargetFor', () => {
   it('falls back to the cwd when nothing claims it', () => {
     expect(openTargetFor([], '/code/loose/dir')).toBe('/code/loose/dir');
     expect(openTargetFor([], undefined)).toBe('');
+  });
+});
+
+describe('launchableProjects', () => {
+  interface P {
+    id: string;
+    dirs: readonly string[];
+  }
+  const dirsOf = (p: P): readonly string[] => p.dirs;
+  const app: P = { id: 'app', dirs: ['/code/app'] };
+  const other: P = { id: 'other', dirs: ['/code/other'] };
+  // A project spanning both: one in-scope directory is enough to launch in.
+  const spanning: P = { id: 'span', dirs: ['/code/other', '/code/app/pkg'] };
+
+  it('keeps only projects with a directory inside the scope', () => {
+    expect(
+      launchableProjects(['/code/app'], [app, other, spanning], dirsOf).map(
+        (p) => p.id,
+      ),
+    ).toEqual(['app', 'span']);
+  });
+
+  it('passes everything through with no scope — project mode, empty window', () => {
+    const all = [app, other];
+    expect(launchableProjects(undefined, all, dirsOf)).toBe(all);
+    expect(launchableProjects([], all, dirsOf)).toBe(all);
+  });
+
+  it('passes everything through when the scope matches NOTHING', () => {
+    // An empty picker tells the user less than a full one: this window's
+    // folder simply has no project on it yet. Filtering is a courtesy; the
+    // launch fence is the rule, and it still refuses whatever gets picked.
+    const all = [app, other];
+    expect(launchableProjects(['/somewhere/else'], all, dirsOf)).toBe(all);
+  });
+
+  it('keeps a project whose directories it cannot place', () => {
+    // outsideScope's asymmetry again: only a POSITIVE elsewhere excludes, so a
+    // project with an empty or unknown directory list stays offerable.
+    const vague: P = { id: 'vague', dirs: [''] };
+    expect(
+      launchableProjects(['/code/app'], [other, vague], dirsOf).map((p) => p.id),
+    ).toEqual(['vague']);
   });
 });

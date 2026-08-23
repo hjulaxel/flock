@@ -16,7 +16,7 @@ import {
   flattenNestedProjects,
   parentDir,
   BRANCH_AUTOSHOW_LIMIT,
-  ELSEWHERE_GROUP_KEY,
+  HIDDEN_RUNNING_GROUP_KEY,
   isHiddenFolder,
   isWithin,
   matchProject,
@@ -722,36 +722,43 @@ describe('computeGrouping: shared claims and folder scope', () => {
   });
 });
 
-describe('computeGrouping: the "Running elsewhere" appendix', () => {
+describe('computeGrouping: the "Still running" appendix', () => {
   const cwds = cwdMap({
     A: '/shared/x',
     C: '/elsewhere/deep',
   });
 
-  it('routes a RUNNING out-of-scope root into `elsewhere`, never out of the tree', () => {
-    const result = grouping({
-      visibleRootIds: ['C'],
-      cwdOf: cwds,
-      scopeDirs: ['/code'],
-      projects: [],
-      hasRunning: () => true,
-    });
-    // Not dropped, not counted as out of scope — the row moved, the process
-    // stayed visible (the levels invariant).
-    expect(result.elsewhere?.rootIds).toEqual(['C']);
-    expect(result.elsewhere?.key).toBe(ELSEWHERE_GROUP_KEY);
-    expect(result.outOfScopeCount).toBe(0);
+  it('drops an out-of-scope root whether it runs or not — the fence is a boundary', () => {
+    // THE ONE DROP WITH NO RESCUE. Every filter below is a view preference and
+    // may not hide a live process; the scope fence is a boundary, and folder
+    // mode has no verb that can reach across it (the launch fence in
+    // extension.ts refuses, the pickers never offer). A row here would be a
+    // row you cannot act on, so there is no row.
+    for (const running of [true, false]) {
+      const result = grouping({
+        visibleRootIds: ['C'],
+        cwdOf: cwds,
+        scopeDirs: ['/code'],
+        projects: [],
+        hasRunning: () => running,
+      });
+      expect(result.hiddenRunning).toBeNull();
+      expect(result.outOfScopeCount).toBe(1);
+    }
   });
 
-  it('a non-running out-of-scope root is dropped and counted, as before', () => {
+  it('keeps the appendix for IN-SCOPE work only', () => {
+    // A is under the scope AND hidden by its closed claimants: rescued. C is
+    // out of scope: gone. Both running, and the difference is the fence.
     const result = grouping({
-      visibleRootIds: ['C'],
+      visibleRootIds: ['A', 'C'],
       cwdOf: cwds,
-      scopeDirs: ['/code'],
-      projects: [],
-      hasRunning: () => false,
+      scopeDirs: ['/shared'],
+      projects: [project('p1', 'Alpha', '/shared', { hidden: true })],
+      hasRunning: () => true,
     });
-    expect(result.elsewhere).toBeNull();
+    expect(result.hiddenRunning?.rootIds).toEqual(['A']);
+    expect(result.hiddenRunning?.key).toBe(HIDDEN_RUNNING_GROUP_KEY);
     expect(result.outOfScopeCount).toBe(1);
   });
 
@@ -767,7 +774,7 @@ describe('computeGrouping: the "Running elsewhere" appendix', () => {
     });
     // Closing the projects hides their WORK; it must not hide a process that
     // is still spending this machine's memory.
-    expect(result.elsewhere?.rootIds).toEqual(['A']);
+    expect(result.hiddenRunning?.rootIds).toEqual(['A']);
     expect(result.hiddenCount).toBe(0);
   });
 
@@ -781,11 +788,11 @@ describe('computeGrouping: the "Running elsewhere" appendix', () => {
       hiddenFolders: ['/elsewhere'],
     };
     const running = grouping({ ...base, hasRunning: () => true });
-    expect(running.elsewhere?.rootIds).toEqual(['C']);
+    expect(running.hiddenRunning?.rootIds).toEqual(['C']);
     expect(running.hiddenCount).toBe(0);
 
     const dead = grouping({ ...base, hasRunning: () => false });
-    expect(dead.elsewhere).toBeNull();
+    expect(dead.hiddenRunning).toBeNull();
     expect(dead.hiddenCount).toBe(1);
   });
 
@@ -799,11 +806,11 @@ describe('computeGrouping: the "Running elsewhere" appendix', () => {
       onlyProjectSessions: true,
     };
     const running = grouping({ ...base, hasRunning: () => true });
-    expect(running.elsewhere?.rootIds).toEqual(['C']);
+    expect(running.hiddenRunning?.rootIds).toEqual(['C']);
     expect(running.hiddenCount).toBe(0);
 
     const dead = grouping({ ...base, hasRunning: () => false });
-    expect(dead.elsewhere).toBeNull();
+    expect(dead.hiddenRunning).toBeNull();
     expect(dead.hiddenCount).toBe(1);
   });
 
@@ -814,7 +821,7 @@ describe('computeGrouping: the "Running elsewhere" appendix', () => {
       scopeDirs: ['/code'],
       projects: [],
     });
-    expect(scoped.elsewhere).toBeNull();
+    expect(scoped.hiddenRunning).toBeNull();
     expect(scoped.outOfScopeCount).toBe(1);
   });
 
@@ -828,7 +835,7 @@ describe('computeGrouping: the "Running elsewhere" appendix', () => {
         throw new Error('boom');
       },
     });
-    expect(result.elsewhere).toBeNull();
+    expect(result.hiddenRunning).toBeNull();
     expect(result.outOfScopeCount).toBe(1);
   });
 });

@@ -1125,6 +1125,22 @@ export const CONFIG_KEYS = {
    *  capped (idleClose.GRACE_POOL_CAP = 8); overflow closes oldest-idle
    *  first. */
   sessionDetachGraceMinutes: 'session.detachGraceMinutes',
+  /** How long a session may keep running after the window that owned it went
+   *  away, in SECONDS. Not a park and not a reprieve — a measurement. VS Code
+   *  reports a window RELOAD and a window CLOSE with the same terminal exit
+   *  reason and offers no way to distinguish them, so the only way to know
+   *  which just happened is to wait: a reload comes back and reattaches
+   *  (clearing the deadline), a close never does. At the deadline the session
+   *  settles to level 2, because with the strict scope fence no other window
+   *  would ever show it — a closed folder's sessions end.
+   *
+   *  Seconds, not minutes, and deliberately far below
+   *  `session.detachGraceMinutes`: this window is measuring a reattach that
+   *  takes about a second, not offering the user time to come back. Raise it
+   *  only if reloads on this machine are slow enough to lose sessions. 0 kills
+   *  on window close outright, which also makes every RELOAD lose its
+   *  sessions. */
+  sessionReloadGraceSeconds: 'session.reloadGraceSeconds',
   /** Who OPENS a conversation: Flock's own tmux-backed terminal, or another
    *  extension's commands (see src/hosts.ts's delegate table). Consulted for a
    *  NEW conversation and for a plain RESUME of an unpinned one — a fork has

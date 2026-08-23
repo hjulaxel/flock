@@ -756,7 +756,24 @@ export class WorkspaceManager {
    * screen when its project does, or project A's chats sit on project B's
    * screen.
    */
-  async parkOthers(keepSessionId: string): Promise<number | null> {
+  /**
+   * `opts.stow` — whether the records this puts away carry `stowedBySwitch`.
+   *
+   * TRUE in project mode, where the marker is the truth: a switch put the
+   * session away and the switch BACK is what brings it home, so the marker is
+   * how restoreSession tells a switch-stowed row from a user-closed one.
+   *
+   * FALSE in folder mode, which has no switch to come back. Writing the marker
+   * there was a real leak, not a cosmetic one: solo mode reached straight into
+   * the switcher's machinery, so a folder-mode window minted records saying
+   * "a switch will bring this home" that nothing would ever honour. The grace
+   * tier still applies — a graced session in folder mode is in scope, on
+   * screen, counting down — it just isn't labelled as switch bookkeeping.
+   */
+  async parkOthers(
+    keepSessionId: string,
+    opts?: { stow?: boolean },
+  ): Promise<number | null> {
     if (this.safeSolo() !== true) return null;
     if (this.switching) return null;
     try {
@@ -788,7 +805,7 @@ export class WorkspaceManager {
     }
     if (victims.length === 0) return 0;
     const writes: Array<Promise<void>> = [];
-    const parked = this.parkSweep(victims, writes);
+    const parked = this.parkSweep(victims, writes, opts?.stow !== false);
     await Promise.all(writes);
     log(
       `workspaces: solo — put away ${String(parked.detached + parked.killed)} ` +
@@ -1395,6 +1412,10 @@ export class WorkspaceManager {
   private parkSweep(
     ids: readonly string[],
     writes: Array<Promise<void>>,
+    /** Whether to stamp `stowedBySwitch` on what this puts away. Defaults to
+     *  true — the switch's own callers want it; see parkOthers for the folder-
+     *  mode caller that must not. */
+    stow = true,
   ): { detached: number; killed: number; chats: number; failed: string[] } {
     const out = { detached: 0, killed: 0, chats: 0, failed: [] as string[] };
     // Two bindings can share one chain tip (a re-key leaves the terminal
@@ -1453,7 +1474,7 @@ export class WorkspaceManager {
           this.safeWrite(tip, {
             graceUntil: new Date(now + graceMs).toISOString(),
             tmux: tmuxName,
-            stowedBySwitch: true,
+            stowedBySwitch: stow,
           }),
         );
         out.detached++;
@@ -1473,8 +1494,9 @@ export class WorkspaceManager {
           // The marker that distinguishes THIS close from every user close:
           // the switch put the session away, so the switch back may bring it
           // home. restoreSession's level-2 tier resumes ONLY records carrying
-          // it; every user verb clears it.
-          stowedBySwitch: true,
+          // it; every user verb clears it. False when there is no switch to
+          // come back — see parkOthers's `stow`.
+          stowedBySwitch: stow,
         }),
       );
       // REPAIR AT REST: this write minted an archived row, and every 1→2

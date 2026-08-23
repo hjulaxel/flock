@@ -108,6 +108,7 @@ import {
 import {
   type LineageMode,
   normalizeMode,
+  outsideScope,
   projectSwitchingOn,
   windowForDir,
 } from './modes';
@@ -354,6 +355,15 @@ export async function activate(
   const detachGraceMinutes = (): number => {
     const v = cfg().get<number>(CONFIG_KEYS.sessionDetachGraceMinutes);
     return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 10;
+  };
+  /** The reload-detection window, in seconds — see
+   *  CONFIG_KEYS.sessionReloadGraceSeconds for why window close measures
+   *  rather than kills. Clamped to a minute: anything longer stops being a
+   *  measurement and becomes an unwatched process. */
+  const reloadGraceSeconds = (): number => {
+    const v = cfg().get<number>(CONFIG_KEYS.sessionReloadGraceSeconds);
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) return 45;
+    return Math.min(v, 60);
   };
   /** `lineage.mode`, resolved (src/modes.ts). Re-read on every call like every
    *  other setting here, so flipping it takes effect without a reload. */
@@ -1586,29 +1596,40 @@ export async function activate(
           extraProjectsDirs: profileProjectsDirs(),
         });
       }
-      // WINDOW CLOSE (reason 'shutdown'): a wrapped session survives the
-      // window on purpose — that is the revival feature — but "survives" must
-      // never mean "runs with no deadline and no reaper until some window
-      // happens to activate". Stamp the detach grace here, so the graced
-      // sweep of any surviving window (and the next activation's reconcile)
-      // BOUNDS it exactly like a switch-detached session; if this window
-      // dies before the async write flushes, the reconcile's unclaimed-kill
-      // is the backstop. PINNED sessions are deliberately exempt: the pin is
-      // the user saying "this long autonomous run outlives my windows" — a
-      // deadline would break exactly that promise. Their visibility across
-      // windows is the next slice's problem, not solved by killing them here.
+      // WINDOW CLOSE (reason 'shutdown'): the window that owned this session
+      // is going away, and with the strict scope fence no OTHER window will
+      // ever show it — folder mode drops out-of-scope rows outright now. So
+      // "survives the window" would mean "runs where nothing can see it",
+      // which is the state this whole design exists to make unreachable. A
+      // closed window's sessions END, at level 2: the transcript is the
+      // session, and `--resume` brings the conversation back whole.
+      //
+      // Why a SHORT grace and not an immediate kill: VS Code reports a window
+      // RELOAD with the same exit reason as a window CLOSE (see
+      // terminals.ts's ExitReason) and gives the extension no way to tell
+      // them apart. A reload comes back and reattaches within a second or
+      // two; a close never comes back. The grace IS that measurement — long
+      // enough that a reload reattaches and clears it (the reattach path
+      // wipes graceUntil), short enough that a real close settles to level 2
+      // in under a minute instead of holding a process for the full detach
+      // grace's ten. It is not a park and not a reprieve; it is how long it
+      // takes to find out which event just happened.
+      //
+      // Not exempted for PINNED sessions any more. The pin means "the idle
+      // sweep must not close me while I work", which is a promise about a
+      // window that exists; it cannot mean "outlive every window", because
+      // there would be no row anywhere to act on the survivor from.
+      //
+      // If this window dies before the async write flushes, the next
+      // activation's reconcile kills the unclaimed wrap — that is also the
+      // only backstop a force-quit (deactivate never runs) leaves us.
       if (reason === 'shutdown' && tmuxName !== undefined) {
-        const pinned = chainAliases(sessionId).some(
-          (id) => store.get(id)?.pinned === true,
-        );
-        if (!pinned) {
-          void store.upsert(chainIndex.tipOf(sessionId), {
-            graceUntil: new Date(
-              Date.now() + detachGraceMinutes() * 60_000,
-            ).toISOString(),
-            tmux: tmuxName,
-          });
-        }
+        void store.upsert(chainIndex.tipOf(sessionId), {
+          graceUntil: new Date(
+            Date.now() + reloadGraceSeconds() * 1000,
+          ).toISOString(),
+          tmux: tmuxName,
+        });
       }
       pokeNow();
     }),
@@ -4373,6 +4394,50 @@ export async function activate(
     },
 
     launchSession: async (opts) => {
+      // ---------------------------------------------------- the scope fence
+      //
+      // FOLDER MODE's boundary, and the ONE place it is enforced. Every verb
+      // that can put a claude process on this machine — new session, resume,
+      // fork, worktree, branch, chat, the palette, a keybinding, a URI
+      // handler, whatever gets written next — funnels through this dep. Fence
+      // it here and "you cannot open another project in this window" is a
+      // property of the extension; fence it in the verbs and it is a property
+      // of however many verbs remembered to ask.
+      //
+      // That distinction is not theoretical. The fence used to live in
+      // routeForeign, called from the resume path only, so the entire
+      // new-session family (project, directory, branch, worktree, subproject)
+      // could launch into another folder from a folder-mode window — which is
+      // exactly how a BASALT session came to be running inside a
+      // lineage-sessions window while the tree, correctly scoped, had no row
+      // for it.
+      //
+      // routeForeign still runs AHEAD of this, and still matters: it offers
+      // the right window and is how a cross-folder notification takes you
+      // there. This is the backstop under it, for the paths that never asked.
+      //
+      // `scopeFolders()` is undefined in project mode and in an empty window,
+      // so outsideScope is false there and this costs nothing: a project-mode
+      // switch restoring sessions across its project's directories is
+      // untouched.
+      if (outsideScope(scopeFolders(), opts.cwd)) {
+        log(
+          'launch: REFUSED —',
+          opts.cwd,
+          'is outside this folder-mode window;',
+          shortId(opts.sessionId),
+          'belongs to its own window',
+        );
+        void vscode.window.showInformationMessage(
+          `Flock: ${opts.cwd} is outside this window's folder. Open that ` +
+            'folder in its own window to work there — this window only ever ' +
+            'runs the folder you opened.',
+        );
+        // `null`, the same answer a failed launch gives: every caller already
+        // treats it as "no binding, stop here" and logs its own line. A refusal
+        // needs no new contract.
+        return null;
+      }
       // Detach tier: a record still naming a tmux session is a conversation
       // that may be RUNNING, hidden (parked by detach; the user clicked its
       // row instead of switching workspaces). Routing the launch under that
@@ -4622,10 +4687,21 @@ export async function activate(
      * workspace switcher's own machinery (same tiers, same records — see
      * workspaces.parkOthers), the pin half is local. Consulted by every flow
      * that opens or fronts a session tab; a no-op while the setting is off.
+     *
+     * `stow` follows the MODE, and this is the second half of the same lesson
+     * the launch fence above teaches. Solo mode borrowed the switcher's park
+     * wholesale, marker included, so a folder-mode window — which has no
+     * switcher at all — was writing `stowedBySwitch` onto every session solo
+     * put away. Harmless-looking bookkeeping that no folder-mode path would
+     * ever honour, and a live example of the switch machinery reaching into a
+     * mode that retired it. In folder mode solo still closes and still graces;
+     * it just stops pretending a switch did it.
      */
     soloEnforce: async (keepSessionId) => {
       if (!boolCfg(CONFIG_KEYS.soloSession, false)) return;
-      await workspaceManager.parkOthers(keepSessionId);
+      await workspaceManager.parkOthers(keepSessionId, {
+        stow: lineageMode() === 'project',
+      });
       await pinSoloTab(keepSessionId);
     },
     focusSession: (sessionId) => {

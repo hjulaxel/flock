@@ -86,7 +86,7 @@ import {
   subprojectLabels,
   validateProjectName,
 } from './projects';
-import { openTargetFor, outsideScope } from './modes';
+import { launchableProjects, openTargetFor, outsideScope } from './modes';
 import {
   canHostSession,
   envForProfile,
@@ -1274,11 +1274,17 @@ async function pickDirectory(
 async function pickProject(
   deps: CommandDeps,
   placeHolder: string,
-  opts?: { includeHidden?: boolean },
+  opts?: { includeHidden?: boolean; launchable?: boolean },
 ): Promise<string | undefined> {
-  const projects = deps
+  const visible = deps
     .allProjects()
     .filter((p) => (opts?.includeHidden ? true : p.hidden !== true));
+  // `launchable` — see modes.launchableProjects for the rule and for why the
+  // administrative pickers deliberately skip it.
+  const projects =
+    opts?.launchable === true
+      ? launchableProjects(deps.scopeDirs?.(), visible, projectDirs)
+      : visible;
   if (projects.length === 0) {
     void vscode.window.showInformationMessage(
       'Flock: no projects yet — create one with "Flock: New Project…".',
@@ -2362,7 +2368,7 @@ async function resolveWorktree(
 ): Promise<{ project: ProjectRecord; branch: BranchInfo } | undefined> {
   const parsed = branchArgOf(arg);
   const projectId =
-    parsed?.projectId ?? projectIdFromArg(arg) ?? (await pickProject(deps, placeHolder));
+    parsed?.projectId ?? projectIdFromArg(arg) ?? (await pickProject(deps, placeHolder, { launchable: true }));
   if (!projectId) return undefined;
   const project = deps.getProject(projectId);
   if (!project) return undefined;
@@ -6971,7 +6977,9 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     async (arg?: unknown) => {
       const id =
         projectIdFromArg(arg) ??
-        (await pickProject(deps, 'Start a session in which project?'));
+        (await pickProject(deps, 'Start a session in which project?', {
+          launchable: true,
+        }));
       if (!id) return;
       // `lineage.git.newSessionInWorktree` decides what this button MEANS, and
       // the row already said which of the two it is about to do — the `+`'s
@@ -7221,7 +7229,9 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     const id =
       branchArgOf(arg)?.projectId ??
       projectIdFromArg(arg) ??
-      (await pickProject(deps, 'Add a worktree to which project?'));
+      (await pickProject(deps, 'Add a worktree to which project?', {
+        launchable: true,
+      }));
     if (!id) return;
     await newWorktreeFlow(deps, id);
   });
@@ -7344,7 +7354,8 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   // `chatHistory` rather than behind the same button.
   register(COMMANDS.chatInProject, 'chat in project', async (arg?: unknown) => {
     const id =
-      projectIdFromArg(arg) ?? (await pickProject(deps, 'Chat in which project?'));
+      projectIdFromArg(arg) ??
+      (await pickProject(deps, 'Chat in which project?', { launchable: true }));
     if (!id) return;
     await chatFlow(deps, id);
   });
@@ -8421,7 +8432,9 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     async (arg?: unknown) => {
       const id =
         projectIdFromArg(arg) ??
-        (await pickProject(deps, 'Start a session in which project?'));
+        (await pickProject(deps, 'Start a session in which project?', {
+          launchable: true,
+        }));
       if (!id) return;
       const project = deps.getProject(id);
       if (!project) return;

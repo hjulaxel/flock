@@ -40,7 +40,7 @@ import type {
 import { log, logError } from './log';
 import { projectUri, sessionUri } from './decorations';
 import {
-  ELSEWHERE_GROUP_KEY,
+  HIDDEN_RUNNING_GROUP_KEY,
   branchIndexForCwd,
   computeGrouping,
   projectBranchList,
@@ -59,7 +59,7 @@ const EMPTY_GROUPING: GroupingResult = {
   loose: [],
   hiddenCount: 0,
   outOfScopeCount: 0,
-  elsewhere: null,
+  hiddenRunning: null,
 };
 
 const EMPTY_FOREST: SessionForest = {
@@ -549,7 +549,7 @@ export class LineageTreeProvider
         ...grouping.loose,
         // The "Running elsewhere" appendix renders rows too — a waiting
         // session there shows its dot, so the count must see it.
-        ...(grouping.elsewhere?.rootIds ?? []),
+        ...(grouping.hiddenRunning?.rootIds ?? []),
       ];
       const seen = new Set<string>();
       const stack = [...roots];
@@ -575,14 +575,18 @@ export class LineageTreeProvider
     }
   }
 
-  /** RUNNING sessions machine-wide — level 1 plus the grace countdown — for
-   *  the container badge. Straight through viewmodel.runningCountOf so this
-   *  surface and the inline one can never disagree on the number; see its doc
-   *  for why the count is machine-wide while attentionCount above stays a
-   *  rendered-rows traversal. */
+  /** RUNNING sessions this window can SHOW — level 1 plus the grace countdown
+   *  — for the container badge. Straight through viewmodel.runningCountOf so
+   *  this surface and the inline one can never disagree on the number.
+   *
+   *  Scoped, not machine-wide: folder mode's fence drops other folders' rows
+   *  outright, and a badge counting rows that do not exist is the same defect
+   *  as a row for a process that does not — you cannot click through it to
+   *  anything. In project mode and empty windows scopeDirs is undefined and
+   *  the count is machine-wide exactly as before. */
   runningCount(): number {
     try {
-      return runningCountOf(this.forest());
+      return runningCountOf(this.forest(), this.deps.scopeDirs?.());
     } catch (err) {
       logError('tree.runningCount', err);
       return 0;
@@ -596,20 +600,20 @@ export class LineageTreeProvider
   /** The one row whose expansion DEFAULT is inverted (see groupItem): the
    *  "Running elsewhere" appendix starts collapsed, so its state needs its own
    *  bit — the collapsedKeys shadow only remembers collapses. */
-  private elsewhereExpanded = false;
+  private hiddenRunningExpanded = false;
 
   /** Wired by registerTree() from TreeView.onDidExpandElement. */
   noteExpanded(el: TreeNode): void {
-    if (el.type === 'group' && el.key === ELSEWHERE_GROUP_KEY) {
-      this.elsewhereExpanded = true;
+    if (el.type === 'group' && el.key === HIDDEN_RUNNING_GROUP_KEY) {
+      this.hiddenRunningExpanded = true;
     }
     this.collapsedKeys.delete(nodeKey(el));
   }
 
   /** Wired by registerTree() from TreeView.onDidCollapseElement. */
   noteCollapsed(el: TreeNode): void {
-    if (el.type === 'group' && el.key === ELSEWHERE_GROUP_KEY) {
-      this.elsewhereExpanded = false;
+    if (el.type === 'group' && el.key === HIDDEN_RUNNING_GROUP_KEY) {
+      this.hiddenRunningExpanded = false;
     }
     if (this.collapsedKeys.size > CACHE_SOFT_LIMIT) this.collapsedKeys.clear();
     this.collapsedKeys.add(nodeKey(el));
@@ -638,7 +642,7 @@ export class LineageTreeProvider
           // The "Running elsewhere" appendix, LAST: running sessions the
           // fences filtered out keep one row here (see GroupingResult), so
           // the machine-wide badge always has rows to point at.
-          ...(grouping.elsewhere !== null ? [grouping.elsewhere] : []),
+          ...(grouping.hiddenRunning !== null ? [grouping.hiddenRunning] : []),
         ];
       }
 
@@ -1081,10 +1085,10 @@ export class LineageTreeProvider
     // invariant holds, collapsed so it never competes with the work. The
     // shadow-expansion cache only records collapses (the expanded default
     // needs no memory), so the inverted default keeps its own expanded set.
-    if (el.key === ELSEWHERE_GROUP_KEY) {
+    if (el.key === HIDDEN_RUNNING_GROUP_KEY) {
       const item = new vscode.TreeItem(
         el.label,
-        this.elsewhereExpanded
+        this.hiddenRunningExpanded
           ? vscode.TreeItemCollapsibleState.Expanded
           : vscode.TreeItemCollapsibleState.Collapsed,
       );
@@ -1323,9 +1327,9 @@ export class LineageTreeProvider
       );
       if (folder) return folder;
       // A filtered-out running session's one row hangs under the appendix.
-      return grouping.elsewhere !== null &&
-        grouping.elsewhere.rootIds.indexOf(el.id) >= 0
-        ? grouping.elsewhere
+      return grouping.hiddenRunning !== null &&
+        grouping.hiddenRunning.rootIds.indexOf(el.id) >= 0
+        ? grouping.hiddenRunning
         : undefined;
     } catch (err) {
       logError('tree.getParent', err);
@@ -1342,7 +1346,7 @@ export class LineageTreeProvider
       // The elsewhere appendix set its (static) tooltip on the item itself —
       // rebuilding the folder hover here would replace it with a path-and-count
       // for a row that has no path.
-      if (el.type === 'group' && el.key === ELSEWHERE_GROUP_KEY) return item;
+      if (el.type === 'group' && el.key === HIDDEN_RUNNING_GROUP_KEY) return item;
       if (el.type === 'group') this.appendGroupTooltip(md, el);
       else if (el.type === 'project') this.appendProjectTooltip(md, el);
       else if (el.type === 'branch') this.appendBranchTooltip(md, el);
