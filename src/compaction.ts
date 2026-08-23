@@ -33,12 +33,16 @@
 //         minted — instant and exact), the Stop hook (the turn ended), or the
 //         roster transition out of `busy` that the poller sees anyway.
 //
-// WHEN THE PURPLE DOT GOES AWAY. "Compacted" is a resting state, not a
-// notification: it says the conversation is freshly compacted and nothing is
-// on top of it. So it clears the moment something IS on top of it — the next
-// prompt (UserPromptSubmit), the next `busy` the roster reports — and when the
-// session ends. It is deliberately NOT cleared by looking at the row: unlike
-// the red dot it is not asking for anything, so "seen" is not a state it has.
+// WHEN THE PURPLE DOT GOES AWAY. "Compacted" is a note, not an alarm: it says
+// the conversation is freshly compacted and nothing has been asked of it
+// since. So it clears when something IS asked of it — the next prompt
+// (UserPromptSubmit), the next `busy` the roster reports — when the session
+// ends, and when you OPEN the session, because opening it is reading the note.
+//
+// The ring is not cleared by opening. A compaction in flight is a fact about
+// the process rather than a message for the user, and watching it happen does
+// not make it stop happening — which is why `clearSettled` exists as something
+// separate from `clear`.
 //
 // EVERY PHASE IS BOUNDED. A compaction that never reports finishing would
 // otherwise leave a ring on the row forever — the crash, the hook that never
@@ -142,8 +146,9 @@ export class CompactionTracker {
   }
 
   /**
-   * Something is on top of the compaction now: a new prompt, or the roster
-   * reporting work again. Clears the RESTING DOT ONLY.
+   * The note has been read, or something is on top of it now: the session was
+   * opened, a new prompt arrived, or the roster is reporting work again.
+   * Clears the RESTING DOT ONLY.
    *
    * Leaving `compacting` alone is not a nicety, it is the whole reason this is
    * a separate method from `clear`. A compaction makes its session busy, so

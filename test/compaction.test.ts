@@ -90,6 +90,28 @@ describe('compaction: what closes a phase', () => {
     expect(phase(settled, [A], NOW + 2_000)).toBeUndefined();
   });
 
+  it('takes the dot down when the session is opened — reading the note', () => {
+    // Opening the session is the signal extension.ts feeds in from
+    // registry.onDidChangeActive, the same "the user is looking" event that
+    // clears the red unseen dot. The purple one is a note saying "freshly
+    // compacted, nothing asked of it since", and opening it reads the note.
+    const t = new CompactionTracker();
+    t.noteStart(A, NOW);
+    t.noteFinish([A], NOW + 1_000);
+    expect(phase(t, [A], NOW + 2_000)).toBe('compacted');
+    t.clearSettled([A]); // ← what onDidChangeActive calls
+    expect(phase(t, [A], NOW + 3_000)).toBeUndefined();
+  });
+
+  it('does NOT take the ring down when the session is opened', () => {
+    // Watching a compaction happen does not make it stop happening. This is
+    // the whole reason clearSettled is separate from clear.
+    const t = new CompactionTracker();
+    t.noteStart(A, NOW);
+    t.clearSettled([A]);
+    expect(phase(t, [A], NOW + 1_000)).toBe('compacting');
+  });
+
   it('clear takes down both — a session that ended is not compacting', () => {
     const t = new CompactionTracker();
     t.noteStart(A, NOW);

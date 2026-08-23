@@ -2328,6 +2328,13 @@ export async function activate(
       const rowId = chainIndex.tipOf(sessionId);
       const node = forest.nodes.get(rowId) ?? forest.nodes.get(sessionId);
       if (node?.unseen === true) void markSeen(node.id);
+      // The purple dot goes out for the same reason and on the same signal.
+      // A compaction that has SETTLED is a note saying "this conversation was
+      // just compacted and nothing has been asked of it since" — and opening
+      // it is reading the note. The ring is untouched: a compaction still in
+      // flight is a fact about the process, not a message for the user, and
+      // watching it happen does not make it stop happening.
+      compaction.clearSettled(chainAliases(sessionId));
     }),
   );
 
