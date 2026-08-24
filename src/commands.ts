@@ -3131,7 +3131,7 @@ export function activeForkTarget(deps: CommandDeps): ForkTargetResolution {
 async function forkFlow(
   deps: AccountCommandDeps,
   parentIdArg: string,
-  opts?: { prompt?: string; title?: string },
+  opts?: { prompt?: string; title?: string; quiet?: boolean },
 ): Promise<string | undefined> {
   // Fork the conversation's CURRENT generation, whatever id the caller held. A
   // row can be superseded between render and click (a resume that re-minted
@@ -3235,6 +3235,30 @@ async function forkFlow(
   });
   if (!binding) {
     log('fork: launch failed for', shortId(childId));
+    // SAY SO. This used to return silently, on the reasoning that whatever
+    // refused the launch had already spoken for itself — and one refusal does
+    // (the folder-mode scope fence names the directory it turned down). But
+    // every other way `launchSession` answers null is mute: a terminal that
+    // could not be created, a tmux wrap that failed, an account whose config
+    // directory is gone. The user clicked Fork, nothing appeared, and nothing
+    // anywhere said why — a failure indistinguishable from a verb that is
+    // broken, which is precisely how it gets reported.
+    //
+    // The wording deliberately does not guess at the cause: it states the
+    // outcome (no branch) and names where the reason is written. When the
+    // fence DID refuse, this is a second notification saying the thing the
+    // fence's own message leaves out — that the fork is the casualty.
+    //
+    // NOT on the agent path (`quiet`). There the reply file is the channel and
+    // failures travel as values — forkForAgent already returns "only 1 of 3
+    // forks launched", which is both more informative than this and aimed at
+    // the caller who can act on it. A dialog there would be a duplicate fired
+    // once per failed fork at a user who did not ask for any of them.
+    if (opts?.quiet !== true) {
+      void vscode.window.showWarningMessage(
+        'Flock: the fork did not open. See the reason in Output → Flock.',
+      );
+    }
     return undefined;
   }
   await pinLaunch(deps, childId, routed);
@@ -3311,6 +3335,9 @@ export async function forkForAgent(
     taken.push(title);
     const childId = await forkFlow(deps, nodeId, {
       title,
+      // The reply file is this caller's channel; see the `quiet` note at
+      // forkFlow's launch-failure branch.
+      quiet: true,
       ...(opts.prompt !== undefined ? { prompt: opts.prompt } : {}),
     });
     if (childId === undefined) {
