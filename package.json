@@ -558,6 +558,23 @@
         "icon": "$(arrow-swap)"
       },
       {
+        "command": "lineage.handoffSession",
+        "title": "Continue on Another CLI...",
+        "category": "Flock",
+        "icon": "$(arrow-right)"
+      },
+      {
+        "command": "lineage.queueDispatch",
+        "title": "Queue Session for Dispatch...",
+        "category": "Flock",
+        "icon": "$(watch)"
+      },
+      {
+        "command": "lineage.dispatchQueue",
+        "title": "Dispatch Queue...",
+        "category": "Flock"
+      },
+      {
         "command": "lineage.hideBranch",
         "title": "Hide Branch",
         "category": "Flock"
@@ -856,6 +873,11 @@
           "command": "lineage.switchSessionAccount",
           "when": "view == lineageSessions && viewItem =~ /;session;/ && viewItem =~ /;claude;/ && lineage.canSwitchAccount",
           "group": "1_actions@4"
+        },
+        {
+          "command": "lineage.handoffSession",
+          "when": "view == lineageSessions && viewItem =~ /;session;/ && lineage.canHandOff",
+          "group": "1_actions@5"
         },
         {
           "command": "lineage.closeSession",
@@ -1318,6 +1340,11 @@
           "command": "lineage.switchSessionAccount",
           "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;session;/ && viewItem =~ /;claude;/ && lineage.canSwitchAccount",
           "group": "1_actions@4"
+        },
+        {
+          "command": "lineage.handoffSession",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;session;/ && lineage.canHandOff",
+          "group": "1_actions@5"
         },
         {
           "command": "lineage.closeSession",

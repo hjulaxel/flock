@@ -42,9 +42,14 @@ import {
   isProviderId,
   isRoutingChoice,
   isSessionId,
+  DISPATCH_DONE_TTL_MS,
+  isDispatchEntry,
   type AccountProfile,
   type AccountSettings,
   type ChainRecord,
+  type DispatchEntry,
+  type DispatchOutcome,
+  type DispatchRecord,
   type DisposableLike,
   type EditorialRecord,
   type HiddenFolder,
@@ -155,6 +160,7 @@ function emptyState(): LineageState {
     workspaces: {},
     accounts: {},
     accountSettings: {},
+    dispatch: {},
   };
 }
 
@@ -406,6 +412,26 @@ function sanitizeAccount(key: string, value: unknown): AccountProfile | null {
   if (!isNonEmptyString(acc.updatedAt)) acc.updatedAt = acc.createdAt;
 
   return acc as unknown as AccountProfile;
+}
+
+/** One dispatch-queue record. The BASE entry is validated by the same guard
+ *  the dispatcher trusts (types.isDispatchEntry); the bookkeeping fields are
+ *  checked here. The key must equal the entry's own id — a mismatch means a
+ *  hand edit, and keeping it would file one intent under another's name. */
+function sanitizeDispatch(key: string, value: unknown): DispatchRecord | null {
+  if (!isDispatchEntry(value)) return null;
+  if (value.id !== key) return null;
+  const rec = value as unknown as Record<string, unknown>;
+  if (typeof rec.updatedAt !== 'string' || rec.updatedAt === '') return null;
+  if (
+    rec.done !== undefined &&
+    rec.done !== 'launched' &&
+    rec.done !== 'cancelled'
+  ) {
+    return null;
+  }
+  if (rec.doneAt !== undefined && typeof rec.doneAt !== 'string') return null;
+  return rec as unknown as DispatchRecord;
 }
 
 /** The singleton account settings. Unknown keys survive, the one field we
@@ -1047,6 +1073,30 @@ export function migrateState(raw: unknown): LineageState {
   out.accounts = accounts;
   out.accountSettings = sanitizeAccountSettings(working.accountSettings);
 
+  // v8 added the dispatch queue. Additive: an older file yields an empty
+  // queue. A SETTLED entry is the queue's tombstone (see DispatchRecord) and
+  // sweeps on the same clock the account tombstones do.
+  const dispatch: Record<string, DispatchRecord> = {};
+  const dispatchCutoff = Date.now() - DISPATCH_DONE_TTL_MS;
+  if (isPlainObject(working.dispatch)) {
+    for (const [key, value] of Object.entries(working.dispatch)) {
+      const rec = sanitizeDispatch(key, value);
+      if (!rec) {
+        log('state: dropped unusable dispatch record', key);
+        continue;
+      }
+      if (rec.done !== undefined) {
+        const at = Date.parse(rec.doneAt ?? rec.updatedAt);
+        if (Number.isFinite(at) && at < dispatchCutoff) {
+          log('state: swept a settled dispatch entry', key);
+          continue;
+        }
+      }
+      dispatch[key] = rec;
+    }
+  }
+  out.dispatch = dispatch;
+
   const hook = sanitizeHookState(working.hookInstall);
   if (hook) out.hookInstall = hook;
   else delete out.hookInstall;
@@ -1181,6 +1231,11 @@ export function mergeStates(
   // newer record first (its view of the order is the fresher one), with the
   // older record's stragglers appended.
   out.chains = mergeChainMaps(disk.chains, mem.chains);
+
+  // A dispatch record is one VALUE whose lifecycle only moves forward
+  // (queued → settled), and a settled record is its own tombstone — so
+  // newest-wins never resurrects a launch. See DispatchRecord.
+  out.dispatch = newerWins(disk.dispatch, mem.dispatch, (d) => d.updatedAt ?? '');
 
   // A workspace snapshot is one VALUE — the layout as last saved — so
   // newest-wins is the whole story.
@@ -1595,6 +1650,56 @@ export class StateStore implements DisposableLike {
         updatedAt: stamp,
       };
       log('state: new chain', anchorId, '→', newId);
+    });
+  }
+
+  // --------------------------------------------------------------- dispatch
+
+  /** Every dispatch record, settled ones included — copies, no order. The
+   *  dispatcher filters to pending itself; the queue view may want both. */
+  dispatchEntries(): DispatchRecord[] {
+    return Object.values(this.memory.dispatch ?? {}).map((d) => ({ ...d }));
+  }
+
+  /** Park an intent. The entry is validated by the same guard the load path
+   *  trusts, so a queue written here can never be dropped there. Re-queueing
+   *  an existing id is refused: the id becomes the launched session's id, and
+   *  overwriting would let one intent impersonate another. */
+  queueDispatch(entry: DispatchEntry): Promise<void> {
+    if (!isDispatchEntry(entry) || (entry as { done?: unknown }).done !== undefined) {
+      log('state: refusing to queue an invalid dispatch entry');
+      return Promise.resolve();
+    }
+    return this.enqueue((state, stamp) => {
+      if (!isPlainObject(state.dispatch)) state.dispatch = {};
+      if (state.dispatch[entry.id] !== undefined) {
+        log('state: refusing to re-queue dispatch entry', entry.id);
+        return;
+      }
+      state.dispatch[entry.id] = { ...entry, updatedAt: stamp };
+      log('state: queued dispatch entry', entry.id);
+    });
+  }
+
+  /** Settle an entry — launched or cancelled. The record STAYS, as its own
+   *  tombstone (see DispatchRecord), and sweeps after DISPATCH_DONE_TTL_MS on
+   *  the load path. Settling twice or settling an unknown id is a logged
+   *  no-op: both mean another window got there first, which is fine. */
+  settleDispatch(id: string, done: DispatchOutcome): Promise<void> {
+    return this.enqueue((state, stamp) => {
+      const rec = isPlainObject(state.dispatch) ? state.dispatch[id] : undefined;
+      if (rec === undefined) {
+        log('state: cannot settle unknown dispatch entry', id);
+        return;
+      }
+      if (rec.done !== undefined) {
+        log('state: dispatch entry already settled', id, rec.done);
+        return;
+      }
+      rec.done = done;
+      rec.doneAt = stamp;
+      rec.updatedAt = stamp;
+      log('state: dispatch entry', id, done);
     });
   }
 

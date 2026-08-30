@@ -19,9 +19,11 @@ import {
   nowIso,
 } from '../src/state';
 import {
+  DISPATCH_DONE_TTL_MS,
   EXTENSION_ID,
   STATE_SCHEMA_VERSION,
   type ChainRecord,
+  type DispatchRecord,
   type EditorialRecord,
   type LineageState,
   type WindowRecord,
@@ -99,6 +101,8 @@ function state(partial: Partial<LineageState> = {}): LineageState {
     // migrated blob fails on two empty objects.
     accounts: {},
     accountSettings: {},
+    // v8, materialised the same way.
+    dispatch: {},
     ...partial,
   };
 }
@@ -2573,5 +2577,118 @@ describe('state: named subprojects', () => {
       'From A',
       'From B',
     ]);
+  });
+});
+
+// -------------------------------------------------------------------------
+// Dispatch queue (v8). The property that matters more than any accessor:
+// a settled record is the queue's TOMBSTONE, so no merge, reload or sweep may
+// ever turn it back into a pending entry — a resurrected entry is a double
+// launch.
+
+describe('state: dispatch queue', () => {
+  it('queues, lists copies, and refuses a re-queue of the same id', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+
+    await store.queueDispatch({ id: S1, createdAt: 5, prompt: 'go' });
+    const listed = store.dispatchEntries();
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.prompt).toBe('go');
+    expect(listed[0]?.updatedAt).not.toBe('');
+
+    // The id becomes the launched session's id; overwriting would let one
+    // intent impersonate another.
+    await store.queueDispatch({ id: S1, createdAt: 9, prompt: 'other' });
+    expect(store.dispatchEntries()).toHaveLength(1);
+    expect(store.dispatchEntries()[0]?.prompt).toBe('go');
+
+    // Copies out, never the store's memory.
+    listed[0]!.prompt = 'mutated';
+    expect(store.dispatchEntries()[0]?.prompt).toBe('go');
+  });
+
+  it('refuses invalid entries by the same guard the load path trusts', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.queueDispatch({ id: '', createdAt: 5 });
+    await store.queueDispatch({ id: S2, createdAt: Number.NaN });
+    expect(store.dispatchEntries()).toHaveLength(0);
+  });
+
+  it('settles once; a second settle and an unknown id are no-ops', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.queueDispatch({ id: S1, createdAt: 5 });
+
+    await store.settleDispatch(S1, 'launched');
+    let rec = store.dispatchEntries()[0];
+    expect(rec?.done).toBe('launched');
+    expect(rec?.doneAt).toBeTruthy();
+
+    await store.settleDispatch(S1, 'cancelled'); // another window lost the race
+    rec = store.dispatchEntries()[0];
+    expect(rec?.done).toBe('launched');
+
+    await store.settleDispatch(S2, 'cancelled'); // unknown — logged, harmless
+    expect(store.dispatchEntries()).toHaveLength(1);
+  });
+
+  it('round-trips through disk, and a settle in one store survives a write from another', async () => {
+    const dir = tempDir();
+    const a = makeStore(dir);
+    await a.load();
+    await a.queueDispatch({ id: S1, createdAt: 5 });
+
+    const b = makeStore(dir);
+    await b.load();
+    expect(b.dispatchEntries()).toHaveLength(1);
+
+    // A settles; B, still holding the pending copy in memory, writes
+    // something unrelated. B's read-merge-write must keep A's settle —
+    // newest-wins on updatedAt is what makes the tombstone stick.
+    await a.settleDispatch(S1, 'launched');
+    await b.queueDispatch({ id: S2, createdAt: 6 });
+
+    const blob = readFile(dir) as LineageState;
+    expect(blob.dispatch?.[S1]?.done).toBe('launched');
+    expect(blob.dispatch?.[S2]?.done).toBeUndefined();
+  });
+
+  it('sweeps settled records after the TTL and keeps fresh ones', async () => {
+    const dir = tempDir();
+    const old = new Date(Date.now() - DISPATCH_DONE_TTL_MS - 60_000).toISOString();
+    const fresh = nowIso();
+    const rec = (id: string, doneAt: string): DispatchRecord => ({
+      id,
+      createdAt: 5,
+      updatedAt: doneAt,
+      done: 'cancelled',
+      doneAt,
+    });
+    seedStateFile(dir, state({ dispatch: { [S1]: rec(S1, old), [S2]: rec(S2, fresh) } }));
+
+    const store = makeStore(dir);
+    await store.load();
+    expect(store.dispatchEntries().map((d) => d.id)).toEqual([S2]);
+  });
+
+  it('drops hand-edited junk on load: key/id mismatch, bad done, missing stamp', async () => {
+    const dir = tempDir();
+    seedStateFile(
+      dir,
+      state({
+        dispatch: {
+          // key names S1, record claims S2 — filed under another's name.
+          [S1]: { id: S2, createdAt: 5, updatedAt: nowIso() },
+          [S2]: { id: S2, createdAt: 5, updatedAt: nowIso(), done: 'exploded' },
+          [S3]: { id: S3, createdAt: 5 },
+          [S4]: { id: S4, createdAt: 5, updatedAt: nowIso() },
+        } as unknown as Record<string, DispatchRecord>,
+      }),
+    );
+    const store = makeStore(dir);
+    await store.load();
+    expect(store.dispatchEntries().map((d) => d.id)).toEqual([S4]);
   });
 });

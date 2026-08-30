@@ -46,6 +46,7 @@ import {
   CONTEXT_HAS_UNSEEN,
   CONTEXT_EXPLORER_FOLLOW,
   CONTEXT_HOOKS_INSTALLED,
+  CONTEXT_CAN_HAND_OFF,
   CONTEXT_CAN_SWITCH_ACCOUNT,
   CONTEXT_MODE,
   CONTEXT_NATIVE_TREE,
@@ -243,6 +244,7 @@ import type { ProjectViewController } from './projectview';
 // are joined up — the views and the verbs only ever see the interfaces.
 import {
   accountEnvKeys,
+  canHandOff,
   canSwitchAccounts,
   configDirForProfile,
   envForProfile,
@@ -293,6 +295,7 @@ import { TerminalRegistry, buildShellArgs, launchEnv } from './terminals';
 import { TerminalMatcher, terminalPid } from './terminalMatch';
 import {
   adoptBackgroundJob,
+  defaultSessionTitle,
   forkForAgent,
   hasForkableRow,
   notificationItems,
@@ -300,6 +303,11 @@ import {
   tabTitleFrom,
 } from './commands';
 import type { AccountCommandDeps } from './commands';
+// The dispatch queue's clockwork: decides (via src/dispatch.ts) when a queued
+// session is worth launching and wakes at the moments that can change the
+// answer. Node-only; this file hands it the store, the usage cache and the
+// same launch path every clicked verb takes.
+import { DispatchHost } from './dispatchHost';
 import { registerFocusIntegration } from './windows';
 import { openProject } from './surfaces';
 import { HooksManager } from './hooks';
@@ -3631,6 +3639,38 @@ export async function activate(
     }),
   );
 
+  /** The same mirror for the HANDOFF entry, which asks the opposite question:
+   *  two accounts running different clis rather than the same one. Kept as its
+   *  own key and its own cache rather than folded into the block above, so
+   *  that neither verb can start drawing on the other's roster. */
+  let lastCanHandOff: boolean | null = null;
+  const syncCanHandOffContext = async (): Promise<void> => {
+    let can = false;
+    try {
+      can = canHandOff(store.getAccounts());
+    } catch (err) {
+      logError('extension.canHandOffContext', err);
+      return;
+    }
+    if (can === lastCanHandOff) return;
+    lastCanHandOff = can;
+    try {
+      await vscode.commands.executeCommand(
+        'setContext',
+        CONTEXT_CAN_HAND_OFF,
+        can,
+      );
+    } catch (err) {
+      logError('extension.canHandOffContext', err);
+    }
+  };
+  await syncCanHandOffContext();
+  context.subscriptions.push(
+    store.onDidChange(() => {
+      void syncCanHandOffContext();
+    }),
+  );
+
   /** The pinned account's launch fields for a conversation — what a resume, a
    *  reattach and a workspace restore all re-inject. `pinnedLaunchProfile`
    *  returns null for a dangling pin — and for a pin naming an account no
@@ -5455,16 +5495,37 @@ export async function activate(
     }
   };
 
+  // Assigned right after `commandDeps` exists — the host launches THROUGH
+  // commandDeps.launchSession, and the verbs poke the host, so one of the two
+  // references has to be late-bound. The verbs' poke is the safe one to
+  // defer: a poke before construction is a poke about an empty queue.
+  let dispatchHost: DispatchHost | undefined;
+
   const commandDeps: AccountCommandDeps = {
     // The whole accounts surface, as ONE optional member: the verbs guard
     // on its presence, so a build without it behaves exactly as this extension
     // did before accounts existed.
     accounts: accountDeps,
 
+    // The dispatch queue: the store persists it, the host (below) acts on it,
+    // and the verbs only park, list and cancel. Cancel IS settle — the record
+    // stays as its own tombstone, so another window can never relaunch it.
+    dispatch: {
+      entries: () => store.dispatchEntries(),
+      queue: (entry) => store.queueDispatch(entry),
+      cancel: (id) => store.settleDispatch(id, 'cancelled'),
+      poke: () => dispatchHost?.poke(),
+    },
+
     getForest: () => forest,
     refresh: refreshNow,
     hasTranscript: (sessionId) =>
       hasTranscript(sessionId, { extraProjectsDirs: profileProjectsDirs() }),
+    // The same lookup hasTranscript runs, kept as a pair on purpose: the
+    // handoff brief has to NAME the file, and two different searches answering
+    // the two questions would eventually disagree.
+    transcriptPathOf: (sessionId) =>
+      transcriptFile(sessionId, { extraProjectsDirs: profileProjectsDirs() }),
     repairResumeLeaf: (sessionId) =>
       repairResumeLeaf(sessionId, { extraProjectsDirs: profileProjectsDirs() }),
     transcriptFacts,
@@ -6578,6 +6639,56 @@ export async function activate(
       await openProject(target, false);
     },
   };
+
+  // The dispatch queue's clockwork. Launches go through commandDeps.
+  // launchSession so a dispatched session takes the same account-safe path
+  // every clicked one does (pin backfill, parked-alias attach); the entry's
+  // id becomes the session id — minted at queue time, so a crash between
+  // decide and launch cannot double-start.
+  dispatchHost = new DispatchHost({
+    pending: () => store.dispatchEntries().filter((d) => d.done === undefined),
+    settle: (id, done) => store.settleDispatch(id, done),
+    profiles: () => accountDeps.accounts(),
+    usageMap: () => accountDeps.usageMap(),
+    refreshUsage: (profiles, force) => accountDeps.refreshUsage(profiles, force),
+    defaultRouting: () => accountDeps.defaultRouting(),
+    launch: async (l) => {
+      const entry = l.entry;
+      const title = entry.title ?? defaultSessionTitle(entry.cwd, []);
+      await commandDeps.recordLaunch(entry.id, null, entry.cwd);
+      await commandDeps.upsertRecord(entry.id, { title });
+      const binding = await commandDeps.launchSession({
+        sessionId: entry.id,
+        ...(entry.cwd !== undefined ? { cwd: entry.cwd } : {}),
+        ...(entry.prompt !== undefined ? { prompt: entry.prompt } : {}),
+        title,
+        env: envForProfile(l.profile),
+        profileId: l.profile.id,
+        ...(l.profile.provider === 'codex'
+          ? { provider: 'codex' as const }
+          : {}),
+      });
+      if (!binding) return false;
+      try {
+        await accountDeps.pinSession(entry.id, l.profile.id);
+      } catch (err) {
+        logError('dispatch.pinSession', err);
+      }
+      refreshNow();
+      return true;
+    },
+    now: () => Date.now(),
+    notify: (m) => void vscode.window.showInformationMessage(m),
+  });
+  context.subscriptions.push(dispatchHost);
+  // Fresh usage numbers are the signal the gate waits on; queue edits poke
+  // through the verbs directly, and the activation poke below covers a queue
+  // that waited out a restart. Cross-window edits arrive with the next usage
+  // tick — the queue's cadence never depends on a repaint.
+  context.subscriptions.push(
+    accountDeps.onUsageChanged(() => dispatchHost?.poke()),
+  );
+  dispatchHost.poke();
 
   context.subscriptions.push(registerCommands(commandDeps));
 

@@ -172,6 +172,16 @@ export const CONTEXT_MULTI_SELECT = 'lineage.multiSelect';
  *  while meaning "two accounts one conversation could move between" would have
  *  been the next person's bug, so the name changed with the meaning. */
 export const CONTEXT_CAN_SWITCH_ACCOUNT = 'lineage.canSwitchAccount';
+/** Gates "Continue on Another CLI…" on the session row.
+ *
+ *  Separate from `CONTEXT_CAN_SWITCH_ACCOUNT` because it is the opposite
+ *  question: that key asks whether two accounts run the SAME cli, this one
+ *  whether two run DIFFERENT ones. The default roster — one Claude login plus
+ *  a Codex one — answers no to the first and yes to the second, which is the
+ *  whole reason the handoff verb exists. Counted by `canHandOff`, which is
+ *  built from `handoffRefusal`'s own tests so the gate and the picker cannot
+ *  drift apart. */
+export const CONTEXT_CAN_HAND_OFF = 'lineage.canHandOff';
 /** Gates the project header view inside the BUILT-IN Explorer container.
  *
  *  NOT simply "this window is a Flock workspace". It is "this window has
@@ -611,6 +621,103 @@ export function isRoutingChoice(v: unknown): v is RoutingChoice {
   }
   return false;
 }
+
+// ----------------------------------------------------------------- dispatch
+
+/** Caps for the dispatch queue's JSON boundary. The prompt ceiling is
+ *  MAX_AGENT_PROMPT_CHARS's figure for MAX_AGENT_PROMPT_CHARS's reason: an
+ *  opening turn is an argv, and argvs have budgets. */
+export const MAX_DISPATCH_PROMPT_CHARS = 4000;
+export const MAX_DISPATCH_TITLE_CHARS = 120;
+
+/**
+ * An intent to start a session, parked until an account is worth it.
+ *
+ * Someone wanted a session — in this directory, maybe with this opening
+ * prompt, on this account or provider or wherever routing likes — at a moment
+ * when starting it was not worth it. The dispatcher (src/dispatch.ts) notices
+ * the moment that changes and acts once, in arrival order. Declared here
+ * rather than in dispatch.ts because the queue PERSISTS (see LineageState),
+ * and state.ts reads shapes from this file alone.
+ */
+export interface DispatchEntry {
+  /** Caller-minted uuid. The queue's key, and later the launch's session id —
+   *  minted once so a crash between decide and launch cannot double-start. */
+  id: string;
+  /** Epoch ms when the entry was queued. FIFO is arrival order, and arrival
+   *  order is a promise to the person who queued first. */
+  createdAt: number;
+  /** Where the session opens. Absent inherits the launcher's default, the
+   *  same as every other launch. */
+  cwd?: string;
+  /** Opening turn, optional — "start looking at the failing tests" is the
+   *  reason to queue a session rather than an alarm clock. */
+  prompt?: string;
+  /** Row title, optional; the launcher's default naming applies otherwise. */
+  title?: string;
+  /** Where this may run: the same RoutingChoice a project pin uses, because
+   *  "which account" must not grow a second grammar. Absent = auto. */
+  routing?: RoutingChoice;
+  /** Epoch ms before which the entry holds regardless of usage — "after
+   *  lunch" composed with "when a window is open", not instead of it. */
+  notBefore?: number;
+}
+
+/** JSON boundary guard: the queue persists in state.json, which is
+ *  hand-editable and survives older builds, so entries arrive as `unknown`.
+ *  Same posture as isRoutingChoice, which it delegates the routing field to. */
+export function isDispatchEntry(v: unknown): v is DispatchEntry {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return false;
+  const e = v as Record<string, unknown>;
+  if (typeof e.id !== 'string' || e.id.length === 0) return false;
+  if (typeof e.createdAt !== 'number' || !Number.isFinite(e.createdAt)) {
+    return false;
+  }
+  if (e.cwd !== undefined && typeof e.cwd !== 'string') return false;
+  if (
+    e.prompt !== undefined &&
+    (typeof e.prompt !== 'string' ||
+      e.prompt.length > MAX_DISPATCH_PROMPT_CHARS)
+  ) {
+    return false;
+  }
+  if (
+    e.title !== undefined &&
+    (typeof e.title !== 'string' || e.title.length > MAX_DISPATCH_TITLE_CHARS)
+  ) {
+    return false;
+  }
+  if (e.routing !== undefined && !isRoutingChoice(e.routing)) return false;
+  if (
+    e.notBefore !== undefined &&
+    (typeof e.notBefore !== 'number' || !Number.isFinite(e.notBefore))
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/** How a queue entry ended. There is no 'failed': a launch that did not stick
+ *  leaves the entry queued for the next decision, because the failure modes
+ *  (binary missing, tmux hiccup) are all things a retry can outlive. */
+export type DispatchOutcome = 'launched' | 'cancelled';
+
+/** What state.json actually holds: the entry, plus the bookkeeping that lets
+ *  two windows merge the queue newest-wins without resurrecting anything. A
+ *  SETTLED entry (done set) is the queue's tombstone — dropping the key
+ *  instead would let the other window's copy re-launch it, which for this
+ *  record type is the single worst outcome. */
+export interface DispatchRecord extends DispatchEntry {
+  /** ISO stamp of the last edit — the newest-wins clock. */
+  updatedAt: string;
+  done?: DispatchOutcome;
+  /** ISO stamp when `done` was set; the sweep clock. */
+  doneAt?: string;
+}
+
+/** As the other tombstone TTLs, and for the same reason: comfortably longer
+ *  than any window could still hold the live record in memory. */
+export const DISPATCH_DONE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 
 /** One rate-limit window as the provider reports it. */
 export interface UsageWindow {
@@ -1310,6 +1417,20 @@ export const COMMANDS = {
    *  resume it there. On a SESSION row, not an account row — the thing being
    *  moved is the conversation, and the account is the destination. */
   switchSessionAccount: 'lineage.switchSessionAccount',
+  /** CONTINUE a conversation on the other CLI — the door through the wall
+   *  `switchSessionAccount` refuses at (`different-cli`): a NEW session on the
+   *  target account whose opening turn is a brief pointing at the parent's
+   *  transcript. Not a resume, and no surface may call it one; the lineage
+   *  edge is minted the way a fork's is. See src/handoff.ts. */
+  handoffSession: 'lineage.handoffSession',
+  /** Park an intent to start a session until an account is worth launching on
+   *  (src/dispatch.ts): the verb asks where it may run and, optionally, what
+   *  its first turn is; the dispatcher does the waiting and the launching. */
+  queueDispatch: 'lineage.queueDispatch',
+  /** The parked intents, each with its holding reason and a cancel. A
+   *  QuickPick rather than a tree section, deliberately, for v1 — see
+   *  docs/proposal-dispatch-and-handoff.md. */
+  dispatchQueue: 'lineage.dispatchQueue',
 } as const;
 export type CommandId = (typeof COMMANDS)[keyof typeof COMMANDS];
 
@@ -3015,6 +3136,11 @@ export interface LineageState {
    *  files did the user consent to", and giving that idea two types would
    *  invite them to drift. */
   verbsInstall?: HookInstallState;
+  /** v8. The dispatch queue, keyed by entry id — intents to start a session,
+   *  parked until an account is worth it (src/dispatch.ts). Optional for the
+   *  reason `accounts` is: hand-built literals predate it, and migrateState
+   *  materialises the map on every load. */
+  dispatch?: Record<string, DispatchRecord>;
 }
 
 // ------------------------------------------------------------------ hooks
@@ -3655,6 +3781,23 @@ export interface CommandDeps {
   getForest(): SessionForest;
   refresh(): void;
   hasTranscript(sessionId: string): boolean;
+  /** The transcript's path, for the one verb that has to NAME the file rather
+   *  than test for it: the handoff brief (src/handoff.ts). Claude layout only,
+   *  like `hasTranscript` — a Codex parent answers null and the verb says
+   *  "not yet" honestly. Optional so every unit double stays valid. */
+  transcriptPathOf?(sessionId: string): string | null;
+  /** The dispatch queue, when the wiring provides one — extension.ts owns the
+   *  store and the clock (dispatchHost.ts); the verbs only park, list and
+   *  cancel. Optional like `accounts`: a build without it has no queue verbs,
+   *  exactly as before the queue existed. */
+  dispatch?: {
+    /** Every record, settled ones included — the picker filters itself. */
+    entries(): DispatchRecord[];
+    queue(entry: DispatchEntry): Promise<void>;
+    cancel(id: string): Promise<void>;
+    /** Something changed — decide again. */
+    poke(): void;
+  };
   /** The background job holding this id, when one does. A native `/fork`
    *  dispatches such a job: live process, no pty any editor owns. Optional —
    *  a wiring without it (and every unit double) simply never offers to adopt
