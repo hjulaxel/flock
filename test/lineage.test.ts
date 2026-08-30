@@ -13,6 +13,8 @@ import {
   resolveAll,
   resumeTarget,
   sessionIsOver,
+  SUBAGENT_FRESH_MS,
+  subagentsWorking,
   type ResolverIO,
 } from '../src/lineage';
 import { normalizeStatus } from '../src/roster';
@@ -447,7 +449,13 @@ function forestOf(
     activityMtimes?: ReadonlyMap<string, number>;
     tailStats?: ReadonlyMap<
       string,
-      { lastPromptAt?: number; tokens?: number; lastExchange?: string }
+      {
+        lastPromptAt?: number;
+        tokens?: number;
+        lastExchange?: string;
+        lastRecordAt?: number;
+        sidechainAt?: number;
+      }
     >;
     archived?: ArchivedSession[];
   } = {},
@@ -1139,6 +1147,34 @@ describe('buildForest', () => {
     expect(node?.lastActiveAt).toBe(4_999_000);
   });
 
+  it('raises the fan-out flag on a busy node from the tail clocks', () => {
+    // END TO END, because the two fields it reads are the ones a declaration
+    // could quietly drop: `tailStats` is a structural shape, so a narrower one
+    // would still typecheck while leaving `node.subagents` unset forever, and
+    // an unset flag looks exactly like a session with no agents.
+    const f = forestOf([live(CHILD, { startedAt: 1000, status: 'busy' })], {}, {
+      tailStats: new Map([
+        [CHILD, { lastRecordAt: 4_000_000, sidechainAt: 4_000_000 }],
+      ]),
+    });
+    expect(f.nodes.get(CHILD)?.subagents).toBe(true);
+  });
+
+  it('leaves it unset when the session is not busy, or has moved on', () => {
+    const quiet = forestOf([live(CHILD, { startedAt: 1000, status: 'idle' })], {}, {
+      tailStats: new Map([
+        [CHILD, { lastRecordAt: 4_000_000, sidechainAt: 4_000_000 }],
+      ]),
+    });
+    expect(quiet.nodes.get(CHILD)?.subagents).toBeUndefined();
+    const stale = forestOf([live(CHILD, { startedAt: 1000, status: 'busy' })], {}, {
+      tailStats: new Map([
+        [CHILD, { lastRecordAt: 4_000_000, sidechainAt: 1_000_000 }],
+      ]),
+    });
+    expect(stale.nodes.get(CHILD)?.subagents).toBeUndefined();
+  });
+
   it('carries them onto an ARCHIVED node too', () => {
     // A closed session's last prompt is as interesting as a live one's, and is
     // the number its row has always claimed to show.
@@ -1289,5 +1325,82 @@ describe('resolveAll: chain-tip parent remap', () => {
       () => 'not-a-uuid',
     );
     expect(junk.get(CHILD)?.parentId).toBe(PARENT);
+  });
+});
+
+// ------------------------------------------------- work that has fanned out
+
+describe('subagentsWorking (the fan-out mark)', () => {
+  const NOW = 1_785_160_000_000;
+
+  it("is true while a busy session's freshest line is a sub-agent's", () => {
+    expect(
+      subagentsWorking('busy', { lastRecordAt: NOW, sidechainAt: NOW }),
+    ).toBe(true);
+  });
+
+  it('needs the session to be BUSY — that is what makes the mark self-clearing', () => {
+    // Nothing has to notice a workflow FINISHING: the turn ending takes the
+    // mark down with it.
+    for (const status of ['idle', 'waiting', 'exited', 'unknown'] as const) {
+      expect(
+        subagentsWorking(status, { lastRecordAt: NOW, sidechainAt: NOW }),
+      ).toBe(false);
+    }
+  });
+
+  it('goes out once the session has moved on from its agents', () => {
+    // Sidechain lines never expire out of a transcript, so an unqualified "has
+    // sidechains" is a fact about the whole history and would mark a session
+    // forever on the strength of something it did last week.
+    expect(
+      subagentsWorking('busy', {
+        lastRecordAt: NOW,
+        sidechainAt: NOW - SUBAGENT_FRESH_MS - 1,
+      }),
+    ).toBe(false);
+  });
+
+  it('tolerates a session thinking between dispatches', () => {
+    // An orchestrator interleaves its own lines with its agents' — reads a
+    // result, thinks, dispatches the next. A window shorter than that thinking
+    // would blink the mark off and on through a fan-out that never stopped.
+    expect(
+      subagentsWorking('busy', {
+        lastRecordAt: NOW,
+        sidechainAt: NOW - SUBAGENT_FRESH_MS + 1,
+      }),
+    ).toBe(true);
+    // The boundary itself is inside the window.
+    expect(
+      subagentsWorking('busy', {
+        lastRecordAt: NOW,
+        sidechainAt: NOW - SUBAGENT_FRESH_MS,
+      }),
+    ).toBe(true);
+  });
+
+  it('says nothing without both clocks, and never throws on rubbish', () => {
+    expect(subagentsWorking('busy', undefined)).toBe(false);
+    expect(subagentsWorking('busy', {})).toBe(false);
+    expect(subagentsWorking('busy', { sidechainAt: NOW })).toBe(false);
+    expect(subagentsWorking('busy', { lastRecordAt: NOW })).toBe(false);
+    expect(
+      subagentsWorking('busy', { lastRecordAt: Number.NaN, sidechainAt: NOW }),
+    ).toBe(false);
+    expect(
+      subagentsWorking('busy', { lastRecordAt: NOW, sidechainAt: Number.NaN }),
+    ).toBe(false);
+  });
+
+  it('is measured between two clocks in the SAME file, never the wall clock', () => {
+    // A machine whose clock disagrees with the transcript's must not be able
+    // to make a session look busy with agents that finished last year, nor to
+    // hide a fan-out happening now. Both stamps here are far from `Date.now()`
+    // and consistent with each other, so the answer still holds.
+    const skewed = NOW - 400 * 24 * 3_600_000;
+    expect(
+      subagentsWorking('busy', { lastRecordAt: skewed, sidechainAt: skewed }),
+    ).toBe(true);
   });
 });

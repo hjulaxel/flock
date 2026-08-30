@@ -30,6 +30,7 @@ import {
   closeProjectFlow,
   reopenProject,
   resumeFlow,
+  partitionForClose,
   partitionForOpen,
   selectedSessionIds,
   skippedForOpenSentence,
@@ -406,6 +407,96 @@ describe('partitionForOpen (the multi-open decision)', () => {
     expect(out.targets).toEqual([A, D]);
     expect(out.live).toEqual([B]);
     expect(out.ghosts).toEqual([C]);
+  });
+});
+
+// Closing several selected sessions at once: which rows the verb can reach.
+describe('partitionForClose (the multi-close decision)', () => {
+  const A = uuid(1);
+  const B = uuid(2);
+  const C = uuid(3);
+
+  const from = (
+    nodes: SessionNode[],
+    reachable: readonly string[],
+  ): {
+    nodeOf: (id: string) => SessionNode | undefined;
+    canEnd: (id: string) => boolean;
+  } => ({
+    nodeOf: (id) => nodes.find((n) => n.id === id),
+    canEnd: (id) => reachable.includes(id),
+  });
+
+  it('closes the live rows Flock can reach, in the order given', () => {
+    const { nodeOf, canEnd } = from(
+      [node(A, { status: 'busy' }), node(B, { status: 'waiting' })],
+      [A, B],
+    );
+    expect(partitionForClose([B, A], nodeOf, canEnd).targets).toEqual([B, A]);
+  });
+
+  it('sets aside a session running somewhere Flock cannot reach', () => {
+    // The singular verb meets this with a whole dialog offering to fork it
+    // instead; five of those before the first tab closes is an obstacle, not a
+    // report, so the batch counts them.
+    const { nodeOf, canEnd } = from(
+      [node(A, { status: 'busy' }), node(B, { status: 'busy' })],
+      [B],
+    );
+    const out = partitionForClose([A, B], nodeOf, canEnd);
+    expect(out.targets).toEqual([B]);
+    expect(out.foreign).toEqual([A]);
+  });
+
+  it('counts an already-closed row separately — it is not a refusal', () => {
+    for (const over of [
+      { archived: true },
+      { status: 'exited' as const },
+      { ghost: true },
+    ]) {
+      const { nodeOf, canEnd } = from([node(A, over)], [A]);
+      const out = partitionForClose([A], nodeOf, canEnd);
+      expect(out.targets).toEqual([]);
+      expect(out.over).toEqual([A]);
+      expect(out.foreign).toEqual([]);
+    }
+  });
+
+  it('never names the same session twice', () => {
+    const { nodeOf, canEnd } = from([node(A, { status: 'busy' })], [A]);
+    expect(partitionForClose([A, A], nodeOf, canEnd).targets).toEqual([A]);
+  });
+
+  it('survives a forest or a reachability probe that throws', () => {
+    // A probe that throws is "cannot reach", so the row is set aside rather
+    // than closed on a guess — the safe direction for a verb that ends
+    // processes.
+    const out = partitionForClose(
+      [A],
+      () => {
+        throw new Error('no forest');
+      },
+      () => {
+        throw new Error('no registry');
+      },
+    );
+    expect(out.targets).toEqual([]);
+    expect(out.foreign).toEqual([A]);
+  });
+
+  it('sorts a mixed selection into all three piles at once', () => {
+    const { nodeOf, canEnd } = from(
+      [
+        node(A, { status: 'busy' }),
+        node(B, { status: 'busy' }),
+        node(C, { archived: true }),
+      ],
+      [A],
+    );
+    const out = partitionForClose([A, B, C], nodeOf, canEnd);
+    expect(out.targets).toEqual([A]);
+    expect(out.foreign).toEqual([B]);
+    expect(out.over).toEqual([C]);
   });
 });
 

@@ -318,6 +318,11 @@
         "icon": "$(archive)"
       },
       {
+        "command": "lineage.closeSessions",
+        "title": "Close Selected Sessions",
+        "category": "Flock"
+      },
+      {
         "command": "lineage.resumeSessions",
         "title": "Open Selected Sessions",
         "category": "Flock"
@@ -854,7 +859,12 @@
         },
         {
           "command": "lineage.closeSession",
-          "when": "view == lineageSessions && viewItem =~ /;hosted;/",
+          "when": "view == lineageSessions && viewItem =~ /;hosted;/ && !lineage.multiSelect",
+          "group": "2_close@2"
+        },
+        {
+          "command": "lineage.closeSessions",
+          "when": "view == lineageSessions && viewItem =~ /;hosted;/ && lineage.multiSelect",
           "group": "2_close@2"
         },
         {
@@ -1099,6 +1109,10 @@
           "when": "false"
         },
         {
+          "command": "lineage.closeSessions",
+          "when": "false"
+        },
+        {
           "command": "lineage.closeWithSummary",
           "when": "false"
         },
@@ -1307,7 +1321,12 @@
         },
         {
           "command": "lineage.closeSession",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;hosted;/",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;hosted;/ && !lineage.multiSelect",
+          "group": "2_close@2"
+        },
+        {
+          "command": "lineage.closeSessions",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;hosted;/ && lineage.multiSelect",
           "group": "2_close@2"
         },
         {

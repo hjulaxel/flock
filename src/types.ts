@@ -866,6 +866,22 @@ export const COMMANDS = {
    *  `renameSession`'s quick input when the inline view is not available. */
   renameSessionInline: 'lineage.renameSessionInline',
   closeSession: 'lineage.closeSession',
+  /**
+   * The multi-selection's own Close — the third pair on this shape, after
+   * `deleteSession`/`deleteSessions` and `resumeSession`/`resumeSessions`, and
+   * for the same reason: a contributed command has ONE title, so the singular
+   * entry on one of five highlighted rows would close one and read as though
+   * it had closed five. The `when` clauses are complements of
+   * `lineage.multiSelect`.
+   *
+   * Unlike Archive, it asks NOTHING, which is the singular verb's rule kept
+   * rather than an exception made: a close leaves every row in the tree and
+   * one click from resuming, so it is recoverable N times over for the same
+   * reason it is recoverable once. Archive confirms because archive HIDES the
+   * rows, and being "more of a hassle than just closing it" is the point of
+   * that verb.
+   */
+  closeSessions: 'lineage.closeSessions',
   closeWithSummary: 'lineage.closeWithSummary',
   /** End the session to level 2 IMMEDIATELY, skipping every wait: a grace
    *  countdown is cut short (the detached process is killed, tree and all), a
@@ -1918,6 +1934,19 @@ export interface SessionNode {
    *  every node the tail sweep covered, because the fact is the same for a
    *  live session; only the hover ever shows it. */
   lastExchange?: string;
+  /** WORK IS FANNING OUT UNDER THIS SESSION RIGHT NOW: it is busy, and the
+   *  freshest thing in its transcript is a sub-agent's line — a workflow, a
+   *  Task, an agent of any kind. See lineage.subagentsWorking for the two
+   *  conditions and for what this deliberately does not claim (how many, or
+   *  which kind).
+   *
+   *  A ROW FACT WITH NO DOT OF ITS OWN. The session is already amber, and
+   *  correctly so: it IS running. What the dot cannot say is that nine things
+   *  are running rather than one, and that is a mark beside the name (see
+   *  viewmodel's `marks`), not a fifth colour in a column whose whole value is
+   *  that it has four. Absent means "not right now", never "never" — the flag
+   *  goes out with the turn that raised it. */
+  subagents?: true;
   /** Epoch ms of `record.graceUntil` — this session is running DETACHED under
    *  the detach grace (tab closed, process alive so re-attach is instant), and
    *  this is when the sweep will end it. The one sanctioned detached-running

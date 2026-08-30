@@ -8,6 +8,32 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Added
 
+- **A session says when its work has fanned out.** A workflow, a Task,
+  sub-agents of any kind: while one is running, the row carries a small
+  **run-all** mark beside its name. The dot could never say this — from outside
+  a session, nine agents working under it and one thinking about a typo are the
+  same word, `busy`, and so the same amber dot.
+  It costs nothing to know. The sidebar already reads a bounded tail of every
+  live session's transcript on every tick, and already inspects `isSidechain`
+  twice in that same loop for the opposite reason (a sub-agent's words are not
+  the conversation's); this is one more assignment inside it. The freshness
+  rule compares two timestamps read out of the *same file* rather than against
+  the wall clock, so a machine whose clock disagrees with its transcripts
+  cannot invent a fan-out or hide one.
+  It is a **mark, not a fifth dot colour**, and that is the whole design
+  decision: the dot column's value is that it holds four meanings a reader has
+  learnt, and a fifth would be paid for by all four. It claims only that the
+  work fanned out — not how many agents, or which kind, because a transcript
+  tail interleaves every sidechain into one stream and a count would be a guess
+  presented as a number. It goes out with the turn that raised it. The native
+  tree draws no mark and says the same thing in the hover.
+- **Close Selected Sessions**, the plural of Close Session — the third command
+  pair on this shape, after Archive and Open. Unlike Archive it asks nothing,
+  which is the singular verb's rule kept rather than an exception made: closing
+  leaves every row where it is, one click from resuming at its last saved turn,
+  so five closes are five clicks from undone for exactly the reason one is one.
+  Sessions running somewhere Flock cannot reach are counted and named in one
+  line instead of raising the singular verb's dialog once per row.
 - **Open Selected Sessions**, the plural of Open Session Here. Select several
   closed rows — shift-click, ctrl-click — and open all of them in one gesture,
   in the order you selected them. It is a separate command from the singular
@@ -602,6 +628,26 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Fixed
 
+- **You could not paste a name into a rename box.** Right-clicking the box to
+  reach Paste destroyed it: the row underneath handles `contextmenu` by taking
+  the keyboard back — so that a menu never acts on rows the tree does not
+  visibly own — and that blurred the input, blur *commits* the edit (Explorer
+  parity), and committing re-renders the row. The box was gone before the menu
+  it was opening could appear. A right-click inside the box is no longer a
+  right-click on the row; the box declares its own `data-vscode-context` so the
+  workbench offers Cut/Copy/Paste instead of the row's verbs (every row sets
+  `preventDefaultContextMenuItems`, which is right for a row and exactly wrong
+  for a text input inside one); and opening a menu no longer counts as clicking
+  away, since the workbench draws it outside the webview's iframe and the blur
+  it causes would otherwise still commit.
+- **The notifications list would not close when you clicked away from it.** It
+  was opened with `ignoreFocusOut`, so Escape was the only way out. That flag
+  earns its keep on a picker holding *work* — something typed, a set of rows
+  ticked, a step with more steps behind it — where a stray click costs you the
+  lot. The bell holds nothing: it is a list of what finished, and re-opening it
+  is one click on the same bell. Removed there and from four more pure
+  browse-and-pick menus (Chats, Closed Projects, Put Away, Switch Workspace);
+  deliberately kept everywhere something typed or ticked would be lost.
 - **The badge said eight when four sessions were running.** Both sidebars — the
   native tree and the inline webview — are registered at once, and only their
   `when` clauses decide which one the workbench draws. But a `view.badge` write

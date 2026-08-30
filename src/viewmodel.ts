@@ -2006,14 +2006,36 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
         if (lines.length > 0) row.tooltip += `\n${lines.join('\n')}`;
       }
     }
+    // The marks, right of the name: small icons for facts a row cannot say any
+    // other way. Built as a list because a row can be muted AND fanning out at
+    // once, and either alone must not shift the other's position.
+    const marks: NonNullable<ViewRow['marks']> = [];
+    // WORK IS FANNING OUT UNDER THIS ONE — a workflow, a Task, agents of any
+    // kind. See lineage.subagentsWorking.
+    //
+    // A MARK RATHER THAN A COLOUR, and that is the whole design decision here.
+    // The session is already amber and the amber is not wrong: it IS running.
+    // What the dot cannot say is that nine things are running inside it rather
+    // than one — and the dot column's entire value is that it holds four
+    // meanings a reader has learnt (amber running, red attention, purple
+    // compacting, purple compacted). A fifth would be paid for by all four.
+    //
+    // `run-all` because that is what a fan-out looks like from outside: more
+    // than one thing going at once, under something you started.
+    if (node.subagents === true && !compact) {
+      marks.push({ icon: 'run-all', title: 'Sub-agents working' });
+    }
     // A struck-through bell, right of the name. Muting is a decision the user
     // made about ONE session and then has no way to see: the dot it suppresses
     // is, by definition, the thing that would have told them. Without a mark on
     // the row, a session that has gone quiet because it was muted is
     // indistinguishable from one that has gone quiet because nothing happened.
     if (node.notifyMuted === true) {
-      row.marks = [{ icon: 'bell-slash', title: 'Notifications hidden' }];
+      marks.push({ icon: 'bell-slash', title: 'Notifications hidden' });
     }
+    // Absent, not empty: a row with nothing to mark must cost no width, and
+    // the client only appends the box for rows that carry one.
+    if (marks.length > 0) row.marks = marks;
     if (node.cwd !== undefined) row.cwd = node.cwd;
     // The two travel separately: badgeKind is set whenever there is a tone at
     // all, because the client keys the dot column's width on it and 'idle'
@@ -2745,6 +2767,13 @@ function sessionTooltip(
   // about what the ROW is worth carrying, and a hover costs no width.
   if (typeof node.tokens === 'number' && Number.isFinite(node.tokens)) {
     lines.push(`context: ${node.tokens.toLocaleString('en-US')} tokens`);
+  }
+  // The fan-out, in words. The inline sidebar draws a `run-all` mark for this;
+  // the native tree cannot (a TreeItem gets one icon, and it is the
+  // provider's), so the hover is where both surfaces say it — the same split
+  // the muted bell below lives with.
+  if (node.subagents === true) {
+    lines.push('sub-agents working under this session');
   }
   // The one fact the native tree has nowhere else to put it: that surface draws
   // no bell (a TreeItem gets one icon, and it is the provider's), so the hover

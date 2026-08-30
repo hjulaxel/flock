@@ -105,6 +105,12 @@ const ROW_GLYPH_FILES: Record<string, string> = {
   chat: 'chat.svg',
   add: 'add.svg',
   'bell-slash': 'bell-slash.svg',
+  // Work that has FANNED OUT under a session: a workflow, a Task, agents of
+  // any kind. Named by its CODICON ID like the pull-request set below, so the
+  // native tree could hand the identical string to a ThemeIcon — though today
+  // it does not, and says the same thing in the hover instead (a TreeItem gets
+  // one icon and the provider has spent it).
+  'run-all': 'run-all.svg',
   // Leads the second line under a session (`branchDisplay: inline`) AND labels
   // the branch block's fold on a project row, which used to carry a chevron: a
   // chevron says "this opens", which the row's own twisty already says, where

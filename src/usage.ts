@@ -63,6 +63,32 @@ export interface TranscriptStats {
    *  timer keeps a long-abandoned session warm forever (measured on this
    *  machine — the spec forbids mtime as an idleness source). */
   lastRecordAt?: number;
+  /**
+   * Epoch ms of the last SIDECHAIN record in the tail — a line written by a
+   * sub-agent rather than by the conversation itself.
+   *
+   * This is the only thing on the outside of a session that says work has
+   * FANNED OUT: a workflow, a Task, an agent of any kind. From the roster the
+   * session is `busy` and nothing more, exactly as it is for a one-line edit,
+   * so a session with nine agents under it and one thinking about a typo are
+   * the same amber dot — which is the gap this fills.
+   *
+   * FREE, and that is why it is here rather than anywhere else. This tail is
+   * already read for every live session on every rebuild, `isSidechain` is
+   * already inspected twice in the same loop (see lastExchange and
+   * isUserPrompt, both of which SKIP sidechains for the opposite reason), and
+   * this is one more assignment inside it. A signal worth a mark on a row is
+   * not worth a second pass over the same bytes.
+   *
+   * A TIMESTAMP, NOT A BOOLEAN, because sidechain records do not expire out of
+   * a transcript: every session that has ever used an agent has them somewhere
+   * in its history, and "has ever" is not what a live mark may mean. The
+   * freshness rule is the reader's — see lineage.SUBAGENT_FRESH_MS, which
+   * compares this against `lastRecordAt` rather than against the wall clock,
+   * so a machine whose clock disagrees with the transcript's cannot make a
+   * session look busy with agents that finished yesterday.
+   */
+  sidechainAt?: number;
   /** The last conversation TEXT in the tail: the final assistant reply when
    *  the window holds one, else the last real user prompt. This is what an
    *  archived row shows when no close-with-summary was recorded — level 2
@@ -345,6 +371,15 @@ export function readTailStats(
       if (typeof ts === 'string' && ts !== '') {
         const parsed = Date.parse(ts);
         if (Number.isFinite(parsed)) out.lastRecordAt = parsed;
+        // The same records, asked one more question: was this one written by a
+        // SUB-AGENT? Set here rather than in a branch of its own so the two
+        // clocks are read off exactly the same lines — `sidechainAt` is only
+        // ever meaningful relative to `lastRecordAt`, and a field that could
+        // advance on a line the other ignored would make that comparison a
+        // lie.
+        if (rec['isSidechain'] === true && Number.isFinite(parsed)) {
+          out.sidechainAt = parsed;
+        }
       }
     }
 

@@ -580,6 +580,17 @@ completes puts it straight back. Silencing a session for good is Mute, which is
 a different verb on purpose — a one-click × that could permanently hide a
 session's notifications would be the most destructive control in the popup.
 
+A session whose work has **fanned out** — a workflow, a Task, sub-agents of any
+kind — carries a small **run-all** mark beside its name while that is
+happening. The dot cannot say it: from the outside a session with nine agents
+under it and one thinking about a typo are the same word, `busy`, so they were
+the same amber dot. The mark is read from the transcript the sidebar already
+reads on every tick (an `isSidechain` line no more than 90 seconds behind the
+session's own last line), which is why it costs nothing and why it says only
+that the work fanned out — not how many agents, or which kind. It goes out with
+the turn that raised it. The native tree draws no mark and says the same thing
+in the hover.
+
 A silenced session never dots, never rings the bell, never toasts, and carries a
 **struck-through bell** beside its name, so a session that has gone quiet
 because you silenced it cannot be mistaken for one that has gone quiet because
