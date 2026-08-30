@@ -32,12 +32,25 @@
 // invisible detached sessions, 32 GB" structurally impossible rather than
 // merely unlikely.
 //
-// WHAT "IDLE" MEANS is deliberately the caller's problem — but with a rule:
-// the last REAL transcript record's timestamp (or roster status), NEVER file
-// mtime. Hooks and last-prompt bookkeeping touch transcripts without new
-// content (measured on this machine), and an mtime-fed timer would keep a
-// dead-idle session warm forever. See usage.readTailStats().lastRecordAt for
-// the supported source.
+// WHAT "IDLE" MEANS has TWO halves, and `lastEngagementMs` below is where
+// they meet:
+//
+//   * what the CONVERSATION did — the last REAL transcript record's
+//     timestamp, NEVER file mtime. Hooks and last-prompt bookkeeping touch
+//     transcripts without new content (measured on this machine), and an
+//     mtime-fed timer would keep a dead-idle session warm forever. See
+//     usage.readTailStats().lastRecordAt for the supported source.
+//   * what the USER did — EditorialRecord.touchedAt: clicking the row,
+//     focusing the tab, revealing the terminal. Clicking a session is the
+//     plainest statement there is that it is in use, and it leaves no trace
+//     in the transcript at all. A clock that only read the first half closed
+//     sessions the user had opened and returned to all week, on the grounds
+//     that the model had not spoken since Monday.
+//
+// The newer of the two wins. Note what this does NOT change: the age the tree
+// shows on a row is still "when this last got an answer", because that is the
+// question a person reading the tree is asking. The two clocks are for two
+// different readers, and only one of them closes anything.
 //
 // PURE, in the shape chatAutoCloseVictims (src/chatAutoClose.ts) established
 // and this module generalizes: this decides, the wiring in extension.ts reads
@@ -62,6 +75,61 @@ import type { SessionStatus } from './types';
  */
 export const GRACE_POOL_CAP = 8;
 
+/**
+ * How stale a session's `touchedAt` must be before another touch is written.
+ *
+ * Every tab switch is a touch, and a touch is a locked read-merge-write of
+ * state.json whose whole record then wins the newest-wins merge against every
+ * other window. Paying that on each flick between two tabs would be absurd for
+ * a clock denominated in DAYS: a minute's resolution moves the close decision
+ * by at most a minute out of four thousand three hundred and twenty. The
+ * wiring compares against the stamp already on the record, so the coalescing
+ * survives a window reload with no in-memory state to rebuild.
+ */
+export const TOUCH_COALESCE_MS = 60_000;
+
+/**
+ * The idle clock: the newest of what the conversation did and what the user
+ * did, with a floor under both.
+ *
+ * Pure, and its own function rather than three `Math.max` calls at the two
+ * call sites, because the RULE is the interesting part and both sweeps have to
+ * apply the same one. Every input is optional and any of them may be
+ * non-finite — a session with no transcript yet, a record with no touch, a
+ * `Date.parse` of a hand-edited stamp — and the answer distinguishes the two
+ * ways of knowing nothing:
+ *
+ *   * no clock at all and no fallback → NaN, which every caller reads as
+ *     "never close on the strength of not knowing";
+ *   * no clock but a fallback (the bind time — the tab is open, so SOMETHING
+ *     happened at that moment) → the fallback.
+ *
+ * That second case is why the fallback is a parameter and not the caller's
+ * `??`. A bound tab whose transcript tail happens to hold no parseable record
+ * used to fall back to its bind time ALONE, so a tab opened this morning and
+ * clicked a minute ago read as hours idle. Folding the touch in here fixes
+ * that without the call site having to know it was ever a problem.
+ */
+export function lastEngagementMs(input: {
+  /** Newest real transcript record across the generation chain. */
+  lastRecordMs?: number;
+  /** Newest `touchedAt` across the generation chain, as epoch ms. */
+  touchedMs?: number;
+  /** Used only when neither clock is known — the bind time / record birth. */
+  fallbackMs?: number;
+}): number {
+  let best = Number.NaN;
+  for (const value of [input.lastRecordMs, input.touchedMs]) {
+    if (value === undefined || !Number.isFinite(value)) continue;
+    if (!Number.isFinite(best) || value > best) best = value;
+  }
+  if (Number.isFinite(best)) return best;
+  const fallback = input.fallbackMs;
+  return fallback !== undefined && Number.isFinite(fallback)
+    ? fallback
+    : Number.NaN;
+}
+
 /** One session, reduced to the facts the decision needs. Built from the
  *  terminal registry + records + roster by extension.ts; by hand in tests. */
 export interface SessionCloseFacts {
@@ -81,8 +149,10 @@ export interface SessionCloseFacts {
   /** Epoch ms the detach grace expires — present IFF the session is in the
    *  grace pool (detached, process running, countdown row showing). */
   graceUntilMs?: number;
-  /** Epoch ms of the last REAL transcript record (never mtime — see header),
-   *  or the bind time when no transcript exists yet. Non-finite = unknown. */
+  /** Epoch ms of the last engagement — the newer of the last real transcript
+   *  record and the last user touch, falling back to the bind time when
+   *  neither is known. Built with `lastEngagementMs`; never mtime (see
+   *  header). Non-finite = unknown, and unknown is never closed. */
   lastActivityMs: number;
 }
 

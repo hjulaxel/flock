@@ -8,6 +8,48 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Changed
 
+- **Clicking a session counts as using it, and the windows before an automatic
+  close are now three days and one day.** The idle timer measured one thing:
+  when the conversation last wrote a real record to its transcript. That is a
+  fine measure of what the *model* has been doing and a poor one for whether
+  the *session* is in use — you open a session, read what it concluded, think
+  about it, leave it open, come back after a meeting, and none of that reaches
+  the transcript. Thirty minutes later the tab was gone and the row archived.
+  Nothing was lost (the transcript is the session, one click resumes it), but
+  a tool that puts away the thing you were looking at has to be right about
+  what "looking at it" means, and it was not.
+  So the clock now has two halves and takes the newer: the last real
+  transcript record, and the last time you **touched** the session — clicked
+  its row, focused its tab, revealed its terminal. A click is the plainest
+  statement there is that a session is in use. The touch is stamped on the
+  session's record (`touchedAt`), so it survives a reload and is visible to
+  every window, and it is written at most once a minute per session, because
+  every tab switch is a touch and a touch is a locked read-merge-write of
+  `state.json` — a clock denominated in days does not need second resolution.
+  **The age shown on the row did not change and is not supposed to.** It still
+  says when the session last got an answer, because that is the question you
+  are asking when you read the tree. Two clocks, two readers; only one of them
+  closes anything.
+  The defaults moved with it. `lineage.session.closeAfterMinutes` goes from 30
+  to **4320 — three days**: a session is a piece of work, and work is picked
+  up tomorrow, so the window has to be long enough that something left on
+  Monday is still open on Thursday. `lineage.chat.autoCloseMinutes` goes from
+  30 to **1440 — one day**: a chat is cheaper and is *meant* to be abandoned,
+  but thirty minutes is shorter than a lunch, and a side question you meant to
+  return to after a meeting was gone when you got back. Both keep `0` as the
+  off switch and every existing protection — the active tab, a busy or waiting
+  session (marked *close after this turn* instead), **Keep Awake**.
+  Three days also drains the pressure out of the sharp edges in the idleness
+  clock, which is half the value of the change: a forty-minute test run that
+  writes nothing while it runs, a roster status frozen at `busy` and then
+  de-staled to idle, a transcript whose 96 kB tail happened to contain no
+  parseable record — each could carry a live session past a thirty-minute
+  deadline, and none of them lasts three days. That last one is fixed outright
+  rather than merely outrun: a bound tab with no readable record used to fall
+  back to *its bind time alone*, so a tab opened this morning and clicked a
+  minute ago read as hours idle. The touch is now folded into that fallback.
+  The decision stays pure and tested (`lastEngagementMs`, `src/idleClose.ts`).
+
 - **The Shells view now lists the commands Claude runs, not the terminals it
   runs in.** The section was always meant to answer "what is executing right
   now"; what it actually listed was one row per terminal *this window* had
