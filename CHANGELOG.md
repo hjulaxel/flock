@@ -4,6 +4,37 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`/exit` leaves you at a shell instead of closing the tab —
+  `lineage.exitToShell`, on by default.** A session's tab holds exactly one
+  process, so exiting used to take the tab with it. That is the wrong ending for
+  the commonest reason to exit at all: you wanted to start again — a new MCP
+  server to pick up, an edited setting, a fresh context — and instead of a prompt
+  to type `claude --resume` at, the tab vanished and you had to go find the row
+  again. Now the same tab holds a shell prompt, in the same directory, with the
+  conversation still in the scrollback above it. Exiting *that* shell closes the
+  tab exactly as `/exit` used to, so nothing becomes harder to get rid of.
+  Requires tmux and is inert without it: a session on the fallback tier **is**
+  its terminal process, so there is nothing left to put a shell into. The
+  behaviour lives in Flock's generated tmux config, which tmux reads when its
+  server starts — so a flip applies to sessions started after every current one
+  has ended. Reported by [@sidhson](https://github.com/sidhson) in
+  [#7](https://github.com/hjulaxel/flock/issues/7).
+
+### Fixed
+
+- **Resume no longer risks handing you a shell and calling it a conversation.**
+  Groundwork for the above, and a correctness fix in its own right: the detach
+  tier's "is this session still live" probe asked only whether a tmux session
+  existed under the wrap's name, which a pane sitting at a shell prompt answers
+  just as well as a running CLI. The probe now reads what is *in* the pane, so an
+  exited wrap is treated as gone — **Resume** takes the ordinary `--resume` path
+  with every guard on it, and a fresh launch ends a stale wrap rather than
+  attaching to it and never starting the CLI at all.
+
 ## [0.1.6] — 2026-08-18
 
 ### Added

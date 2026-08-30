@@ -42,6 +42,18 @@
 //     command is exec'd directly, no shell in between (same guarantee the
 //     plain launch has).
 //
+// EXIT TO THE SHELL (`lineage.exitToShell`, on by default). A wrap's pane holds
+// exactly one process, so `/exit` used to take the tab with it: tmux destroyed
+// the session, the client died, and VS Code closed the tab on someone who had
+// exited only in order to start again. The conf now arms `remain-on-exit` and a
+// `pane-died` hook that respawns the user's login shell in that same pane — same
+// tmux session, same client, same tab, a prompt where the CLI was — then
+// disarms itself so the shell's own exit still ends everything. `renderTmuxConf`
+// carries the reasoning for each line; `queryWrapState` is the other half, the
+// one that stops the resume verb from mistaking that shell for a live
+// conversation. Off, and on the kill+resume tier, the old behaviour is exactly
+// what happens.
+//
 // Windows is deliberately out: tmux is not a native Windows program, and a
 // WSL/MSYS tmux found on PATH would run claude in the wrong world. Windows —
 // and any machine without tmux — keeps the kill+resume tier, which every
@@ -57,7 +69,7 @@ import * as path from 'node:path';
 
 import { logError } from './log';
 import { isSessionId } from './types';
-import type { TmuxSpawn } from './types';
+import type { TmuxSpawn, WrapState } from './types';
 
 /** The private server's socket name (`tmux -L …`). Also the string a user
  *  needs to inspect it by hand: `tmux -L lineage list-sessions`. */
@@ -67,8 +79,23 @@ export const TMUX_SOCKET = 'lineage';
 export const TMUX_CONF_NAME = 'tmux.conf';
 
 /**
- * The whole conf. Its one job is to make tmux INVISIBLE: a wrapped session
- * must look and feel like a bare claude terminal.
+ * The pane option the exit-to-shell hook stamps, and the one unambiguous way
+ * to tell a wrap that is RUNNING its CLI from one that has exited and left a
+ * shell behind. A user option (`@`-prefixed) so tmux stores it for us and no
+ * future tmux release can mean something else by it.
+ *
+ * WHY A FLAG AND NOT A GUESS: the alternative reading is
+ * `#{pane_current_command}` against a list of shell basenames, which is wrong
+ * in both directions — a claude that shells out for a tool call momentarily
+ * reads as a shell, and a user whose shell Flock has never heard of reads as
+ * claude. The flag is set by the same hook that respawns the shell, so it says
+ * exactly what happened rather than what the pane looks like.
+ */
+export const TMUX_EXITED_OPTION = '@flock_exited';
+
+/**
+ * The conf's fixed part. Its one job is to make tmux INVISIBLE: a wrapped
+ * session must look and feel like a bare claude terminal.
  *
  * `prefix None` (both prefixes) is the load-bearing line: Claude Code owns
  * Ctrl+B (background a task), and a tmux that swallows it as its prefix would
@@ -92,6 +119,94 @@ set -g allow-passthrough on
 set -s exit-empty on
 set -g set-titles off
 `;
+
+/**
+ * Characters that must never reach the shell path we interpolate into the
+ * conf. The path lands inside a SINGLE-QUOTED tmux hook command, so a quote
+ * or a backslash would end the string early and the rest of the line would be
+ * parsed as tmux commands; whitespace would split it into a command plus
+ * arguments; `#` starts a tmux comment, and `;` a new command. None of these
+ * appear in a real shell path, so anything carrying one is rejected rather
+ * than escaped — a launch must never turn into a conf we did not write.
+ */
+const UNSAFE_IN_CONF = /['"\\;#\s]/;
+
+/**
+ * Pure. The shell to leave behind when a wrapped CLI exits, or null when there
+ * should be no exit-to-shell at all (Windows, where the whole tier is absent —
+ * see `findTmuxBinary`).
+ *
+ * `$SHELL` is the right source: it is the shell the user chose, and the one
+ * their prompt, aliases and history belong to. It is also user-controlled
+ * input reaching a file we generate, hence `UNSAFE_IN_CONF` and the absolute
+ * -path requirement. A `$SHELL` that fails either test is not an error worth
+ * a message — it falls back to the platform's own default, which is what the
+ * pty would have used anyway.
+ */
+export function resolveExitShell(
+  shell: string | undefined,
+  platform: string,
+): string | null {
+  if (platform === 'win32') return null;
+  const fallback = platform === 'darwin' ? '/bin/zsh' : '/bin/bash';
+  if (typeof shell !== 'string') return fallback;
+  const trimmed = shell.trim();
+  if (trimmed === '' || !trimmed.startsWith('/')) return fallback;
+  if (UNSAFE_IN_CONF.test(trimmed)) return fallback;
+  return trimmed;
+}
+
+/**
+ * Pure. The whole conf, with or without the exit-to-shell block.
+ *
+ * THE PROBLEM THE BLOCK FIXES: `/exit` (or Ctrl+D) ends the claude process,
+ * which is the wrap's only pane — so tmux destroys the session, `exit-empty`
+ * reaps the server, the client dies and VS Code closes the tab. Someone who
+ * exits meaning to start again immediately (new MCP server, edited settings,
+ * a fresh context) does not get a prompt to type `claude --resume` at: they
+ * get their tab pulled out from under them and have to go find the row again.
+ *
+ * The three hooks, verified against tmux 3.6a rather than assumed:
+ *
+ *   * `remain-on-exit on` keeps the pane — dead, but present — when its
+ *     process exits, which is the only state from which `pane-died` fires at
+ *     all. Without it tmux destroys the pane and only `pane-exited` fires,
+ *     too late to put anything back.
+ *   * `respawn-pane` puts a LOGIN shell in that same pane, at
+ *     `#{pane_current_path}` so it opens where the conversation was working.
+ *     Same pane means same tmux session, same client, same VS Code tab: the
+ *     screen redraws to a prompt and nothing else moves.
+ *   * `setw remain-on-exit off` is the safety half, and it is not optional.
+ *     Left armed, exiting the SHELL would fire the hook again and respawn
+ *     another one — a tab that cannot be closed from the inside and a tmux
+ *     session that outlives every attempt to end it. Disarmed, the shell's
+ *     own exit destroys the pane for real, `exit-empty` reaps the server, and
+ *     the tab closes exactly as it does today.
+ *   * the `TMUX_EXITED_OPTION` stamp is what Flock reads back: a wrap at a
+ *     shell prompt is NOT a live conversation to attach to, and without this
+ *     the resume verb would hand the user their own shell and call it a
+ *     reopened session. See `queryWrapState`.
+ *
+ * `kill-session` is unaffected — it destroys the session outright, so the
+ * hook never runs and a tab the user closes still ends the session (checked;
+ * a resurrecting hook here would leak a tmux session per close). So is
+ * `respawn-pane -k`, which replaces the process without firing `pane-died`,
+ * leaving the account-move path exactly as it was.
+ */
+export function renderTmuxConf(exitShell?: string | null): string {
+  if (typeof exitShell !== 'string' || exitShell === '') return TMUX_CONF;
+  if (!exitShell.startsWith('/') || UNSAFE_IN_CONF.test(exitShell)) {
+    return TMUX_CONF;
+  }
+  return (
+    TMUX_CONF +
+    `# Exit to the shell instead of closing the tab (lineage.exitToShell).\n` +
+    `set -g remain-on-exit on\n` +
+    `set-hook -g pane-died 'respawn-pane -k -c "#{pane_current_path}" -- ${exitShell} -l'\n` +
+    `set-hook -ga pane-died 'setw remain-on-exit off'\n` +
+    `set-hook -ga pane-died 'set -p ${TMUX_EXITED_OPTION} 1'\n`
+  );
+}
 
 /**
  * The tmux session name for a Flock session. Prefixed so a hand-run
@@ -207,8 +322,12 @@ export function findTmuxBinary(): string | null {
  * Idempotent: an up-to-date file is left untouched, so activation costs one
  * read in the steady state.
  */
-export function ensureTmuxConf(dir: string): string | undefined {
+export function ensureTmuxConf(
+  dir: string,
+  exitShell?: string | null,
+): string | undefined {
   const confPath = path.join(dir, TMUX_CONF_NAME);
+  const wanted = renderTmuxConf(exitShell);
   try {
     let existing: string | undefined;
     try {
@@ -216,9 +335,9 @@ export function ensureTmuxConf(dir: string): string | undefined {
     } catch {
       existing = undefined;
     }
-    if (existing !== TMUX_CONF) {
+    if (existing !== wanted) {
       fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(confPath, TMUX_CONF);
+      fs.writeFileSync(confPath, wanted);
     }
     return confPath;
   } catch (err) {
@@ -271,6 +390,60 @@ export function queryPanePid(
     } catch (err) {
       logError('tmux.queryPanePid', err);
       resolve(undefined);
+    }
+  });
+}
+
+/**
+ * Pure. `list-panes -F '#{pane_pid} #{TMUX_EXITED_OPTION}'` output as a state.
+ *
+ * Same one-pane rule as `parsePanePid`, and for the same reason: a wrap is
+ * created around a single command, so anything answering with two panes is not
+ * what we made and nothing is claimed about it. An unset user option formats
+ * as the empty string, so a wrap launched before exit-to-shell existed — or
+ * with it switched off — reads `running`, which is what it is.
+ */
+export function parseWrapState(stdout: string): WrapState {
+  const lines = stdout.split('\n').filter((l) => l.trim() !== '');
+  if (lines.length !== 1) return 'gone';
+  const parts = (lines[0] ?? '').trim().split(/\s+/);
+  const pid = Number(parts[0] ?? '');
+  if (!Number.isInteger(pid) || pid <= 0) return 'gone';
+  return (parts[1] ?? '') === '1' ? 'exited' : 'running';
+}
+
+/**
+ * Whether the server holds this wrap, and whether its CLI is still in it.
+ *
+ * One exec, and it replaces `queryPanePid(...) !== undefined` everywhere the
+ * question being asked is "is there a conversation here" rather than "what pid
+ * is claude". Never throws; a missing server, name or tmux is `gone`.
+ */
+export function queryWrapState(
+  binary: string,
+  name: string,
+): Promise<WrapState> {
+  return new Promise((resolve) => {
+    try {
+      execFile(
+        binary,
+        [
+          '-L',
+          TMUX_SOCKET,
+          'list-panes',
+          '-t',
+          `=${name}`,
+          '-F',
+          `#{pane_pid} #{${TMUX_EXITED_OPTION}}`,
+        ],
+        { timeout: 2000 },
+        (err, stdout) => {
+          resolve(err ? 'gone' : parseWrapState(stdout));
+        },
+      );
+    } catch (err) {
+      logError('tmux.queryWrapState', err);
+      resolve('gone');
     }
   });
 }
@@ -426,6 +599,28 @@ export function buildSetEnvArgs(
 }
 
 /**
+ * Pure. The argv that unsets the exit-to-shell stamp on a wrap's pane.
+ *
+ * Belongs to every path that puts a CLI back into a pane: the stamp records
+ * that the pane holds a SHELL, and a respawn makes that false. Left behind, a
+ * live conversation would read as `exited` forever — and the resume verb would
+ * kill and relaunch a process that was running fine. Pane target form (`=name:`)
+ * for the reason `buildRespawnArgs` documents.
+ */
+export function buildClearExitedArgs(name: string): string[] {
+  return [
+    '-L',
+    TMUX_SOCKET,
+    'set',
+    '-p',
+    '-t',
+    `=${name}:`,
+    '-u',
+    TMUX_EXITED_OPTION,
+  ];
+}
+
+/**
  * Restart a wrapped session's process IN PLACE, on a different environment.
  *
  * WHY THIS EXISTS: an account is a config directory, and a config directory is
@@ -478,6 +673,27 @@ export async function respawnTmuxPane(
     }
   });
   if (!ok) return false;
+
+  // The pane holds a CLI again, so it is no longer "exited to a shell".
+  // Defensive rather than reached today (the resume path clears an exited wrap
+  // by killing it, not by respawning into it), and cheap enough to keep the
+  // stamp from ever outliving what it describes.
+  await new Promise<void>((resolve) => {
+    try {
+      execFile(
+        binary,
+        buildClearExitedArgs(opts.name),
+        { timeout: 2000 },
+        (err) => {
+          if (err) logError('tmux.clearExited', err);
+          resolve();
+        },
+      );
+    } catch (err) {
+      logError('tmux.clearExited', err);
+      resolve();
+    }
+  });
 
   for (const [key, value] of Object.entries(opts.env ?? {})) {
     await new Promise<void>((resolve) => {

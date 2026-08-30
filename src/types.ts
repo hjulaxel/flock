@@ -1034,6 +1034,10 @@ export const CONFIG_KEYS = {
   /** Detach tier: 'auto' (wrap launches in the private tmux server when tmux
    *  is on PATH) or 'off'. */
   tmux: 'tmux',
+  /** `/exit` leaves a shell in the tab instead of closing it. Rides on the
+   *  detach tier — a wrapped pane is the only one something can be put back
+   *  into — so it is silently inert when `tmux` is off or tmux is absent. */
+  exitToShell: 'exitToShell',
   groupByFolder: 'groupByFolder',
   showGhosts: 'showGhosts',
   showArchived: 'showArchived',
@@ -2712,7 +2716,33 @@ export interface TerminalDeps {
    *  inactive), never by workspace parking, which detaches. Absent = a
    *  user-closed wrapped session keeps running hidden. */
   tmuxKillSession?(name: string): Promise<boolean>;
+  /** Detach tier: what the private server holds under this wrap name —
+   *  `gone`, `running`, or `exited` (the CLI left and exit-to-shell put a
+   *  shell in its pane). The launch path needs the third answer specifically:
+   *  its `new-session -A` ATTACHES to an existing session, so launching under
+   *  the name of a wrap sitting at a shell prompt would adopt the shell and
+   *  never start claude at all. Absent (the unit doubles) = the pre-fix
+   *  behaviour, which is correct on any wiring that cannot leave a shell
+   *  behind in the first place. */
+  tmuxWrapState?(name: string): Promise<WrapState>;
 }
+
+/**
+ * Detach tier (src/tmux.ts). What the private server holds under a wrap's name.
+ *
+ *   * `gone`    — no such session (never launched, killed, or died while
+ *                 parked). The everyday answer for a closed conversation.
+ *   * `running` — one pane, a live process in it. A conversation to ATTACH to.
+ *   * `exited`  — one pane, and exit-to-shell has fired in it: the CLI is gone
+ *                 and the user is sitting at a shell prompt.
+ *
+ * `exited` is the state that has to be told apart from `running`, and the
+ * reason this type exists. Both answer a pane pid, so every probe written as
+ * "does a pane pid come back" reads a shell as a live conversation — and the
+ * resume verb, built on exactly that probe, would attach the user to their own
+ * shell and record the session as reopened.
+ */
+export type WrapState = 'gone' | 'running' | 'exited';
 
 /** Detach tier (src/tmux.ts). How to wrap a session launch in the private
  *  tmux server: the resolved binary, plus the conf that makes tmux invisible

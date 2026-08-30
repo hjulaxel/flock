@@ -1475,6 +1475,11 @@
           ],
           "description": "Run Flock-launched Claude sessions inside a private tmux server (`tmux -L lineage`). This upgrades workspace parking from close-and-resume to detach-and-reattach: switching away hides a session's tab while the conversation KEEPS RUNNING — busy ones too — and switching back reattaches it instantly, live state intact. Requires tmux on PATH; without it (and always on Windows) Flock falls back to close-and-resume. Sessions started outside Flock are never wrapped either way."
         },
+        "lineage.exitToShell": {
+          "type": "boolean",
+          "default": true,
+          "description": "When you `/exit` a session Flock launched, leave a shell prompt in the tab instead of closing it — same tab, same directory — so you can start straight back up with `claude --resume`. Exiting that shell closes the tab as usual. Requires `lineage.tmux` and tmux on PATH: a bare session IS its terminal process, so there is nothing left to put a shell into. The setting is written into Flock's tmux conf, which tmux reads when its server starts, so a change applies to sessions started after every current one has ended."
+        },
         "lineage.terminalLocation": {
           "type": "string",
           "default": "editor",

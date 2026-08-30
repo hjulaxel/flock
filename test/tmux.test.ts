@@ -14,11 +14,16 @@ import * as path from 'node:path';
 
 import {
   TMUX_CONF,
+  TMUX_EXITED_OPTION,
   TMUX_SOCKET,
+  buildClearExitedArgs,
   buildRespawnArgs,
   buildSetEnvArgs,
   buildTmuxArgs,
   ensureTmuxConf,
+  parseWrapState,
+  renderTmuxConf,
+  resolveExitShell,
   findTmuxBinary,
   tmuxAdvice,
   tmuxInstallHint,
@@ -178,6 +183,145 @@ describe('the conf keeps tmux invisible', () => {
   });
 });
 
+// Exit to the shell (`lineage.exitToShell`). Every claim below was checked
+// against tmux 3.6a by hand before it was written down: the hook chain leaves a
+// real login shell in the SAME pane at the conversation's own directory, the
+// self-disarm is what stops the shell's own exit from respawning another one
+// forever, and neither `kill-session` nor `respawn-pane -k` fires `pane-died`
+// (so a closed tab still ends the session, and the account-move path is
+// untouched).
+describe('exit to the shell: the conf block', () => {
+  const SH = '/bin/zsh';
+
+  it('adds nothing at all when there is no shell to leave behind', () => {
+    expect(renderTmuxConf(null)).toBe(TMUX_CONF);
+    expect(renderTmuxConf(undefined)).toBe(TMUX_CONF);
+    expect(renderTmuxConf('')).toBe(TMUX_CONF);
+  });
+
+  it('keeps the invisibility conf intact and appends to it', () => {
+    const conf = renderTmuxConf(SH);
+    expect(conf.startsWith(TMUX_CONF)).toBe(true);
+  });
+
+  it('arms remain-on-exit, without which pane-died never fires', () => {
+    // tmux destroys the pane on process exit unless this is on, and then only
+    // `pane-exited` fires — too late to put anything back in it.
+    expect(renderTmuxConf(SH)).toContain('set -g remain-on-exit on');
+  });
+
+  it('respawns the shell in the same pane, at the conversation\u2019s own path', () => {
+    const conf = renderTmuxConf(SH);
+    expect(conf).toContain("set-hook -g pane-died 'respawn-pane -k");
+    // Same pane means same tmux session, same client, same VS Code tab.
+    expect(conf).toContain('-c "#{pane_current_path}"');
+    // A LOGIN shell: the point is the user's own prompt, aliases and history.
+    expect(conf).toContain(`-- ${SH} -l'`);
+  });
+
+  it('disarms itself, so exiting the SHELL really closes the tab', () => {
+    // THE load-bearing safety line. Left armed, the hook fires on the shell's
+    // own exit too and respawns another one: a tab that cannot be closed from
+    // the inside, and a tmux session that outlives every attempt to end it.
+    expect(renderTmuxConf(SH)).toContain(
+      "set-hook -ga pane-died 'setw remain-on-exit off'",
+    );
+  });
+
+  it('stamps the pane, which is how Flock tells a shell from a conversation', () => {
+    expect(renderTmuxConf(SH)).toContain(
+      `set-hook -ga pane-died 'set -p ${TMUX_EXITED_OPTION} 1'`,
+    );
+  });
+
+  it('appends the hooks with -ga, or each would replace the last', () => {
+    const conf = renderTmuxConf(SH);
+    expect(conf.match(/set-hook -g pane-died/g)).toHaveLength(1);
+    expect(conf.match(/set-hook -ga pane-died/g)).toHaveLength(2);
+  });
+
+  it('refuses a shell path that could break out of the hook string', () => {
+    // The path lands inside a SINGLE-QUOTED tmux hook command. A quote would
+    // end the string early and the rest of the line would parse as tmux
+    // commands; whitespace splits it; `#` opens a comment and `;` a command.
+    // None of these occurs in a real shell path, so the conf falls back to
+    // having no block at all rather than to a conf we did not write.
+    for (const bad of [
+      "/bin/z'sh",
+      '/bin/z sh',
+      '/bin/zsh;kill-server',
+      '/bin/zsh#x',
+      '/bin/z"sh',
+      '/bin/z\\sh',
+      'zsh', // not absolute
+    ]) {
+      expect(renderTmuxConf(bad), bad).toBe(TMUX_CONF);
+    }
+  });
+});
+
+describe('resolveExitShell', () => {
+  it('prefers $SHELL — the user\u2019s prompt, aliases and history', () => {
+    expect(resolveExitShell('/opt/homebrew/bin/fish', 'darwin')).toBe(
+      '/opt/homebrew/bin/fish',
+    );
+  });
+
+  it('falls back to the platform default rather than failing a launch', () => {
+    expect(resolveExitShell(undefined, 'darwin')).toBe('/bin/zsh');
+    expect(resolveExitShell(undefined, 'linux')).toBe('/bin/bash');
+    expect(resolveExitShell('', 'linux')).toBe('/bin/bash');
+    // Relative, or carrying something that cannot survive the conf: the
+    // default is what the pty would have used anyway.
+    expect(resolveExitShell('zsh', 'darwin')).toBe('/bin/zsh');
+    expect(resolveExitShell("/bin/z'sh", 'darwin')).toBe('/bin/zsh');
+  });
+
+  it('is null on Windows, where the whole detach tier is absent', () => {
+    expect(resolveExitShell('C:\\Windows\\system32\\cmd.exe', 'win32')).toBeNull();
+    expect(resolveExitShell(undefined, 'win32')).toBeNull();
+  });
+});
+
+describe('parseWrapState', () => {
+  it('tells a live conversation from a shell left by /exit', () => {
+    // Both answer a pane pid, which is why the old `queryPanePid !== undefined`
+    // probe read a shell as a session to attach to — and why resume would have
+    // dropped the user at their own prompt and called it a reopened session.
+    expect(parseWrapState('61862 \n')).toBe('running');
+    expect(parseWrapState('61862 1\n')).toBe('exited');
+  });
+
+  it('reads an unset option as running — every pre-feature wrap', () => {
+    // An unset user option formats as the empty string, so a wrap launched
+    // before exit-to-shell existed, or with it off, must read as what it is.
+    expect(parseWrapState('61862\n')).toBe('running');
+  });
+
+  it('is gone for no server, no session, and anything unparseable', () => {
+    expect(parseWrapState('')).toBe('gone');
+    expect(parseWrapState('\n\n')).toBe('gone');
+    expect(parseWrapState("can't find session\n")).toBe('gone');
+    expect(parseWrapState('0 1\n')).toBe('gone');
+    expect(parseWrapState('-3\n')).toBe('gone');
+  });
+
+  it('claims nothing about a session with more than one pane', () => {
+    // Same rule as parsePanePid: a wrap is built around a single command, so
+    // two panes means this is not ours.
+    expect(parseWrapState('61862 1\n61863 1\n')).toBe('gone');
+  });
+});
+
+describe('buildClearExitedArgs', () => {
+  it('unsets the stamp on the PANE, using the pane target form', () => {
+    expect(buildClearExitedArgs('lineage-abc')).toEqual([
+      '-L', 'lineage', 'set', '-p', '-t', '=lineage-abc:', '-u',
+      TMUX_EXITED_OPTION,
+    ]);
+  });
+});
+
 describe('ensureTmuxConf', () => {
   it('writes the conf and is idempotent', () => {
     const dir = tempDir();
@@ -197,6 +341,25 @@ describe('ensureTmuxConf', () => {
 
   it('degrades to undefined when the dir cannot exist', () => {
     expect(ensureTmuxConf('/dev/null/nope')).toBeUndefined();
+  });
+
+  it('writes the exit-to-shell block when one is asked for', () => {
+    const dir = tempDir();
+    const p = ensureTmuxConf(dir, '/bin/zsh') as string;
+    expect(fs.readFileSync(p, 'utf8')).toBe(renderTmuxConf('/bin/zsh'));
+  });
+
+  it('rewrites the file when the setting is flipped, either way', () => {
+    // The flip IS a file rewrite — the hooks live in the conf, not in the
+    // launch argv. tmux reads the conf at SERVER start, so the rewrite is what
+    // makes the next server agree with the setting.
+    const dir = tempDir();
+    const p = ensureTmuxConf(dir, '/bin/zsh') as string;
+    expect(fs.readFileSync(p, 'utf8')).toContain('remain-on-exit on');
+    ensureTmuxConf(dir, null);
+    expect(fs.readFileSync(p, 'utf8')).toBe(TMUX_CONF);
+    ensureTmuxConf(dir, '/bin/bash');
+    expect(fs.readFileSync(p, 'utf8')).toContain('/bin/bash -l');
   });
 });
 

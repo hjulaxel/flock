@@ -673,10 +673,24 @@ export class TerminalRegistry implements DisposableLike {
     let shellArgs = isCodex ? buildCodexArgs(opts) : buildShellArgs(opts);
     let tmuxName: string | undefined;
     if (tmux) {
-      tmuxName =
+      const recordedName =
         typeof opts.tmuxName === 'string' && opts.tmuxName !== ''
           ? opts.tmuxName
-          : tmuxSessionName(sessionId);
+          : undefined;
+      tmuxName = recordedName ?? tmuxSessionName(sessionId);
+      // EXIT-TO-SHELL, the launch side. `new-session -A` attaches when the
+      // name exists, which is the entire mechanism behind restoring a parked
+      // session — and exactly wrong when what exists is a wrap the user
+      // `/exit`ed out of, whose pane now holds a shell. Attaching there would
+      // show them that shell and never run the argv, so Flock would report a
+      // resumed conversation over a bash prompt. Ending the stale wrap first
+      // turns the `-A` back into a create.
+      //
+      // Only for a DERIVED name: a name that arrived in `opts` came from the
+      // park record and means "re-attach to this", and the restore path has
+      // its own liveness answer. Nothing is killed unless the probe says
+      // `exited`, so a running conversation is never touched.
+      if (recordedName === undefined) await this.clearExitedWrap(tmuxName);
       shellArgs = buildTmuxArgs({
         name: tmuxName,
         ...(tmux.confPath !== undefined ? { confPath: tmux.confPath } : {}),
@@ -1044,6 +1058,29 @@ export class TerminalRegistry implements DisposableLike {
         logError('terminals.tmuxKillSession', err);
       },
     );
+  }
+
+  /**
+   * AWAITED, unlike `killTmuxSoon`: the `new-session` that follows would
+   * otherwise race the kill and could still find the session there to attach
+   * to. Both probe and kill are best-effort — no dep, a throw, or a kill that
+   * fails all fall through to the launch, which is the pre-fix behaviour and
+   * no worse than not having looked.
+   */
+  private async clearExitedWrap(name: string): Promise<void> {
+    const probe = this.deps.tmuxWrapState;
+    const kill = this.deps.tmuxKillSession;
+    if (typeof probe !== 'function' || typeof kill !== 'function') return;
+    try {
+      if ((await probe(name)) !== 'exited') return;
+      const ok = await kill(name);
+      log(
+        `terminals: ${ok ? 'ended' : 'could not end'} the exited wrap ${name} ` +
+          'before relaunching into its name',
+      );
+    } catch (err) {
+      logError('terminals.clearExitedWrap', err);
+    }
   }
 
   /** Detach tier, re-resolved per launch (installing tmux or flipping

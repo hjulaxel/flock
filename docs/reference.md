@@ -639,6 +639,33 @@ what. Set `lineage.tmux` to `off` to force the fallback anywhere else.
 Flock says this once, in a notice you can dismiss, if it finds you without tmux
 while workspaces are on. It never asks twice.
 
+### `/exit` leaves you at a shell
+
+A session's tab holds exactly one process, so `/exit` used to take the tab with
+it. That is the wrong ending for the commonest reason to exit at all: you wanted
+to start again — a new MCP server to pick up, an edited setting, a fresh
+context — and instead of a prompt to type `claude --resume` at, the tab vanished
+and you had to go find the row again.
+
+With `lineage.exitToShell` on (the default), exiting a session Flock launched
+leaves **a shell prompt in the same tab, in the same directory**. Nothing else
+moves: same tab, same position, same scrollback above the prompt. Start back up
+however you like — `claude --resume`, `claude -c`, something else entirely — or
+click the row in the sidebar, which resumes the conversation as it always did.
+Exiting *that* shell closes the tab, exactly as `/exit` used to.
+
+It needs tmux, and the setting is inert without it: a session on the fallback
+tier **is** its terminal process, so there is nothing left to put a shell into.
+
+Two details worth knowing:
+
+- The behaviour lives in Flock's generated tmux config, and tmux reads that
+  config when its **server** starts. So flipping the setting applies to sessions
+  started after every current one has ended — not to the ones already open.
+- Flock can tell a shell left behind this way from a conversation still running
+  (it stamps the pane), which is what stops **Resume** from attaching you to
+  your own shell prompt and calling it a reopened session.
+
 ## Using Flock alongside the Claude Code extension
 
 Flock does not need to be the only way you run Claude. The session list comes
