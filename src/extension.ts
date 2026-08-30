@@ -188,7 +188,7 @@ import {
   describeForkEdge,
 } from './daemon';
 import { BranchListCache } from './branchList';
-import { recommendedNotice } from './recommend';
+import { recommendedNotice, windowModelChoices } from './recommend';
 import { chatAutoCloseVictims } from './chatAutoClose';
 import { frontSession, mayFollowSelection } from './switcher';
 import { type WhereAmI, whereAmI } from './whereami';
@@ -6556,6 +6556,17 @@ export async function activate(
     // off two context keys and one configuration value. `hookState` is the live
     // record the context key is set from, so the menu and the palette cannot
     // disagree about whether hooks are installed.
+    // Through `windowModelChoices` rather than off `lineage.mode`, so the gear
+    // menu's sentence and the picker's "(current)" mark come from one function
+    // — and so the legacy `workspaces.enabled` pair is folded by the same
+    // `resolveMode` every gate here runs, which a raw read of the setting would
+    // miss. RAW values in, exactly as `recommendedWorld` hands them over.
+    windowModel: () =>
+      windowModelChoices({
+        mode: cfg().get<string>(CONFIG_KEYS.mode),
+        workspacesEnabled: boolCfg(CONFIG_KEYS.workspacesEnabled, true),
+      }).find((c) => c.current)?.label,
+
     menuState: () => ({
       hooksInstalled: store.getHookState().installed === true,
       verbsInstalled: store.getVerbsState().installed === true,

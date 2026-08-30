@@ -4435,6 +4435,22 @@ export interface CommandDeps {
    *  Optional: absent (an older wiring, every unit double) means the menu offers
    *  BOTH halves of each pair rather than guessing which way it goes, which is
    *  wrong-looking but never wrong. */
+  /** The label of the window model this window is on — "One folder per
+   *  project", "Flock only", "Auto-switch" — or undefined when the wiring
+   *  cannot say. The gear menu previews it so the entry answers "which am I
+   *  on?" without being opened.
+   *
+   *  A LABEL, not the `LineageMode` behind it, and deliberately: the label is
+   *  what the picker one click later shows, and the two must read the same. It
+   *  comes from `windowModelChoices`, which resolves the current model with the
+   *  same `resolveMode` every gate in this extension runs — including the fold
+   *  of the legacy `workspaces.enabled` pair, which a raw `lineage.mode` read
+   *  would miss and report the wrong model for.
+   *
+   *  Optional for the reason `branchDisplay` above is: a host wiring without it
+   *  — and every unit double — gets the old static description rather than a
+   *  claim it cannot support. */
+  windowModel?(): string | undefined;
   menuState?(): {
     hooksInstalled: boolean;
     onlyActive: boolean;

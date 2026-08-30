@@ -503,7 +503,13 @@ export interface WindowModelChoice {
  * touches a settings file.
  */
 export function windowModelChoices(
-  world: RecommendedWorld,
+  /** The TWO fields this actually reads, rather than the whole world. Narrowed
+   *  so a caller that only wants to name the current model — the gear menu's
+   *  preview — does not have to build (or await) the rest of it: assembling a
+   *  `RecommendedWorld` probes every project's worktrees, which is far too much
+   *  work to put behind opening a menu. Every existing caller passes a full
+   *  world and is unaffected. */
+  world: Pick<RecommendedWorld, 'mode' | 'workspacesEnabled'>,
 ): WindowModelChoice[] {
   const current = resolveMode(world.mode, world.workspacesEnabled);
 

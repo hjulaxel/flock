@@ -110,6 +110,18 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Changed
 
+- **The gear menu says which window model you are on.** Choose Window Model…
+  has been in **Settings and Housekeeping…** under *Setup* since the models
+  landed, but it described the three choices rather than naming the one in
+  force — so the entry read like a list of things you could read about, and the
+  question people actually arrive with ("which am I in?") needed the picker
+  opened to answer. It now reads *Currently “Auto-switch” — change it*. The
+  wording comes from `windowModelChoices`, the same function the picker itself
+  uses, so the sentence and the “(current)” mark one click later cannot
+  disagree — and the legacy `workspaces.enabled` pair is folded by the same
+  `resolveMode` every gate runs, which a direct read of `lineage.mode` would
+  have got wrong for anyone still carrying it.
+
 - **The `+` cuts a worktree per root session, and it is the default.** One
   session, one checkout: the branch is minted from the session's name
   (`flock 3` → `flock-3`, behind the new `lineage.git.branchPrefix` when set),

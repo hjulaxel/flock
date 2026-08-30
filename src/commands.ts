@@ -10728,9 +10728,22 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       description: 'What to turn on, and why — you tick what you want',
       command: COMMANDS.recommendedSetup,
     });
+    // NAMES THE MODEL THIS WINDOW IS ON, rather than listing the three.
+    // Which one you are in decides whether opening a session moves this
+    // window, opens another, or does neither — so a person reaching this menu
+    // is usually asking "which am I on?", and a static list of all three
+    // answers a question they did not have. Read through `windowModelChoices`,
+    // the same function the picker itself uses, so the sentence here and the
+    // “(current)” mark one click later can never disagree; if the world is
+    // unavailable — the wiring is optional, and every unit double omits it —
+    // it falls back to naming the three, which is what it always said.
+    const modelNow = safeCall('menuWindowModel', () => deps.windowModel?.());
     items.push({
       label: '$(window) Choose Window Model...',
-      description: 'One folder per project, Flock only, or auto-switch',
+      description:
+        modelNow === undefined
+          ? 'One folder per project, Flock only, or auto-switch'
+          : `Currently “${modelNow}” — change it`,
       command: COMMANDS.chooseWindowModel,
     });
 

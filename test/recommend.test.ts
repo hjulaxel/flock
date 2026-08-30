@@ -410,6 +410,37 @@ describe('windowModelChoices: what a window is', () => {
     expect(recommendedPlan(settled).done).not.toContain('windowModel');
   });
 
+  it('always names exactly one current model, and names it in words', () => {
+    // What the GEAR MENU shows. Its entry previews the current model by
+    // reading this list's `current` label — "Currently “Auto-switch”" — rather
+    // than mapping `lineage.mode` to a wording of its own, so that the
+    // sentence in the menu and the "(current)" mark in the picker one click
+    // later cannot say different things. Two properties hold that up: exactly
+    // one choice is ever current (so the preview is never blank or ambiguous),
+    // and its label is human wording rather than the stored enum value.
+    const worlds: RecommendedWorld[] = [
+      settled,
+      { ...settled, mode: 'folder' },
+      { ...settled, mode: 'root' },
+      { ...settled, mode: 'project' },
+      // The legacy pair, which a raw `lineage.mode` read would get wrong: no
+      // mode set, workspaces off, is the folder window — and the gear must not
+      // report the enum's default at somebody it does not describe.
+      { ...settled, mode: undefined, workspacesEnabled: false },
+      // And a hand-edited typo, which resolveMode folds to the default.
+      { ...settled, mode: 'PROJECT ' },
+    ];
+    for (const w of worlds) {
+      const current = windowModelChoices(w).filter((c) => c.current);
+      expect(current, JSON.stringify({ mode: w.mode })).toHaveLength(1);
+      const label = current[0].label;
+      expect(label).not.toBe('');
+      // Never the raw setting value: those are 'folder' / 'root' / 'project',
+      // and a menu that says "Currently “project”" has leaked its storage.
+      expect(['folder', 'root', 'project']).not.toContain(label);
+    }
+  });
+
   it('offers exactly the three models, in ladder order', () => {
     // Most contained to most following, so the list itself teaches the
     // progression rather than making the reader assemble it.
