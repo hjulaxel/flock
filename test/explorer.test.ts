@@ -16,6 +16,7 @@ import {
   ExplorerSync,
   desiredFolders,
   isAnchored,
+  nonAnchorFolders,
   planSplice,
   withAnchorName,
   workspaceFileJson,
@@ -96,6 +97,41 @@ describe('explorer: isAnchored', () => {
   it('is false for an empty window and for an empty anchor path', () => {
     expect(isAnchored([], ANCHOR)).toBe(false);
     expect(isAnchored([anchorFolder], '')).toBe(false);
+  });
+});
+
+// --------------------------------------------------------- nonAnchorFolders
+
+describe('explorer: nonAnchorFolders', () => {
+  it('strips the anchor and keeps every real folder, order intact', () => {
+    // The converted-window shape: anchor first, the user's folders after. The
+    // real folders are the window's identity — what the folder-mode fence
+    // scopes to and what the WindowRecord publishes for routing.
+    expect(nonAnchorFolders(ANCHOR, [ANCHOR, '/a', '/b'])).toEqual([
+      '/a',
+      '/b',
+    ]);
+  });
+
+  it('strips the anchor wherever it sits, however it is spelled', () => {
+    // A rearranged window is degraded for splices (isAnchored says no) but
+    // its real folders are still its real folders.
+    expect(
+      nonAnchorFolders(ANCHOR, ['/a', `${ANCHOR}/`, '/b']),
+    ).toEqual(['/a', '/b']);
+    expect(nonAnchorFolders(ANCHOR, [ANCHOR.toUpperCase(), '/a'])).toEqual([
+      '/a',
+    ]);
+  });
+
+  it('drops junk entries and passes unconverted windows through unchanged', () => {
+    expect(nonAnchorFolders(ANCHOR, ['', '/a'])).toEqual(['/a']);
+    expect(nonAnchorFolders(ANCHOR, ['/x', '/y'])).toEqual(['/x', '/y']);
+    expect(nonAnchorFolders(ANCHOR, [])).toEqual([]);
+  });
+
+  it('an empty anchor path strips nothing', () => {
+    expect(nonAnchorFolders('', ['/a'])).toEqual(['/a']);
   });
 });
 
@@ -214,6 +250,35 @@ describe('explorer: desiredFolders under directory scope', () => {
     expect(desiredFolders(bare, ANCHOR, { scope: 'directory' })).toEqual(
       desiredFolders(bare, ANCHOR),
     );
+  });
+
+  it('roots at the current directory when NO project claims the session', () => {
+    // The auto-switch model follows the SESSION, and a session may be running
+    // in a loose checkout nobody has filed into a project yet. Clearing the
+    // tree back to the anchor because of that is the one outcome a following
+    // Explorer may never produce.
+    expect(
+      desiredFolders(null, ANCHOR, {
+        scope: 'directory',
+        currentDir: '/tmp/scratch',
+      }),
+    ).toEqual([{ path: '/tmp/scratch', name: 'scratch' }]);
+  });
+
+  it('still answers nothing for no project under project scope, or with no directory', () => {
+    // `'project'` scope has no directory LIST to expand into roots without a
+    // project, so [] stays the only honest answer there — and an absent
+    // `currentDir` is the "leave workspace" path, which must stay byte-identical.
+    expect(
+      desiredFolders(null, ANCHOR, {
+        scope: 'project',
+        currentDir: '/tmp/scratch',
+      }),
+    ).toEqual([]);
+    expect(desiredFolders(null, ANCHOR, { scope: 'directory' })).toEqual([]);
+    expect(
+      desiredFolders(null, ANCHOR, { scope: 'directory', currentDir: ANCHOR }),
+    ).toEqual([]);
   });
 
   it('is unchanged from before when the scope is project, or absent', () => {
@@ -524,6 +589,35 @@ describe('explorer: ExplorerSync', () => {
 });
 
 // ------------------------------------------------------- the anchor's label
+
+describe('explorer: currentRoots — the mark reads off the tree', () => {
+  it('reports the live folder list with the anchor dropped', () => {
+    const h = host([anchorFolder, { path: '/code/lib' }]);
+    expect(new ExplorerSync(h, ANCHOR).currentRoots()).toEqual(['/code/lib']);
+  });
+
+  it('follows a splice, so it cannot name a root that is not there', async () => {
+    // The disagreement this exists to remove: the header used to RECOMPUTE which
+    // directory the tree was showing from where the active session is, and when
+    // the front conversation belonged to none of the project's directories the
+    // follow listener correctly left the tree alone while the recomputed mark
+    // moved to the project's main folder on its own.
+    const h = host([anchorFolder]);
+    const sync = new ExplorerSync(h, ANCHOR);
+    expect(sync.currentRoots()).toEqual([]);
+    await sync.sync(project({ dirs: ['/Users/x/sandbox'] }));
+    expect(sync.currentRoots()).toContain('/Users/x/sandbox');
+  });
+
+  it('is empty, not an error, when the host throws', () => {
+    const h = host([anchorFolder], {
+      folders: () => {
+        throw new Error('no workspace');
+      },
+    });
+    expect(new ExplorerSync(h, ANCHOR).currentRoots()).toEqual([]);
+  });
+});
 
 describe('explorer: the anchor carries the project name', () => {
   /** A host whose anchor label actually follows the on-disk rename, i.e. a

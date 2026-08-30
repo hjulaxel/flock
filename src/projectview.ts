@@ -52,6 +52,17 @@ export type ProjectViewRow =
       current: boolean;
       showing: boolean;
     }
+  /**
+   * WHERE THE FRONT CONVERSATION IS, when it is somewhere worth naming: a lane
+   * of this project, or a branch that is not the one you would assume.
+   *
+   * Directly under the project row, because it is the same kind of fact — a
+   * caption on the tree below, not one of its roots. Emitted only when
+   * src/whereami.ts says there is something to say, so a project whose sessions
+   * all run in its main directory on its main branch draws exactly the rows it
+   * always did.
+   */
+  | { kind: 'here'; lane: string; branch: string; detached: boolean }
   /** Anchored, but no project is active — the Explorer shows nothing of ours. */
   | { kind: 'none' }
   /** Not a Flock workspace: the feature has never been set up here. */
@@ -71,6 +82,44 @@ export interface ProjectViewDeps {
   /** The directory the folder tree is rooted at under `'directory'` scope.
    *  Optional; absent falls back to the project's main directory. */
   currentDir?(): string | undefined;
+  /**
+   * Can this window switch projects IN PLACE — i.e. would `switchWorkspace`
+   * actually do something if this view's rows fired it?
+   *
+   * Two rows here do fire it, and in the one-folder-per-project model the verb
+   * refuses: the window IS its folder, and rearranging it is the thing that
+   * model exists not to do. The view can still be on screen there — it is
+   * contributed on `lineage.explorerFollow`, which says nothing about the
+   * window model, and the active project id lives in per-window
+   * `workspaceState` that nothing clears when the model changes — so a window
+   * that once auto-switched keeps drawing a project header whose click is a
+   * refusal toast.
+   *
+   * The fix is to stop making the row LOOK clickable, not to make the refusal
+   * friendlier — the same argument `hereItem` below makes about itself: a row
+   * that navigates nowhere is a control that appears to do nothing, and one
+   * that answers back is worse than one that never invited the click.
+   *
+   * DELIBERATELY THE WEAKER OF THE TWO MODE GATES, and this is the mistake
+   * worth not making: the caller must hand in "is this window able to switch"
+   * (the mode is not `folder`), NOT `modes.projectSwitchingOn` ("does it switch
+   * by itself"). The Flock-only model keeps the switch verb on purpose — it
+   * simply never fires by itself and never advertises itself in the status bar
+   * — so gating on the stronger predicate would take a click that works away
+   * from every window the legacy `workspaces.enabled: false` pair migrated. A
+   * row is silenced here only where the verb behind it says no.
+   *
+   * Optional, and absent reads as TRUE — the behaviour every caller had before
+   * the gate existed, so a unit double that says nothing about the model gets
+   * the rows it always got, and a wiring that forgets to pass it fails visibly
+   * (a refusal) rather than silently (a header that stopped working).
+   */
+  switching?(): boolean;
+  /** Where the conversation in front is — the decision src/whereami.ts already
+   *  made for the status bar, handed here rather than re-derived, so the two
+   *  surfaces cannot disagree about which lane you are in. Optional: absent
+   *  means the view draws no `here` row, which is what it did before. */
+  here?(): { lane: string; branch: string; detached: boolean } | undefined;
   /** Fires whenever the model behind the rows moved — the same signal the
    *  sidebar repaints on. */
   onDidChangeData(listener: () => void): DisposableLike;
@@ -84,7 +133,11 @@ export interface ProjectViewDeps {
 export function projectRows(
   project: ProjectRecord | undefined,
   anchored: boolean,
-  opts: { scope?: ExplorerScope; currentDir?: string } = {},
+  opts: {
+    scope?: ExplorerScope;
+    currentDir?: string;
+    here?: { lane: string; branch: string; detached: boolean };
+  } = {},
 ): ProjectViewRow[] {
   if (!anchored) return [{ kind: 'setup' }];
   if (!project) return [{ kind: 'none' }];
@@ -98,8 +151,26 @@ export function projectRows(
   const wanted = pathKey(normalizeDir(opts.currentDir ?? ''));
   const found = wanted === '' ? -1 : dirs.findIndex((d) => pathKey(d) === wanted);
   const currentIndex = found < 0 ? 0 : found;
+  // Nothing to say is the common case, and it draws nothing: a `here` row that
+  // read "main, no lane" on every project would be a permanent row carrying no
+  // information — which is the argument the project row's own description makes
+  // against printing the directory list twice.
+  const here = opts.here;
+  const saysSomething =
+    here !== undefined &&
+    (here.lane !== '' || here.branch !== '' || here.detached);
   return [
     { kind: 'project', project },
+    ...(saysSomething && here !== undefined
+      ? [
+          {
+            kind: 'here' as const,
+            lane: here.lane,
+            branch: here.branch,
+            detached: here.detached,
+          },
+        ]
+      : []),
     ...dirs.map((path, i) => ({
       kind: 'dir' as const,
       path,
@@ -144,15 +215,17 @@ export class ProjectViewProvider
     let anchored = false;
     let scope: ExplorerScope | undefined;
     let currentDir: string | undefined;
+    let here: { lane: string; branch: string; detached: boolean } | undefined;
     try {
       project = this.deps.activeProject();
       anchored = this.deps.anchored();
       scope = this.deps.scope?.();
       currentDir = this.deps.currentDir?.();
+      here = this.deps.here?.();
     } catch (err) {
       logError('projectview.getChildren', err);
     }
-    return projectRows(project, anchored, { scope, currentDir });
+    return projectRows(project, anchored, { scope, currentDir, here });
   }
 
   getTreeItem(row: ProjectViewRow): vscode.TreeItem {
@@ -161,26 +234,42 @@ export class ProjectViewProvider
         return this.projectItem(row.project);
       case 'dir':
         return this.dirItem(row);
+      case 'here':
+        return this.hereItem(row);
       case 'none':
-        return this.actionItem(
-          'No active project',
-          'Choose one…',
-          'layers',
-          COMMANDS.switchWorkspace,
-          'Pick the project this window is scoped to. The Explorer below ' +
-            'will show its directories.',
-        );
+        // A CAPTION when nothing can be switched — see `switching` on the deps.
+        // "Choose one…" beside a command that would refuse is an invitation to
+        // a door that is locked; the row still says what the window's state IS,
+        // because that half was never the problem.
+        return this.canSwitch()
+          ? this.actionItem(
+              'No active project',
+              'Choose one…',
+              'layers',
+              COMMANDS.switchWorkspace,
+              'Pick the project this window is scoped to. The Explorer below ' +
+                'will show its directories.',
+            )
+          : this.captionItem(
+              'No active project',
+              'layers',
+              'This window does not switch projects in place. Open a ' +
+                'project — or a session\'s workspace — in its own window ' +
+                'instead.',
+            );
       case 'setup':
       default:
         return this.actionItem(
-          'Explorer is not following a project',
+          'This window is not following you',
           'Set up…',
           'gear',
           COMMANDS.followInExplorer,
           'This window is a plain folder, so the Explorer cannot be ' +
             'repointed without reloading it. Setting up converts the window ' +
-            'to a Flock workspace once; after that, switching projects ' +
-            'swaps the file tree instantly.',
+            'to a Flock workspace once; after that the file tree roots ' +
+            "itself at the session you are working in — its subproject's " +
+            "directory, inside that session's own git worktree — and Source " +
+            'Control shows that worktree.',
         );
     }
   }
@@ -199,11 +288,99 @@ export class ProjectViewProvider
       count === undefined
         ? undefined
         : `${count} session${count === 1 ? '' : 's'}`;
-    item.tooltip = 'Active project — click to switch.';
-    item.command = {
-      command: COMMANDS.switchWorkspace,
-      title: 'Switch Workspace',
-    };
+    // The click, and the half of the tooltip that promises it, exist only where
+    // the switch does. Everything else about the row — the name, the count, the
+    // directories under it — is just as true in a window that never switches,
+    // which is why the row stays rather than being hidden with the verb.
+    if (this.canSwitch()) {
+      item.tooltip = 'Active project — click to switch.';
+      item.command = {
+        command: COMMANDS.switchWorkspace,
+        title: 'Switch Workspace',
+      };
+    } else {
+      item.tooltip =
+        'The project this window is scoped to. This window does not switch ' +
+        'projects in place — open another one in its own window.';
+    }
+    return item;
+  }
+
+  /**
+   * A row that says something and goes nowhere: `actionItem`'s shape minus the
+   * command and the "do this" description. Used where a verb has been gated
+   * away, so the row keeps its answer and loses only its promise.
+   */
+  private captionItem(
+    label: string,
+    icon: string,
+    tooltip: string,
+  ): vscode.TreeItem {
+    const item = new vscode.TreeItem(
+      label,
+      vscode.TreeItemCollapsibleState.None,
+    );
+    item.iconPath = new vscode.ThemeIcon(icon);
+    item.tooltip = tooltip;
+    return item;
+  }
+
+  /** The switch gate, read defensively — absent means yes (the behaviour before
+   *  the gate existed) and so does a supplier that throws, because a view that
+   *  hid its own verbs on an exception would be harder to diagnose than one
+   *  whose verb refuses with a sentence. */
+  private canSwitch(): boolean {
+    const fn = this.deps.switching;
+    if (!fn) return true;
+    try {
+      return fn.call(this.deps) !== false;
+    } catch (err) {
+      logError('projectview.switching', err);
+      return true;
+    }
+  }
+
+  /**
+   * The `here` row. Label first, then the branch as the description — the lane
+   * is the answer to "which piece of work", the branch is the answer to "on
+   * what", and the first is the one somebody scans for.
+   *
+   * NOT CLICKABLE. Every other row in this view goes somewhere; this one is a
+   * caption, and the place it would take you to is the session you are already
+   * in. A row that navigates to where you already are is a control that appears
+   * to do nothing.
+   */
+  private hereItem(row: {
+    lane: string;
+    branch: string;
+    detached: boolean;
+  }): vscode.TreeItem {
+    const label = row.lane !== '' ? row.lane : 'You are here';
+    const item = new vscode.TreeItem(
+      label,
+      vscode.TreeItemCollapsibleState.None,
+    );
+    item.iconPath = new vscode.ThemeIcon(
+      row.lane !== '' ? 'arrow-small-right' : 'git-branch',
+    );
+    item.description = row.detached
+      ? 'detached HEAD'
+      : row.branch === ''
+        ? undefined
+        : row.branch;
+    item.tooltip = [
+      row.lane !== ''
+        ? `The conversation in front is in the "${row.lane}" lane.`
+        : 'Where the conversation in front is.',
+      row.detached
+        ? 'Its checkout has a detached HEAD.'
+        : row.branch !== ''
+          ? `On ${row.branch} — a branch worth naming, so not the repository's main checkout.`
+          : '',
+    ]
+      .filter((s) => s !== '')
+      .join('\n');
+    item.contextValue = 'lineageProjectHere';
     return item;
   }
 

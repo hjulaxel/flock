@@ -213,10 +213,29 @@ class FocusIntegrationImpl implements FocusIntegration {
       return;
     }
 
+    // REAL folders only. The wiring's realFolders() strips the Flock anchor —
+    // the empty folder[0] a converted explorer-follow window carries — because
+    // publishing the anchor made exactly the wrong promise twice over: other
+    // windows routed "work under ~/code/app" away from the window that hosts
+    // it (nothing is under an empty anchor), and this window's own folder-mode
+    // scope read the same record shape and fenced everything out. Every real
+    // root is published so multi-root windows are routable for all of them.
+    let realFolders: readonly string[];
+    try {
+      realFolders =
+        this.deps.realFolders?.() ??
+        (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
+    } catch (err) {
+      logError('windows.realFolders', err);
+      realFolders = (vscode.workspace.workspaceFolders ?? []).map(
+        (f) => f.uri.fsPath,
+      );
+    }
     const rec: WindowRecord = {
       windowId: this.windowId,
       focusHandle: { uri: handle },
-      folder: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+      ...(realFolders[0] !== undefined ? { folder: realFolders[0] } : {}),
+      ...(realFolders.length > 0 ? { folders: [...realFolders] } : {}),
       pid: process.pid,
       publishedAt: new Date().toISOString(),
     };

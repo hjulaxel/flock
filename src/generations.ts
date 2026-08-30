@@ -22,6 +22,21 @@
 //     and write forkedFrom; verified on all 13 fork transcripts on this
 //     machine, zero ambiguous cases). Extracted by archive.ts as
 //     ArchivedSession.continuesId.
+//
+//     QUALIFY THAT PREMISE, because it was measured on one flavour of fork.
+//     The 13 transcripts it was read off are NATIVE in-app `/fork` children —
+//     the only kind that writes `forkedFrom` at all. Flock's own forks
+//     (`--fork-session --resume <parent> --session-id <child>`) write no such
+//     marker: 0 of the 153 parent/child pairs on this machine carry one, across
+//     claude 2.1.207 through 2.1.248, and the only 5 marked transcripts
+//     anywhere here appear in no Flock state file. The CONCLUSION still holds
+//     for them and the reasoning is worth writing down rather than
+//     re-discovering: a Flock fork rewrites every copied record's camel
+//     `sessionId` to its OWN id, so `firstSessionId === ownId`, so
+//     `continuationOf` returns undefined before the marker is ever consulted.
+//     The absent marker costs nothing here; what it would cost is a fork Flock
+//     did not make, where the transcript is the only witness. See
+//     docs/forking-and-context.md section 3.
 //   * recorded re-keys — persisted ChainRecords written when a hook event's
 //     inherited LINEAGE_NODE_ID differs from its session_id (state.ts).
 //

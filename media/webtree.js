@@ -214,8 +214,9 @@
 
   /** Tell the extension what is selected. It needs this for one reason: the
    *  context menu on a row is the workbench's, and the workbench hands the
-   *  command the ROW it was opened on and nothing else — so the only way "Delete
-   *  Sessions" can mean all four of them is if this side says so first. Also
+   *  command the ROW it was opened on and nothing else — so the only way
+   *  "Archive Selected Sessions" can mean all four of them is if this side says
+   *  so first. Also
    *  drives the `lineage.multiSelect` context key, which is what swaps the
    *  singular menu entry for the plural one. */
   function reportSelection() {
@@ -326,10 +327,11 @@
    * Drop selected keys whose rows are gone, and tell the extension if that
    * changed anything.
    *
-   * This is what closes the loop after a delete: the rows vanish from the next
-   * model post, the selection empties here, and the extension's copy — which is
-   * what "Delete Sessions" acts on — empties with it. Without it the menu would
-   * go on offering to delete four sessions that are no longer in the tree, and
+   * This is what closes the loop after an archive: the rows vanish from the
+   * next model post, the selection empties here, and the extension's copy —
+   * which is what "Archive Selected Sessions" acts on — empties with it.
+   * Without it the menu would go on offering to archive four sessions that are
+   * no longer in the tree, and
    * the multi-select context key would stay set over a single row.
    */
   function pruneSelection() {
@@ -419,7 +421,9 @@
     // sessions they know they have.
     p.textContent = filtered
       ? 'No active sessions. Closed ones are hidden — use the filter in the title bar to show them again.'
-      : 'No Claude sessions here yet. Start one and its forks will appear as a tree.';
+      : 'No Claude sessions here yet — Flock starts with a clean slate. Start '
+        + 'one and its forks appear as a tree; what ran before Flock waits '
+        + 'behind the import button below.';
     box.appendChild(p);
     const button = (label, command, secondary) => {
       const btn = document.createElement('button');
@@ -1234,8 +1238,8 @@
     // whatever was selected before — EXCEPT on a row that is already part of a
     // multi-selection, where collapsing to it is precisely what the user is
     // trying not to do. Right-clicking one of four selected sessions to reach
-    // "Delete Sessions" has to leave all four selected, which is how every file
-    // manager behaves.
+    // "Archive Selected Sessions" has to leave all four selected, which is how
+    // every file manager behaves.
     el.addEventListener('contextmenu', () => {
       if (!selection.has(row.key)) {
         selectOnly(row.key);
@@ -1591,10 +1595,13 @@
         // without this key a selection made with shift+arrows would have no way
         // to act on itself.
         //
-        // Nothing is confirmed here: the extension deletes and offers one Undo,
-        // the same deal a single delete has always had. What IS refused is an
-        // empty ask — no sessions selected sends no message at all, rather than
-        // a command that opens a picker nobody went looking for.
+        // This key DECIDES nothing: it names a gesture and the extension
+        // decides what happens. Archiving asks once, in a modal, and then
+        // offers Undo on the toast — the same deal a single archive has, and
+        // the reason the key does not have to confirm anything itself. What IS
+        // refused here is an empty ask — no sessions selected sends no message
+        // at all, rather than a command that opens a picker nobody went
+        // looking for.
         e.preventDefault();
         if (selectedSessionIds().length > 0) post('deleteSelection');
         return;
@@ -1714,6 +1721,16 @@
       const i = indexOfKey(msg.key);
       const el = i >= 0 ? root.children[i] : null;
       if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
+      // `focus` is the session-SWITCHER gesture (lineage.focusSessionsView),
+      // and it is opt-in per message because almost every other reveal must
+      // NOT take the keyboard: a session launched from a terminal selects its
+      // new row while the user goes on typing in the terminal, and a reveal
+      // that stole focus there would eat the next keystroke.
+      //
+      // The extension has already focused the VIEW by this point, which in a
+      // webview means the iframe and nothing inside it. This is what puts the
+      // keyboard on the element the arrow handler is bound to.
+      if (msg.focus) root.focus();
       return;
     }
   });

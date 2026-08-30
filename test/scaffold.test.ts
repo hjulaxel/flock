@@ -12,13 +12,18 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import {
+  BRAND_COLOR_ID,
   BRANCH_FEATURE_SWITCHES,
+  CLOSED_COLOR_ID,
   COMMANDS,
+  COMPACTING_COLOR_ID,
   CONFIG_SECTION,
+  DONE_COLOR_ID,
   EXTENSION_ID,
   PROVIDERS,
   PROVIDER_IDS,
   PROVIDER_MEDIA_DIR,
+  RUNNING_COLOR_ID,
   SESSION_ID_RE,
   STATE_SCHEMA_VERSION,
   contextValueOf,
@@ -30,7 +35,11 @@ import type {
   PullRequestState,
   RecommendedWorld,
 } from '../src/types';
-import { recommendedPlan } from '../src/recommend';
+import {
+  recommendedPlan,
+  surfaceChoices,
+  windowModelChoices,
+} from '../src/recommend';
 import { branchStateIcon } from '../src/viewmodel';
 
 const ROOT = path.join(__dirname, '..');
@@ -79,7 +88,7 @@ describe('scaffold: the shared types contract', () => {
     // (src/state.ts); a bump on its own stamps an old-shaped file as the new
     // version without materialising the maps that version promises, and the
     // reader then finds them missing on a file it believes is current.
-    expect(STATE_SCHEMA_VERSION).toBe(7);
+    expect(STATE_SCHEMA_VERSION).toBe(8);
   });
 
   it('declares every contributed command id under the lineage. prefix', () => {
@@ -92,7 +101,7 @@ describe('scaffold: the shared types contract', () => {
     //
     // Bump it in the same commit as the verb, and check the new id reaches a
     // menu: a command nobody can invoke is not a feature.
-    expect(ids).toHaveLength(86);
+    expect(ids).toHaveLength(93);
     // Duplicate values would make one of them unreachable — the later key wins
     // at registration and the earlier verb's menu entry fires the wrong flow.
     expect(new Set(ids).size).toBe(ids.length);
@@ -113,7 +122,27 @@ describe('scaffold: the shared types contract', () => {
     expect(contributed).toEqual([...Object.values(COMMANDS)].sort());
   });
 
-  // `lineage.showBranchesAndWorktrees` writes six settings and its partner writes
+  // A ThemeColor naming an id the manifest does not contribute resolves to
+  // nothing — the badge simply renders in the theme's own foreground, which
+  // for the compaction ring means an indistinguishable grey circle and no
+  // error anywhere. Only a cross-check catches it.
+  it('contributes every colour id the code paints with', () => {
+    const pkg = JSON.parse(
+      fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'),
+    ) as { contributes: { colors: { id: string }[] } };
+    const contributed = new Set(pkg.contributes.colors.map((c) => c.id));
+    for (const id of [
+      BRAND_COLOR_ID,
+      RUNNING_COLOR_ID,
+      DONE_COLOR_ID,
+      CLOSED_COLOR_ID,
+      COMPACTING_COLOR_ID,
+    ]) {
+      expect(contributed.has(id)).toBe(true);
+    }
+  });
+
+  // `lineage.showBranchesAndWorktrees` writes four settings and its partner writes
   // the defaults back, which only works while BRANCH_FEATURE_SWITCHES agrees with
   // the manifest about both halves. A key that is not a real setting is a silent
   // no-op — `update()` on an undeclared key throws, and the command reports it as
@@ -128,7 +157,7 @@ describe('scaffold: the shared types contract', () => {
       };
     };
     const properties = pkg.contributes.configuration.properties;
-    expect(BRANCH_FEATURE_SWITCHES.length).toBe(5);
+    expect(BRANCH_FEATURE_SWITCHES.length).toBe(4);
     for (const { key, on, off } of BRANCH_FEATURE_SWITCHES) {
       const full = `${CONFIG_SECTION}.${key}`;
       const declared = properties[full];
@@ -181,8 +210,24 @@ describe('scaffold: the shared types contract', () => {
       unlistedCount: 0,
       branchRowsEnabled: false,
       maxWorktrees: 3,
+      terminalLocation: 'editor',
+      soloSession: false,
+      launchMode: 'flock',
+      claudeExtensionInstalled: false,
+      mode: undefined,
+      workspacesEnabled: true,
     };
-    const entries = recommendedPlan(world).steps.flatMap((s) => s.settings);
+    // Neither taste step carries settings of its own — their OPTIONS do, and
+    // each is a write the picker can perform, so each is held to the same
+    // manifest contract as a step's own table. The window models matter most
+    // here: the `project` option writes an enum VALUE, and a value the manifest
+    // does not declare would be refused by `writeSettings` at the wiring and
+    // look like a picker that did nothing.
+    const entries = [
+      ...recommendedPlan(world).steps.flatMap((s) => s.settings),
+      ...surfaceChoices(world).flatMap((c) => c.settings),
+      ...windowModelChoices(world).flatMap((c) => c.settings),
+    ];
     // The loop asserting nothing is the failure mode this guards against.
     expect(entries.length).toBeGreaterThan(0);
     for (const { key, value } of entries) {
@@ -217,11 +262,33 @@ describe('scaffold: the shared types contract', () => {
     };
     const contributed = Object.keys(pkg.contributes.configuration.properties);
     const doc = fs.readFileSync(path.join(ROOT, 'docs', 'settings.md'), 'utf8');
-    const documented = [...doc.matchAll(/^\| `(lineage\.[^`]+)` \|/gm)].map(
+    // Read ONLY the settings table, not every line in the file that happens to
+    // look like one. The document has a second table further down — the
+    // migration matrix for `lineage.mode` and the deprecated
+    // `lineage.workspaces.enabled` — whose own HEADER row is two settings keys
+    // in backticks, and a whole-file regex counts that header as a duplicate
+    // row for a setting that is already documented. The set comparison below
+    // survives that (a duplicate changes no set), which is precisely why it has
+    // to be fixed here rather than discovered later: the duplicate assertion
+    // added underneath would fail on a document that is perfectly correct.
+    // Bounded by the table's own header and the next section heading, so the
+    // rest of the page can grow tables freely.
+    const tableStart = doc.indexOf('| Setting | Default | What it does |');
+    expect(tableStart, 'the settings table header').toBeGreaterThan(-1);
+    const after = doc.indexOf('\n## ', tableStart);
+    const table = doc.slice(tableStart, after === -1 ? undefined : after);
+    const documented = [...table.matchAll(/^\| `(lineage\.[^`]+)` \|/gm)].map(
       (m) => m[1] as string,
     );
     expect(documented.filter((k) => !contributed.includes(k))).toEqual([]);
     expect(contributed.filter((k) => !documented.includes(k))).toEqual([]);
+    // One row per setting, not merely one row somewhere for every setting. Two
+    // rows for one key is two descriptions to keep true, and the reader meets
+    // whichever they scroll to first.
+    expect(
+      documented.filter((k, at) => documented.indexOf(k) !== at),
+      'settings documented twice',
+    ).toEqual([]);
     const header = doc.match(/^All (\d+) settings, as contributed\./m);
     expect(header, 'the "All N settings" opening line').not.toBeNull();
     expect(Number(header?.[1])).toBe(contributed.length);
@@ -230,6 +297,21 @@ describe('scaffold: the shared types contract', () => {
     const pointer = readme.match(/all (\d+), with defaults\./);
     expect(pointer, "the README's Settings pointer").not.toBeNull();
     expect(Number(pointer?.[1])).toBe(contributed.length);
+  });
+
+  // The same reasoning one test up, applied to a document nothing else points
+  // at: a doc dropped from the README's index is a doc that silently rots. This
+  // one in particular, because it is the only place the fork/compaction/resume
+  // mechanics are written down with their numbers, and the file it describes
+  // (the Claude CLI) ships several times a week — so the day it stops being
+  // linked is the day it starts being wrong in private.
+  it('ships docs/forking-and-context.md and links it from the README', () => {
+    expect(
+      fs.existsSync(path.join(ROOT, 'docs', 'forking-and-context.md')),
+    ).toBe(true);
+    const readme = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
+    const docs = readme.slice(readme.indexOf('## Documentation'));
+    expect(docs).toContain('docs/forking-and-context.md');
   });
 
   it('ships an icon file for every provider', () => {

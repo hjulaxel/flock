@@ -23,14 +23,15 @@
 import * as vscode from 'vscode';
 
 import {
-  ATTENTION_BADGE_ENABLED,
   BRAND_COLOR_ID,
   COMMANDS,
+  COMPACTING_COLOR_ID,
   DEFAULT_BRANCH_DISPLAY,
   DONE_COLOR_ID,
   PROVIDERS,
   PROVIDER_IDS,
   PROVIDER_MEDIA_DIR,
+  RUNNING_BADGE_ENABLED,
   RUNNING_COLOR_ID,
   isSessionId,
 } from './types';
@@ -41,9 +42,9 @@ import type {
   TreeDeps,
 } from './types';
 import { log, logError } from './log';
-import { buildDemoProject } from './demoProject';
 import {
   BRANCH_COLOR_COUNT,
+  HIDDEN_RUNNING_GROUP_KEY,
   computeGrouping,
   projectBranchList,
 } from './projects';
@@ -54,8 +55,11 @@ import {
   buildViewModel,
   folderRowKey,
   projectRowKey,
+  runningCountOf,
+  runningWithoutRow,
   sessionRowKey,
   subprojectRowKey,
+  subtreeHasRunning,
 } from './viewmodel';
 import type { ViewRow } from './viewmodel';
 
@@ -288,6 +292,8 @@ const EMPTY_GROUPING: GroupingResult = {
   folders: [],
   loose: [],
   hiddenCount: 0,
+  outOfScopeCount: 0,
+  hiddenRunning: null,
 };
 
 const EMPTY_FOREST: SessionForest = {
@@ -402,7 +408,16 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
    *  to yet. Only the client can say when it is listening, so this tracks its
    *  one announcement and is cleared for every fresh page. */
   private clientReady = false;
-  private readonly collapsed = new Set<string>();
+  /** SEEDED with the "Running elsewhere" appendix key: that one row inverts
+   *  the expansion default (a ledger of other windows' running processes must
+   *  not open on top of this window's work), and seeding the collapse is how
+   *  an all-default-expanded model expresses it. The prune exempts the key —
+   *  the group comes and goes with the filters, and pruning its seed while it
+   *  was absent would flip its default to expanded for the rest of the
+   *  window. */
+  private readonly collapsed = new Set<string>([
+    folderRowKey(HIDDEN_RUNNING_GROUP_KEY),
+  ]);
 
   private lastForest: SessionForest = EMPTY_FOREST;
   private groupCacheForest: SessionForest | null = null;
@@ -443,6 +458,15 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
     // signature over projects: the whole model is re-posted on every change
     // event anyway, so a stale group cache can only survive one tick.
     if (this.groupCacheForest === forest) return this.groupCache;
+    // Read once and shared by the fence and the rowless-running rescue below:
+    // the badge and the appendix must be scoped by the SAME value or the
+    // number and the rows go back to disagreeing.
+    const scopeDirs =
+      this.safe<readonly string[] | undefined>(
+        'scopeDirs',
+        () => this.deps.scopeDirs?.(),
+        undefined,
+      ) ?? [];
     this.groupCache = computeGrouping(
       {
         visibleRootIds: forest.visibleRoots,
@@ -455,6 +479,22 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
           () => this.deps.onlyProjectSessions(),
           false,
         ),
+        // Folder mode's fence — every real folder this window opened, or []
+        // when project mode (or an empty window) scopes nothing. Read per
+        // grouping like every other setting here; the mode flip triggers a
+        // rebuild, so the forest-identity cache key above still invalidates
+        // in time.
+        scopeDirs,
+        // The invariant's escape hatch — see GroupingInput.hasRunning: a
+        // filtered RUNNING root files into the "Running elsewhere" appendix
+        // instead of losing its row.
+        hasRunning: (rootId) => subtreeHasRunning(forest, rootId),
+        // The other half of the same invariant: a live session with no row AT
+        // ALL — an archived record the roster still reports — joins the
+        // appendix rather than being counted by the badge and drawn nowhere.
+        // Scoped with the same fence the badge uses, so the number and the
+        // rows agree. See viewmodel.runningWithoutRow.
+        rowlessRunningIds: runningWithoutRow(forest, scopeDirs),
         worktreesOf: (dir) =>
           this.safe('worktreesOf', () => this.deps.worktreesOf?.(dir) ?? [], []),
         // `lineage.git.branches`. Read per grouping like every other setting
@@ -481,17 +521,19 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
       },
       this.groupCache,
     );
-    // The demo project is APPENDED to the finished result, downstream of every
-    // rule that decides what belongs where — so it cannot claim a real session,
-    // cannot move a real row, and cannot be reached by anything that reads the
-    // store. Last in the list because it is the least important row on screen.
-    // See src/demoProject.ts.
-    if (this.safe('demoProject', () => this.deps.demoProject?.(), false)) {
-      this.groupCache = {
-        ...this.groupCache,
-        projects: [...this.groupCache.projects, buildDemoProject(Date.now())],
-      };
-    }
+    // Everything in this cache came out of computeGrouping, and nothing is
+    // appended to it afterwards. That is a rule and not merely an observation.
+    // A project spliced in at this line is a project no rule of membership ever
+    // agreed to: it answers to nothing that decides where a session belongs and
+    // to nothing that reads the store, so every guard downstream has to be told
+    // about it one at a time. The demo project was the one exception, injected
+    // exactly here on the argument that it was fenced off well enough to be
+    // harmless — and the fence held perfectly, which turned out to be beside
+    // the point the day `lineage.showBranchesAndWorktrees` switched it on for
+    // people who had never heard of it and who then found a project in their
+    // sidebar that they had never made. If a synthetic row is ever wanted
+    // again, it has to arrive as a rule computeGrouping applies, not as an
+    // append after the fact.
     this.groupCacheForest = forest;
     return this.groupCache;
   }
@@ -675,6 +717,19 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  /** RUNNING sessions this window can SHOW — what the container badge shows.
+   *  See viewmodel.runningCountOf for the predicate, for why this counts
+   *  processes rather than attention (or rendered rows), and for why the
+   *  folder-mode scope bounds it. */
+  runningCount(): number {
+    try {
+      return runningCountOf(this.forest(), this.deps.scopeDirs?.());
+    } catch (err) {
+      logError('webtree.runningCount', err);
+      return 0;
+    }
+  }
+
   /** provider id -> {light, dark} webview uris for its brand mark. */
   private iconMap(webview: vscode.Webview): Record<string, { light: string; dark: string }> {
     const out: Record<string, { light: string; dark: string }> = {};
@@ -800,13 +855,15 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
     /* Our contributed colours, handed to the client under stable names. The
        workbench publishes every contributed id as --vscode-<id with dots as
        dashes>, so a user's theme override reaches this view too. The status dot
-       has exactly TWO lit tones here: idle draws no dot at all, and neither does
-       a closed row — that one is dimmed instead, which needs no colour of its
-       own (the contributed lineage.closed still colours the native tree's row,
-       where there is no way to dim one). See webtree.css. */
+       has exactly THREE lit colours here — running, done, and the one purple
+       both compaction phases share — while idle draws no dot at all, and
+       neither does a closed row: that one is dimmed instead, which needs no
+       colour of its own (the contributed lineage.closed still colours the
+       native tree's row, where there is no way to dim one). See webtree.css. */
     --lineage-brand: var(--vscode-${BRAND_COLOR_ID.replace(/\./g, '-')});
     --lineage-running: var(--vscode-${RUNNING_COLOR_ID.replace(/\./g, '-')});
     --lineage-done: var(--vscode-${DONE_COLOR_ID.replace(/\./g, '-')});
+    --lineage-compacting: var(--vscode-${COMPACTING_COLOR_ID.replace(/\./g, '-')});
 ${branchPaletteCss()}  }
 </style>
 <title>Flock</title>
@@ -875,13 +932,15 @@ ${branchPaletteCss()}  }
     const view = this.view;
     if (!view) return;
     try {
-      // Off for now — 0 clears the badge via the `undefined` arm below.
-      const count = ATTENTION_BADGE_ENABLED ? this.attentionCount() : 0;
+      // The RUNNING count — the levels invariant as a number (see
+      // RUNNING_BADGE_ENABLED in types.ts for why attention lost this slot).
+      // While off, 0 clears the badge via the `undefined` arm below.
+      const count = RUNNING_BADGE_ENABLED ? this.runningCount() : 0;
       view.badge =
         count > 0
           ? {
               value: count,
-              tooltip: `${count} session${count === 1 ? '' : 's'} waiting on you`,
+              tooltip: `${count} session${count === 1 ? '' : 's'} running`,
             }
           : undefined;
     } catch (err) {
@@ -937,6 +996,9 @@ ${branchPaletteCss()}  }
       }
     }
     for (const g of grouping.folders) live.add(folderRowKey(g.key));
+    // Always "live": the appendix comes and goes with the filters, and its
+    // collapsed seed (see the field) must survive the spells it is absent.
+    live.add(folderRowKey(HIDDEN_RUNNING_GROUP_KEY));
     for (const key of Array.from(this.collapsed)) {
       if (filtered && !key.startsWith('session:')) continue;
       if (!live.has(key)) this.collapsed.delete(key);
@@ -994,6 +1056,15 @@ ${branchPaletteCss()}  }
         changed = true;
       }
     }
+    // The appendix group too: a bell click on a "Running elsewhere" session
+    // must open the group its row is filed under, seeded collapse or not.
+    if (
+      grouping.hiddenRunning !== null &&
+      grouping.hiddenRunning.rootIds.includes(top) &&
+      this.collapsed.delete(folderRowKey(grouping.hiddenRunning.key))
+    ) {
+      changed = true;
+    }
     if (changed) this.groupCacheForest = null;
     await this.selectRow(sessionRowKey(sessionId));
   }
@@ -1030,13 +1101,44 @@ ${branchPaletteCss()}  }
    *  come first: the row may only exist because of an expansion this call just
    *  made, and a `select` naming a key the client has not rendered yet is a
    *  no-op it never retries. */
-  private async selectRow(key: string): Promise<void> {
+  private async selectRow(key: string, focus = false): Promise<void> {
     this.post();
     try {
-      await this.view?.webview.postMessage({ type: 'select', key });
+      await this.view?.webview.postMessage({ type: 'select', key, focus });
     } catch (err) {
       logError('webtree.selectRow', err);
     }
+  }
+
+  /**
+   * `reveal`, but the keyboard comes too — the sidebar as a session SWITCHER
+   * rather than a list you click (COMMANDS.focusSessionsView).
+   *
+   * TWO focus moves, and both are needed. `focusView()` reveals the view and
+   * hands it the workbench's focus, which gets as far as the webview frame and
+   * no further — a webview is an iframe, and focusing it does not focus
+   * anything inside it. The `focus` flag on the select message is the second
+   * half: the client focuses the tree element itself, which is what the
+   * arrow-key handler is actually bound to. Without the first, a Flock sidebar
+   * that is collapsed or behind another container never appears at all;
+   * without the second it appears with the row highlighted and the arrows
+   * still going wherever they were going before — the failure that reads as
+   * "nothing happened".
+   *
+   * `focusView()` also WAITS for a cold webview to finish loading its script,
+   * which is why the select is safe to send immediately after it: a message
+   * arriving before the page is listening is dropped and never retried.
+   *
+   * Returns false when the view could not be brought up — the caller
+   * (extension.ts) then tries the native tree, which is the same
+   * exactly-one-of-the-two shape every other surface here uses.
+   */
+  async focusSession(sessionId: string): Promise<boolean> {
+    if (!isSessionId(sessionId)) return false;
+    if (!(await this.focusView())) return false;
+    await this.reveal(sessionId);
+    await this.selectRow(sessionRowKey(sessionId), true);
+    return true;
   }
 
   /**
@@ -1180,7 +1282,12 @@ ${branchPaletteCss()}  }
           const set = this.collapsed;
           if (set.has(key)) set.delete(key);
           else {
-            if (set.size > CACHE_SOFT_LIMIT) set.clear();
+            if (set.size > CACHE_SOFT_LIMIT) {
+              set.clear();
+              // Re-seed the one row whose DEFAULT is collapsed (see the field)
+              // — the wipe resets to defaults, and its default is shut.
+              set.add(folderRowKey(HIDDEN_RUNNING_GROUP_KEY));
+            }
             set.add(key);
           }
           this.post();
@@ -1199,11 +1306,16 @@ ${branchPaletteCss()}  }
         }
 
         case 'deleteSelection': {
-          // The Delete key. It carries NO payload: the page has just reported
-          // its selection through the message above, and the verb resolves the
-          // ids the same way the context menu's does — from the one place that
-          // holds them. Same rule as the branch chips: the client names a
-          // gesture, the extension decides what it acts on.
+          // The Delete key. It ARCHIVES the selection — the message name is
+          // the client protocol, not a word anybody reads, so it keeps the
+          // spelling both halves already agree on rather than being renamed to
+          // chase a UI title through a wire format.
+          //
+          // It carries NO payload: the page has just reported its selection
+          // through the message above, and the verb resolves the ids the same
+          // way the context menu's does — from the one place that holds them.
+          // Same rule as the branch chips: the client names a gesture, the
+          // extension decides what it acts on.
           await this.deps.runCommand('deleteSessions');
           return;
         }
@@ -1525,6 +1637,10 @@ export function branchRowParts(
 export interface WebtreeController extends DisposableLike {
   refresh(): void;
   revealSession(sessionId: string): Promise<void>;
+  /** revealSession, plus the keyboard: reveal the view, select the row and
+   *  focus the tree so the arrows switch sessions from there. False when the
+   *  view could not be brought up. */
+  focusSession(sessionId: string): Promise<boolean>;
   revealProject(projectId: string): Promise<void>;
   /** Show the view, give it the keyboard, and wait for its page to listen.
    *  Anything that is about to ask for an inline edit calls this first — see
@@ -1573,6 +1689,7 @@ export function registerWebtree(
   return {
     refresh: () => provider.refresh(),
     revealSession: (sessionId) => provider.reveal(sessionId),
+    focusSession: (sessionId) => provider.focusSession(sessionId),
     revealProject: (projectId) => provider.revealProject(projectId),
     focusView: () => provider.focusView(),
     beginRename: (sessionId) => provider.beginRename(sessionId),

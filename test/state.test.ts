@@ -427,6 +427,22 @@ describe('migrateState', () => {
     expect(migrated.windows['w-good']?.focusHandle.uri).toBe(good.focusHandle.uri);
   });
 
+  it('sanitizes the window folders list — junk entries dropped, not the window', () => {
+    // `folders` is windowForDir's routing input: one bad element must not
+    // make an otherwise-valid window unroutable.
+    const migrated = migrateState({
+      version: 1,
+      windows: {
+        'w-multi': { ...windowRec('w-multi', 1), folders: ['/a', 7, '', '/b'] },
+        'w-empty': { ...windowRec('w-empty', 2), folders: [7] },
+        'w-scalar': { ...windowRec('w-scalar', 3), folders: 'nope' },
+      },
+    });
+    expect(migrated.windows['w-multi']?.folders).toEqual(['/a', '/b']);
+    expect(migrated.windows['w-empty']?.folders).toBeUndefined();
+    expect(migrated.windows['w-scalar']?.folders).toBeUndefined();
+  });
+
   it('keeps hookInstall only when it carries a boolean `installed`', () => {
     expect(migrateState({ hookInstall: { installed: true, pluginVersion: 1 } }).hookInstall)
       .toEqual({ installed: true, pluginVersion: 1 });
@@ -1689,6 +1705,143 @@ describe('state: hide verb retired', () => {
   });
 });
 
+describe('state: parked is retired (v8)', () => {
+  // The invisible running-but-unshown state becomes unrepresentable: a parked
+  // record reads as ARCHIVED — closed, tmux discarded — and the flip lives in
+  // the sanitizer (not a one-shot ladder step) so a mixed install's old
+  // window re-writing `parked: true` converges again on every read. The
+  // processes those records left running are the activation reconcile's job;
+  // this ladder is pure and must never touch one.
+  const UPDATED = '2026-07-01T10:00:00.000Z';
+
+  it('a parked record reads as archived: closed at updatedAt, tmux gone, flag dropped', () => {
+    const migrated = migrateState({
+      version: 7,
+      records: {
+        [S1]: {
+          id: S1,
+          parked: true,
+          tmux: `lineage-${S1}`,
+          createdAt: UPDATED,
+          updatedAt: UPDATED,
+        },
+      },
+    });
+    const rec = migrated.records[S1];
+    // updatedAt, never now: stamping now at load would make a stale record
+    // win every merge it touches.
+    expect(rec?.closed).toBe(UPDATED);
+    expect(rec?.tmux).toBeNull();
+    expect(rec?.parked).toBeUndefined();
+    expect(migrated.version).toBe(STATE_SCHEMA_VERSION);
+  });
+
+  it('an existing closed stamp is kept — the flip never rewrites history', () => {
+    const migrated = migrateState({
+      version: 7,
+      records: {
+        [S1]: {
+          id: S1,
+          parked: true,
+          closed: '2026-06-01T00:00:00.000Z',
+          createdAt: UPDATED,
+          updatedAt: UPDATED,
+        },
+      },
+    });
+    expect(migrated.records[S1]?.closed).toBe('2026-06-01T00:00:00.000Z');
+  });
+
+  it('runs on a file already claiming v8 — the mixed-install self-heal', () => {
+    // An old v7 build keeps writing `parked: true` into a file this build
+    // already stamped v8; keying the flip on the version would miss it.
+    const migrated = migrateState({
+      version: STATE_SCHEMA_VERSION,
+      records: {
+        [S1]: { id: S1, parked: true, createdAt: UPDATED, updatedAt: UPDATED },
+        // parked:false is pure noise once the state is unrepresentable.
+        [S2]: { id: S2, parked: false, createdAt: UPDATED, updatedAt: UPDATED },
+      },
+    });
+    expect(migrated.records[S1]?.parked).toBeUndefined();
+    expect(migrated.records[S1]?.closed).toBe(UPDATED);
+    expect(migrated.records[S2]?.parked).toBeUndefined();
+    expect(migrated.records[S2]?.closed).toBeUndefined();
+  });
+});
+
+describe('state: lifecycle fields sanitize', () => {
+  it('pinned/closeAfterTurn round-trip as booleans; junk types are dropped', () => {
+    const migrated = migrateState({
+      version: STATE_SCHEMA_VERSION,
+      records: {
+        [S1]: {
+          id: S1,
+          pinned: true,
+          closeAfterTurn: true,
+          createdAt: nowIso(),
+          updatedAt: nowIso(),
+        },
+        [S2]: {
+          id: S2,
+          pinned: 'yes',
+          closeAfterTurn: 1,
+          createdAt: nowIso(),
+          updatedAt: nowIso(),
+        },
+      },
+    });
+    expect(migrated.records[S1]?.pinned).toBe(true);
+    expect(migrated.records[S1]?.closeAfterTurn).toBe(true);
+    expect(migrated.records[S2]?.pinned).toBeUndefined();
+    expect(migrated.records[S2]?.closeAfterTurn).toBeUndefined();
+  });
+
+  it('stowedBySwitch round-trips as a boolean; junk types are dropped', () => {
+    // The restore gate reads `=== true`, so a truthy string surviving the
+    // sanitizer would quietly widen "the switch stowed this" to whatever an
+    // old or foreign writer put there.
+    const migrated = migrateState({
+      version: STATE_SCHEMA_VERSION,
+      records: {
+        [S1]: {
+          id: S1,
+          stowedBySwitch: true,
+          createdAt: nowIso(),
+          updatedAt: nowIso(),
+        },
+        [S2]: {
+          id: S2,
+          stowedBySwitch: 'yes',
+          createdAt: nowIso(),
+          updatedAt: nowIso(),
+        },
+      },
+    });
+    expect(migrated.records[S1]?.stowedBySwitch).toBe(true);
+    expect(migrated.records[S2]?.stowedBySwitch).toBeUndefined();
+  });
+
+  it('graceUntil keeps a string, keeps an explicit null, drops junk', () => {
+    const migrated = migrateState({
+      version: STATE_SCHEMA_VERSION,
+      records: {
+        [S1]: {
+          id: S1,
+          graceUntil: '2026-08-23T12:00:00.000Z',
+          createdAt: nowIso(),
+          updatedAt: nowIso(),
+        },
+        [S2]: { id: S2, graceUntil: null, createdAt: nowIso(), updatedAt: nowIso() },
+        [S3]: { id: S3, graceUntil: 42, createdAt: nowIso(), updatedAt: nowIso() },
+      },
+    });
+    expect(migrated.records[S1]?.graceUntil).toBe('2026-08-23T12:00:00.000Z');
+    expect(migrated.records[S2]?.graceUntil).toBeNull();
+    expect(migrated.records[S3]?.graceUntil).toBeUndefined();
+  });
+});
+
 describe('state: notification fields sanitize', () => {
   it('doneAt/seenAt/notify round-trip; junk types are dropped', () => {
     const migrated = migrateState({
@@ -1717,7 +1870,11 @@ describe('state: notification fields sanitize', () => {
     expect(migrated.records[S1]?.doneAt).toBe('2026-07-29T10:00:00.000Z');
     expect(migrated.records[S1]?.seenAt).toBe('2026-07-29T11:00:00.000Z');
     expect(migrated.records[S1]?.notify).toBe(false);
-    expect(migrated.records[S1]?.parked).toBe(true);
+    // `parked` is RETIRED at v8: the flag never survives a load — the record
+    // reads as archived instead (the flip's own tests live in the
+    // "parked is retired" describe block).
+    expect(migrated.records[S1]?.parked).toBeUndefined();
+    expect(migrated.records[S1]?.closed).toBe(migrated.records[S1]?.updatedAt);
     expect(migrated.records[S2]?.doneAt).toBeUndefined();
     expect(migrated.records[S2]?.seenAt).toBeUndefined();
     expect(migrated.records[S2]?.notify).toBeUndefined();
@@ -1916,6 +2073,47 @@ describe('state: accounts', () => {
     const reader = makeStore(dir);
     await reader.load();
     expect(reader.getAccounts()).toEqual([]);
+  });
+
+  it("a removed account's config directory stays readable, so its conversations do not vanish", async () => {
+    // Removing an account does not remove the conversations that were MOVED
+    // onto it. Every reader that finds a transcript walks the live roster's
+    // config dirs, so a tombstone that dropped `configDir` took every such
+    // conversation off the tree with it — rows without transcripts, resume and
+    // fork refusing — while the removal dialog promised that sessions already
+    // running on it are not touched.
+    const dir = tempDir();
+    const store = makeStore(dir);
+    await store.load();
+    await store.upsertAccount('work', {
+      label: 'Work',
+      provider: 'claude',
+      configDir: '/tmp/profiles/work',
+    });
+    await store.deleteAccount('work');
+
+    // Still not an account anywhere a picker or a launch can see it.
+    expect(store.getAccounts()).toEqual([]);
+    expect(store.getAccount('work')).toBeUndefined();
+    // But the directory is still readable, and survives the round trip through
+    // sanitizeAccount that used to drop it.
+    expect(store.retiredClaudeConfigDirs()).toEqual(['/tmp/profiles/work']);
+    const reader = makeStore(dir);
+    await reader.load();
+    expect(reader.retiredClaudeConfigDirs()).toEqual(['/tmp/profiles/work']);
+    expect(reader.getAccounts()).toEqual([]);
+  });
+
+  it('does not offer a removed CODEX account as a claude directory to read', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.upsertAccount('cdx', {
+      label: 'Codex',
+      provider: 'codex',
+      configDir: '/tmp/profiles/cdx',
+    });
+    await store.deleteAccount('cdx');
+    expect(store.retiredClaudeConfigDirs()).toEqual([]);
   });
 
   it('accountIds sees the tombstones the readers hide — a new account must not claim a removed one\'s id', async () => {
@@ -2214,6 +2412,36 @@ describe('state: named subprojects', () => {
     expect(after?.dir).toBe('/code/app');
     expect(after?.projectId).toBe('p1');
     expect(after?.createdAt).toBe(created);
+  });
+
+  it('carries a PINNED BRANCH verbatim — trimmed, never slugged or folded', async () => {
+    // The pin has to MATCH what `git worktree list` reports (see
+    // SubprojectRecord.branch), so `feat/x` must survive with its separator.
+    const dir = tempDir();
+    const store = makeStore(dir);
+    await store.load();
+    await store.upsertProject('p1', { rootDir: '/code/app', name: 'app' });
+    await store.upsertSubproject('l1', {
+      projectId: 'p1',
+      name: 'Ingest',
+      dir: '/code/app',
+      branch: '  feat/x ',
+    });
+    expect(store.getSubproject('l1')?.branch).toBe('feat/x');
+
+    // Round trip: a second store reading the same file keeps the pin — the
+    // field is registered in sanitizeSubproject, not merely tolerated.
+    const again = makeStore(dir);
+    await again.load();
+    expect(again.getSubproject('l1')?.branch).toBe('feat/x');
+
+    // An emptied pin is CLEARED, and junk never becomes a pin at all.
+    await store.upsertSubproject('l1', { branch: '' });
+    expect(store.getSubproject('l1')?.branch).toBeUndefined();
+    await store.upsertSubproject('l1', {
+      branch: 42 as unknown as string,
+    });
+    expect(store.getSubproject('l1')?.branch).toBeUndefined();
   });
 
   it('tombstones a lane rather than dropping its key', async () => {

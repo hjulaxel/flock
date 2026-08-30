@@ -846,11 +846,13 @@ describe('workspaces: a project chat travels with its project', () => {
 
     await new WorkspaceManager(deps).switchTo('pw');
 
-    // It leaves with its project, like every other session of ours.
+    // It leaves with its project, like every other session of ours. Bare
+    // launches (no tmux name) take the close tier: the record is archived
+    // (level 2), never flagged.
     expect(killed).toEqual([CHAT, S1]);
     expect(
       calls.written
-        .filter((w) => w.patch.parked === true)
+        .filter((w) => typeof w.patch.closed === 'string')
         .map((w) => w.id)
         .sort(),
     ).toEqual([CHAT, S1].sort());
@@ -861,70 +863,105 @@ describe('workspaces: a project chat travels with its project', () => {
     ]);
   });
 
-  it('moves a legacy panel-parked chat home on the way back', async () => {
-    // An older build parked by stowing into the terminal panel, so a chat can
-    // be parked AND still live. That one is moved home, never duplicated.
-    //
-    // Found by scanning the RECORDS for parked chats in the project's
-    // directories, not by reading one id off the project — a project has as
-    // many chats as you have opened.
+  it('a WRAPPED chat is KILLED through the reaping funnel — never graced', async () => {
+    // The chat has no tree row, so a graced chat would be a running process
+    // with NO surface anywhere — the exact unrepresentable state the levels
+    // exist to remove. So the switch ends it for real: `endSessionTab` (the
+    // dispose-plus-tree-kill dep), a `closed` stamp, and NEVER a `graceUntil`
+    // — even though the tmux name would have earned any other session the
+    // detach tier.
+    const groups: FakeGroup[] = [
+      { viewColumn: 1, isActive: true, tabs: [fakeTerminalTab('Chat · API')] },
+    ];
+    stubTabModel(groups, []);
     const records: Record<string, EditorialRecord> = {
-      [CHAT]: record(CHAT, { chat: true, parked: true, cwd: '/code/api' }),
+      [CHAT]: record(CHAT, { chat: true, cwd: '/code/api' }),
     };
+    const ended: string[] = [];
     const { deps, calls } = harness({
       getProject: twoProjects,
-      getActive: () => 'pw',
+      getActive: () => 'pa',
       getRecord: (id) => records[id],
-      allRecords: () => records,
+      bindings: () => [binding(CHAT, 'Chat · API')],
       sessionCwd: () => '/code/api',
-    });
-
-    await new WorkspaceManager(deps).switchTo('pa');
-
-    expect(calls.unstowed).toEqual([CHAT]);
-    expect(calls.launched).toEqual([]);
-    expect(calls.written).toContainEqual({
-      id: CHAT,
-      patch: { parked: false, tmux: null },
-    });
-  });
-
-  it('resumes the chat a switch parked — only a USER-closed chat stays dead', async () => {
-    // Parking closes the terminal now, so the chat the switch put away is dead
-    // by construction and coming home means `--resume`. The `parked` gate is
-    // what keeps the old rule's substance: a chat the user closed was never
-    // parked, so no switch ever revives it.
-    const records: Record<string, EditorialRecord> = {
-      [CHAT]: record(CHAT, { chat: true, parked: true, cwd: '/code/api' }),
-    };
-    const { deps, calls } = harness({
-      getProject: twoProjects,
-      getActive: () => 'pw',
-      getRecord: (id) => records[id],
-      allRecords: () => records,
-      sessionCwd: () => '/code/api',
-      isLive: () => false,
-      hasTranscript: () => true,
-      resumeSessions: () => true,
-      launchSession: async (opts) => {
-        calls.launched.push(opts.sessionId);
-        return {
-          nodeId: opts.sessionId,
-          sessionId: opts.sessionId,
-          terminalName: 'chat',
-          createdAt: 0,
-        };
+      tmuxNameOf: () => `lineage-${CHAT}`,
+      endSessionTab: (id) => {
+        ended.push(id);
+        closeOneTerminalTab(groups);
+        return true;
+      },
+      // A kill that lands on closeSessionTab took the wrong tier — the plain
+      // dispose only DETACHES a wrapped chat, leaving its process running.
+      closeSessionTab: () => {
+        throw new Error('a chat must go through endSessionTab, not the dispose');
       },
     });
 
+    await new WorkspaceManager(deps).switchTo('pw');
+
+    expect(ended).toEqual([CHAT]);
+    const chatWrites = calls.written.filter((w) => w.id === CHAT);
+    expect(chatWrites.some((w) => typeof w.patch.closed === 'string')).toBe(true);
+    expect(chatWrites.some((w) => typeof w.patch.graceUntil === 'string')).toBe(
+      false,
+    );
+  });
+
+  it('a BUSY wrapped chat keeps its tab — killed never means interrupted', async () => {
+    // Any other wrapped session detaches busy or not (a detach interrupts
+    // nothing). A chat's only exit is the KILL, and a kill mid-turn aborts
+    // real work — so a busy chat is spared exactly like a busy bare session:
+    // tab stays open, swept once idle.
+    const groups: FakeGroup[] = [
+      { viewColumn: 1, isActive: true, tabs: [fakeTerminalTab('Chat · API')] },
+    ];
+    stubTabModel(groups, []);
+    const records: Record<string, EditorialRecord> = {
+      [CHAT]: record(CHAT, { chat: true, cwd: '/code/api' }),
+    };
+    const ended: string[] = [];
+    const { deps } = harness({
+      getProject: twoProjects,
+      getActive: () => 'pa',
+      getRecord: (id) => records[id],
+      bindings: () => [binding(CHAT, 'Chat · API')],
+      sessionCwd: () => '/code/api',
+      tmuxNameOf: () => `lineage-${CHAT}`,
+      isSessionBusy: () => true,
+      endSessionTab: (id) => {
+        ended.push(id);
+        return true;
+      },
+    });
+
+    await new WorkspaceManager(deps).switchTo('pw');
+
+    expect(ended).toEqual([]);
+    expect(groups[0]?.tabs).toHaveLength(1);
+  });
+
+  it('a graced chat record from an older build is NOT revived by a switch', async () => {
+    // The comeback loop is gone with the grace that justified it: a switch
+    // KILLS chats now, so by construction no chat record it writes carries
+    // `graceUntil` — and one that still does (an older build's write) is the
+    // lifecycle sweep's to end, never this restore's to resurrect. Chat
+    // History is the only way a chat is asked for.
+    const records: Record<string, EditorialRecord> = {
+      [CHAT]: record(CHAT, { chat: true, graceUntil: ISO, cwd: '/code/api' }),
+    };
+    const { deps, calls } = harness({
+      getProject: twoProjects,
+      getActive: () => 'pw',
+      getRecord: (id) => records[id],
+      allRecords: () => records,
+      sessionCwd: () => '/code/api',
+      hasTranscript: () => true,
+    });
+
     await new WorkspaceManager(deps).switchTo('pa');
 
-    expect(calls.launched).toEqual([CHAT]);
+    expect(calls.launched).toEqual([]);
     expect(calls.unstowed).toEqual([]);
-    expect(calls.written).toContainEqual({
-      id: CHAT,
-      patch: { parked: false, tmux: null },
-    });
   });
 
   it('a user-closed chat (never parked) is not revived by a switch', async () => {
@@ -983,13 +1020,43 @@ describe('workspaces: parking closes, never the panel', () => {
 
     expect(killed).toEqual([S1]);
     expect(
-      calls.written.filter((w) => w.patch.parked === true).map((w) => w.id),
+      calls.written
+        .filter((w) => typeof w.patch.closed === 'string')
+        .map((w) => w.id),
     ).toEqual([S1]);
     // The busy session's tab is still on screen — never killed mid-turn.
     expect(groups[0]?.tabs.map((t) => t.label)).toEqual(['claude · busy']);
   });
 
-  it('a failed dispose never writes `parked` — the flag stays honest', async () => {
+  it('the kill tier runs the at-rest resumeLeaf repair — every 1→2 does', async () => {
+    // The spec's rule with no carve-outs: a 1→2 transition mints an archived
+    // row, and an archived row must be provably resumable the moment it
+    // exists — the switch's kill tier was the one path that skipped it.
+    const groups: FakeGroup[] = [
+      { viewColumn: 1, isActive: true, tabs: [fakeTerminalTab('claude')] },
+    ];
+    stubTabModel(groups, []);
+    const repaired: string[] = [];
+    const { deps } = harness({
+      getProject: twoProjects,
+      getActive: () => 'pa',
+      bindings: () => [binding(S1, 'claude')],
+      sessionCwd: () => '/code/api',
+      repairResumeLeaf: (id) => {
+        repaired.push(id);
+      },
+      closeSessionTab: () => {
+        closeOneTerminalTab(groups);
+        return true;
+      },
+    });
+
+    await new WorkspaceManager(deps).switchTo('pw');
+
+    expect(repaired).toEqual([S1]);
+  });
+
+  it('a failed dispose never writes the record — the level stays honest', async () => {
     const groups: FakeGroup[] = [
       { viewColumn: 1, isActive: true, tabs: [fakeTerminalTab('claude')] },
     ];
@@ -1004,7 +1071,13 @@ describe('workspaces: parking closes, never the panel', () => {
 
     await new WorkspaceManager(deps).switchTo('pw');
 
-    expect(calls.written.filter((w) => w.patch.parked === true)).toEqual([]);
+    expect(
+      calls.written.filter(
+        (w) =>
+          typeof w.patch.closed === 'string' ||
+          typeof w.patch.graceUntil === 'string',
+      ),
+    ).toEqual([]);
   });
 
   it('parks nothing when resumeSessions is off — a park could not come back', async () => {
@@ -1028,7 +1101,13 @@ describe('workspaces: parking closes, never the panel', () => {
     await new WorkspaceManager(deps).switchTo('pw');
 
     expect(killed).toEqual([]);
-    expect(calls.written.filter((w) => w.patch.parked === true)).toEqual([]);
+    expect(
+      calls.written.filter(
+        (w) =>
+          typeof w.patch.closed === 'string' ||
+          typeof w.patch.graceUntil === 'string',
+      ),
+    ).toEqual([]);
     expect(groups[0]?.tabs).toHaveLength(1);
   });
 
@@ -1095,14 +1174,14 @@ describe('workspaces: parking closes, never the panel', () => {
     const manager = new WorkspaceManager(deps);
     await manager.switchTo('pw');
     expect(calls.killed).toEqual([S1]);
-    expect(records[S1]?.parked).toBe(true);
+    expect(typeof records[S1]?.closed).toBe('string');
 
     await manager.switchTo('pa');
     // The stale "live" row did not stop the resume, and no legacy unstow was
     // attempted against a terminal that no longer exists.
     expect(calls.launched).toEqual([S1]);
     expect(calls.unstowed).toEqual([]);
-    expect(records[S1]?.parked).toBe(false);
+    expect(records[S1]?.closed).toBeNull();
   });
 });
 
@@ -1191,7 +1270,7 @@ describe('workspaces: a session that never took a turn still comes home', () => 
     expect(launched.map((l) => l.sessionId)).toEqual([S1]);
     // `--session-id <id>`, no `--resume`: there is no transcript to name.
     expect(launched[0]?.resumeId).toBeUndefined();
-    expect(records[S1]?.parked).toBe(false);
+    expect(records[S1]?.closed).toBeNull();
   });
 
   it('leaves an unstarted FORK for its own click', async () => {
@@ -1245,16 +1324,20 @@ describe('workspaces: the detach tier (tmux)', () => {
 
     expect(calls.killed).toEqual([S1]);
     expect(
-      calls.written.filter((w) => w.patch.parked === true).map((w) => w.id),
+      calls.written
+        .filter((w) => typeof w.patch.graceUntil === 'string')
+        .map((w) => w.id),
     ).toEqual([S1]);
     // The bare busy session's tab is still on screen — never killed mid-turn.
     expect(groups[0]?.tabs.map((t) => t.label)).toEqual(['claude · bare']);
   });
 
-  it('a detach park records the tmux name; a kill park erases it', async () => {
-    // The name IS the tier decision at restore time: with it, re-attach;
-    // without it, `--resume`. A kill writing `tmux: null` is what stops a
-    // stale name from an earlier detach outliving a park that really killed.
+  it('a detach records the name under a grace deadline; a kill closes and erases it', async () => {
+    // The name IS the tier decision at restore time: with it (under grace),
+    // re-attach; without it, `--resume`. A kill writing `tmux: null` is what
+    // stops a stale name from an earlier detach outliving a close that really
+    // killed — and the kill tier writes `closed`, never a flag: level 2 is an
+    // archived row, not a hidden state.
     const groups: FakeGroup[] = [
       {
         viewColumn: 1,
@@ -1279,12 +1362,18 @@ describe('workspaces: the detach tier (tmux)', () => {
 
     await new WorkspaceManager(deps).switchTo('pw');
 
-    const parks = calls.written.filter((w) => w.patch.parked === true);
-    expect(parks).toContainEqual({
-      id: S1,
-      patch: { parked: true, tmux: TMUX_S1 },
-    });
-    expect(parks).toContainEqual({ id: S2, patch: { parked: true, tmux: null } });
+    const stowed = calls.written.find((w) => w.id === S1);
+    expect(typeof stowed?.patch.graceUntil).toBe('string');
+    expect(stowed?.patch.tmux).toBe(TMUX_S1);
+    const closedWrite = calls.written.find((w) => w.id === S2);
+    expect(typeof closedWrite?.patch.closed).toBe('string');
+    expect(closedWrite?.patch.tmux).toBeNull();
+    // BOTH tiers mark the stow as the switch's own: the kill tier because the
+    // restore's level-2 gate demands the marker, the detach tier so a grace
+    // that expires into level 2 (the sweep preserves the marker) still says
+    // "the switch did this" when the user comes back.
+    expect(stowed?.patch.stowedBySwitch).toBe(true);
+    expect(closedWrite?.patch.stowedBySwitch).toBe(true);
   });
 
   it('switch-back reattaches — the roster row is LIVE and blocks nothing', async () => {
@@ -1356,13 +1445,13 @@ describe('workspaces: the detach tier (tmux)', () => {
 
     const manager = new WorkspaceManager(deps);
     await manager.switchTo('pw');
-    expect(records[S1]?.parked).toBe(true);
+    expect(typeof records[S1]?.graceUntil).toBe('string');
     expect(records[S1]?.tmux).toBe(TMUX_S1);
 
     await manager.switchTo('pa');
     expect(calls.unstowed).toEqual([]);
     expect(launchedWith).toEqual([{ sessionId: S1, tmuxName: TMUX_S1 }]);
-    expect(records[S1]?.parked).toBe(false);
+    expect(records[S1]?.graceUntil).toBeNull();
     expect(records[S1]?.tmux).toBeNull();
   });
 
@@ -1390,8 +1479,108 @@ describe('workspaces: the detach tier (tmux)', () => {
     await new WorkspaceManager(deps).switchTo('pw');
 
     expect(calls.killed).toEqual([]);
-    expect(calls.written.filter((w) => w.patch.parked === true)).toEqual([]);
+    expect(
+      calls.written.filter((w) => w.patch.graceUntil !== undefined),
+    ).toEqual([]);
     expect(groups[0]?.tabs).toHaveLength(1);
+  });
+});
+
+describe('workspaces: user closed stays closed (stowedBySwitch)', () => {
+  // The regression this describes: the restore gate was once "closed OR
+  // graced", which made close-by-switch and close-by-user indistinguishable —
+  // a session the user closed from the tree AFTER the layout was saved came
+  // back on the next switch, resumed against their explicit verb. The marker
+  // is the record-side truth the layout cannot carry.
+  const snapshotBoth: WorkspaceSnapshot = {
+    projectId: 'pa',
+    tabs: [
+      { kind: 'session', sessionId: S1, viewColumn: 1 },
+      { kind: 'session', sessionId: S2, viewColumn: 1 },
+    ],
+    savedAt: ISO,
+    updatedAt: ISO,
+  };
+
+  function restoreHarness(records: Record<string, EditorialRecord>): {
+    manager: WorkspaceManager;
+    launched: string[];
+    records: Record<string, EditorialRecord>;
+  } {
+    stubTabModel([{ viewColumn: 1, isActive: true, tabs: [] }], []);
+    const launched: string[] = [];
+    const { deps } = harness({
+      getProject: twoProjects,
+      getWorkspace: (id) => (id === 'pa' ? snapshotBoth : undefined),
+      getActive: () => 'pw',
+      getRecord: (id) => records[id],
+      allRecords: () => records,
+      upsertRecord: async (id, patch) => {
+        records[id] = { ...(records[id] ?? record(id)), ...patch };
+      },
+      sessionCwd: () => '/code/api',
+      isLive: () => false,
+      hasTranscript: () => true,
+      launchSession: async (opts) => {
+        launched.push(opts.sessionId);
+        return {
+          nodeId: opts.sessionId,
+          sessionId: opts.sessionId,
+          terminalName: 'claude',
+          createdAt: 0,
+        };
+      },
+    });
+    return { manager: new WorkspaceManager(deps), launched, records };
+  }
+
+  it('resumes the switch-stowed session and leaves the user-closed one closed', async () => {
+    // Both are level 2 and BOTH are named by the saved layout. Only S1 was
+    // put away by the switch; S2's close is the user's (Close, Close Now, the
+    // idle timer finishing a user-shaped close — anything without the marker).
+    const { manager, launched } = restoreHarness({
+      [S1]: record(S1, {
+        closed: ISO,
+        cwd: '/code/api',
+        stowedBySwitch: true,
+      }),
+      [S2]: record(S2, { closed: ISO, cwd: '/code/api' }),
+    });
+    await manager.switchTo('pa');
+    expect(launched).toEqual([S1]);
+  });
+
+  it('an expired grace still comes home — the sweep preserved the marker', async () => {
+    // Switch away (grace + marker) → the deadline passed → the sweep killed
+    // to level 2, clearing the grace but KEEPING the marker (the timer only
+    // finished what the switch started). The switch back finds closed + the
+    // marker and resumes.
+    const { manager, launched } = restoreHarness({
+      [S1]: record(S1, {
+        closed: ISO,
+        graceUntil: null,
+        tmux: null,
+        cwd: '/code/api',
+        stowedBySwitch: true,
+      }),
+    });
+    await manager.switchTo('pa');
+    expect(launched).toEqual([S1]);
+  });
+
+  it('the restore CONSUMES the marker, so the next user close sticks', async () => {
+    const { manager, launched, records } = restoreHarness({
+      [S1]: record(S1, {
+        closed: ISO,
+        cwd: '/code/api',
+        stowedBySwitch: true,
+      }),
+    });
+    await manager.switchTo('pa');
+    expect(launched).toEqual([S1]);
+    // Consumed on the way home: were it left standing, a Close performed
+    // after this restore would be resurrected by the switch after next.
+    expect(records[S1]?.stowedBySwitch).toBe(false);
   });
 });
 
@@ -1477,6 +1666,111 @@ describe('workspaces: the Explorer follows the switch', () => {
   });
 });
 
+// The deep switch's arrival gesture (design/levels-and-modes.md, project mode):
+// the manager asks ONE dep to reveal the target and narrate its git context,
+// and treats the whole thing as a courtesy — the decisions behind the dep are
+// src/deepSwitch.ts's and are tested in test/deepSwitch.test.ts; what is under
+// test HERE is the contract: who gets called with what, where the note lands,
+// and that no failure of the courtesy can dent the transaction.
+describe('workspaces: the deep switch reveals where you landed', () => {
+  afterEach(() => {
+    delete (vscodeMock.window as { setStatusBarMessage?: unknown })
+      .setStatusBarMessage;
+  });
+
+  it('asks the wiring to reveal the TARGET, and narrates its git context in the summary', async () => {
+    stubTabModel([], []);
+    const revealed: Array<{ id: string; auto: boolean; trigger: string | null }> =
+      [];
+    const messages: string[] = [];
+    (vscodeMock.window as { setStatusBarMessage?: unknown }).setStatusBarMessage =
+      (text: string): void => {
+        messages.push(text);
+      };
+    const { deps } = harness({
+      getProject: twoProjects,
+      getActive: () => 'pa',
+      revealSwitchTarget: async (project, opts) => {
+        revealed.push({ id: project.id, auto: opts.auto, trigger: opts.trigger });
+        return 'now on feat/x (worktree web-feat-x)';
+      },
+    });
+
+    await new WorkspaceManager(deps).switchTo('pw');
+
+    expect(revealed).toEqual([{ id: 'pw', auto: false, trigger: null }]);
+    // The one summary line answers "where am I?" as well as "what moved?".
+    expect(messages.join(' ')).toContain('now on feat/x (worktree web-feat-x)');
+  });
+
+  it('hands an auto switch its trigger — the lane stamp is how the reveal narrows', async () => {
+    stubTabModel([], []);
+    const revealed: Array<{ auto: boolean; trigger: string | null }> = [];
+    const { deps } = harness({
+      getProject: twoProjects,
+      getActive: () => 'pa',
+      revealSwitchTarget: async (_project, opts) => {
+        revealed.push(opts);
+        return '';
+      },
+    });
+
+    await new WorkspaceManager(deps).switchTo('pw', {
+      auto: true,
+      focusSessionId: S1,
+    });
+
+    expect(revealed).toEqual([{ auto: true, trigger: S1 }]);
+  });
+
+  it('completes the switch when the reveal throws — a courtesy is never a step', async () => {
+    const groups: FakeGroup[] = [
+      {
+        viewColumn: 1,
+        isActive: true,
+        tabs: [fakeFileTab('file:///code/api/a.ts')],
+      },
+    ];
+    const closed: string[] = [];
+    stubTabModel(groups, closed);
+    stubOpen(groups, []);
+    const { deps } = harness({
+      getProject: twoProjects,
+      getActive: () => 'pa',
+      revealSwitchTarget: async () => {
+        throw new Error('git hung');
+      },
+    });
+
+    await new WorkspaceManager(deps).switchTo('pw');
+
+    // The transaction still cleared the foreign tab; the failure cost only
+    // the note.
+    expect(closed).toEqual(['a.ts']);
+  });
+
+  it('never reveals when leaving workspace mode, or on a same-project re-save', async () => {
+    // Both doors promise they cost nothing; a reveal would be the promise
+    // broken — navigation chrome on verbs that move no tabs.
+    stubTabModel([], []);
+    const revealed: string[] = [];
+    const { deps } = harness({
+      getProject: twoProjects,
+      getActive: () => 'pa',
+      revealSwitchTarget: async (project) => {
+        revealed.push(project.id);
+        return '';
+      },
+    });
+    const manager = new WorkspaceManager(deps);
+
+    await manager.switchTo(null);
+    await manager.switchTo('pa');
+
+    expect(revealed).toEqual([]);
+  });
+});
+
 describe('workspaces: a switch ends on the tab you asked for', () => {
   const binding = (sessionId: string, terminalName: string) => ({
     nodeId: sessionId,
@@ -1484,7 +1778,15 @@ describe('workspaces: a switch ends on the tab you asked for', () => {
     terminalName,
     createdAt: 0,
   });
-  const parkedIn = (dir: string) => ({ parked: true, cwd: dir });
+  // Put away by an earlier switch = level 2 now: an archived record the
+  // target's layout names. The layout, not a flag, is what brings it back.
+  // Stowed BY THE SWITCH: the kill tier writes the marker next to `closed`,
+  // and the restore's level-2 tier resumes only records carrying it.
+  const parkedIn = (dir: string) => ({
+    closed: ISO,
+    cwd: dir,
+    stowedBySwitch: true,
+  });
   const resumes = (calls: Calls): WorkspaceManagerDeps['launchSession'] =>
     async (opts) => {
       calls.launched.push(opts.sessionId);
@@ -1682,10 +1984,17 @@ describe('workspaces: a switch ends on the tab you asked for', () => {
     });
 
     expect(calls.launched).toEqual([]);
-    // And the record stops claiming a visible tab is hidden.
+    // And the record stops claiming a visible tab is hidden. closeAfterTurn
+    // clears with the claim: a mark left behind would close the very tab the
+    // switch-back just settled on.
     expect(calls.written).toContainEqual({
       id: S1,
-      patch: { parked: false, tmux: null },
+      patch: {
+        graceUntil: null,
+        tmux: null,
+        closeAfterTurn: false,
+        stowedBySwitch: false,
+      },
     });
     expect(calls.focused).toEqual([S1]);
   });
@@ -1761,10 +2070,53 @@ describe('workspaces: solo mode (lineage.soloSession)', () => {
     expect(await new WorkspaceManager(deps).parkOthers(S1)).toBe(2);
 
     expect(calls.killed.sort()).toEqual([S2, S3].sort());
-    const parked = calls.written.filter((w) => w.patch.parked === true);
-    expect(parked.find((w) => w.id === S2)?.patch.tmux).toBe(TMUX_S2);
-    expect(parked.find((w) => w.id === S3)?.patch.tmux).toBeNull();
-    expect(parked.some((w) => w.id === S1)).toBe(false);
+    const stowedSolo = calls.written.find((w) => w.id === S2);
+    expect(typeof stowedSolo?.patch.graceUntil).toBe('string');
+    expect(stowedSolo?.patch.tmux).toBe(TMUX_S2);
+    const closedSolo = calls.written.find((w) => w.id === S3);
+    expect(typeof closedSolo?.patch.closed).toBe('string');
+    expect(closedSolo?.patch.tmux).toBeNull();
+    expect(calls.written.some((w) => w.id === S1)).toBe(false);
+  });
+
+  // `stowedBySwitch` is the switch's claim ticket: restoreSession resumes a
+  // level-2 row ONLY when it carries the marker. Folder mode has no switch, so
+  // solo mode there must not mint tickets nothing will ever redeem — it was
+  // reaching straight into the switcher's machinery, marker included.
+  it('stamps stowedBySwitch by default — the switch will come back for these', async () => {
+    const { deps, calls } = harness({
+      bindings: () => [binding(S1, 'keep'), binding(S2, 'tmux'), binding(S3, 'bare')],
+      tmuxNameOf: (id) => (id === S2 ? TMUX_S2 : undefined),
+      soloSession: () => true,
+    });
+
+    expect(await new WorkspaceManager(deps).parkOthers(S1)).toBe(2);
+    // Both tiers carry it: the graced one and the closed one.
+    expect(calls.written.find((w) => w.id === S2)?.patch.stowedBySwitch).toBe(true);
+    expect(calls.written.find((w) => w.id === S3)?.patch.stowedBySwitch).toBe(true);
+  });
+
+  it('omits it when the caller says there is no switch to come back', async () => {
+    const { deps, calls } = harness({
+      bindings: () => [binding(S1, 'keep'), binding(S2, 'tmux'), binding(S3, 'bare')],
+      tmuxNameOf: (id) => (id === S2 ? TMUX_S2 : undefined),
+      soloSession: () => true,
+    });
+
+    expect(
+      await new WorkspaceManager(deps).parkOthers(S1, { stow: false }),
+    ).toBe(2);
+    const graced = calls.written.find((w) => w.id === S2);
+    const closed = calls.written.find((w) => w.id === S3);
+    expect(graced?.patch.stowedBySwitch).toBe(false);
+    expect(closed?.patch.stowedBySwitch).toBe(false);
+    // Everything ELSE about the two tiers is unchanged — folder mode still
+    // graces a wrapped session and still closes a bare one. Only the claim
+    // ticket goes.
+    expect(typeof graced?.patch.graceUntil).toBe('string');
+    expect(graced?.patch.tmux).toBe(TMUX_S2);
+    expect(typeof closed?.patch.closed).toBe('string');
+    expect(closed?.patch.tmux).toBeNull();
   });
 
   it('spares a busy BARE session — a park there would abort its turn', async () => {
@@ -1777,6 +2129,44 @@ describe('workspaces: solo mode (lineage.soloSession)', () => {
     expect(await new WorkspaceManager(deps).parkOthers(S1)).toBe(0);
     expect(calls.killed).toEqual([]);
     expect(calls.written).toEqual([]);
+  });
+
+  it('never parks a CHAT — it is not a session tab, and it has no row to come back by', async () => {
+    // Focusing the pinned session S1 must sweep the ordinary session S2 and
+    // leave the chat's tab exactly where it is, idle or not.
+    const records: Record<string, EditorialRecord> = {
+      [CHAT]: record(CHAT, { chat: true }),
+    };
+    const { deps, calls } = harness({
+      bindings: () => [binding(S1, 'keep'), binding(S2, 'session'), binding(CHAT, 'chat')],
+      getRecord: (id) => records[id],
+      allRecords: () => records,
+      soloSession: () => true,
+    });
+
+    expect(await new WorkspaceManager(deps).parkOthers(S1)).toBe(1);
+    expect(calls.killed).toEqual([S2]);
+    expect(calls.written.some((w) => w.id === CHAT)).toBe(false);
+  });
+
+  it('recognises a reopened chat by its BIRTH record — the bound generation carries no flag', async () => {
+    // A chat reopened twice is bound under a generation id nothing ever wrote
+    // `chat` onto; only the birth record (a chain member) still says what the
+    // conversation is. S3 is the bound generation, CHAT its birth id.
+    const records: Record<string, EditorialRecord> = {
+      [CHAT]: record(CHAT, { chat: true }),
+    };
+    const tip = (id: string): string => (id === CHAT || id === S3 ? S3 : id);
+    const { deps, calls } = harness({
+      bindings: () => [binding(S1, 'keep'), binding(S3, 'reopened chat')],
+      getRecord: (id) => records[id],
+      allRecords: () => records,
+      tipOf: tip,
+      soloSession: () => true,
+    });
+
+    expect(await new WorkspaceManager(deps).parkOthers(S1)).toBe(0);
+    expect(calls.killed).toEqual([]);
   });
 
   it("keeps the kept conversation's WHOLE CHAIN — a re-keyed generation is the same tab", async () => {
@@ -1794,8 +2184,8 @@ describe('workspaces: solo mode (lineage.soloSession)', () => {
 
   it('a switch restores ONE session — the one the layout says was in front', async () => {
     const records: Record<string, EditorialRecord> = {
-      [S1]: record(S1, { parked: true }),
-      [S2]: record(S2, { parked: true }),
+      [S1]: record(S1, { closed: ISO, stowedBySwitch: true }),
+      [S2]: record(S2, { closed: ISO, stowedBySwitch: true }),
     };
     const snapshot: WorkspaceSnapshot = {
       projectId: 'pw',

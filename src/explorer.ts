@@ -186,6 +186,39 @@ export function isAnchored(
 }
 
 /**
+ * The window's REAL folders: the workspace folder list with the anchor
+ * removed, order kept.
+ *
+ * The anchor is Flock's own — an empty directory in globalStorage that exists
+ * only to hold folder[0] so splices never restart the extension host (see the
+ * header) — so it must never count as something this window "opened": nothing
+ * runs in it, nothing is under it, and any consumer that treats it as a real
+ * root gets a nonsense answer (folder mode scoping a converted window to it
+ * rendered zero sessions; windowForDir routing on it made the window
+ * unreachable). This module owns the anchor's identity, so this is where the
+ * question "which folders are actually the user's?" is answered — every other
+ * file asks it rather than re-deriving the anchor path comparison.
+ *
+ * Matching is by path identity ANYWHERE in the list, not just index 0: a
+ * window whose user rearranged folders above the anchor is degraded (splices
+ * are off, see isAnchored) but its real folders are still its real folders.
+ */
+export function nonAnchorFolders(
+  anchorPath: string,
+  folders: readonly string[],
+): string[] {
+  const anchorKey = pathKey(normalizeDir(anchorPath));
+  const out: string[] = [];
+  for (const raw of folders ?? []) {
+    const dir = normalizeDir(raw);
+    if (dir === '') continue;
+    if (anchorKey !== '' && pathKey(dir) === anchorKey) continue;
+    out.push(raw);
+  }
+  return out;
+}
+
+/**
  * The folder rows a project should occupy, in Explorer order: main directory
  * first, extras below. Never includes the anchor.
  *
@@ -206,8 +239,23 @@ export function desiredFolders(
   anchorPath: string,
   opts: DesiredFoldersOptions = {},
 ): FolderSpec[] {
-  if (!project) return [];
   const anchorKey = pathKey(normalizeDir(anchorPath));
+  // NO PROJECT is a normal state under `'directory'` scope and an impossible
+  // one under `'project'` scope, so the two answer differently. The auto-switch
+  // model follows the SESSION (src/follow.ts), and a session may be running in
+  // a loose checkout nobody has filed into a project yet — clearing the tree
+  // back to the anchor because of that is the one outcome a following Explorer
+  // may never produce, and `narrowToCurrent` already knows how to label a bare
+  // path and how to refuse the anchor. Under `'project'` scope there is no
+  // directory LIST to expand into roots, so `[]` remains the only honest
+  // answer. Both leave `sync(null)` — the "leave workspace" path, which passes
+  // no `currentDir` at all — byte-identical: an absent `currentDir` falls
+  // through to the empty `all` below and clears the tail, as it always has.
+  if (!project) {
+    return (opts.scope ?? 'project') === 'project'
+      ? []
+      : narrowToCurrent([], opts.currentDir, anchorKey);
+  }
   const all: FolderSpec[] = [];
   const seen = new Set<string>();
   for (const dir of projectDirs(project)) {
@@ -405,6 +453,35 @@ export class ExplorerSync {
     }
   }
 
+  /**
+   * The directories the folder tree is ACTUALLY rooted at right now — the live
+   * folder list with the anchor dropped, in workbench order.
+   *
+   * Read back rather than remembered, for the same reason `anchorLabel` is. The
+   * caller that wants this is the header view, which marks which directory the
+   * tree below it is showing, and recomputing that mark from "where the active
+   * session is" made it possible for the mark and the tree to disagree: when the
+   * front conversation belongs to no directory of this project the follow
+   * listener correctly leaves the tree ALONE, while a recomputed mark fell back
+   * to the project's main directory and pointed at a root that was not there.
+   * A mark read off the thing it describes cannot be wrong.
+   *
+   * Under `'directory'` scope there is exactly one entry; under `'project'`
+   * scope there is one per directory and nothing marks them.
+   */
+  currentRoots(): string[] {
+    try {
+      return this.host
+        .folders()
+        .slice(1)
+        .map((f) => normalizeDir(f.path))
+        .filter((d) => d !== '');
+    } catch (err) {
+      logError('explorer.currentRoots', err);
+      return [];
+    }
+  }
+
   /** The scope the HOST reports right now. Read per sync rather than cached so
    *  flipping the setting takes effect on the next switch, and defaulting to
    *  `'project'` so a host that does not implement it behaves as before. */
@@ -456,9 +533,8 @@ export class ExplorerSync {
         this.warnedNotAnchored = true;
         log(
           'explorer: this window is not a Flock workspace (folder[0] is not ' +
-            'the anchor) — the Explorer will not follow the active project. ' +
-            'Run "Flock: Follow the Active Project in the Explorer" to set ' +
-            'one up.',
+            'the anchor) — the Explorer will not follow the session you are ' +
+            'in. Run "Flock: Follow the Session I Am In" to set one up.',
         );
       }
       return 'not-anchored';

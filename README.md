@@ -115,8 +115,9 @@ chats, and much more.
   top of the view lists every closed project.
 
 - **Nothing is lost.** Closing a tab does not remove its row. It's dimmed and
-  stays one click from resuming. Only **Delete** removes a row, and that is also
-  undoable.
+  stays one click from resuming. Only **Archive** removes a row — it asks
+  first, it closes the session before it hides it, it is undoable, and every
+  project row has an **Archived Sessions…** list to search and restore from.
 
 - **A recommended setup, that says why.** Seventeen of Flock's settings ship
   off, and they are not off for the same reason: two of them — instant updates
@@ -198,11 +199,12 @@ Nothing about it is unfinished: it reads real worktrees, `git worktree add` and
 rules are covered by the same tests they always were. Turn the setting on to get
 all of it back, including its menus.
 
-The feature is six settings by now, so there is one verb for all of them:
+The feature is four settings by now, so there is one verb for all of them:
 **Flock: Show Branches and Worktrees** in the command palette turns on the rows,
-the pull-request chips, the two previews and the `inline` display mode in one go,
-and **Flock: Hide Branches and Worktrees** puts every one of them back to the
-value it ships with.
+the pull-request chips and the directory-model preview in one go, and
+**Flock: Hide Branches and Worktrees** puts every one of them back to the value
+it ships with. It deliberately leaves `lineage.git.branchDisplay` alone: how the
+rows read is a choice you made, and the Hide half only ever restores defaults.
 
 Once it is on, `lineage.git.branchDisplay` picks how a session says which
 worktree it is in: `inline` — the default — writes the branch on a line under the
@@ -241,8 +243,11 @@ contains another's.
 When they disagree, both projects' saved layouts can name the same session, so
 switching between them brings the same tabs back under either one. If your
 projects do not nest, you will not see it. If they do, the workaround today is to
-leave workspace mode (**Settings → Switch Workspace… → Leave Workspace Mode**) or
-to turn `lineage.workspaces.enabled` off.
+leave workspace mode (**Settings → Switch Workspace… → Leave Workspace Mode**),
+or to run **Flock: Choose Window Model…** and pick a model that does not switch
+by itself — *One folder per project* or *Root (Flock only)*. (`lineage.workspaces.enabled`
+was the old way to say that second thing. It is deprecated now and folded into
+`lineage.mode`, so setting it still works and the picker is the honest spelling.)
 
 This is a known bug with a known fix — membership in a switch should be
 `matchProject`'s answer, the same one the tree renders — and it is not fixed in
@@ -250,10 +255,13 @@ this release.
 
 ## Documentation
 
-- **[Settings](docs/settings.md)** — all 40, with defaults.
+- **[Settings](docs/settings.md)** — all 48, with defaults.
 - **[Reference](docs/reference.md)** — how it works, projects, subprojects,
-  notifications, workspaces, close vs delete, naming, the sidebar rendering
+  notifications, workspaces, close vs archive, naming, the sidebar rendering
   modes, and what you get alongside the Claude Code extension.
+- **[Forking and context](docs/forking-and-context.md)** — what a fork, a
+  fork-and-compact, a resume and a self-fork each do to the conversation,
+  measured against real transcripts.
 
 ## Privacy
 

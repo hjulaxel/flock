@@ -1,12 +1,20 @@
 // src/lineage.ts — the parent-resolution cascade, the argv walk, and the
 // forest builder.
 //
-// This module imports ./types, ./log, ./transcript and node builtins only —
-// never vscode, roster.ts or state.ts. That keeps it runnable (and unit
-// testable) outside the extension host, and keeps the ancestry model
+// This module imports ./types, ./log, ./transcript, ./archive and node
+// builtins only — never vscode, roster.ts or state.ts. That keeps it runnable
+// (and unit testable) outside the extension host, and keeps the ancestry model
 // independent of the roster-polling layer that feeds it. It spawns nothing but
 // `ps`, and never infers an edge from message-uuid overlap between transcripts
 // (see below).
+//
+// ./archive is the newest of those and the only one that is not obviously a
+// dependency: it owns the reading of a transcript HEAD, and the name a closed
+// session's row carries is derived from that head. The alternative was a
+// second copy of the precedence here, which would have let a row and the
+// archive picker disagree about what one nameless session is called. archive.ts
+// imports ./types, ./log, ./generations and ./usage, none of which reach back
+// here, so the direction is a tree and not a cycle.
 //
 // THE ONE RULE THIS FILE EXISTS TO ENFORCE: a wrong edge is worse than no
 // edge. Every branch below is either exact by construction (we recorded it at
@@ -20,6 +28,7 @@
 import { execFile } from 'node:child_process';
 import * as process from 'node:process';
 
+import { transcriptFallbackName } from './archive';
 import { log, logError } from './log';
 import { forkParentFromTranscript } from './transcript';
 import {
@@ -31,6 +40,7 @@ import {
   shortId,
   type ArchivedSession,
   type ArgvScanResult,
+  type CompactionPhase,
   type EditorialRecord,
   type LineageEdge,
   type NodeAttention,
@@ -496,12 +506,39 @@ export interface BuildForestInput {
    *  from `archive.endedAt` directly (see below) and never consult this map. */
   activityMtimes?: ReadonlyMap<string, number>;
   /** sessionId → what the transcript TAIL says about the session: when the
-   *  user last prompted it, and how many tokens the last turn ran with. Same
-   *  chain-tip-collapsed keying as `activityMtimes`. Both fields are optional
-   *  per entry and per session — a transcript whose tail carries neither (too
-   *  new, or nothing but tool traffic in the window) simply leaves the node's
-   *  fields unset and every renderer falls back to what it showed before. */
-  tailStats?: ReadonlyMap<string, { lastPromptAt?: number; tokens?: number }>;
+   *  user last prompted it, how many tokens the last turn ran with, and the
+   *  last conversation text (what an archived row shows when no summary was
+   *  recorded). Same chain-tip-collapsed keying as `activityMtimes`. Every
+   *  field is optional per entry and per session — a transcript whose tail
+   *  carries none of them (too new, or nothing but tool traffic in the
+   *  window) simply leaves the node's fields unset and every renderer falls
+   *  back to what it showed before. */
+  tailStats?: ReadonlyMap<
+    string,
+    { lastPromptAt?: number; tokens?: number; lastExchange?: string }
+  >;
+  /** sessionId → the compaction phase to draw, from the in-memory
+   *  CompactionTracker (src/compaction.ts). A LOOKUP rather than a map of raw
+   *  facts, because the tracker's answer depends on the chain (a compaction
+   *  re-mints the id, so the start and the finish arrive under different ones)
+   *  and on the live status — neither of which this module knows about. Absent,
+   *  or answering undefined, is the ordinary case: a session in no compaction
+   *  phase draws exactly the dots it drew before this existed.
+   *
+   *  LIVE ROWS ONLY. An archived node's phase would describe a process that has
+   *  already exited, and 'closed' outranks every compaction mark anyway.
+   *
+   *  `status` is handed over rather than looked up because the tracker needs
+   *  it — the resting purple dot means "compacted, and nothing behind it", so a
+   *  session the roster reports as busy again withholds it — and this is the
+   *  one place the DERIVED status exists. Asking the caller to re-derive it
+   *  from the raw entry would be a second copy of deriveStatus's decision
+   *  table, which is exactly the drift the two existing copies are pinned
+   *  against by a test. */
+  compactionOf?: (
+    sessionId: string,
+    status: SessionStatus,
+  ) => CompactionPhase | undefined;
   opts?: {
     showGhosts?: boolean; // default true
     now?: number;         // default Date.now()
@@ -551,6 +588,37 @@ function deriveStatus(e: RosterEntry): {
   return { status: 'unknown', attention: 'none' };
 }
 
+/**
+ * Is this conversation over — nothing running, nothing to attach to?
+ *
+ * The one definition, living here because this module owns `SessionNode` and
+ * computes all three of the flags it reads. It had grown four hand-written
+ * copies in viewmodel.ts alone plus one local `isOver` inside buildForest, and
+ * the moment the two renderers started making a LAYOUT decision off it (a
+ * closed row is one row: no branch sub-line, no branch name in the native
+ * description) a sixth and seventh copy in tree.ts would have been the drift
+ * this codebase writes its comments to prevent. `visibleChildren`'s
+ * `onlyActive` promotion, the row's compaction, and E's sibling comparator are
+ * three readings of one fact and must never disagree about a single node.
+ *
+ * Ghosts count as over, and that is deliberate: a ghost is an ancestor
+ * INFERRED from a child's edge, with no process, no transcript of its own and
+ * a cwd borrowed from whichever child spoke first. Every question this
+ * predicate answers — should the promotion pass skip it, may it claim a
+ * checkout, does it sort after the live siblings — wants "yes, treat it as
+ * finished".
+ *
+ * It is deliberately NOT `ViewRow.closed`, which is `!ghost && (archived ||
+ * exited)`. That one governs DIMMING, and dimming a ghost would claim it was a
+ * session of yours that ran and stopped — a history it does not have. Two
+ * predicates that differ by exactly one arm look like a bug to anyone reading
+ * quickly, so both carry the argument for the arm they differ on; do not merge
+ * them.
+ */
+export function sessionIsOver(node: SessionNode): boolean {
+  return node.ghost || node.archived || node.status === 'exited';
+}
+
 function nonEmpty(v: unknown): string | undefined {
   return typeof v === 'string' && v.length > 0 ? v : undefined;
 }
@@ -562,7 +630,9 @@ function nonEmpty(v: unknown): string | undefined {
  *  claiming to show. */
 function applyTailStats(
   node: SessionNode,
-  stats: { lastPromptAt?: number; tokens?: number } | undefined,
+  stats:
+    | { lastPromptAt?: number; tokens?: number; lastExchange?: string }
+    | undefined,
 ): void {
   if (stats === undefined) return;
   const at = stats.lastPromptAt;
@@ -572,6 +642,13 @@ function applyTailStats(
   const tokens = stats.tokens;
   if (typeof tokens === 'number' && Number.isFinite(tokens) && tokens > 0) {
     node.tokens = tokens;
+  }
+  // Copied onto every node the tail sweep covered, not only archived ones:
+  // the fact is the same either way, and it is the RENDERERS that decide an
+  // archived row is the one place it earns width (see viewmodel.pushSession).
+  const exchange = stats.lastExchange;
+  if (typeof exchange === 'string' && exchange.trim() !== '') {
+    node.lastExchange = exchange;
   }
 }
 
@@ -589,15 +666,37 @@ function applyTailStats(
  *    is what gets it out of the way. Applied at both levels (children lists
  *    and the root list), because a root demoted only within its folder row
  *    would still sit above live work.
- *  - archived (closed) sorts after every live sibling, exactly once — and no
- *    longer reshuffles AMONG archived siblings by recency. With
- *    `lineage.showArchived` on, this machine alone carries 157+ foreign
- *    closed sessions; keying purely on startedAt keeps their relative order
- *    stable instead of relitigating it every tick a process happens to exit.
+ *  - OVER sorts after every live sibling, exactly once — and no longer
+ *    reshuffles AMONG the over rows by recency. With `lineage.showArchived`
+ *    on, this machine alone carries 157+ foreign closed sessions; keying
+ *    purely on startedAt keeps their relative order stable instead of
+ *    relitigating it every tick a process happens to exit.
+ *
+ *    "Over" is `sessionIsOver`, not `archived`. It used to be `archived`, and
+ *    that read one arm short in a way you only see when a tree changes shape:
+ *    a ghost — the inferred "(gone)" ancestor Flock mints when a child names a
+ *    parent nothing can produce a row for — is never archived, and the ghost
+ *    pass has no roster row to read a `startedAt` from (see step 3), so it
+ *    fell through to the undefined-last branch and landed as the LAST LIVE
+ *    sibling: above every real closed session. Exactly backwards, since a
+ *    ghost is by construction the ancestor of something that has already
+ *    finished. The same one-word fix also demotes a roster row the agent list
+ *    still carries but reports as `exited`, which both renderers already draw
+ *    as closed; the order now agrees with the drawing.
+ *
+ *    The REJECTED alternative was to synthesise a `startedAt` for the ghost
+ *    from its earliest child, the way `noteInherited` synthesises a cwd. It is
+ *    the same shape of guess but not the same quality of one: a cwd is a fact
+ *    the child genuinely inherited from the parent, whereas a child's start
+ *    time is emphatically not its parent's — the parent is older than every
+ *    child by definition. And it would answer the wrong question. This key
+ *    asks "is it still going", and for that a ghost has an answer already.
  */
 function compareByStartThenId(a: SessionNode, b: SessionNode): number {
   if (a.hidden !== b.hidden) return a.hidden ? 1 : -1;
-  if (a.archived !== b.archived) return a.archived ? 1 : -1;
+  const aOver = sessionIsOver(a);
+  const bOver = sessionIsOver(b);
+  if (aOver !== bOver) return aOver ? 1 : -1;
   const as = a.startedAt;
   const bs = b.startedAt;
   if (as !== bs) {
@@ -716,6 +815,21 @@ export function buildForest(input: BuildForestInput): SessionForest {
     const la = input?.activityMtimes?.get(id);
     if (la !== undefined) node.lastActiveAt = la;
     applyTailStats(node, input?.tailStats?.get(id));
+    // The detach grace, as a renderable fact. `graceUntil` is the lifecycle
+    // sweep's deadline (workspaces.ts writes it when a switch detaches a
+    // wrapped session); the row it governs is a LIVE row — the roster still
+    // lists the process — and the spec's price for that detached-running
+    // state is that the row must say so, with a countdown. Stamped only here,
+    // in the live pass: an archived record's leftover deadline describes a
+    // process that no longer exists, and a countdown on a dead row would be a
+    // promise the sweep already kept. An unparseable stamp is left off the
+    // node — the sweep reads the same garbage as "expired" and ends the
+    // process within a minute, so the honest render is a plain live row, not
+    // a fabricated deadline.
+    if (typeof record?.graceUntil === 'string') {
+      const deadline = Date.parse(record.graceUntil);
+      if (Number.isFinite(deadline)) node.graceDeadlineAt = deadline;
+    }
     // A muted (hidden) row never carries the green dot — hide is how the
     // user says "stop telling me about this one". Nor does a DELETED one, and
     // for a harder reason than taste: a deleted session has no row, so a dot
@@ -725,6 +839,14 @@ export function buildForest(input: BuildForestInput): SessionForest {
     if (!node.hidden && !node.deleted) {
       const unseen = deriveUnseen(status, record, notificationsDefault);
       if (unseen !== undefined) node.unseen = unseen;
+    }
+    // Same two exclusions as the unseen dot above and for the same reason: a
+    // muted row must carry no lit mark at all, and a deleted one has no row for
+    // a mark to sit on. The tracker owns every other rule about when a phase is
+    // live — see src/compaction.ts.
+    if (!node.hidden && !node.deleted) {
+      const phase = input?.compactionOf?.(id, status);
+      if (phase !== undefined) node.compaction = phase;
     }
     if (record?.notify === false) node.notifyMuted = true;
     nodes.set(id, node);
@@ -743,10 +865,40 @@ export function buildForest(input: BuildForestInput): SessionForest {
     const record = records[id];
     const { parentId, source } = cutSelfEdge(resolutionFor(id), id);
 
+    // WHAT A CLOSED ROW IS CALLED.
+    //
+    // Until this round the chain ended at `shortId`, and on a real machine it
+    // ended there far too often: of the 278 transcripts under
+    // ~/.claude/projects here, 198 — 71.2% — rendered as a bare eight-hex row.
+    // Turning on "Show Closed Sessions Too" therefore filled the tree with
+    // rows whose only readable content was the last-exchange snippet beside
+    // the id, which is exactly the "I see the last prompt, not the name"
+    // complaint this round exists to answer.
+    //
+    // `transcriptFallbackName` (archive.ts, which owns the reading of the
+    // transcript head) adds two steps below the two title records: the CLI's
+    // own generated `ai-title`, shown as an ordinary name because it IS a
+    // title of this conversation and the alternative is a hex id; then the
+    // opening prompt in typographic quotes, which is a QUOTATION and says so.
+    // That takes the hex-id rate to 6.8%. `labelIsFallback` is the
+    // machine-readable half of the quoting — the quotes are for the reader,
+    // the flag is for code (terminal-tab naming) that must not treat a
+    // quotation as a name someone chose.
+    //
+    // `headers.customTitle` keeps its place between them and is left where it
+    // is deliberately: it and `a.label` are two readers of the SAME
+    // `custom-title` record, and in the shipped wiring this step is dead —
+    // extension.ts fills `headers` only for LIVE roster rows with no name, and
+    // an archived node is by construction not one of those. Reordering it
+    // would be churn against a step that never fires; keeping it costs
+    // nothing and keeps callers that do pass headers (tests, and anything that
+    // later wants to) working.
+    const fallback = transcriptFallbackName(a);
     const label =
       nonEmpty(record?.title) ??
       nonEmpty(a.label) ??
       nonEmpty(headers?.get(id)?.customTitle) ??
+      fallback?.text ??
       shortId(id);
 
     const node: SessionNode = {
@@ -765,6 +917,12 @@ export function buildForest(input: BuildForestInput): SessionForest {
       children: [],
       visibleChildren: [],
     };
+    // Only when the quotation actually WON the chain: a session with both a
+    // recorded title and a first prompt has a real name, and flagging it would
+    // cost that name its terminal tab.
+    if (fallback?.fallback === true && label === fallback.text) {
+      node.labelIsFallback = true;
+    }
     const cwd = nonEmpty(a.cwd) ?? nonEmpty(record?.cwd);
     if (cwd !== undefined) node.cwd = cwd;
     const summary = nonEmpty(record?.summary);
@@ -938,8 +1096,7 @@ export function buildForest(input: BuildForestInput): SessionForest {
   // the delete path already does, and doing it here is also what keeps
   // `visibleChildren`, `visibleRoots` and `attentionCount` consistent with each
   // other — three fields every renderer reads as one answer.
-  const isOver = (n: SessionNode): boolean =>
-    n.ghost || n.archived || n.status === 'exited';
+  const isOver = sessionIsOver;
   const visibleMemo = new Map<string, boolean>();
   const descendantMemo = new Map<string, boolean>();
 
@@ -993,10 +1150,43 @@ export function buildForest(input: BuildForestInput): SessionForest {
     return list;
   }
 
+  // `children` is the STRUCTURE — where a node hangs, and it is sorted by the
+  // comparator above. `visibleChildren` is the PICTURE — what a person
+  // actually scans down. Promotion is the one thing that makes the two differ,
+  // and until now it made them differ in a way nobody chose: `visibleListOf`
+  // SPLICES a promoted child into the slot its invisible parent occupied, so
+  // the position of a live fork on screen was decided by the sort key of a row
+  // that is not on screen. Close or archive a session in the middle of a tree
+  // and its fork visibly moves, though nothing about the fork changed — and
+  // with Show Only Active Sessions on there is not even a row left to explain
+  // the move. Re-keying the visible list with the same comparator merges the
+  // promoted child back in among the siblings it now stands with.
+  //
+  // The REJECTED alternative was to stop demoting over rows, which would leave
+  // the slot stable and need no second sort. It loses to compareByStartThenId's
+  // own argument: the demotion is what keeps 157+ foreign closed sessions out
+  // from between your live ones, and that is worth more than a stable slot for
+  // a row that is disappearing anyway.
+  //
+  // This is a pure re-key and adds no state: `roots`, `children` and `edges`
+  // are untouched, so everything that reasons about lineage rather than layout
+  // still sees precisely the tree it saw before.
+  //
+  // The copy is load-bearing. `visibleChildrenOf` hands back the `promotedMemo`
+  // entry itself, and a parent's `visibleListOf` spreads that same array into
+  // its own list, so sorting in place would reorder a memo other callers share.
+  const sortVisible = (ids: string[]): string[] =>
+    [...ids].sort((a, b) => {
+      const na = nodes.get(a);
+      const nb = nodes.get(b);
+      if (!na || !nb) return a < b ? -1 : a > b ? 1 : 0;
+      return compareByStartThenId(na, nb);
+    });
+
   for (const n of nodes.values()) {
-    n.visibleChildren = visibleChildrenOf(n);
+    n.visibleChildren = sortVisible(visibleChildrenOf(n));
   }
-  const visibleRoots = visibleListOf(roots.map((r) => r.id));
+  const visibleRoots = sortVisible(visibleListOf(roots.map((r) => r.id)));
 
   // (7) edges + attention count.
   const edges: LineageEdge[] = [];

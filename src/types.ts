@@ -69,32 +69,51 @@ export const BRAND_COLOR_ID = 'lineage.brand';
 export const RUNNING_COLOR_ID = 'lineage.running';
 export const DONE_COLOR_ID = 'lineage.done';
 export const CLOSED_COLOR_ID = 'lineage.closed';
+/** Compaction — both phases, ring and dot alike. ONE colour id for two marks
+ *  on purpose: they are the same fact at two moments, and a theme that
+ *  retunes the purple must not be able to retune only half of it. Purple is
+ *  the one signal hue the sidebar had left (amber is running, red is
+ *  attention, green is the brand), and the branch palette already spends it
+ *  on "merged" — which is the same idea, a thing that has settled. */
+export const COMPACTING_COLOR_ID = 'lineage.compacting';
 /** The single glyph the status dot is drawn with. A FileDecoration badge is
  *  capped at two graphemes by the workbench, which is the whole reason status
  *  is a dot and not a word. */
 export const STATUS_DOT = '●';
-/** RETIRED. The hollow ring a closed row used to carry at its right edge.
- *  Nothing paints it now: a closed row is already dimmed, its logo greyed and
- *  (in the native tree) its label greyed by the decoration's colour, so the ring
- *  was a second mark saying what the row said anyway — and a column of empty
- *  circles beside every finished session is exactly the "every row carries a
- *  mark" noise the lit dots exist to stand out from.
+/** The HOLLOW ring, at the right edge — the native tree's half of the purple
+ *  ring webtree.css draws with a border.
  *
- *  The constant stays for the same reason EditorialRecord.hidden does: the
- *  character was a considered choice (deliberately not '◌' U+25CC, which is
- *  absent from the workbench's UI-font fallbacks and renders as tofu in a
- *  FileDecoration badge), and a future surface that wants a printable "over"
- *  mark should start from that answer rather than rediscover it. */
+ *  Retired once and brought back for a different job. It used to mark a CLOSED
+ *  row, and that was wrong for the reason STATUS_DOT's note gives: a closed row
+ *  is already dimmed and its logo greyed, so the ring was a second mark for
+ *  something the row had already said, and a column of empty circles beside
+ *  every finished session is exactly the noise the lit dots exist to stand out
+ *  from. Compaction-in-flight is the opposite case — a transient state nothing
+ *  else on the row reports, on a handful of rows at a time — which is precisely
+ *  what a mark is for.
+ *
+ *  The character was a considered choice then and stands now: deliberately NOT
+ *  '◌' U+25CC, which is absent from the workbench's UI-font fallbacks and
+ *  renders as tofu in a FileDecoration badge. */
 export const CLOSED_DOT = '○';
 /** The numeric badge on the Flock view container (the activity-bar logo):
- *  how many rendered rows carry a lit attention dot. DEACTIVATED for now —
- *  flip to `true` to bring it back, no other change needed. Both surfaces
- *  (native tree and inline webview) read this at the one line where they
- *  write `view.badge`, and both write `undefined` while it is off, so the
- *  badge clears rather than freezing at its last value. The counters behind
- *  it — `LineageTreeProvider.attentionCount` and `attentionCountOf` — stay
- *  live and tested; only the publish is switched off. */
-export const ATTENTION_BADGE_ENABLED = false;
+ *  how many RUNNING sessions the tree is answering for — level 1 and the
+ *  grace countdown together, i.e. every live process with a row.
+ *
+ *  The slot used to count attention (lit dots) and was deactivated; the
+ *  running count takes it because it is the number the levels design exists
+ *  to make countable. "No running process without a visible row" is only an
+ *  invariant you can trust if the count of processes is ON the container —
+ *  the 84-detached-sessions incident was survivable precisely because nothing
+ *  anywhere showed "84". Attention lost the slot but not its surfaces: the
+ *  dots, the bell and `lineage.hasUnseen` all still carry it, and
+ *  `attentionCountOf` stays live and tested.
+ *
+ *  Flip to `false` to clear the badge — both surfaces (native tree and inline
+ *  webview) read this at the one line where they write `view.badge`, and both
+ *  write `undefined` while it is off, so the badge clears rather than
+ *  freezing at its last value. */
+export const RUNNING_BADGE_ENABLED = true;
 export const CONTEXT_HOOKS_INSTALLED = 'lineage.hooksInstalled';
 /** True while any rendered session is done-and-not-looked-at. Drives the bell
  *  icon in the view title: `bell-dot` when set, plain `bell` when not — two
@@ -127,12 +146,12 @@ export const CONTEXT_HAS_FORKABLE = 'lineage.hasForkable';
  *
  *  It exists to make a menu entry honest. The workbench opens a row's context
  *  menu on the row you right-clicked and hands the command that row alone, so
- *  "Delete Session" on one of four selected rows would delete one and read as
- *  though it had deleted four. This key swaps the singular entry for a plural
+ *  "Archive Session" on one of four selected rows would archive one and read as
+ *  though it had archived four. This key swaps the singular entry for a plural
  *  one that says how many it is about to take — the same complementary-`when`
  *  shape the bell and the active-only filter already use. */
 export const CONTEXT_MULTI_SELECT = 'lineage.multiSelect';
-/** TWO OR MORE accounts a session can actually run on.
+/** TWO OR MORE accounts a CLAUDE conversation could be moved between.
  *
  *  Gates the "Move to Account…" entry in a session row's menu, and nothing
  *  else. The verb stays REGISTERED either way — that is the standing rule for
@@ -140,11 +159,17 @@ export const CONTEXT_MULTI_SELECT = 'lineage.multiSelect';
  *  entry whose picker can only ever say "there is no other account" is a row of
  *  clutter in front of every single-account user, which is most of them.
  *
- *  Counted over `accounts.canHostSession`, not over the raw roster: an account
- *  no session can start on is not somewhere a conversation can move to either,
- *  so a machine with one Claude login and one Gemini row has ONE destination,
- *  which is none. */
-export const CONTEXT_MANY_ACCOUNTS = 'lineage.manyAccounts';
+ *  Counted over `accounts.canSwitchAccounts`, which asks the same question the
+ *  PICKER asks and is why this key was renamed rather than repaired in place.
+ *  It used to count `accounts.canHostSession` — every account a session can
+ *  START on — and that stopped being the same question the day `codex` joined
+ *  SESSION_PROVIDERS: a machine with one Claude login and one Codex login had
+ *  two host-capable accounts and no legal move between them, so the entry drew
+ *  on every session row in front of a picker that was always empty. That is the
+ *  roster this extension seeds by default. A key still called `manyAccounts`
+ *  while meaning "two accounts one conversation could move between" would have
+ *  been the next person's bug, so the name changed with the meaning. */
+export const CONTEXT_CAN_SWITCH_ACCOUNT = 'lineage.canSwitchAccount';
 /** Gates the project header view inside the BUILT-IN Explorer container.
  *
  *  NOT simply "this window is a Flock workspace". It is "this window has
@@ -157,6 +182,23 @@ export const CONTEXT_MANY_ACCOUNTS = 'lineage.manyAccounts';
  *  Flock view in the Explorer of every install that never opened a
  *  project. */
 export const CONTEXT_EXPLORER_FOLLOW = 'lineage.explorerFollow';
+/** The `lineage.mode` value ('folder' | 'root' | 'project'), mirrored for the
+ *  manifest's when-clauses: a contributed menu item cannot read a setting
+ *  through anything but `config.*`, and gating on the RESOLVED mode (defaults
+ *  and garbage values folded in by modes.normalizeMode, and the legacy
+ *  `workspaces.enabled` pair folded in by modes.resolveMode) has to match what
+ *  the code actually does — `config.lineage.mode == 'project'` would disagree
+ *  with the code the moment a settings file carries a typo, and now also the
+ *  moment one carries the old pair. That the RESOLVED value is what lands here
+ *  is what let a third value be added without a single when-clause learning
+ *  about `workspaces.enabled`.
+ *
+ *  A when-clause spells the NEGATIVE — `lineage.mode != 'folder'` — wherever a
+ *  verb is available at two of the three models, which is most of them: in-window
+ *  switching exists at `flock` and `project` alike and is refused only by the
+ *  window that is its folder. Written at activation and on every configuration
+ *  change. */
+export const CONTEXT_MODE = 'lineage.mode';
 
 // ------------------------------------------------------------------ schema
 
@@ -172,8 +214,19 @@ export const CONTEXT_EXPLORER_FOLLOW = 'lineage.explorerFollow';
  *  and state.migrateV5ToV6 for the write. Sessions are not touched and do not
  *  need to be: membership has always been derived from the cwd, so a session
  *  that was under the child's row is under the child's DIRECTORY row afterwards.
+ *
+ *  v8 RETIRES `parked` — the invisible running-but-unshown state that let 84
+ *  detached sessions (~670 processes) pile up unseen. Every record with
+ *  `parked: true` is flipped to archived (a `closed` stamp, `tmux` cleared) —
+ *  level 2: no process, a visible resumable row. The flip lives in
+ *  state.sanitizeRecord rather than in a one-shot ladder step, on the
+ *  hidden→deleted precedent, so a mixed install whose old window keeps
+ *  re-writing `parked: true` converges again on every read. The processes those
+ *  records left running are ended by the activation-time tmux reconcile
+ *  (extension.ts), which needs no record-side name — the tmux session name
+ *  encodes the session id.
  */
-export const STATE_SCHEMA_VERSION = 7;
+export const STATE_SCHEMA_VERSION = 8;
 
 /** The first schema version written by a build in which branch rows are OFF by
  *  default. 0.1.1 and earlier drew a row per checkout unconditionally and wrote
@@ -633,15 +686,143 @@ export function isTerminalLocationPref(v: unknown): v is TerminalLocationPref {
   return v === 'editor' || v === 'panel' || v === 'newWindow';
 }
 
+/**
+ * `lineage.sessionSwitching` — which list is THE list of conversations.
+ *
+ * Two session switchers on one screen is one too many. The Claude Code
+ * extension has an agent list of its own, reachable from the back arrow at the
+ * top of its panel, and it is very easy to land in by accident; it also knows
+ * nothing about forks, projects, worktrees or anything else the tree exists to
+ * show, so arriving there is a downgrade you did not ask for.
+ *
+ * `flock` (the default) makes the tree the switcher: the row of whatever
+ * conversation is in front stays SELECTED as you move between them, so the
+ * sidebar always already says where you are, and alt+left over Claude puts the
+ * keyboard on that row so the arrows can move you off it.
+ *
+ * `claude` turns both halves off and leaves the agent list alone. Nothing here
+ * disables anything of Claude's — Flock could not if it wanted to — it only
+ * stops Flock from having an opinion about where you are.
+ *
+ * WHAT THIS IS NOT: an interception. The back arrow is a route change inside
+ * another extension's webview and it produces no signal on the outside — no
+ * tab, no title change, no command, no context key. Flock cannot stop the
+ * click, cannot see it, and does not pretend to. What it can do is make sure
+ * the place you land is already correct.
+ */
+export type SessionSwitching = 'flock' | 'claude';
+
+export function isSessionSwitching(v: unknown): v is SessionSwitching {
+  return v === 'flock' || v === 'claude';
+}
+
+export const DEFAULT_SESSION_SWITCHING: SessionSwitching = 'flock';
+
+/**
+ * What clicking **Close with Summary** does — four answers, each honest about
+ * what it costs. The behaviour, the wait and the refusals are in
+ * src/closeSummary.ts, which re-exports all three of these; they live here
+ * because this file imports nothing and is the root every module may read.
+ *
+ * `compact-and-tell-parent` is the standard: type `/compact` into the session,
+ * wait for the Claude CLI to write its own compaction summary, record it on
+ * the row, type a short form of it into the PARENT conversation, and then
+ * close. `compact-only` is the same without the parent step, for a branch
+ * whose parent is not open or not interested. `ask-me` is exactly the old
+ * input box, kept by name so that anyone who preferred it can find it by
+ * reading the list rather than by discovering it is gone. `off` closes with no
+ * summary at all — what **Close Session** already does — for anyone who keeps
+ * hitting a menu entry they did not want to be a two-minute verb.
+ *
+ * SAY WHAT THE COMPACTING MODES ARE, precisely, wherever they are described.
+ * Flock cannot ask a model for a summary: it has no API client, and it speaks
+ * to the CLI only by typing into its terminal. It drives `/compact` and reads
+ * back what the CLI wrote. The words are genuinely the model's; the driving is
+ * a keystroke. It is not a scrape of the last exchange, and it is not
+ * something Flock generated.
+ */
+export type CloseSummaryMode =
+  | 'compact-and-tell-parent'
+  | 'compact-only'
+  | 'ask-me'
+  | 'off';
+
+export function isCloseSummaryMode(v: unknown): v is CloseSummaryMode {
+  return (
+    v === 'compact-and-tell-parent' ||
+    v === 'compact-only' ||
+    v === 'ask-me' ||
+    v === 'off'
+  );
+}
+
+/**
+ * The default, and it is a compacting one.
+ *
+ * The old behaviour is not the safe default here; it is the reported bug. What
+ * makes this defensible is that every way it can fail declines loudly rather
+ * than quietly doing something else: a Codex session is offered the plain
+ * close by name, a session with no terminal in this window refuses before
+ * anything is typed, and a compaction that never finishes closes nothing at
+ * all.
+ *
+ * Note the deliberate asymmetry with `CommandDeps.closeSummaryMode`, whose
+ * ABSENCE reads as `ask-me`. The default of the setting is this; the default
+ * of a wiring that never read the setting is the old input box, because a
+ * reader that cannot see the configuration has no business starting
+ * two-minute compactions on the strength of a value it never read.
+ */
+export const DEFAULT_CLOSE_SUMMARY_MODE: CloseSummaryMode =
+  'compact-and-tell-parent';
+
 // ------------------------------------------------------------------ verbs
 
 export const WRAP_PROMPT =
   'Wrap up this session: summarize what was accomplished in 3-6 bullet ' +
   'points, list any unfinished work, then stop.';
 
+/**
+ * The one turn that makes a conversation compact itself.
+ *
+ * A SLASH COMMAND and not English, and the whole of both features that use it
+ * rests on that distinction: the Claude CLI interprets a prompt beginning with
+ * `/` as a command, so this is an instruction rather than a message. The Codex
+ * CLI takes a positional prompt too but as ordinary user text, which would
+ * open a conversation by saying the literal characters "/compact" to a model
+ * and compact nothing — so every caller checks the provider first and declines
+ * by name rather than half-doing it.
+ *
+ * It lives here rather than in commands.ts because two very different callers
+ * need the same string: `forkAndCompact` hands it to a CHILD as its opening
+ * positional argument, and Close with Summary types it into a session that is
+ * already running. A second literal would be one edit away from the two
+ * disagreeing.
+ */
+export const COMPACT_PROMPT = '/compact';
+
 export const COMMANDS = {
   refresh: 'lineage.refresh',
   focusSession: 'lineage.focusSession',
+  /**
+   * Put the keyboard in the Flock sidebar, on the row of whatever conversation
+   * is in front — the one gesture that makes the sidebar a session SWITCHER
+   * rather than a list you click.
+   *
+   * It exists because of the Claude Code extension's own back arrow, which
+   * leaves its conversation for an agent list Flock cannot see into and does
+   * not need: two session lists on one screen, and only one of them knows
+   * about forks, projects or worktrees. Flock cannot intercept that click — it
+   * is a route change inside another extension's webview, with no tab, title,
+   * command or context key on the outside of it — so this is the half that can
+   * be made to work: the arrow key that means "back" while Claude has focus
+   * lands you in the tree instead, on the row you were already in, with the up
+   * and down arrows switching sessions from there.
+   *
+   * Bound to alt+left, scoped to the Claude panel or sidebar being active, and
+   * only while `lineage.sessionSwitching` is `flock`. Always available from the
+   * palette, whatever that setting says.
+   */
+  focusSessionsView: 'lineage.focusSessionsView',
   newSession: 'lineage.newSession',
   /** `newSession` with the folder question forced back on. `newSession` itself
    *  defaults to the project this window is open on and asks nothing, which is
@@ -684,19 +865,47 @@ export const COMMANDS = {
   renameSessionInline: 'lineage.renameSessionInline',
   closeSession: 'lineage.closeSession',
   closeWithSummary: 'lineage.closeWithSummary',
+  /** End the session to level 2 IMMEDIATELY, skipping every wait: a grace
+   *  countdown is cut short (the detached process is killed, tree and all), a
+   *  live tab is closed. The user verb for "1→2 now" where `closeSession`
+   *  covers only a session with a terminal to close. */
+  closeSessionNow: 'lineage.closeSessionNow',
+  /** Toggle the keep-awake pin (EditorialRecord.pinned): a pinned session is
+   *  exempt from the idle timer, grace expiry and pool eviction — for long
+   *  autonomous runs that look idle between turns. One toggle verb rather than
+   *  a pin/unpin pair because the pinned state has no menu token yet; the verb
+   *  reports which way it flipped. */
+  togglePinSession: 'lineage.togglePinSession',
   wrapSession: 'lineage.wrapSession',
   copySessionId: 'lineage.copySessionId',
   // TWO verbs on a row, no third: CLOSE ends the tab (the row stays,
-  // inactive), DELETE removes the row (restorable). The old hide verb is
-  // retired; old `hidden` records read as deleted (see state.sanitizeRecord).
+  // inactive), ARCHIVE ends the session and removes the row (restorable). The
+  // old hide verb is retired; old `hidden` records read as deleted (see
+  // state.sanitizeRecord).
+  //
+  // THE ID STILL SAYS `delete` AND THE TITLE SAYS "Archive Session", ON
+  // PURPOSE. A command id is a public contract: it is what a user's
+  // `keybindings.json`, a task runner, or another extension names, and none of
+  // them ever see it in the UI. Renaming it would break those bindings
+  // silently, in exchange for a word nobody reads — so the words changed and
+  // the ids did not. The same applies to `deleteSessions`, `restoreSession`
+  // and `deleteStale` below.
   deleteSession: 'lineage.deleteSession',
   /** The same verb over a MULTI-SELECTION. A separate id rather than a
    *  widened `deleteSession` because the two have to say different things in a
-   *  menu — "Delete Session" over four selected rows is a lie — and a
+   *  menu — "Archive Session" over four selected rows is a lie — and a
    *  contributed command has exactly one title. Their `when` clauses are
    *  complements of `lineage.multiSelect`. */
   deleteSessions: 'lineage.deleteSessions',
   restoreSession: 'lineage.restoreSession',
+  /** The per-project archive browser — "Archived Sessions…" on a project row.
+   *  Archiving takes a row out of the tree, which makes the archive the one
+   *  place a session can be without being anywhere you can look; this is that
+   *  place, scoped to the project you are already looking at, searchable by
+   *  name, and restoring several at once. `restoreSession` remains the
+   *  whole-machine door for the case where you do not know which project it
+   *  was. */
+  archivedSessions: 'lineage.archivedSessions',
   openProject: 'lineage.openProject',
   installHooks: 'lineage.installHooks',
   removeHooks: 'lineage.removeHooks',
@@ -759,6 +968,24 @@ export const COMMANDS = {
   /** Rename a NAMED subproject. Only on a lane — an implicit directory row has
    *  no name of its own to change (its label is the directory's). */
   renameSubproject: 'lineage.renameSubproject',
+  /**
+   * Re-file an EXISTING session into one of its project's lanes, or out of every
+   * lane.
+   *
+   * The missing half of named lanes. A lane's stamp
+   * (`EditorialRecord.subprojectId`) was written at LAUNCH and nowhere else, so
+   * the only way into a lane was to start a session from the lane's own `+` —
+   * which means every conversation that predates the lane, and every one started
+   * from the project's `+` or from a terminal, could never be filed in it.
+   * Measured on a real store: two live lanes, 556 session records, and not one
+   * stamp between them.
+   *
+   * `StateStore.moveSessionSubproject` is deliberately a DIFFERENT writer from
+   * the launch path's `setSessionSubproject`, so "the launch must not overwrite
+   * an existing stamp" and "the user may change their mind" stay separate rules.
+   * This is the verb behind the second one.
+   */
+  moveSessionToLane: 'lineage.moveSessionToLane',
   /** REMOVED — `lineage.moveProject`, "Move Project…". Re-filed a project under
    *  another one. Nesting projects inside projects is retired: a subproject is a
    *  directory now (see `newSubproject`), so there is no parent to pick. The id
@@ -820,6 +1047,24 @@ export const COMMANDS = {
    *  checkout — an editor there rather than an agent — and the reason it is a
    *  verb of its own rather than something `revealBranch` could cover. */
   openWorktreeWindow: 'lineage.openWorktreeWindow',
+  /** A SESSION's workspace, in its own window — the row-level counterpart of
+   *  Open Project in New Window, and the answer to "go to that workspace" for a
+   *  conversation rather than for a project.
+   *
+   *  The target is the session's WORKTREE first, then the lane it is filed in,
+   *  then the directory its project claims. A session's window is the checkout
+   *  it runs in, not the project's root: the whole reason to go there is to see
+   *  its files and its Source Control, and a linked worktree is what answers
+   *  both. Every tier CONTAINS the session's cwd, which is not a nicety — the
+   *  new window's launch fence and its grouping fence are both containment
+   *  tests, so a target that does not contain the cwd opens a window with
+   *  neither a row for the session nor the ability to resume it.
+   *
+   *  Not titled "…in New Window" like its two neighbours, because it may not
+   *  open one: a window already covering the directory is raised instead, here
+   *  as everywhere else, since two windows on one directory is two roosts for
+   *  one piece of work. */
+  openSessionWorkspace: 'lineage.openSessionWorkspace',
   /** The pull request on this branch, in the browser. Only ever drawn on a row
    *  that HAS one (the `pullRequest` context token), and only reachable at all
    *  with `lineage.git.pullRequests` on. */
@@ -860,8 +1105,9 @@ export const COMMANDS = {
   projectFromFolder: 'lineage.projectFromFolder',
   hideFolder: 'lineage.hideFolder',
   showHidden: 'lineage.showHidden',
-  // Bulk housekeeping for a tree whose rows persist until deleted. Replaces an
-  // earlier `lineage.hideStale` (hide is retired).
+  // Bulk housekeeping for a tree whose rows persist until archived. Replaces an
+  // earlier `lineage.hideStale` (hide is retired). Titled "Archive Stale
+  // Sessions…"; see `deleteSession` for why the id keeps the old word.
   deleteStale: 'lineage.deleteStale',
   // Notifications
   showNotifications: 'lineage.showNotifications',
@@ -924,26 +1170,27 @@ export const COMMANDS = {
   branchDisplayColor: 'lineage.branchDisplayColor',
   /** Every git-and-worktree switch at once, from the palette.
    *
-   *  The branch work is spread over six settings — rows, the line under a
-   *  session, how much that line says, the pull-request chips and the two
-   *  previews — and each one is off for its own good reason. That is right for
-   *  a person who wants one of them and wrong for the two who want all of them:
-   *  somebody trying the feature out, and somebody testing a change to it in an
-   *  Extension Development Host. Both had to find six keys in the settings UI,
-   *  knowing all six names.
+   *  The branch work is spread over four settings — the branch rows, how much
+   *  the line under a session says, the pull-request chips and the
+   *  directory-model preview — and each one is off for its own good reason.
+   *  That is right for a person who wants one of them and wrong for the two who
+   *  want all of them: somebody trying the feature out, and somebody testing a
+   *  change to it in an Extension Development Host. Both had to find four keys
+   *  in the settings UI, knowing all four names.
    *
    *  One pair of ids rather than a picker, and no dialog: the palette entry IS
-   *  the choice. `show` writes the six on (with `detailed` for the line, which
+   *  the choice. `show` writes the four on (with `detailed` for the line, which
    *  is the level worth looking at when you have asked for everything); `hide`
    *  writes the shipped defaults back, so the pair is an exact inverse and not
    *  a one-way door.
    *
-   *  Two of the six are things Flock otherwise never does unasked — `gh pr
-   *  list` reaches the network, and the demo project puts rows in the tree that
-   *  are not real — so the ON half says so afterwards in a message rather than
-   *  a status-bar flash. Invoking the command is the person's act that those
-   *  two settings require; being told what you just turned on is not the same
-   *  as being asked. */
+   *  One of the four is a thing Flock otherwise never does unasked — `gh pr
+   *  list` reaches the network — so the ON half says so afterwards in a message
+   *  rather than a status-bar flash. That is still enough to earn the message on
+   *  its own, because the network is the one consequence here a person cannot
+   *  discover by looking at their sidebar. Invoking the command is the person's
+   *  act that the setting requires; being told what you just turned on is not
+   *  the same as being asked. */
   showBranchesAndWorktrees: 'lineage.showBranchesAndWorktrees',
   hideBranchesAndWorktrees: 'lineage.hideBranchesAndWorktrees',
   /** THE ONBOARDING VERB: everything a new install should turn on, as a
@@ -964,6 +1211,22 @@ export const COMMANDS = {
    *  offer, so every line has to carry its own reason and its own cost — and
    *  the answer has to be theirs, per line, before anything is written. */
   recommendedSetup: 'lineage.recommendedSetup',
+  /** WHICH OF THE THREE WINDOW MODELS this window is in — the same picker the
+   *  recommended setup's `windowModel` step opens, reachable on its own.
+   *
+   *  A VERB rather than "open the settings UI and find the dropdown", because
+   *  the dropdown is where the choice went unfound: it is one of forty-odd
+   *  rows, its values are `folder` / `flock` / `project` rather than the words
+   *  a person would use, and nothing in the product ever pointed at it. The
+   *  picker names the three the way Axel names them, says what each one costs,
+   *  puts the cursor on the one you are in — and writes `workspaces.enabled`
+   *  alongside the mode when auto-switch is chosen, which is the only way the
+   *  legacy pair ever gets untangled on a real machine.
+   *
+   *  Not gated by a when-clause: a person in the wrong model is exactly the
+   *  person who needs to find this, and hiding it in some models would be the
+   *  same mistake the dropdown made. */
+  chooseWindowModel: 'lineage.chooseWindowModel',
   /** The gear at the end of the view title, and everything that used to be
    *  behind the `...` beside it.
    *
@@ -1048,6 +1311,44 @@ export const CONFIG_KEYS = {
    *  the half that makes windows read them. Defaults false; set true by the
    *  install command, whose modal is the consent. */
   verbsEnabled: 'verbs.enabled',
+  /**
+   * `lineage.fork.notifyParent` — after a fork, type one sentence into the
+   * PARENT conversation saying that a branch was made, what it is called and
+   * what it is for.
+   *
+   * NEW CONSTRUCTION, not an existing mechanism turned on. Flock has no
+   * session-to-session messaging: the in-session verbs channel runs one way,
+   * session → extension, and the only text that has ever gone the other way is
+   * a fork's opening prompt, delivered once at birth. This note rides the
+   * single remaining extension → live-session channel, `sendTextToSession`,
+   * which types into a terminal bound in THIS window — see src/forkNote.ts for
+   * what that costs and what it cannot reach.
+   *
+   * OFF by default, and the default is the honest one. The note is keystrokes
+   * into a running conversation: it costs the parent a turn, and if there is
+   * half a sentence already typed in that input box it is appended to it.
+   * Nothing is queued when the parent cannot be reached — a closed parent, one
+   * in another window, one running outside Flock — because the tree already
+   * carries the fact for the person, and a mailbox would be a second lifecycle
+   * to get wrong.
+   */
+  forkNotifyParent: 'fork.notifyParent',
+  /**
+   * `lineage.close.summaryMode` — what **Close with Summary** actually does.
+   *
+   * It used to open an input box and ask the person to type the summary, which
+   * is the one party with least of the conversation in their head. The default
+   * now types `/compact` into the session, waits for the Claude CLI to write
+   * its own compaction summary, records it on the row, and (in the standard
+   * mode) types a short form of it into the parent before closing.
+   *
+   * Say what this is precisely, everywhere it is described: Flock cannot ask a
+   * model for a summary — it has no API client and speaks to the CLI only by
+   * typing into its terminal. It drives `/compact` and reads back what the CLI
+   * wrote. The text is genuinely model-written; the driving is a keystroke.
+   * The values, the wait and the refusals live in src/closeSummary.ts.
+   */
+  closeSummaryMode: 'close.summaryMode',
   terminalLocation: 'terminalLocation',
   /** Quality-of-life: keep at most ONE session tab open in this window.
    *  Opening or focusing a session parks every other session tab — detached
@@ -1057,12 +1358,60 @@ export const CONFIG_KEYS = {
    *  out side by side is a strong opinion, and the default stays the tab
    *  strip as VS Code users know it. */
   soloSession: 'soloSession',
+  /** How long a project chat's tab may sit unused before it closes itself, in
+   *  minutes; 0 disables. A chat is a scratch conversation whose NORMAL ending
+   *  is abandonment, and it has no tree row for solo mode or a switch to tidy
+   *  behind — so without this, finished chats pile up as tabs. The close is a
+   *  plain terminal close, never a park (`parked` means "a switch will bring
+   *  this back", which is exactly wrong for a chat), and the conversation
+   *  survives in Chat History. Busy or waiting chats and the active tab are
+   *  never touched. The decision is chatAutoCloseVictims
+   *  (src/chatAutoClose.ts); extension.ts sweeps on a timer. */
+  chatAutoCloseMinutes: 'chat.autoCloseMinutes',
+  /** How long ANY session tab may sit idle before it closes itself to level 2
+   *  (an archived row, one click from resuming), in minutes; 0 disables. The
+   *  generalization of `chat.autoCloseMinutes` to every session: the process
+   *  is a warm cache over the transcript, and a cache nobody has read for
+   *  half an hour is paid for in memory (~390 MB + ~8 MCP children each). The
+   *  active tab, busy/waiting sessions (marked close-after-turn instead) and
+   *  pinned sessions are never touched. Decision: idleCloseDecisions
+   *  (src/idleClose.ts); extension.ts sweeps on the same 60 s timer as the
+   *  chat sweep. Idleness is the last REAL transcript record's timestamp,
+   *  never file mtime — hooks touch transcripts without new content. */
+  sessionCloseAfterMinutes: 'session.closeAfterMinutes',
+  /** How long a tab-close (workspace switch, solo mode) may leave a
+   *  tmux-wrapped session running DETACHED so re-attach is instant, in
+   *  minutes; 0 closes immediately. The one sanctioned detached-running
+   *  state, and it always renders — the tree shows a countdown row. At the
+   *  deadline: idle → closed to level 2; busy → close-after-turn. The pool is
+   *  capped (idleClose.GRACE_POOL_CAP = 8); overflow closes oldest-idle
+   *  first. */
+  sessionDetachGraceMinutes: 'session.detachGraceMinutes',
+  /** How long a session may keep running after the window that owned it went
+   *  away, in SECONDS. Not a park and not a reprieve — a measurement. VS Code
+   *  reports a window RELOAD and a window CLOSE with the same terminal exit
+   *  reason and offers no way to distinguish them, so the only way to know
+   *  which just happened is to wait: a reload comes back and reattaches
+   *  (clearing the deadline), a close never does. At the deadline the session
+   *  settles to level 2, because with the strict scope fence no other window
+   *  would ever show it — a closed folder's sessions end.
+   *
+   *  Seconds, not minutes, and deliberately far below
+   *  `session.detachGraceMinutes`: this window is measuring a reattach that
+   *  takes about a second, not offering the user time to come back. Raise it
+   *  only if reloads on this machine are slow enough to lose sessions. 0 kills
+   *  on window close outright, which also makes every RELOAD lose its
+   *  sessions. */
+  sessionReloadGraceSeconds: 'session.reloadGraceSeconds',
   /** Who OPENS a conversation: Flock's own tmux-backed terminal, or another
    *  extension's commands (see src/hosts.ts's delegate table). Consulted for a
    *  NEW conversation and for a plain RESUME of an unpinned one — a fork has
    *  nothing to hand over (`--fork-session` is a CLI flag no delegated command
    *  carries). */
   launchMode: 'launch.mode',
+  /** WHERE you switch conversations: Flock's tree, or the Claude Code
+   *  extension's own agent list. See SessionSwitching. */
+  sessionSwitching: 'sessionSwitching',
   onlyProjectSessions: 'onlyProjectSessions',
   /** Show live sessions Flock does not own — `claude` running in some other
    *  terminal, another editor, a script. OFF by default: the roster is
@@ -1175,29 +1524,39 @@ export const CONFIG_KEYS = {
    * nothing there regresses and nothing is half-rendered.
    */
   previewDirectoryModel: 'preview.directoryModel',
-  /**
-   * PREVIEW: a fabricated project, to look at the shape without a repository.
-   *
-   * Its own switch rather than a mode of the one above, because the two answer
-   * different questions. `previewDirectoryModel` asks "is this right for MY
-   * monorepo", which needs real directories and real branches; this asks "is this
-   * layout right at all", which is easier to judge on a project engineered to have
-   * three directories, two repositories and a branch in every state the rows can
-   * draw. Neither implies the other and both can be on.
-   *
-   * Nothing it shows is real: every id is prefixed and refuses every verb, no
-   * directory on it exists, and it is built from a constant rather than from the
-   * store — so it cannot be renamed into a real project, cannot be written to
-   * `state.json`, and disappears completely when the switch goes off. See
-   * src/demoProject.ts.
-   */
-  previewDemoProject: 'preview.demoProject',
   staleAfterHours: 'staleAfterHours',
   busyStaleMinutes: 'busyStaleMinutes',
   // Notifications
   notificationsEnabled: 'notifications.enabled',
   notificationsPopup: 'notifications.popup',
-  // Workspaces
+  /** `lineage.mode` — what a WINDOW is, in three values.
+   *
+   *  `folder` (the default, labelled *One folder per project*): the window is
+   *  the folder you opened, the tree scopes itself to sessions under it, and
+   *  in-window project switching does not exist — the switch verb refuses, no
+   *  workspace status-bar item is drawn; other projects' rows route to their
+   *  own windows. `flock` (*Flock only*): the window is Flock's — nothing is
+   *  fenced, the tree holds everything, nothing rearranges itself, but the
+   *  switch verb is still there for somebody who runs it on purpose.
+   *  `project` (*Auto-switch*): one window spans many projects, switches
+   *  between them transactionally, and switches FOR you when your attention
+   *  moves.
+   *
+   *  Parsing, the migration and the gates all live in src/modes.ts; the
+   *  RESOLVED value is mirrored into the CONTEXT_MODE key for the manifest's
+   *  when-clauses. */
+  mode: 'mode',
+  // Workspaces (the two models that have a switcher)
+  /** `lineage.workspaces.enabled` — SUPERSEDED by `lineage.mode`, still
+   *  honoured, and read in exactly one place: `modes.resolveMode`. While this
+   *  is `false` and the mode is `project`, the window resolves to `flock` —
+   *  which is what that pair already meant before the third value existed, so
+   *  the fold moves nobody. Nothing else in the source may read this key: a
+   *  second reader is a second answer to "which model is this window in", and
+   *  the whole point of the third value is that there is only one. Retired by
+   *  the user's own hand — the window-model picker writes it back to `true`
+   *  when somebody chooses auto-switch — never by an activation that edits a
+   *  settings file nobody asked it to touch. */
   workspacesEnabled: 'workspaces.enabled',
   workspacesResumeSessions: 'workspaces.resumeSessions',
   workspacesAutoSwitch: 'workspaces.autoSwitch',
@@ -1233,8 +1592,8 @@ export const CONFIG_KEYS = {
 /**
  * WHAT "BRANCHES AND WORKTREES" IS, as a list of settings.
  *
- * The feature is six keys, each off for its own reason, and
- * `lineage.showBranchesAndWorktrees` writes all six. The table lives here rather
+ * The feature is four keys, each off for its own reason, and
+ * `lineage.showBranchesAndWorktrees` writes all four. The table lives here rather
  * than inside that command's implementation for one reason: `off` is supposed to
  * be the manifest's own default, and a copy of a default that nothing checks is a
  * copy that drifts. Here, a test can hold it against `contributes.configuration`
@@ -1259,7 +1618,6 @@ export const BRANCH_FEATURE_SWITCHES: readonly {
   { key: CONFIG_KEYS.gitSessionBranchDetail, on: 'detailed', off: 'standard' },
   { key: CONFIG_KEYS.gitPullRequests, on: true, off: false },
   { key: CONFIG_KEYS.previewDirectoryModel, on: true, off: false },
-  { key: CONFIG_KEYS.previewDemoProject, on: true, off: false },
 ] as const;
 
 /** Age past which `lineage.deleteStale` pre-selects a session. Not a filter —
@@ -1279,6 +1637,11 @@ export const DEFAULT_BUSY_STALE_MINUTES = 5;
 
 export type SessionKind = 'interactive' | 'background' | 'unknown';
 export type SessionStatus = 'busy' | 'waiting' | 'idle' | 'exited' | 'unknown';
+/** The two lit compaction phases — see src/compaction.ts, which owns every
+ *  rule about when a session is in one. Declared HERE rather than there for
+ *  the reason at the top of this file: types.ts imports nothing, so every
+ *  layer can depend on it, and SessionNode needs this name. */
+export type CompactionPhase = 'compacting' | 'compacted';
 export type NodeAttention = 'none' | 'waiting';
 /** How a parent edge was established, listed in the order the resolver tries
  *  them: the first source that answers wins (see the cascade in lineage.ts). */
@@ -1331,6 +1694,23 @@ export interface ArchivedSession {
   startedAt?: number;   // first record timestamp, else birthtimeMs
   cwd?: string;         // from the head scan, never from the lossy dir name
   label?: string;       // custom-title header record
+  /** The title the CLI generated for this conversation — its own `ai-title`
+   *  record, read from the same bounded head as `label`. A DIFFERENT class of
+   *  name from `label`: a person chose that one, a model wrote this one. It is
+   *  still shown unmarked, because it is a genuine title OF this conversation
+   *  and the thing it replaces is an eight-character hex id. Present in 154 of
+   *  the 278 transcripts on the machine this was measured on, always inside the
+   *  existing head window, and never contradicting itself when the CLI
+   *  re-emits it later in the same file. */
+  aiTitle?: string;
+  /** The opening words of the conversation — the first thing a PERSON typed,
+   *  whitespace-collapsed. The last resort before a hex id, and never a title:
+   *  callers quote it (see `transcriptFallbackName`) so a row says "these are
+   *  the words it started with", not "this is what it is called". CLI plumbing
+   *  is filtered out at the source — tool results, injected preambles,
+   *  sub-agent turns, compaction continuations and `<bash-input>` echoes are
+   *  not things anybody typed. */
+  firstPrompt?: string;
   /** The transcript's OWN head names a different session id and carries
    *  no forkedFrom marker: this file is a plain-`--resume` CONTINUATION of
    *  that session, not a fork of it. Verified against real data: every fork
@@ -1404,6 +1784,33 @@ export interface RecommendedWorld {
    *  single-checkout repository draws no branch rows, so offering them to its
    *  owner is offering nothing. */
   readonly maxWorktrees: number;
+  /** `lineage.terminalLocation`, normalized to its three legal values — the
+   *  same `isTerminalLocationPref` read every launch makes. Where a
+   *  Flock-launched session's terminal goes; one leg of the answer to "where do
+   *  sessions open today" that `surfaceChoices` marks as current. */
+  readonly terminalLocation: TerminalLocationPref;
+  /** `lineage.soloSession` — the other leg: editor tabs one at a time (pinned,
+   *  the rest parked) or side by side. */
+  readonly soloSession: boolean;
+  /** `lineage.launch.mode` AS CONFIGURED, not as resolved. Resolution needs the
+   *  extension-presence fact below, and `surfaceChoices` does it with the same
+   *  `resolveLaunchMode` every launch uses — so a mode naming a missing
+   *  extension is still distinguishable from `flock` chosen on purpose. */
+  readonly launchMode: string | undefined;
+  /** Whether the official Claude Code extension is installed — the one fact in
+   *  this shape only a host can answer (`vscode.extensions.getExtension`). */
+  readonly claudeExtensionInstalled: boolean;
+  /** `lineage.mode` AS CONFIGURED, not as resolved — `launchMode`'s contract
+   *  exactly, and for the same reason: resolution needs the second fact below,
+   *  and `windowModelChoices` performs it with the same `resolveMode` every
+   *  gate in the extension runs, so the picker can never call "current" a model
+   *  the window is not actually in. */
+  readonly mode: string | undefined;
+  /** `lineage.workspaces.enabled`, raw. The other half of the pair
+   *  `resolveMode` folds; the picker needs it to know whether a `project`
+   *  window is really auto-switching or is the Flock-only model wearing the old
+   *  spelling. */
+  readonly workspacesEnabled: boolean;
 }
 
 // ------------------------------------------------------------------ lineage results
@@ -1453,17 +1860,65 @@ export interface SessionNode {
   status: SessionStatus;      // ghosts and archived nodes are 'exited'
   attention: NodeAttention;
   label: string;              // precedence: editorial.title > roster.name >
-                              // archive.label > header.customTitle > shortId
+                              // archive.label > header.customTitle >
+                              // archive.aiTitle > “archive.firstPrompt” >
+                              // shortId. The last two are archived-only; see
+                              // archive.transcriptFallbackName for why the
+                              // generated title is shown bare and the prompt
+                              // is shown in quotes.
+  /** This node's `label` is a QUOTATION of the conversation's opening words,
+   *  not a name anybody chose. The quote marks say that to a reader; this flag
+   *  says it to code. Only one consumer needs it so far — terminal-tab naming,
+   *  which must fall back to the CLI's own `claude · 1a2b3c4d` rather than put
+   *  `“cd ..”` on a tab — but every future caller that WRITES a label
+   *  somewhere, as opposed to showing it, wants to ask this first. Absent
+   *  (never `false`) on every node whose name is real, so the common case
+   *  costs nothing. */
+  labelIsFallback?: true;
   /** The close-with-summary text, when one was recorded. Carried on the node
    *  so the tooltip can show it — otherwise the text the user typed would be
    *  reachable only by hand-reading state.json. */
   summary?: string;
+  /** The last real conversation text visible in the transcript's bounded tail
+   *  — the final assistant reply when the window holds one, else the last user
+   *  prompt (see usage.readTailStats). Level 2 exists to answer "what did that
+   *  branch conclude?" without resuming, and this is the answer where no
+   *  `summary` was recorded — but it is a HOVER fact, not a row fact, and has
+   *  been since the 2026-08-28 review: beside a name and an age it was the
+   *  widest thing on a closed row and read as the row's identity. Carried on
+   *  every node the tail sweep covered, because the fact is the same for a
+   *  live session; only the hover ever shows it. */
+  lastExchange?: string;
+  /** Epoch ms of `record.graceUntil` — this session is running DETACHED under
+   *  the detach grace (tab closed, process alive so re-attach is instant), and
+   *  this is when the sweep will end it. The one sanctioned detached-running
+   *  state, and the spec's condition for sanctioning it is that the process
+   *  must have a ROW — which it does. The countdown itself lives in the row's
+   *  HOVER rather than in its description (the 2026-08-28 review: the row's
+   *  existence, not its wording, is what makes the state reachable), so this
+   *  field feeds `viewmodel.graceTooltipLine` and the `;grace;` context token
+   *  that puts Close Now / Keep Awake on the menu. Present only on LIVE nodes
+   *  — an archived record's stale deadline describes a process that no longer
+   *  exists — and kept even past expiry, because a busy session outlives its
+   *  deadline on purpose (close-after-turn) and a row must never go quiet
+   *  while its process runs. */
+  graceDeadlineAt?: number;
   /** The session finished a turn (`doneAt`) and the user has not looked at it
    *  since — the attention dot. Computed per build from the editorial record;
    *  `undefined` means "not tracked" (notifications off for this session, or a
    *  node kind that has no unseen state), which the renderers treat as the
    *  older, unseen-blind behaviour. */
   unseen?: boolean;
+  /** This conversation is being compacted right now (`'compacting'` — the
+   *  purple ring), or was just compacted and nothing has been asked of it
+   *  since (`'compacted'` — the full purple dot). Absent on every session that
+   *  is in neither phase, which is nearly all of them nearly all of the time.
+   *
+   *  Computed per build from the in-memory CompactionTracker (src/compaction.ts)
+   *  rather than read off the editorial record: a compaction phase is a fact
+   *  about a running process, minutes long, and writing it to disk would
+   *  outlive the process it describes. */
+  compaction?: CompactionPhase;
   /** This session's notifications are EXPLICITLY off (`record.notify ===
    *  false`) — the row draws a struck-through bell to say so. Only the explicit
    *  per-session mute sets it, never the global `lineage.notifications.enabled`
@@ -1937,6 +2392,22 @@ export interface SubprojectRecord {
    * still starts sessions where it says.
    */
   dir: string;
+  /**
+   * The lane's PINNED BRANCH — the one piece of git context a lane may carry.
+   *
+   * When set, the lane's work is the BRANCH, and `dir` is only where the branch
+   * happened to live when the lane was made: the deep switch reveals (and the
+   * lane's `+` starts sessions in) whatever checkout has this branch out TODAY,
+   * which for a worktree-per-agent workflow moves as worktrees come and go. See
+   * src/deepSwitch.ts for the resolution rule; the fallback when no checkout
+   * has the branch is always `dir` itself — nothing on a switch path ever
+   * CREATES a worktree (that stays a user-confirmed verb, src/worktrees.ts).
+   *
+   * Optional, and absent means "the directory answers on its own" — every lane
+   * from before this field behaves exactly as it always did. Short name
+   * (`feat/x`), never a full ref.
+   */
+  branch?: string;
   /** TOMBSTONE, exactly as ProjectRecord.deleted is and for the same reason: a
    *  dropped key is indistinguishable from "the other window has not heard of it
    *  yet", and any window still holding the lane re-adds it on its next write. */
@@ -2013,13 +2484,65 @@ export type ContextToken =
   | 'notified'
   /** OWNERSHIP pair, always exactly one of the two on a LIVE session row, for
    *  the same reason as the two pairs above. `hosted` means Flock can honestly
-   *  end this session — its tab is here, another Flock window has it, or a
-   *  workspace switch parked it — and is what the Close verbs match on.
+   *  end this session — its tab is here, another Flock window has it, or it
+   *  runs detached under the grace — and is what the Close verbs match on.
    *  `foreign` means the process belongs to something else (a terminal, the
    *  Claude Code extension, another app), where a close could only write a
    *  timestamp onto a conversation that carries on running. See src/hosts.ts. */
   | 'hosted'
   | 'foreign'
+  /** A THIRD ownership token, on a live row whose terminal is bound in THIS
+   *  window — the strict half of `hosted`, never emitted without it.
+   *
+   *  `hosted` deliberately spans three situations (a tab here, another Flock
+   *  window, a detached wrap under the grace) because the verbs that merely
+   *  END a session can honestly serve all three. The verbs that have to TYPE
+   *  into a terminal cannot: Close with Summary sends `/compact` and reads the
+   *  summary back, and Wrap Up sends a sentence, and neither has anything to
+   *  type into when the terminal belongs to another window or does not exist
+   *  yet. Those match on this token instead, so the menu stops offering what
+   *  the verb would only refuse.
+   *
+   *  Emitted for an ABSENT host as well as for 'here', which keeps the
+   *  back-compat contract the pair above states: a wiring with no opinion about
+   *  ownership — every unit double — gets byte-identical menus to the ones it
+   *  had before ownership existed. */
+  | 'here'
+  /** WHICH CLI wrote this conversation, as a complementary pair on every
+   *  non-ghost session row. A ghost is an ancestor inferred from a child's
+   *  edge: it has no transcript, so claiming a CLI for it would be the same
+   *  made-up fact the icon code already refuses to draw for one.
+   *
+   *  It exists because "Move to Account…" can only move a Claude conversation
+   *  — Codex keeps its history somewhere else entirely, in a layout this
+   *  extension does not relocate — and the manifest needs a POSITIVE clause to
+   *  say so, since it never negates a viewItem regex (see the visibility pair
+   *  above).
+   *
+   *  Resolved from the session's own record, or from which history store its
+   *  transcript sits in, and NEVER from the owning project's provider: that
+   *  fallback is right for a glyph and catastrophic here, because a project
+   *  switched to Codex would otherwise relabel every Claude conversation
+   *  filed under it and withdraw a verb that works. An unwired lookup reads as
+   *  'claude', so the failure this pair prevents is a Codex row being OFFERED
+   *  the verb, never a Claude row being denied it. */
+  | 'claude'
+  | 'codex'
+  /** This session runs DETACHED under the grace countdown
+   *  (SessionNode.graceDeadlineAt): its tab is gone, its process is alive so
+   *  re-attach is instant, and the sweep will end it at the deadline. A THIRD
+   *  token beside 'live' + the ownership pair, never a replacement for them —
+   *  a grace row keeps every live verb (it IS live) and gains the two that only
+   *  make sense while the countdown runs: Close Now (why wait out the timer)
+   *  and Keep Awake (make the timer never fire). */
+  | 'grace'
+  /** The "Running elsewhere" GROUP row — the collapsed appendix folder mode
+   *  renders for running sessions its filters would otherwise drop (cwd
+   *  outside the window's folders, or every claiming project closed). Its own
+   *  token rather than 'group' so the folder verbs (hide, open) never appear
+   *  on a row that is not a folder: it has no cwd and exists purely so that
+   *  "every running process has a row in every window" survives the fences. */
+  | 'elsewhere'
   /** One branch row under a project. Its own token rather than reusing
    *  'project': the two rows carry the same projectId and would otherwise match
    *  each other's `when` clauses, putting the project's whole context menu —
@@ -2088,7 +2611,21 @@ export type ContextToken =
    *  user reads — but the row is where the fact lives, and inventing the token
    *  later would mean changing a contextValue every `when` clause matches. */
   | 'account'
-  | 'default';
+  | 'default'
+  /** A row in the Shells view — one terminal this window has bound. Its own
+   *  token rather than 'session' even though the row carries a session id: a
+   *  shell row's verbs are about a PROCESS (reveal its terminal, confirm its
+   *  wrap) and the tree's session menu — fork, rename, hide, move to account —
+   *  is a menu about a conversation, which would be nonsense on a list of
+   *  ptys. */
+  | 'shell'
+  /** This shell is WRAPPED in the private tmux server. A second token on a
+   *  shell row, never alone, and it marks the one fact on that row with a
+   *  consequence: a wrapped shell survives a workspace switch (the pane is
+   *  detached and reattached) where an unwrapped one is closed and resumed.
+   *  Positive, like every other pair here, because the manifest never negates
+   *  a viewItem regex. */
+  | 'tmux';
 export function contextValueOf(tokens: ContextToken[]): string {
   return ';' + tokens.join(';') + ';';
 }
@@ -2115,11 +2652,33 @@ export interface EditorialRecord {
    *  `restoreSession` brings the row back — so this is a view-level delete, not
    *  a data delete. It is now the ONLY way a session with an editorial record
    *  leaves the tree: closing its tab merely flips the row to inactive
-   *  (archived). */
+   *  (archived).
+   *
+   *  THE USER CALLS THIS "ARCHIVED". The field keeps its old name because the
+   *  state file is on real users' disks and `sanitizeRecord` already carries
+   *  migration rules for two retired fields; a third rename would have a live
+   *  blast radius and buy nothing that changing the words did not already buy.
+   *  Note the vocabulary collision this leaves behind: `src/archive.ts` and
+   *  `SessionNode.archived` mean level 2 (closed, read off disk), which is a
+   *  DIFFERENT thing from the Archive verb that writes this flag. */
   deleted?: boolean;
   launchedByUs?: boolean;
   boundWindowId?: string | null; // window whose terminal hosts this session
-  wrapRequestedAt?: string;      // ISO; set by the wrap verb
+  /** ISO; set by the wrap verb. WRITE-ONLY as things stand — nothing reads it,
+   *  and no settlement machinery exists behind it, so do not assume a pending
+   *  wrap is tracked anywhere just because this is stamped. */
+  wrapRequestedAt?: string;
+  /** ISO; set by Close with Summary the moment it types `/compact`, and unlike
+   *  `wrapRequestedAt` it IS read.
+   *
+   *  It exists because a transcript may already contain compaction summaries
+   *  from before this close — 29 of 43 real compactions measured on one machine
+   *  stayed in the same transcript file as an earlier one — and without a floor
+   *  to compare against, the reader would pick up last Tuesday's summary and
+   *  present it as this branch's conclusion. `parseCompactSummary` takes it as
+   *  `sinceMs`. It survives the close so that a person (or a later verb) can
+   *  tell a recorded summary that Flock asked for from one typed by hand. */
+  summaryRequestedAt?: string;
   cwd?: string;
   /** Per-session override of the provider glyph. Normally unset — the
    *  provider comes from the owning project, else DEFAULT_PROVIDER. */
@@ -2191,26 +2750,60 @@ export interface EditorialRecord {
    *  silencing a session is what `notify: false` is for, and conflating the two
    *  would make a one-click × the most destructive control in the popup. */
   notifyDismissedAt?: string;
-  // ---- workspaces ---------------------------------------------------------
-  /** Put away by a WORKSPACE SWITCH: its terminal was closed — the claude
-   *  process ended; the conversation lives on in its transcript — to clear
-   *  the window for another project, and switching back RESUMES it
-   *  (`--resume`, chain-tip routed). The terminal panel is never involved:
-   *  an older build stowed parked sessions into it instead, and a still-live
-   *  one from those days is moved home as a one-shot migration. The row
-   *  renders normally — parking is bookkeeping, not a user verb, so it must
-   *  not grey anything. Membership needs no special case: any non-deleted
-   *  record survives the `showArchived` gate. */
+  // ---- lifecycle ----------------------------------------------------------
+  /** RETIRED at schema v8. The old workspace switch wrote `parked: true` —
+   *  running (or resumable) but with no tab and no distinct row — and that
+   *  invisible, unbounded state is how 84 detached sessions (~670 processes,
+   *  32 GB) accumulated unseen. The state is now unrepresentable: a session is
+   *  level 1 (running, shown), level 2 (`closed` set — no process, archived
+   *  row, click to resume) or level 3 (`deleted`). sanitizeRecord reads a
+   *  persisted `parked: true` (written by older builds) as archived — `closed`
+   *  stamped, `tmux` cleared — and drops the field, so no record carries it
+   *  past a load. Kept typed because foreign state files written by older
+   *  windows still carry it and the sanitizer needs the name. */
   parked?: boolean;
-  /** DETACH-tier parking (see src/tmux.ts). The private tmux session
-   *  (`tmux -L lineage …`) this conversation was detached into when a switch
-   *  parked it: the terminal — only the tmux CLIENT — was disposed and the
-   *  claude process kept running, invisible. Written at park time next to
-   *  `parked`; kill-tier parks write `null` instead so a stale name can never
-   *  survive a park that really killed. Cleared (null) when a restore
-   *  re-attaches. While set, ANY resume of this conversation must go through
-   *  `new-session -A` under this name — a plain `--resume` would start a
-   *  second claude beside the one still running. */
+  /** THE DETACH GRACE — the one sanctioned running-but-detached state, and it
+   *  always renders (a countdown row in the tree). ISO deadline: closing this
+   *  session's tab (a workspace switch, solo mode) left its tmux-wrapped
+   *  process running so re-attach is instant, and at this moment the sweep
+   *  ends it to level 2 (or, mid-turn, marks it `closeAfterTurn`). Written by
+   *  the detach sweep next to `tmux`; cleared (`null`) together with it when a
+   *  re-attach settles the claim. The pool of graced sessions is capped
+   *  (idleClose.GRACE_POOL_CAP); overflow closes oldest-idle first. */
+  graceUntil?: string | null;
+  /** THE KEEP-AWAKE PIN: this session is exempt from every automatic close —
+   *  the idle timer, grace expiry, grace-pool eviction. For long autonomous
+   *  runs that look idle between turns. A pinned session is still level 1
+   *  with a visible row; the pin holds a process open, never hides one. */
+  pinned?: boolean;
+  /** CLOSE-AFTER-THIS-TURN — the spec's queue, not a state. Set instead of
+   *  closing when the idle timer (or an expired grace) lands on a BUSY or
+   *  WAITING session: a turn in flight and a blocked permission dialog outrank
+   *  tidiness everywhere in this extension. The sweep closes the session and
+   *  clears the mark on the first tick that finds it idle; the user looking at
+   *  the tab (active) also clears it — re-engagement outranks the queue. */
+  closeAfterTurn?: boolean;
+  /** STOWED BY A SWITCH — the workspace switch (and nothing else) put this
+   *  session away, so the switch back may bring it home. Written by
+   *  parkSweep's detach and kill tiers next to the grace deadline / `closed`
+   *  stamp, and it is what lets the restore tell close-by-switch from
+   *  close-by-user: an archived record WITHOUT this marker was closed by a
+   *  user verb (Close, Close Now, Delete, a tab ×) or by the idle timer, and
+   *  a saved layout naming it must NOT resurrect it — "user closed stays
+   *  closed" held on the record itself, because the layout alone cannot say
+   *  what happened after it was saved. Survives the sweep's grace-expiry kill
+   *  on purpose (the timer finishing what the switch started is still the
+   *  switch's doing); cleared by the restore that consumes it and by every
+   *  user verb that touches the session's lifecycle. */
+  stowedBySwitch?: boolean;
+  /** The private tmux session (`tmux -L lineage …`, see src/tmux.ts) this
+   *  conversation's process runs detached in while under `graceUntil`: the
+   *  terminal — only the tmux CLIENT — was disposed and the claude process
+   *  kept running. Written by the detach sweep next to `graceUntil`; cleared
+   *  (null) when a re-attach or a kill settles it. While set, ANY resume of
+   *  this conversation must go through `new-session -A` under this name — a
+   *  plain `--resume` would start a second claude beside the one still
+   *  running. */
   tmux?: string | null;
   // ---- project chat -------------------------------------------------------
   /** This session is a project CHAT — a scratch conversation about the project
@@ -2244,7 +2837,18 @@ export interface FocusHandle {
 export interface WindowRecord {
   windowId: string;      // random uuid minted per activation
   focusHandle: FocusHandle;
-  folder?: string;       // first workspace folder fsPath, if any
+  /** First REAL workspace folder fsPath, if any. "Real" excludes the Flock
+   *  anchor a converted explorer-follow window carries at folder[0] — an
+   *  empty directory nothing runs in, so publishing it made the window
+   *  unroutable (nothing is "under" it) while hiding the folders that ARE
+   *  its identity. Kept as the single-folder field older readers know. */
+  folder?: string;
+  /** EVERY real workspace folder, in workspace order (anchor excluded, same
+   *  rule as `folder`). What modes.windowForDir routes on, so a multi-root
+   *  window is the target for work under any of its roots, not only the
+   *  first. Absent on records published by older builds — readers fall back
+   *  to `folder`. */
+  folders?: readonly string[];
   pid: number;           // extension-host pid, used to prune dead windows
   publishedAt: string;   // ISO
 }
@@ -2524,6 +3128,14 @@ export interface TreeDeps {
    *  Optional, like every lookup here: absent means the hover reads exactly as
    *  it did before accounts could be switched. */
   accountLabelOf?(sessionId: string): string | undefined;
+  /** Which CLI wrote this conversation — the fact behind the row's
+   *  `;claude;` / `;codex;` token pair, and therefore behind whether "Move to
+   *  Account…" is in its menu. See ViewModelInput.sessionCli for the rule that
+   *  must resolve it (the record, then the store the transcript sits in) and
+   *  for why the PROJECT's provider must never be that rule. The return type is
+   *  left loose here for the same reason `hostOf`'s is: types.ts may not import
+   *  a module that imports it back. Optional; absent reads as 'claude'. */
+  sessionCli?(sessionId: string): 'claude' | 'codex' | 'gemini' | undefined;
   /** RETIRED: `reparent`. Dropping a session onto another re-parented it, and
    *  dropping one onto a folder row detached it to a root — so a fork could be
    *  dragged out of the tree it branched from and an unrelated conversation
@@ -2544,6 +3156,15 @@ export interface TreeDeps {
   hiddenFolders(): string[];
   /** Only show sessions that belong to a project (config). */
   onlyProjectSessions(): boolean;
+  /** FOLDER MODE's scope: every REAL folder this window opened (the Flock
+   *  anchor excluded), or undefined/empty when nothing is scoped (project
+   *  mode, or an empty window). Feeds GroupingInput.scopeDirs — sessions
+   *  whose cwd is known and outside ALL of them are another window's rows,
+   *  not this one's. A list because converted explorer-follow windows and
+   *  ordinary multi-root workspaces open several folders, each of which is
+   *  "the folder you opened". Optional so an older wiring (and every unit
+   *  double) keeps the machine-wide tree it always had. */
+  scopeDirs?(): readonly string[] | undefined;
   /** The view's session selection changed: these ids, in display order.
    *
    *  Reported UP rather than read down, because only the view knows it — the
@@ -2658,11 +3279,17 @@ export interface TreeDeps {
    *  Flock ships. Moot while `branchRows` is off: there are no branch rows to
    *  move. */
   directoryModel?(): boolean;
-  /** `lineage.preview.demoProject` — append the fabricated project (see
-   *  src/demoProject.ts) to the grouping. Absent reads as OFF. Independent of
-   *  `directoryModel`: the demo carries its own directory rows and branch lists,
-   *  so it draws the new layout whether or not real projects do. */
-  demoProject?(): boolean;
+  /** RETIRED: `demoProject`. `lineage.preview.demoProject` appended a fabricated
+   *  project to the grouping so the directory-and-branch layout could be judged
+   *  without owning a repository shaped for it. It was removed because it was
+   *  never actually off: `lineage.showBranchesAndWorktrees` wrote it ON as part
+   *  of the branch bundle, so people who had never heard of the setting found
+   *  *Flock (demo)* sitting in a sidebar full of their own work. The containment
+   *  worked exactly as designed — prefixed ids, no directory that exists, never
+   *  written to the store — and that turned out to be beside the point: a
+   *  made-up project in a real tree is a bug however well it is fenced. What is
+   *  left for looking at the layout is `preview.directoryModel` over your own
+   *  repositories. */
   /** RETIRED: `reparentProject`. Dragging one project row onto another filed it
    *  as a subproject. Nesting records is gone (see COMMANDS.newSubproject), so a
    *  project row no longer drags at all and the drop handlers refuse the
@@ -2712,6 +3339,25 @@ export interface TerminalDeps {
    *  inactive), never by workspace parking, which detaches. Absent = a
    *  user-closed wrapped session keeps running hidden. */
   tmuxKillSession?(name: string): Promise<boolean>;
+  /** BARE tier's half of the tree reap (src/procs.ts): the live descendants
+   *  of a pid, walked via ps. A bare terminal's dispose kills only the pane
+   *  root — its ~8 MCP children re-parent to PID 1 and keep running — so the
+   *  registry walks the tree BEFORE disposing and reaps the survivors after.
+   *  Injectable for tests; absent = the real walker in src/procs.ts. */
+  listDescendants?(rootPid: number): Promise<number[]>;
+  /** The escalation ladder behind the walk above: verify the walked pids
+   *  exited, SIGTERM the survivors, SIGKILL the stubborn — each signal to an
+   *  explicit pid, never a name pattern. Injectable for tests; absent = the
+   *  real ladder in src/procs.ts. */
+  reapSurvivors?(
+    pids: readonly number[],
+  ): Promise<{ exited: number; termed: number; killed: number }>;
+  /** The `kill(pid, 0)` liveness probe (src/procs.ts isPidAlive). The
+   *  shutdown-time bare reap uses it to tell a window CLOSE (the pty root is
+   *  dead — its orphans may be reaped) from a window RELOAD (the pty
+   *  survives for revival — touching its tree would kill a live session).
+   *  Injectable for tests; absent = the real probe. */
+  isPidAlive?(pid: number): boolean;
 }
 
 /** Detach tier (src/tmux.ts). How to wrap a session launch in the private
@@ -2728,6 +3374,13 @@ export interface WindowDeps {
   publishWindow(rec: WindowRecord): Promise<void>;
   /** Called when our UriHandler receives /focus; sessionId from the query. */
   onFocusRequest(sessionId: string | null): void;
+  /** The window's REAL workspace folders, in order — the Flock anchor (an
+   *  empty directory the explorer-follow feature parks at folder[0] of a
+   *  converted window) already filtered out by the wiring, which is the one
+   *  place that knows the anchor's path. What `WindowRecord.folder`/`folders`
+   *  publish; absent (older wirings, unit doubles) falls back to the raw
+   *  workspace folder list, which is correct for every unconverted window. */
+  realFolders?(): readonly string[];
 }
 
 export interface HookDeps {
@@ -2792,7 +3445,30 @@ export interface TranscriptFacts {
   lastActiveAt?: number;
   /** The first thing the PERSON typed, as the picker's label. */
   firstPrompt?: string;
+  /** The working directory the transcript's OWN head names.
+   *
+   *  The only cwd an archived session has when its record predates the field
+   *  or was written by an import: measured on a real store, 32 of 159 archived
+   *  records carry no `record.cwd`, and 28 of those 32 have one here. A picker
+   *  that files sessions under projects by cwd alone would therefore be blind
+   *  to a fifth of every project's archive. */
+  cwd?: string;
+  /** The transcript's `custom-title` record — the name a `/title` gave the
+   *  conversation, which the editorial record never learns because the user
+   *  typed it at the CLI rather than at the tree. */
+  label?: string;
+  /** The title the CLI generated for this conversation (its own `ai-title`
+   *  record). A different class of name from `label`: a person chose that one,
+   *  a model wrote this one — but both are titles OF the conversation, and the
+   *  thing they replace is an eight-character hex id. */
+  aiTitle?: string;
 }
+// None of the four are read for a LIVE session: the transcript index skips a
+// file it saw being written (archive.ts), so a caller asking about something
+// currently running gets `lastActiveAt` and nothing else. Harmless for the two
+// callers there are — a chat's history and the archive browser both ask about
+// conversations that are over — and worth knowing before a third one assumes
+// otherwise.
 
 /**
  * What repairResumeLeaf did, or why it did nothing. See resumeLeaf.ts — the
@@ -2948,6 +3624,21 @@ export interface CommandDeps {
    *  reports it, which is a roster tick away. Resolves either way; never
    *  throws, and never steals keyboard focus from the terminal. */
   revealSession(sessionId: string): Promise<void>;
+  /**
+   * `revealSession` for the conversation currently IN FRONT, plus the
+   * keyboard: reveal the Flock sidebar, select that row, and focus the tree so
+   * the up and down arrows switch sessions from there.
+   *
+   * Takes no id on purpose — "the session I am in" is a question only
+   * extension.ts can answer (the active terminal, else the last conversation
+   * Flock put on screen, resolved over the generation chain), and a caller
+   * that had an id to pass would want `revealSession` instead.
+   *
+   * False means nothing happened: no conversation in front, or neither view
+   * could be brought up. The verb says so rather than reporting a jump it did
+   * not make.
+   */
+  focusSessionsView(): Promise<boolean>;
   /** Select the project's row. No ancestor walk is needed — a project row is
    *  always at depth 0 — so this is the select half of `revealSession` alone. */
   revealProject(projectId: string): Promise<void>;
@@ -2984,7 +3675,11 @@ export interface CommandDeps {
    *
    *  Only ever consulted for a NEW conversation. Nothing a delegate contributes
    *  takes a session id, so a fork has nothing to hand over and keeps Flock's
-   *  own launch in every mode. See src/hosts.ts for the delegate table.
+   *  own launch in every mode. The caller also decides FIRST whether the
+   *  launch is the delegate's to make at all: a conversation whose routing
+   *  resolves to another CLI, or to an account with its own environment,
+   *  never reaches this (see hosts.delegateRefusal). See src/hosts.ts for the
+   *  delegate table.
    *
    *  Optional: absent means the setting does not exist for this wiring, which is
    *  every unit double. */
@@ -3012,6 +3707,15 @@ export interface CommandDeps {
    *  dialog may offer "Open in <label>" at all: the offer must not render in
    *  flock mode, and a dialog cannot probe by running the command. */
   delegateOpenInfo?(): { label: string } | null;
+  /** The delegate a NEW conversation would be handed to — label only, nothing
+   *  run — or null in flock mode, when the extension is missing, or on a
+   *  wiring without the setting. The NEW-launch twin of delegateOpenInfo,
+   *  without the open-command requirement (every delegate has a newCommand).
+   *  What the routing gate consults for its status-bar note: "opened here"
+   *  is only worth saying when a delegation was actually forgone, and the
+   *  gate must not probe by running the delegate's command. It never DECIDES
+   *  the handover — delegateLaunch does, by trying. */
+  delegateNewInfo?(): { label: string } | null;
   /** `lineage.soloSession`: after a session's tab opened (or was focused),
    *  park every OTHER session tab in this window and pin the kept one.
    *  A no-op when the setting is off. The mechanism is the workspace
@@ -3036,8 +3740,88 @@ export interface CommandDeps {
   renameTerminal(sessionId: string, name: string): Promise<boolean>;
   sendTextToSession(sessionId: string, text: string): boolean;
   closeTerminal(sessionId: string): boolean;
+  /** End a DETACHED session's process — one under a grace countdown, whose
+   *  terminal is already gone so `closeTerminal` has nothing to dispose. Kills
+   *  the recorded tmux session and its process TREE (~8 MCP children — see
+   *  src/procs.ts), stamps the record archived and runs the at-rest repair.
+   *  The Close Now verb's second tier. Optional: a wiring without it (and
+   *  every unit double) archives the record and leaves the process to the
+   *  sweep's grace expiry, which is late but never wrong. */
+  killDetached?(sessionId: string): Promise<boolean>;
+  /** Does some record on this session's generation chain name a LIVE window
+   *  other than this one (`boundWindowId` against the pruned window list)?
+   *  The cross-window RESTORE RACE guard, mirroring the lifecycle sweep's:
+   *  another window's restore binds the terminal and stamps `boundWindowId`
+   *  first, but clears `graceUntil`/`tmux` only after its launch resolves —
+   *  a seconds-wide window in which the record still reads as a detached
+   *  claim while the process already has a tab THERE. Killing on that claim
+   *  would end the session out from under the window that just attached it,
+   *  so Delete and the Close verbs skip the kill when this answers true.
+   *  Optional: absent (older wirings, unit doubles) reads as false, the
+   *  pre-guard behaviour. */
+  boundToLiveForeignWindow?(sessionId: string): boolean;
+  /** WHICH id on this session's generation chain carries the detached claim —
+   *  a `graceUntil` countdown or a `tmux` wrap name — or undefined when no
+   *  generation of the conversation claims a detached process.
+   *
+   *  THE BUG THIS EXISTS TO CLOSE. The claim is written onto whichever id was
+   *  parked, and `generations.INHERITED_RECORD_KEYS` deliberately does NOT
+   *  carry `tmux`/`graceUntil` forward, so a conversation that re-mints its id
+   *  afterwards (a plain resume, a compaction) leaves the claim on an OLDER
+   *  member while its ROW is the tip. Every verb that asked
+   *  `claimsDetachedProcess(getRecord(id))` therefore read "no detached
+   *  process" for a wrap that was very much running — while `killDetached`,
+   *  which searches the chain, would have found and ended it. Archive then
+   *  wrote `deleted: true` over a live wrap: row gone, process running, which
+   *  is the state the levels design exists to make unrepresentable. It was
+   *  observed on a real machine, on a `claude` process 31 hours old.
+   *
+   *  Returning the HOLDER rather than a boolean is deliberate: the wiring has
+   *  to find the holder anyway to end it, and a shape that hands back only
+   *  "yes" invites a second, differently-scoped search at the call site — the
+   *  precise divergence this member removes.
+   *
+   *  Optional, and an absent dep is NOT "no claim": callers fall back to
+   *  reading the tip record, which is exactly the pre-chain behaviour every
+   *  unit double already relies on. */
+  detachedClaimHolder?(sessionId: string): string | undefined;
   // windows (F)
   focusWindowFor(sessionId: string): Promise<boolean>;
+  /** Raise the window whose opened folder contains `dir` (deepest wins — see
+   *  modes.windowForDir), revealing `sessionId` there once it is up. False when
+   *  no live window covers the directory, which is the caller's cue to offer a
+   *  NEW window instead. Folder mode's routing arm; optional so an older
+   *  wiring (and every unit double) simply has no cross-folder routing. */
+  focusWindowForDir?(dir: string, sessionId?: string): Promise<boolean>;
+  /** `lineage.mode`, resolved (src/modes.ts) — including the legacy
+   *  `workspaces.enabled` fold, so a caller never sees the raw setting. The
+   *  union is spelled out rather than imported because types.ts imports
+   *  nothing: it is the leaf every layer depends on, and modes.ts imports IT.
+   *
+   *  Optional: absent — every unit double, an older wiring — reads as no mode
+   *  machinery at all, i.e. nothing gated and nothing routed, which is exactly
+   *  the pre-mode behaviour. */
+  lineageMode?(): 'folder' | 'root' | 'project';
+  /** FOLDER MODE's fence, when there is one: every real folder this window
+   *  opened (anchor excluded), or undefined when nothing is fenced (project
+   *  mode, an empty window, a unit double). The same value TreeDeps.scopeDirs
+   *  feeds the grouping, so the verbs and the rows can never disagree about
+   *  which sessions are this window's to act on. */
+  scopeDirs?(): readonly string[] | undefined;
+  /** Every real folder THIS window opened (the Flock anchor excluded), in every
+   *  model — not a fence, a fact.
+   *
+   *  Deliberately a second member beside `scopeDirs` rather than a widening of
+   *  it. `scopeDirs` is the folder-mode FENCE and is `undefined` in the other
+   *  two models on purpose (see extension.ts's `scopeFolders`), so a verb that
+   *  asked it "does this window already have that directory open?" would get
+   *  silence in exactly the two models where the question is most alive. The
+   *  fence is a policy; this is geography, and the window-opening verbs need
+   *  the geography.
+   *
+   *  Optional: absent (older wirings, unit doubles) reads as "no claim", so a
+   *  verb that would open a window opens one — the pre-check behaviour. */
+  windowFolders?(): readonly string[];
   // surfaces (F)
   openProject(fsPath: string, newWindow: boolean): Promise<void>;
   // hooks (G)
@@ -3059,6 +3843,21 @@ export interface CommandDeps {
   // projects + visibility
   allProjects(): ProjectRecord[];
   getProject(id: string): ProjectRecord | undefined;
+  /** The same worktree-reach resolver the sidebar groups with (see
+   *  projects.projectReach): given a project, every directory it reaches
+   *  through the repositories it sits on, not just the ones it lists.
+   *
+   *  Built PER CALL, because worktrees come and go several times a day and a
+   *  resolver kept past the tick that made it would remember a checkout that
+   *  has since been removed.
+   *
+   *  Optional, and absent means "listed directories only": every unit double
+   *  and any older wiring then under-reports a session that ran in a worktree,
+   *  which is a session missing from a list rather than a session filed under
+   *  the wrong project. The reason it exists at all is that a surface which
+   *  disagrees with the sidebar about membership is indistinguishable from a
+   *  bug, because it is one. */
+  projectReach?(): (project: ProjectRecord) => readonly string[];
   /** The branches the tree is CURRENTLY showing for a project — the same
    *  BranchInfo objects the chip row was built from, not a fresh git probe.
    *  That identity is the point: a chip click must be able to spawn only in a
@@ -3091,6 +3890,16 @@ export interface CommandDeps {
   /** `lineage.git.worktreePath` — the pattern a new worktree's path is built
    *  from. Absent falls back to the shipped default. */
   worktreePathPattern?(): string;
+  /** The repository's checkouts at `dir` — a WARMED read of the same cache the
+   *  views group with (src/git.ts), awaited so the answer is real rather than
+   *  whatever the cache held. For the one verb that places a session by a
+   *  lane's pinned branch (see SubprojectRecord.branch): a stale list would
+   *  start the session in a worktree that was removed a minute ago. NOT gated
+   *  on `lineage.git.branches` — that setting hides the branch ROWS; the data
+   *  path stays live so placement works with the rows off. Absent (older
+   *  wiring, unit doubles) reads as "no checkouts": the lane's own directory
+   *  answers, which is the pre-pin behaviour. */
+  worktreesFor?(dir: string): Promise<readonly Worktree[]>;
   /** The repository's local branches, most recently committed first. Read once,
    *  when the user opens the New Worktree picker; [] leaves the picker as a
    *  free-text field, which is the half of it that needs no git. */
@@ -3134,6 +3943,11 @@ export interface CommandDeps {
   /** Tombstone a lane. Leaves every session's stamp alone — see
    *  StateStore.deleteSubproject. */
   deleteSubproject?(id: string): Promise<void>;
+  /** The lane a session is filed under, resolved over its generation CHAIN —
+   *  `StateStore.getSessionSubproject`. Optional: absent means the picker cannot
+   *  mark a current lane and offers no "no subproject" exit, which is the
+   *  degradation a wiring without lanes wants anyway. */
+  getSessionLane?(sessionId: string): string | undefined;
   /** Re-file one session into a lane, or out of every lane (`null`). */
   moveSessionSubproject?(
     sessionId: string,
@@ -3180,6 +3994,44 @@ export interface CommandDeps {
   markSeen(sessionId: string): Promise<void>;
   /** `lineage.notifications.enabled` (the global default). */
   notificationsEnabled(): boolean;
+  // ---- telling a parent what its branches did ------------------------------
+  /**
+   * `lineage.fork.notifyParent`. Optional, and an absent dep reads as FALSE —
+   * every unit double, and any wiring that has not been taught this setting,
+   * forks exactly as it did before and types nothing into anybody.
+   */
+  notifyParentOnFork?(): boolean;
+  /**
+   * `lineage.close.summaryMode`. Optional, and an absent dep reads as
+   * `'ask-me'` — deliberately NOT `DEFAULT_CLOSE_SUMMARY_MODE`.
+   *
+   * The default of the SETTING is the compacting one; the default of a MISSING
+   * READER is the old input box. A wiring that cannot see the configuration
+   * has no business starting two-minute compactions on people's branches on
+   * the strength of a default it never read.
+   */
+  closeSummaryMode?(): CloseSummaryMode;
+  /**
+   * Wait for the Claude CLI to write a compaction summary into this
+   * conversation's transcript, and hand back its text.
+   *
+   * `sinceMs` is a floor on the summary's own timestamp — a transcript may
+   * hold summaries from earlier compactions, and one of those presented as
+   * this branch's conclusion is worse than no summary at all. Resolves
+   * `undefined` at `timeoutMs` with nothing found, which is a normal outcome
+   * and not an error: the verb that asked then closes nothing and says so.
+   *
+   * The wiring, not this module, owns the search: a compaction re-mints the
+   * session id in about a third of cases, so the summary may land in a NEW
+   * transcript under a NEW id, and only the chain index knows the two are one
+   * conversation. Optional: without it Close with Summary falls back to the
+   * input box rather than pretending it can read an answer it cannot.
+   */
+  awaitCompactSummary?(
+    sessionId: string,
+    sinceMs: number,
+    timeoutMs: number,
+  ): Promise<string | undefined>;
   // ---- active-only filter -------------------------------------------------
   /** Write `lineage.onlyActiveSessions`. A setter and no getter on purpose: the
    *  two commands that call it each know the value they mean, and the state the
@@ -3211,13 +4063,13 @@ export interface CommandDeps {
    *  which is what the `+` has always done. */
   newSessionInWorktree?(): boolean;
   // ---- every git switch at once -------------------------------------------
-  /** Write all six of the branch-and-worktree settings — `git.branches`,
-   *  `git.sessionBranch`, `git.sessionBranchDetail`, `git.pullRequests`,
-   *  `preview.directoryModel` and `preview.demoProject` — on, or back to the
-   *  values the extension ships with.
+  /** Write all four of the branch-and-worktree settings — `git.branches`,
+   *  `git.sessionBranchDetail`, `git.pullRequests` and
+   *  `preview.directoryModel` — on, or back to the values the extension ships
+   *  with.
    *
-   *  One member rather than six setters because the six are written together or
-   *  not at all: a partial result is a tree in a state nobody asked for and
+   *  One member rather than four setters because the four are written together
+   *  or not at all: a partial result is a tree in a state nobody asked for and
    *  cannot name. Optional, like `menuState`: an older wiring (and every unit
    *  double that does not care) simply does not offer the pair.
    *

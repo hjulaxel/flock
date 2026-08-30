@@ -86,6 +86,38 @@ export interface SwitchAccountRequest {
   tabTitle?: string;
 }
 
+/**
+ * WHAT HAPPENED TO THE PROCESS, in the four states that can actually occur.
+ *
+ * `inPlace` below is a boolean, and a boolean has room for two of these. The
+ * two it had no room for are the two that need saying:
+ *
+ *   'not-running'  the conversation moved — bytes and pin both — and has no
+ *                  terminal, because the relaunch produced none. Reported as
+ *                  `inPlace: false` before this existed, which the status line
+ *                  rendered as "(in a new terminal)": the user was sent to look
+ *                  for a tab that is not there.
+ *   'unknown'      something claimed to be running and nothing was stopped, so
+ *                  the bytes may have moved under a live process. Reported as
+ *                  `inPlace: true` before this existed, on the argument that
+ *                  nothing was running so nothing was lost — vacuously true
+ *                  only when the premise holds, and this is exactly the branch
+ *                  where it does not.
+ *
+ * A verb that restarts processes owes the user an answer to "where is my
+ * session now", and "we do not know" is one of the answers it has to be able
+ * to give.
+ */
+export type SwitchRunningState =
+  /** The tab was kept: the pane was respawned under the user's cursor. */
+  | 'in-place'
+  /** A new terminal holds it; the old tab is gone. */
+  | 'relaunched'
+  /** Nothing was running before and nothing is running now. */
+  | 'not-running'
+  /** Something was, and this window could not reach it. */
+  | 'unknown';
+
 export interface SwitchAccountResult {
   ok: boolean;
   /**
@@ -97,14 +129,43 @@ export interface SwitchAccountResult {
    * list. The caller says which happened, because the user is about to go
    * looking for their session and the two answers send them to different
    * places.
+   *
+   * KEPT ALONGSIDE `running` rather than replaced by it: it is the field every
+   * existing caller and test double reads, and the two never disagree — see
+   * where it is built.
    */
   inPlace: boolean;
+  /** The same question with room for the two answers a boolean cannot hold.
+   *  Optional so a wiring that predates it still type-checks; a caller that
+   *  reads it should fall back to `inPlace`. */
+  running?: SwitchRunningState;
   /** Sidecar directories that did not follow the transcript (see
    *  accountMove.SESSION_SIDECAR_DIRS). Empty is the normal case. */
   skipped: readonly string[];
   /** Why it did not happen, in one sentence. Present only when `ok` is false,
    *  and by then the conversation is back where it started. */
   error?: string;
+  /**
+   * THE ONE REFUSAL WITH A WAY OUT: the destination account already holds a
+   * `<sessionId>.jsonl`, so the move would have to overwrite one of two files
+   * claiming to be this conversation.
+   *
+   * Reported as a structure rather than left inside `error` because it is the
+   * only failure the user can actually do something about, and what they need in
+   * order to decide is a size and a date on each copy. Set only alongside
+   * `ok: false`; the mechanism detects it BEFORE stopping anything, so a caller
+   * offering the way out is offering it on an untouched conversation.
+   */
+  duplicate?: {
+    /** The blocking copy, in the account being moved TO. */
+    otherPath: string;
+    otherBytes: number;
+    otherMtimeMs: number;
+    /** This conversation's copy, in the account it is on now. */
+    thisPath: string;
+    thisBytes: number;
+    thisMtimeMs: number;
+  };
 }
 
 export interface AccountDeps {
@@ -149,6 +210,51 @@ export interface AccountDeps {
   switchSessionAccount?(
     request: SwitchAccountRequest,
   ): Promise<SwitchAccountResult>;
+  /**
+   * Can THIS window stop and restart the session's process, even though no
+   * terminal here is bound to it?
+   *
+   * Asked only about a session `hostOf` calls 'flock', which is one word for
+   * several situations that need different answers. A conversation parked into
+   * the private tmux server by a workspace switch is 'flock' and this window
+   * can respawn its pane perfectly well; a conversation whose tab another VS
+   * Code window holds with no wrap around it is also 'flock', and there this
+   * window can stop precisely nothing — which is how the switch came to rename
+   * a transcript out from under a live CLI and report success. The
+   * discriminator is whether a tmux session name resolves anywhere on the
+   * conversation's generation chain, and only the wiring can see that.
+   *
+   * Optional, and an absent answer is a refusal: a wiring that cannot tell must
+   * not be the one that decides to restart somebody's process.
+   */
+  canRestartSession?(sessionId: string): boolean;
+  /**
+   * Would the move be a re-pin and nothing else — same config directory, same
+   * environment either side?
+   *
+   * Asked by the confirmation dialog, which otherwise promises a cost this case
+   * does not pay: the roster this extension seeds by default contains two
+   * profiles that resolve to `~/.claude`, so "move it to the default login" is
+   * reachable, harmless, and was being announced as a killed turn and a
+   * restarted CLI. The mechanism short-circuits it (see accounts.switchMovesNothing);
+   * this exists so the sentence in front of the user matches what the mechanism
+   * is going to do. Optional, and an absent answer means "assume it moves
+   * something", which is the safe direction: it overstates the cost rather than
+   * understating it.
+   */
+  switchMovesNothing?(sessionId: string, to: AccountProfile): boolean;
+  /**
+   * Rename one of two transcripts claiming a single session id out of the way,
+   * so the account move that refused can go ahead.
+   *
+   * Nothing is deleted — see accountMove.setAsideTranscript for why, and for the
+   * `.superseded-<stamp>` suffix that takes the file out of every reader's
+   * selection without any of them learning a new rule. Optional; without it the
+   * duplicate refusal is a dead end, which is what it was.
+   */
+  setAsideTranscript?(
+    transcriptPath: string,
+  ): Promise<{ ok: boolean; path?: string; error?: string }>;
   /** The cached snapshot for one account, without going anywhere. */
   usage(profile: AccountProfile): UsageSnapshot | null;
   /** All cached snapshots, keyed by account id — what routing.resolveRouting

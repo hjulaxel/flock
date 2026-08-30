@@ -7,12 +7,12 @@
 
 import * as vscode from 'vscode';
 import {
-  ATTENTION_BADGE_ENABLED,
   BRAND_COLOR_ID,
   COMMANDS,
   DEFAULT_PROVIDER,
   PROVIDERS,
   PROVIDER_MEDIA_DIR,
+  RUNNING_BADGE_ENABLED,
   TREE_DND_MIME,
   VIEW_ID,
   contextValueOf,
@@ -38,8 +38,10 @@ import type {
   TreeNode,
 } from './types';
 import { log, logError } from './log';
+import { sessionIsOver } from './lineage';
 import { projectUri, sessionUri } from './decorations';
 import {
+  HIDDEN_RUNNING_GROUP_KEY,
   branchIndexForCwd,
   computeGrouping,
   projectBranchList,
@@ -57,6 +59,8 @@ const EMPTY_GROUPING: GroupingResult = {
   folders: [],
   loose: [],
   hiddenCount: 0,
+  outOfScopeCount: 0,
+  hiddenRunning: null,
 };
 
 const EMPTY_FOREST: SessionForest = {
@@ -80,16 +84,22 @@ import {
   branchStateIcon,
   branchStatusLines,
   branchTokens,
+  exchangeSnippet,
   formatAge,
   formatBranchSync,
   formatPullRequestChip,
   formatTokens,
+  graceTooltipLine,
   projectContextValue,
   pullRequestLines,
+  runningCountOf,
+  runningWithoutRow,
   sessionContextValue,
+  sessionSnippet,
   statusDescriptor,
   statusTone,
   subprojectRowKey,
+  subtreeHasRunning,
 } from './viewmodel';
 
 export {
@@ -102,6 +112,7 @@ export {
 
 import { hostMarker, hostTooltipLine } from './hosts';
 import type { SessionHost } from './hosts';
+import type { SessionCli } from './accounts';
 
 /** Escape the markdown that matters inside a trusted MarkdownString. Labels
  *  come from roster names and user renames — never trust them verbatim.
@@ -162,6 +173,11 @@ function groupingSignature(
    *  project, so without it the cached grouping would keep drawing the old rows
    *  until some unrelated roster tick happened to change the forest. */
   lanes: readonly SubprojectRecord[] = [],
+  /** Folder mode's scope (GroupingInput.scopeDirs), pre-joined by the caller.
+   *  In the signature because flipping `lineage.mode` changes it without
+   *  changing the forest, and the cached grouping would otherwise keep the
+   *  other mode's rows until an unrelated roster tick. */
+  scopeDirs = '',
 ): string {
   const p = projects
     .map(
@@ -184,7 +200,18 @@ function groupingSignature(
         `${x.id}\u0000${x.projectId}\u0000${x.name}\u0000${x.dir}`,
     )
     .join('\u0002');
-  return `${groupByFolder ? '1' : '0'}${onlyProjectSessions ? '1' : '0'}${branchRows ? '1' : '0'}|${p}|${hiddenFolders.join('\u0002')}|${l}`;
+  return `${groupByFolder ? '1' : '0'}${onlyProjectSessions ? '1' : '0'}${branchRows ? '1' : '0'}|${p}|${hiddenFolders.join('\u0002')}|${l}|${scopeDirs}`;
+}
+
+/**
+ * The two answers to "which branch is this session on" that a native row needs,
+ * built together in one walk — see sessionBranchNamesFor for why they are two.
+ */
+interface SessionBranchNames {
+  /** The rows that say it in their DESCRIPTION: the inline surface's rules. */
+  spoken: Map<string, string>;
+  /** Every row a branch scope claims, for the HOVER, which has room for it. */
+  all: Map<string, string>;
 }
 
 // ---------------------------------------------------------------- provider
@@ -227,7 +254,7 @@ export class LineageTreeProvider
   private groupCacheForest: SessionForest | null = null;
   private groupCacheSignature: string | null = null;
   /** Cleared whenever the grouping is rebuilt — see sessionBranchNamesFor. */
-  private sessionBranchNames: Map<string, string> | null = null;
+  private sessionBranchNames: SessionBranchNames | null = null;
   private groupCache: GroupingResult = EMPTY_GROUPING;
 
   private parentIndexForest: SessionForest | null = null;
@@ -303,6 +330,24 @@ export class LineageTreeProvider
       : undefined;
   }
 
+  /** Same `safe` discipline again, and the same default the inline view's
+   *  `safeSessionCli` applies: a lookup that is not wired, or that throws,
+   *  answers 'claude'. The two surfaces have to emit the same token string or
+   *  the two context menus drift apart — which is the whole lesson of the
+   *  commit that discovered "Move to Account…" had been contributed to the
+   *  native tree only while the DEFAULT view is the inline one.
+   *
+   *  Deliberately NOT `providerOf` below, which falls back to the owning
+   *  project's provider: right for a glyph, wrong for a verb. */
+  private sessionCliOf(sessionId: string): SessionCli {
+    const cli = this.safe<SessionCli | undefined>(
+      'sessionCli',
+      () => this.deps.sessionCli?.(sessionId),
+      undefined,
+    );
+    return cli === 'codex' ? 'codex' : 'claude';
+  }
+
   private groupingFor(forest: SessionForest): GroupingResult {
     const groupByFolder = this.safe('groupByFolder', () => this.deps.groupByFolder(), true);
     const onlyProjectSessions = this.safe(
@@ -319,6 +364,12 @@ export class LineageTreeProvider
     const branchRows =
       this.safe('branchRows', () => this.deps.branchRows?.(), false) === true;
     const lanes = this.safe('subprojects', () => this.deps.subprojects?.(), []);
+    const scopeDirs =
+      this.safe<readonly string[] | undefined>(
+        'scopeDirs',
+        () => this.deps.scopeDirs?.(),
+        undefined,
+      ) ?? [];
 
     const signature = groupingSignature(
       projects,
@@ -331,6 +382,7 @@ export class LineageTreeProvider
       // to change the forest.
       branchRows,
       lanes,
+      scopeDirs.join('\u0002'),
     );
     if (
       this.groupCacheForest === forest &&
@@ -347,6 +399,22 @@ export class LineageTreeProvider
         hiddenFolders,
         groupByFolder,
         onlyProjectSessions,
+        // Folder mode's fence — every real folder this window opened, or []
+        // when project mode (or an empty window) scopes nothing. A grouping
+        // input rather than a forest one so the counts and both view styles
+        // read the same fence.
+        scopeDirs,
+        // The invariant's escape hatch: lets the grouping route a filtered
+        // RUNNING root into the "Running elsewhere" appendix instead of
+        // dropping its row. Liveness is a forest fact, so the lookup lives
+        // here and the pure grouping just asks.
+        hasRunning: (rootId) => subtreeHasRunning(forest, rootId),
+        // The other half of the same invariant: a live session with no row AT
+        // ALL — an archived record the roster still reports — joins the
+        // appendix rather than being counted by the badge and drawn nowhere.
+        // Scoped with the same fence the badge uses, so the number and the
+        // rows agree. See viewmodel.runningWithoutRow.
+        rowlessRunningIds: runningWithoutRow(forest, scopeDirs),
         // The NAMED subprojects, and the stamp that says which one a session was
         // started in. Both are grouping inputs rather than rendering ones: which
         // row a session belongs to must be the same answer in both view styles.
@@ -379,7 +447,8 @@ export class LineageTreeProvider
   }
 
   /**
-   * session id → the branch to say in its description, for the rows that get one.
+   * Which branch each session row is on: `spoken`, the ones that SAY it in
+   * their description, and `all`, every row a branch scope accounts for.
    *
    * THE NATIVE TREE'S HALF OF `branchDisplay: inline`. A TreeItem has one
    * label and one description and no second line to put a branch on — the same
@@ -392,13 +461,27 @@ export class LineageTreeProvider
    * subdirectory of another), withheld below BRANCH_CHIPS_MIN, and withheld on a
    * fork that stayed in its parent's checkout.
    *
-   * Built once per grouping and thrown away with it, because it is derived from
-   * exactly two things — the grouping's branch lists and the forest's cwds — and
-   * both of those change together.
+   * WHY TWO MAPS AND NOT ONE. A row's DESCRIPTION and its HOVER answer different
+   * questions, and the inline surface has always answered them separately: it
+   * suppresses the branch sub-line on a closed row, on a fork that stayed put and
+   * under branch grouping, but it sets the `branch: …` hover line for every row a
+   * scope claims (viewmodel.pushSession, at `branchAt >= 0`). Until this pass the
+   * native tree had one gated map and no branch line in its hover at all, so
+   * closing a session took the branch name off the row and there was nowhere left
+   * to read it — the description was the native tree's only copy of the fact. The
+   * rejected alternative was to look the branch up again in appendSessionTooltip
+   * with `branchIndexForCwd`: that function needs the BranchInfo[] of the row's
+   * own project-or-directory scope, which only this walk knows, so a second
+   * lookup would have had to re-derive the scoping and would drift from it.
+   *
+   * Built once per grouping and thrown away with it, because both maps are
+   * derived from exactly two things — the grouping's branch lists and the
+   * forest's cwds — and both of those change together.
    */
-  private sessionBranchNamesFor(forest: SessionForest): Map<string, string> {
+  private sessionBranchNamesFor(forest: SessionForest): SessionBranchNames {
     if (this.sessionBranchNames) return this.sessionBranchNames;
-    const map = new Map<string, string>();
+    const spoken = new Map<string, string>();
+    const all = new Map<string, string>();
     const walk = (
       id: string,
       branches: readonly BranchInfo[],
@@ -407,27 +490,90 @@ export class LineageTreeProvider
       const node = forest.nodes.get(id);
       if (!node) return;
       const at = branchIndexForCwd(branches, node.cwd);
-      if (at >= 0 && at !== parentAt) map.set(id, branches[at].name);
-      for (const kid of node.visibleChildren) walk(kid, branches, at);
+      // A closed row says nothing — one row, no branch. The suppression is here
+      // rather than at the call site because this map IS the native tree's half
+      // of `branchDisplay: inline`, and its rules are the inline surface's
+      // rules deliberately.
+      const over = sessionIsOver(node);
+      if (at >= 0) {
+        // The hover's copy: ungated by the compaction, by the transparency rule
+        // and by BRANCH_CHIPS_MIN, exactly like the inline hover's line. A hover
+        // costs no row width, which is what every one of those gates is about.
+        all.set(id, branches[at].name);
+        if (at !== parentAt && !over && branches.length >= BRANCH_CHIPS_MIN) {
+          spoken.set(id, branches[at].name);
+        }
+      }
+      // `parentAt` means "the last checkout NAMED on the way here", not "the
+      // checkout of the row above". A silent row must therefore pass its
+      // parent's index down rather than its own, or it swallows the branch fact
+      // for its whole subtree and the first live descendant in the same
+      // checkout never names its worktree. Identical to the inline renderer's
+      // `spokenBranchAt`; the two walks disagreeing here would be a silent
+      // difference between the surfaces, which is why both are pinned by tests.
+      const said = over ? parentAt : at;
+      for (const kid of node.visibleChildren) walk(kid, branches, said);
     };
     const scope = (
       branches: readonly BranchInfo[],
       rootIds: readonly string[],
     ): void => {
-      if (branches.length < BRANCH_CHIPS_MIN) return;
       for (const id of rootIds) walk(id, branches, -1);
     };
+    // `lineage.groupSessionsByBranch`, read once for the whole walk. Under it a
+    // project's sessions hang off BRANCH ROWS (projectChildren), and the row
+    // immediately above a session then already names its checkout in bigger
+    // type — so repeating it in the description is the same redundancy the
+    // transparency rule removes from a fork that stayed in its parent's
+    // checkout, and it is removed the same way: by seeding the walk with the
+    // branch row's own index instead of -1.
+    //
+    // The rejected alternative was the blunt one the inline surface still uses —
+    // suppress the branch on EVERY row while grouping is on. That deletes the
+    // one place under grouping where the name is load-bearing: a fork living in
+    // a different worktree nests under its PARENT, so it hangs off the parent's
+    // branch row, and the row above it names the wrong checkout. Seeding says
+    // "your branch row already said this" without also saying "no row under
+    // grouping may name a branch".
+    const grouped =
+      this.safe(
+        'groupSessionsByBranch',
+        () => this.deps.groupSessionsByBranch?.(),
+        false,
+      ) === true;
     for (const project of this.groupCache.projects) {
-      scope(project.branches ?? [], project.rootIds);
+      const branches = project.branches ?? [];
+      // The same three-part test projectChildren and getParent apply before they
+      // will draw a branch row at all: below the threshold, or with the block
+      // folded away, the sessions sit directly under the project and nothing
+      // above them has said anything.
+      const rows =
+        grouped &&
+        branches.length >= BRANCH_CHIPS_MIN &&
+        project.branchesShown !== false;
+      if (rows) {
+        for (let at = 0; at < branches.length; at++) {
+          // A folded-away branch draws no row, so its sessions fall through to
+          // `unbranchedRoots` below and speak like any ungrouped row.
+          if (branches[at].shown === false) continue;
+          for (const id of branches[at].rootIds) walk(id, branches, at);
+        }
+        scope(branches, unbranchedRoots(project.rootIds, branches));
+      } else {
+        scope(branches, project.rootIds);
+      }
       // A split project's branches live on its directory rows (the preview
       // directory model), and each directory is its own repository — so each one
-      // is its own scope, exactly as it is in the inline renderer.
+      // is its own scope, exactly as it is in the inline renderer. Never seeded:
+      // this renderer draws no branch rows under a directory row (getChildren
+      // lists a subproject's `rootIds` directly), so nothing above those
+      // sessions has named their checkout.
       for (const sub of project.subprojects ?? []) {
         scope(sub.branches ?? [], sub.rootIds);
       }
     }
-    this.sessionBranchNames = map;
-    return map;
+    this.sessionBranchNames = { spoken, all };
+    return this.sessionBranchNames;
   }
 
   /**
@@ -518,6 +664,9 @@ export class LineageTreeProvider
         ...grouping.projects.flatMap((p) => p.rootIds),
         ...grouping.folders.flatMap((g) => g.rootIds),
         ...grouping.loose,
+        // The "Running elsewhere" appendix renders rows too — a waiting
+        // session there shows its dot, so the count must see it.
+        ...(grouping.hiddenRunning?.rootIds ?? []),
       ];
       const seen = new Set<string>();
       const stack = [...roots];
@@ -543,17 +692,46 @@ export class LineageTreeProvider
     }
   }
 
+  /** RUNNING sessions this window can SHOW — level 1 plus the grace countdown
+   *  — for the container badge. Straight through viewmodel.runningCountOf so
+   *  this surface and the inline one can never disagree on the number.
+   *
+   *  Scoped, not machine-wide: folder mode's fence drops other folders' rows
+   *  outright, and a badge counting rows that do not exist is the same defect
+   *  as a row for a process that does not — you cannot click through it to
+   *  anything. In project mode and empty windows scopeDirs is undefined and
+   *  the count is machine-wide exactly as before. */
+  runningCount(): number {
+    try {
+      return runningCountOf(this.forest(), this.deps.scopeDirs?.());
+    } catch (err) {
+      logError('tree.runningCount', err);
+      return 0;
+    }
+  }
+
   private isCollapsed(el: TreeNode): boolean {
     return this.collapsedKeys.has(nodeKey(el));
   }
 
+  /** The one row whose expansion DEFAULT is inverted (see groupItem): the
+   *  "Running elsewhere" appendix starts collapsed, so its state needs its own
+   *  bit — the collapsedKeys shadow only remembers collapses. */
+  private hiddenRunningExpanded = false;
+
   /** Wired by registerTree() from TreeView.onDidExpandElement. */
   noteExpanded(el: TreeNode): void {
+    if (el.type === 'group' && el.key === HIDDEN_RUNNING_GROUP_KEY) {
+      this.hiddenRunningExpanded = true;
+    }
     this.collapsedKeys.delete(nodeKey(el));
   }
 
   /** Wired by registerTree() from TreeView.onDidCollapseElement. */
   noteCollapsed(el: TreeNode): void {
+    if (el.type === 'group' && el.key === HIDDEN_RUNNING_GROUP_KEY) {
+      this.hiddenRunningExpanded = false;
+    }
     if (this.collapsedKeys.size > CACHE_SOFT_LIMIT) this.collapsedKeys.clear();
     this.collapsedKeys.add(nodeKey(el));
   }
@@ -578,6 +756,10 @@ export class LineageTreeProvider
           ...grouping.projects.filter((p) => (p.depth ?? 0) === 0),
           ...grouping.folders,
           ...grouping.loose.map((id) => this.sessionRef(id)),
+          // The "Running elsewhere" appendix, LAST: running sessions the
+          // fences filtered out keep one row here (see GroupingResult), so
+          // the machine-wide badge always has rows to point at.
+          ...(grouping.hiddenRunning !== null ? [grouping.hiddenRunning] : []),
         ];
       }
 
@@ -1014,6 +1196,31 @@ export class LineageTreeProvider
   }
 
   private groupItem(el: GroupNode): vscode.TreeItem {
+    // The "Running elsewhere" appendix inverts the expansion DEFAULT: an
+    // ordinary folder group is the user's work and opens expanded, where this
+    // group is a ledger of other windows' running processes — present so the
+    // invariant holds, collapsed so it never competes with the work. The
+    // shadow-expansion cache only records collapses (the expanded default
+    // needs no memory), so the inverted default keeps its own expanded set.
+    if (el.key === HIDDEN_RUNNING_GROUP_KEY) {
+      const item = new vscode.TreeItem(
+        el.label,
+        this.hiddenRunningExpanded
+          ? vscode.TreeItemCollapsibleState.Expanded
+          : vscode.TreeItemCollapsibleState.Collapsed,
+      );
+      item.id = `group:${el.key}`;
+      item.description = `${el.rootIds.length}`;
+      item.iconPath = new vscode.ThemeIcon('server-process');
+      // Its own token, NOT 'group': the folder verbs (hide, open in window)
+      // act on a directory this row does not have.
+      item.contextValue = contextValueOf(['elsewhere']);
+      item.tooltip =
+        'Running sessions this window’s filters would otherwise hide — ' +
+        'other folders’ work, or closed projects’. Each still costs this ' +
+        'machine memory; close or route them from here.';
+      return item;
+    }
     const item = new vscode.TreeItem(
       el.label,
       this.isCollapsed(el)
@@ -1094,16 +1301,34 @@ export class LineageTreeProvider
     // name in a field that is already dim, small and elided at the first squeeze
     // would cost the age its place to say something the hover already says in
     // words. See sessionBranchNamesFor for which rows get one.
+    //
+    // A CLOSED ROW HAS NO BRANCH NAME, whatever `branchDisplay` says. This is
+    // the native half of the inline surface's one-row compaction: there the
+    // branch is a second LINE and dropping it is what keeps the row one row
+    // tall; here it is the widest token in a single-line description, sitting
+    // immediately left of the name's own space, and leaving it would make a
+    // closed row read as a branch report rather than as a session. Both
+    // surfaces have to compact the same rows, so both ask
+    // lineage.sessionIsOver — see sessionBranchNamesFor, which applies the same
+    // rule (and the same transparency rule) inside the walk.
+    const over = sessionIsOver(node);
     const branchName =
+      !over &&
       this.safe('branchDisplay', () => this.deps.branchDisplay?.(), 'color') ===
-      'inline'
-        ? this.sessionBranchNamesFor(forest).get(node.id)
+        'inline'
+        ? this.sessionBranchNamesFor(forest).spoken.get(node.id)
         : undefined;
     item.description = [
       branchName ?? '',
       tokens,
       age,
       status,
+      // The grace countdown and the archived conclusion USED TO BE HERE, in
+      // this order, matching the inline surface part for part. Both moved to
+      // the hover in the 2026-08-28 review — see viewmodel.pushSession for the
+      // argument, and viewmodel.graceTooltipLine for the countdown's. What has
+      // not changed is that neither renderer is allowed its own opinion about
+      // how a row reads: if one of them puts a fact back, so does the other.
       hostMarker(host ?? 'none') ?? '',
       node.hidden ? 'hidden' : '',
     ]
@@ -1118,7 +1343,12 @@ export class LineageTreeProvider
     } catch (err) {
       logError('tree.isBoundHere', err);
     }
-    item.contextValue = sessionContextValue(node, boundHere, host);
+    item.contextValue = sessionContextValue(
+      node,
+      boundHere,
+      host,
+      this.sessionCliOf(node.id),
+    );
 
     // The leading glyph names WHO is running, not what state it is in: a
     // session row shows its LLM provider's logo. State is not lost — it is in
@@ -1224,7 +1454,15 @@ export class LineageTreeProvider
             )
           : project;
       }
-      return grouping.folders.find((g) => g.rootIds.indexOf(el.id) >= 0);
+      const folder = grouping.folders.find(
+        (g) => g.rootIds.indexOf(el.id) >= 0,
+      );
+      if (folder) return folder;
+      // A filtered-out running session's one row hangs under the appendix.
+      return grouping.hiddenRunning !== null &&
+        grouping.hiddenRunning.rootIds.indexOf(el.id) >= 0
+        ? grouping.hiddenRunning
+        : undefined;
     } catch (err) {
       logError('tree.getParent', err);
       return undefined;
@@ -1237,6 +1475,10 @@ export class LineageTreeProvider
     try {
       const md = new vscode.MarkdownString();
       md.isTrusted = true;
+      // The elsewhere appendix set its (static) tooltip on the item itself —
+      // rebuilding the folder hover here would replace it with a path-and-count
+      // for a row that has no path.
+      if (el.type === 'group' && el.key === HIDDEN_RUNNING_GROUP_KEY) return item;
       if (el.type === 'group') this.appendGroupTooltip(md, el);
       else if (el.type === 'project') this.appendProjectTooltip(md, el);
       else if (el.type === 'branch') this.appendBranchTooltip(md, el);
@@ -1332,6 +1574,23 @@ export class LineageTreeProvider
     const lines: string[] = [];
     lines.push(`kind: ${node.kind}${node.ghost ? ' (ghost)' : ''}`);
     if (node.cwd) lines.push(`cwd: ${mdCode(node.cwd)}`);
+    // WHICH CHECKOUT, in words, next to the path it is a checkout of. The same
+    // line the inline hover carries (viewmodel.pushSession sets
+    // `branch: <name>` for every row a branch scope claims), and for the same
+    // reason: the description can only afford the name on some rows — never on a
+    // closed one, since the 2026-08-28 compaction — and before this line existed
+    // the native tree's answer to "which branch was that session on" was gone the
+    // moment the session closed. The `cwd:` line above is not that answer: a
+    // worktree directory is often named after the task rather than the branch,
+    // and a plain checkout that has changed branches is the same path either way.
+    //
+    // Read from the ungated map (see sessionBranchNamesFor), so it appears on
+    // live and closed rows alike and below the chip threshold, exactly as the
+    // inline hover's does. It is absent, correctly, when `lineage.git.branches`
+    // is off — with no branch block there is no branch scope, and this renderer
+    // must not invent facts the rest of the view is not showing.
+    const branch = this.sessionBranchNamesFor(forest).all.get(node.id);
+    if (branch !== undefined) lines.push(`branch: ${mdEscape(branch)}`);
     if (typeof node.startedAt === 'number' && Number.isFinite(node.startedAt)) {
       let iso = '';
       try {
@@ -1369,6 +1628,17 @@ export class LineageTreeProvider
           : ''
       }`,
     );
+    // The detached-running fact, countdown included — viewmodel.ts owns the
+    // wording, so the two surfaces cannot drift. It used to be a hand-written
+    // copy here with a comment promising it would not; the promise is now
+    // structural, which matters more than it did, because since the 2026-08-28
+    // review this hover is the ONLY place either surface says how long is left.
+    // `Date.now()` because this tooltip resolves lazily, on hover: unlike the
+    // inline surface, which computes its hover at build time from `input.now`,
+    // this one is asked the question at the moment the pointer stops.
+    if (typeof node.graceDeadlineAt === 'number') {
+      lines.push(graceTooltipLine(node.graceDeadlineAt, Date.now()));
+    }
     if (node.hidden) {
       lines.push('hidden: sorted last, not counted in the badge');
     }
@@ -1395,7 +1665,15 @@ export class LineageTreeProvider
     // The close-with-summary text. Without this the only place it exists is
     // state.json — and the input box that collects it promises it is "recorded
     // on the node", so the node is where it has to be readable.
-    if (node.summary) lines.push(`summary: ${mdEscape(node.summary)}`);
+    if (node.summary) lines.push(`summary: ${mdEscape(sessionSnippet(node))}`);
+    // BOTH, never one or the other — same rule as the inline hover, and the two
+    // must not drift. These are hover-only since the 2026-08-28 review (a closed
+    // row is a name and an age), which is exactly why coalescing them was wrong:
+    // with the row no longer carrying either, `summary ?? lastExchange` left a
+    // summarised session with no surface anywhere showing what it actually last
+    // said. Two facts, two lines, summary first.
+    const exchange = exchangeSnippet(node);
+    if (exchange !== '') lines.push(`last exchange: ${mdEscape(exchange)}`);
 
     for (const line of lines) md.appendMarkdown(`- ${line}\n`);
   }
@@ -1607,6 +1885,8 @@ function parseDraggedProjectIds(raw: string): string[] {
 export interface TreeController extends DisposableLike {
   refresh(): void;
   revealSession(sessionId: string): Promise<void>;
+  /** revealSession, plus the keyboard — see the implementation. */
+  focusSession(sessionId: string): Promise<boolean>;
   /** The worktrees this view accounts for under one project — what a worktree
    *  verb re-resolves its target against when the native tree is the one on
    *  screen. See LineageTreeProvider.branchesOf. */
@@ -1660,15 +1940,18 @@ export function registerTree(deps: TreeDeps): TreeController {
 
   const updateBadge = (): void => {
     try {
-      // Counted over the RENDERED tree, not the raw forest — see
-      // LineageTreeProvider.attentionCount(). Not counted at all while the
+      // The RUNNING count — level 1 plus the grace countdown — because the
+      // badge is the levels invariant as a number (see RUNNING_BADGE_ENABLED
+      // in types.ts for why attention lost this slot). Counted over the
+      // RENDERED tree, not the raw forest — see
+      // LineageTreeProvider.runningCount(). Not counted at all while the
       // badge is off: 0 falls through to `undefined` below, which clears it.
-      const count = ATTENTION_BADGE_ENABLED ? provider.attentionCount() : 0;
+      const count = RUNNING_BADGE_ENABLED ? provider.runningCount() : 0;
       view.badge =
         typeof count === 'number' && count > 0
           ? {
               value: count,
-              tooltip: `${count} session${count === 1 ? '' : 's'} waiting on you`,
+              tooltip: `${count} session${count === 1 ? '' : 's'} running`,
             }
           : undefined;
     } catch (err) {
@@ -1713,6 +1996,26 @@ export function registerTree(deps: TreeDeps): TreeController {
         });
       } catch (err) {
         logError('tree.revealSession', err);
+      }
+    },
+
+    /** revealSession with `focus: true` — the session-switcher gesture
+     *  (COMMANDS.focusSessionsView). The native tree needs no second focus
+     *  move the way the webview does: a TreeView is a real workbench list, so
+     *  focusing it focuses the row, and the arrows are the workbench's own.
+     *  Reports whether the reveal landed, so the caller can say nothing
+     *  happened rather than claim it did. */
+    async focusSession(sessionId: string): Promise<boolean> {
+      try {
+        await view.reveal(provider.sessionRef(sessionId), {
+          select: true,
+          focus: true,
+          expand: REVEAL_EXPAND_LEVELS,
+        });
+        return true;
+      } catch (err) {
+        logError('tree.focusSession', err);
+        return false;
       }
     },
 

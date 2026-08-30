@@ -36,12 +36,52 @@ import { logError } from './log';
  *  buy very little and are paid for on every live session, every rebuild. */
 export const TAIL_MAX_BYTES = 96 * 1024;
 
+/** How much of the tail Close with Summary reads, looking for the CLI's own
+ *  compaction summary.
+ *
+ *  Five hundred and twelve kilobytes, deliberately five times the window
+ *  above, and the reason the two numbers differ is what they cost. The 96 kB
+ *  window is paid on EVERY live session on EVERY rebuild and is sized for one
+ *  turn; this one is paid once, on an explicit user verb, and has to contain a
+ *  record whose body alone measured up to 27 kB on this machine with a
+ *  conversation's worth of tool traffic appended after it. A summary is not
+ *  worth putting on the rebuild's hot path — which is also why it is not a
+ *  field of TranscriptStats — but it is worth a generous one-off read. */
+export const SUMMARY_TAIL_MAX_BYTES = 512 * 1024;
+
 export interface TranscriptStats {
   /** Epoch ms of the last real user prompt seen in the tail. */
   lastPromptAt?: number;
   /** Context size of the last assistant turn, in tokens. */
   tokens?: number;
+  /** Epoch ms of the last REAL conversation record in the tail — any
+   *  `user`/`assistant` line with a timestamp, tool results and sidechains
+   *  included (a sub-agent writing is a session working). This is the idle
+   *  clock the lifecycle sweep (src/idleClose.ts) runs on, and it exists
+   *  because file MTIME is a liar here: hooks and last-prompt bookkeeping
+   *  touch the transcript without appending conversation, so an mtime-fed
+   *  timer keeps a long-abandoned session warm forever (measured on this
+   *  machine — the spec forbids mtime as an idleness source). */
+  lastRecordAt?: number;
+  /** The last conversation TEXT in the tail: the final assistant reply when
+   *  the window holds one, else the last real user prompt. This is what an
+   *  archived row shows when no close-with-summary was recorded — level 2
+   *  exists to answer "what did that branch conclude?" without resuming, and
+   *  the conclusion is the last thing said, not the last time something was.
+   *  Sidechains are skipped for the same reason isUserPrompt skips them: a
+   *  sub-agent's words are not the conversation's. Bounded to
+   *  LAST_EXCHANGE_MAX_CHARS at capture — this is a fact for a one-line
+   *  description and a hover, and an unbounded string would ride every
+   *  rebuild's stats map for nothing. */
+  lastExchange?: string;
 }
+
+/** How much of the last exchange to keep. Enough for a hover to say what the
+ *  session concluded; the row itself truncates much harder (a rendering
+ *  decision, so it lives in viewmodel.ts). Cut text gets a '…' HERE, because
+ *  downstream cannot tell a 400-char answer from the first 400 chars of a
+ *  longer one. */
+export const LAST_EXCHANGE_MAX_CHARS = 400;
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -55,8 +95,15 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
  * line cannot be parsed, and guessing at its contents is how a token count
  * becomes fiction. Invalid UTF-8 at the cut becomes U+FFFD, that line then
  * fails JSON.parse, and it is skipped by the same rule.
+ *
+ * Exported because the compaction-summary read (src/closeSummary.ts, wired in
+ * extension.ts) needs exactly this discipline over exactly these files, and a
+ * second copy of a bounded tail reader is a thing that drifts: the day one of
+ * them learns about a new encoding case and the other does not is the day two
+ * readers of one transcript disagree. It throws on a missing file, like every
+ * fs call here — callers wrap.
  */
-function readTail(file: string, maxBytes: number): string {
+export function readTranscriptTail(file: string, maxBytes: number): string {
   const fd = fs.openSync(file, 'r');
   try {
     const size = fs.fstatSync(fd).size;
@@ -178,8 +225,14 @@ function readHead(file: string, maxBytes: number): string {
 /** The text of a prompt record, in both shapes the CLI writes: a bare string,
  *  or a content array whose `text` blocks are joined. Blocks that are not text
  *  (an image, a pasted file reference) contribute nothing rather than a
- *  placeholder — "[object Object]" in a picker is worse than a short label. */
-function promptTextOf(rec: Record<string, unknown>): string | undefined {
+ *  placeholder — "[object Object]" in a picker is worse than a short label.
+ *
+ *  Exported for archive.ts's head scan, which needs the opening prompt out of
+ *  records it is ALREADY parsing for `cwd` and the title. Calling
+ *  `readFirstPrompt` from there would mean a second bounded read of every
+ *  transcript on the index path; reusing this and `isUserPrompt` is also what
+ *  stops a second copy of "what counts as something a person typed" existing. */
+export function promptTextOf(rec: Record<string, unknown>): string | undefined {
   const message = rec['message'];
   if (!isPlainObject(message)) return undefined;
   const content = message['content'];
@@ -237,11 +290,18 @@ export function readTailStats(
   const out: TranscriptStats = {};
   let text: string;
   try {
-    text = readTail(file, maxBytes);
+    text = readTranscriptTail(file, maxBytes);
   } catch {
     return out; // raced deletion / EACCES — no signal, not an error
   }
   if (text === '') return out;
+
+  // The two candidates for lastExchange, tracked separately so the verdict at
+  // the end can prefer the assistant's reply over a prompt that came after it:
+  // an unanswered "also fix X" typed just before closing is not what the
+  // session concluded — the answer above it is.
+  let lastAssistantText: string | undefined;
+  let lastPromptText: string | undefined;
 
   const lines = text.split('\n');
   // Drop the first line unless the window happens to start exactly at a record
@@ -264,12 +324,45 @@ export function readTailStats(
         const parsed = Date.parse(ts);
         if (Number.isFinite(parsed)) out.lastPromptAt = parsed;
       }
+      const prompt = promptTextOf(rec);
+      if (prompt !== undefined) lastPromptText = prompt;
+    }
+
+    // The assistant half of lastExchange. promptTextOf reads message.content
+    // text blocks, which is the same shape assistant lines carry — a turn that
+    // was all tool calls has no text block and contributes nothing, exactly
+    // right for "what did it conclude". Sidechains are a sub-agent's words.
+    if (rec['type'] === 'assistant' && rec['isSidechain'] !== true) {
+      const reply = promptTextOf(rec);
+      if (reply !== undefined) lastAssistantText = reply;
+    }
+
+    // The idle clock: any real conversation record moves it (see the field's
+    // doc above) — but never a `system`/`summary`/hook line, which is exactly
+    // the traffic that made mtime unusable.
+    if (rec['type'] === 'user' || rec['type'] === 'assistant') {
+      const ts = rec['timestamp'];
+      if (typeof ts === 'string' && ts !== '') {
+        const parsed = Date.parse(ts);
+        if (Number.isFinite(parsed)) out.lastRecordAt = parsed;
+      }
     }
 
     const message = rec['message'];
     if (isPlainObject(message) && isPlainObject(message['usage'])) {
       const tokens = contextTokensOf(message['usage']);
       if (tokens > 0) out.tokens = tokens;
+    }
+  }
+
+  const exchange = lastAssistantText ?? lastPromptText;
+  if (exchange !== undefined) {
+    const trimmed = exchange.trim();
+    if (trimmed !== '') {
+      out.lastExchange =
+        trimmed.length > LAST_EXCHANGE_MAX_CHARS
+          ? trimmed.slice(0, LAST_EXCHANGE_MAX_CHARS - 1) + '…'
+          : trimmed;
     }
   }
   return out;

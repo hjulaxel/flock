@@ -519,6 +519,7 @@ function forkDeps(over: { launchFails?: boolean } = {}) {
     beginInlineRename: async () => false,
     beginInlineRenameProject: async () => false,
     revealSession: async () => undefined,
+    focusSessionsView: async () => true,
     revealProject: async () => undefined,
     getRecord: () => undefined,
     allRecords: () => ({}),

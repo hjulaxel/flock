@@ -12,6 +12,7 @@ import {
   psPpidCommand,
   resolveAll,
   resumeTarget,
+  sessionIsOver,
   type ResolverIO,
 } from '../src/lineage';
 import { normalizeStatus } from '../src/roster';
@@ -23,6 +24,7 @@ import {
   type EditorialRecord,
   type ParentResolution,
   type RosterEntry,
+  type SessionNode,
   type TranscriptHeaderMeta,
 } from '../src/types';
 
@@ -443,7 +445,10 @@ function forestOf(
     showGhosts?: boolean;
     onlyActive?: boolean;
     activityMtimes?: ReadonlyMap<string, number>;
-    tailStats?: ReadonlyMap<string, { lastPromptAt?: number; tokens?: number }>;
+    tailStats?: ReadonlyMap<
+      string,
+      { lastPromptAt?: number; tokens?: number; lastExchange?: string }
+    >;
     archived?: ArchivedSession[];
   } = {},
 ) {
@@ -682,6 +687,97 @@ describe('buildForest', () => {
     });
   });
 
+  // ------------------------------------------- promotion and sibling order
+  //
+  // Axel: "the trees get weird when you do stuff to them — like when you close
+  // one in the middle, that's pretty weird." He was right, and the weirdness
+  // was never in WHICH rows survive — that pass was fuzzed against an
+  // independent model over 4000 randomised forests with zero defects — it was
+  // in WHERE they land. Promotion used to splice a fork into the slot its
+  // invisible parent held, so closing a session moved a sibling that had not
+  // changed. These pin the order, not the membership.
+  describe('order after a middle session goes away', () => {
+    const MID = '0f0000e5-0000-4000-8000-0000000000e5';
+    const X = '0f0000f6-0000-4000-8000-0000000000f6';
+    const Y = '0f000017-0000-4000-8000-000000000017';
+
+    const closed = (id: string, startedAt: number): ArchivedSession => ({
+      sessionId: id,
+      transcriptPath: `/t/${id}.jsonl`,
+      startedAt,
+      endedAt: 4_000_000,
+      bytes: 10,
+      cwd: '/work',
+    });
+
+    it('merges a promoted child back into its siblings’ order instead of leaving it in its dead parent’s slot', () => {
+      const f = forestOf(
+        [live(PARENT, { startedAt: 1_000 }), live(X, { startedAt: 1_300 }), live(Y, { startedAt: 1_200 })],
+        {
+          [MID]: { parentId: PARENT, source: 'forkedFrom' },
+          [X]: { parentId: PARENT, source: 'forkedFrom' },
+          [Y]: { parentId: MID, source: 'forkedFrom' },
+        },
+        { archived: [closed(MID, 1_100)], onlyActive: true },
+      );
+      // Y started before X and is now Y's grandparent's own child on screen,
+      // so it reads above X — as it did before MID was ever closed.
+      expect(f.nodes.get(PARENT)?.visibleChildren).toEqual([Y, X]);
+      // The structure did not move: MID still hangs where it hung, demoted
+      // for being over, and Y is still MID's child.
+      expect(f.nodes.get(PARENT)?.children).toEqual([X, MID]);
+      expect(f.nodes.get(Y)?.parentId).toBe(MID);
+    });
+
+    it('archiving a middle session does not move the fork under it', () => {
+      // The production wiring, which is what makes this the regression test
+      // for the reported bug: archiving writes `deleted: true`, and the id is
+      // then dropped from BOTH the roster and the transcript index, so the
+      // session comes back as a ghost — with no startedAt to sort on.
+      const f = forestOf(
+        [live(PARENT, { startedAt: 1_000 }), live(X, { startedAt: 1_300 }), live(Y, { startedAt: 1_200 })],
+        {
+          [MID]: { parentId: PARENT, source: 'forkedFrom' },
+          [X]: { parentId: PARENT, source: 'forkedFrom' },
+          [Y]: { parentId: MID, source: 'forkedFrom' },
+        },
+        { records: { [MID]: { ...record({ id: MID }), deleted: true } } },
+      );
+      expect(f.nodes.get(MID)?.ghost).toBe(true);
+      expect(f.nodes.get(MID)?.startedAt).toBeUndefined();
+      expect(f.nodes.get(PARENT)?.visibleChildren).toEqual([Y, X]);
+    });
+
+    it('promotes to the ROOT list in sibling order too', () => {
+      const f = forestOf(
+        [live(X, { startedAt: 1_300 }), live(Y, { startedAt: 1_200 })],
+        { [Y]: { parentId: MID, source: 'forkedFrom' } },
+        { archived: [closed(MID, 1_100)], onlyActive: true },
+      );
+      expect(f.visibleRoots).toEqual([Y, X]);
+    });
+
+    it('sorts an inferred ancestor with the closed rows, not the live ones', () => {
+      const GHOST = '0f000028-0000-4000-8000-000000000028';
+      const GKID = '0f000039-0000-4000-8000-000000000039';
+      const f = forestOf(
+        [live(PARENT, { startedAt: 1_000 }), live(X, { startedAt: 1_300 }), live(GKID, { startedAt: 1_400 })],
+        {
+          [X]: { parentId: PARENT, source: 'forkedFrom' },
+          [MID]: { parentId: PARENT, source: 'forkedFrom' },
+          [GKID]: { parentId: GHOST, source: 'forkedFrom' },
+          [GHOST]: { parentId: PARENT, source: 'forkedFrom' },
+        },
+        { archived: [closed(MID, 1_100)], showGhosts: true },
+      );
+      // A ghost has no startedAt, so before the shared over-test it fell to
+      // the end of the LIVE run — above every genuinely closed sibling.
+      expect(f.nodes.get(PARENT)?.children).toEqual([X, MID, GHOST]);
+      expect(f.nodes.get(GHOST)?.ghost).toBe(true);
+      expect(f.nodes.get(GHOST)?.startedAt).toBeUndefined();
+    });
+  });
+
   it('cuts a cycle so the forest still has a root', () => {
     const f = forestOf([live(PARENT), live(CHILD)], {
       [PARENT]: { parentId: CHILD, source: 'forkedFrom' },
@@ -822,6 +918,80 @@ describe('buildForest', () => {
     expect(f.nodes.get('0f0000d4-0000-4000-8000-0000000000d4')?.label).toBe(
       '0f0000d4',
     );
+  });
+
+  // The archived half of the chain, and which of its names is a QUOTATION.
+  // Before this, an archived session nobody titled rendered as a bare hex id —
+  // 71.2% of the real transcripts on Axel's machine — which, next to the
+  // transcript-tail snippet the row used to carry, is what made a closed row
+  // read as its own last prompt.
+  // The shared predicate. It lives here because this module owns SessionNode
+  // and computes all three flags; both renderers and the sibling comparator
+  // import it, and a second copy anywhere is what these assertions exist to
+  // make expensive.
+  it('sessionIsOver counts all three ways a conversation ends — ghosts included', () => {
+    const base = (over: Partial<SessionNode>): SessionNode => ({
+      id: CHILD,
+      parentId: null,
+      source: 'none',
+      ghost: false,
+      archived: false,
+      hidden: false,
+      deleted: false,
+      status: 'idle',
+      attention: 'none',
+      label: 'x',
+      kind: 'unknown',
+      children: [],
+      visibleChildren: [],
+      ...over,
+    });
+    expect(sessionIsOver(base({ archived: true }))).toBe(true);
+    expect(sessionIsOver(base({ status: 'exited' }))).toBe(true);
+    // A ghost is an INFERRED ancestor with no process and a borrowed cwd — it
+    // counts as over, which is what lets the renderers refuse it a branch claim.
+    expect(sessionIsOver(base({ ghost: true }))).toBe(true);
+    expect(sessionIsOver(base({ status: 'busy' }))).toBe(false);
+    expect(sessionIsOver(base({ status: 'waiting', hidden: true }))).toBe(false);
+  });
+
+  it('names an archived session from the transcript when nobody titled it', () => {
+    const arch = (id: string, over: Partial<ArchivedSession> = {}): ArchivedSession => ({
+      sessionId: id,
+      transcriptPath: `/t/${id}.jsonl`,
+      endedAt: 4_000_000,
+      bytes: 10,
+      ...over,
+    });
+    const D = '0f0000d4-0000-4000-8000-0000000000d4';
+    const E = '0f0000e5-0000-4000-8000-0000000000e5';
+    const f = forestOf([], {}, {
+      archived: [
+        arch(CHILD, { label: 'chosen', aiTitle: 'generated' }),
+        arch(PARENT, { aiTitle: 'Fix auth bug and score drift' }),
+        arch(OTHER, { firstPrompt: 'why is the roster poll firing twice' }),
+        arch(D),
+        arch(E, { firstPrompt: 'z'.repeat(200) }),
+      ],
+      records: { [CHILD]: record({ id: CHILD }) },
+    });
+    // A title someone chose still wins.
+    expect(f.nodes.get(CHILD)?.label).toBe('chosen');
+    expect(f.nodes.get(CHILD)?.labelIsFallback).toBeUndefined();
+    // The CLI's generated title is a name, shown bare and unflagged.
+    expect(f.nodes.get(PARENT)?.label).toBe('Fix auth bug and score drift');
+    expect(f.nodes.get(PARENT)?.labelIsFallback).toBeUndefined();
+    // The opening prompt is a quotation, and says so to code as well as to a
+    // reader — tabTitleFor refuses it on the strength of the flag.
+    expect(f.nodes.get(OTHER)?.label).toBe(
+      '“why is the roster poll firing twice”',
+    );
+    expect(f.nodes.get(OTHER)?.labelIsFallback).toBe(true);
+    expect(f.nodes.get(E)?.label.endsWith('…”')).toBe(true);
+    expect(f.nodes.get(E)?.labelIsFallback).toBe(true);
+    // And with nothing at all, the short id, exactly as before.
+    expect(f.nodes.get(D)?.label).toBe('0f0000d4');
+    expect(f.nodes.get(D)?.labelIsFallback).toBeUndefined();
   });
 
   it('never reorders visibleRoots when a session starts waiting on you (P7)', () => {
@@ -993,12 +1163,86 @@ describe('buildForest', () => {
   it('ignores a junk or absent entry rather than writing a junk field', () => {
     const f = forestOf([live(CHILD), live(PARENT)], {}, {
       tailStats: new Map([
-        [CHILD, { lastPromptAt: Number.NaN, tokens: 0 }],
+        [CHILD, { lastPromptAt: Number.NaN, tokens: 0, lastExchange: '  ' }],
       ]),
     });
     expect(f.nodes.get(CHILD)?.lastPromptAt).toBeUndefined();
     expect(f.nodes.get(CHILD)?.tokens).toBeUndefined();
+    expect(f.nodes.get(CHILD)?.lastExchange).toBeUndefined();
     expect(f.nodes.get(PARENT)?.lastPromptAt).toBeUndefined();
+  });
+
+  it('carries the last exchange onto live and archived nodes alike', () => {
+    // The fact is the same either way; it is the RENDERERS that decide an
+    // archived row is the one place it earns width.
+    const f = forestOf([live(CHILD)], {}, {
+      archived: [
+        {
+          sessionId: PARENT,
+          transcriptPath: '/tmp/p.jsonl',
+          endedAt: 4_999_000,
+          bytes: 10,
+        },
+      ],
+      tailStats: new Map([
+        [CHILD, { lastExchange: 'live conclusion' }],
+        [PARENT, { lastExchange: 'archived conclusion' }],
+      ]),
+    });
+    expect(f.nodes.get(CHILD)?.lastExchange).toBe('live conclusion');
+    expect(f.nodes.get(PARENT)?.lastExchange).toBe('archived conclusion');
+  });
+
+  // The detach grace, as a renderable fact — the one sanctioned
+  // detached-running state must reach the renderers or it is the old
+  // invisible `parked` under a new name.
+  it('stamps graceDeadlineAt on a live node from record.graceUntil', () => {
+    const f = forestOf([live(CHILD)], {}, {
+      records: {
+        [CHILD]: record({ graceUntil: '2026-08-23T10:00:00.000Z' }),
+      },
+    });
+    expect(f.nodes.get(CHILD)?.graceDeadlineAt).toBe(
+      Date.parse('2026-08-23T10:00:00.000Z'),
+    );
+  });
+
+  it('leaves it off for a cleared, absent or unparseable deadline', () => {
+    // null is the cleared state (same convention as record.tmux); garbage is
+    // read by the sweep as "expired" and the process ends within a minute, so
+    // the honest render is a plain live row, not a fabricated countdown.
+    const f = forestOf(
+      [live(CHILD), live(PARENT), live(OTHER)],
+      {},
+      {
+        records: {
+          [CHILD]: record({ graceUntil: null }),
+          [PARENT]: record({ id: PARENT }),
+          [OTHER]: record({ id: OTHER, graceUntil: 'not a timestamp' }),
+        },
+      },
+    );
+    expect(f.nodes.get(CHILD)?.graceDeadlineAt).toBeUndefined();
+    expect(f.nodes.get(PARENT)?.graceDeadlineAt).toBeUndefined();
+    expect(f.nodes.get(OTHER)?.graceDeadlineAt).toBeUndefined();
+  });
+
+  it('never stamps an ARCHIVED node — its leftover deadline is a kept promise', () => {
+    const f = forestOf([], {}, {
+      archived: [
+        {
+          sessionId: CHILD,
+          transcriptPath: '/tmp/x.jsonl',
+          endedAt: 4_999_000,
+          bytes: 10,
+        },
+      ],
+      records: {
+        [CHILD]: record({ graceUntil: '2026-08-23T10:00:00.000Z' }),
+      },
+    });
+    expect(f.nodes.get(CHILD)?.archived).toBe(true);
+    expect(f.nodes.get(CHILD)?.graceDeadlineAt).toBeUndefined();
   });
 });
 

@@ -14,8 +14,12 @@ import * as path from 'node:path';
 
 import {
   SESSION_SIDECAR_DIRS,
+  SET_ASIDE_SUFFIX,
   moveConversation,
   projectsRootOf,
+  setAsideTranscript,
+  sourceDirFor,
+  transcriptCopyInConfigDir,
   transcriptInConfigDir,
 } from '../src/accountMove';
 
@@ -32,6 +36,32 @@ function writeTranscript(dir: string, id: string, body: string): string {
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.writeFileSync(target, body, 'utf-8');
   return target;
+}
+
+/** A transcript for `id` under `dir`, in a slug of the caller's choosing —
+ *  the slug is the cwd's encoding, so one conversation resumed from a git
+ *  worktree of its own repo has a second, different one. */
+function writeTranscriptAt(
+  dir: string,
+  slug: string,
+  id: string,
+  body: string,
+): string {
+  const target = path.join(projectsRootOf(dir), slug, `${id}.jsonl`);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, body, 'utf-8');
+  return target;
+}
+
+/** Every `<id>.jsonl` anywhere under a config dir's projects root. */
+function copiesUnder(dir: string, id: string): string[] {
+  const root = projectsRootOf(dir);
+  const out: string[] = [];
+  for (const sub of fs.readdirSync(root)) {
+    const candidate = path.join(root, sub, `${id}.jsonl`);
+    if (fs.existsSync(candidate)) out.push(candidate);
+  }
+  return out;
 }
 
 function writeSidecar(dir: string, kind: string, id: string, body: string): void {
@@ -211,5 +241,180 @@ describe('accountMove: the refusals', () => {
     expect(transcriptInConfigDir(toDir, SESSION)).not.toBeNull();
     expect(result.skipped).toEqual(['tasks']);
     expect(result.sidecars).toEqual([]);
+  });
+});
+
+describe('accountMove: sourceDirFor — the pin is a claim, the file is the fact', () => {
+  it('answers with the preferred dir when the pin is right', () => {
+    writeTranscript(fromDir, SESSION, '{}\n');
+    expect(
+      sourceDirFor(SESSION, { preferred: fromDir, roots: [fromDir, toDir] }),
+    ).toEqual({ dir: fromDir, matchedPreferred: true });
+  });
+
+  it('finds it in another account when the pin has come apart from the bytes', () => {
+    // Not a hypothetical: the tmux environment leak this change also fixes is a
+    // mechanism that produced exactly this state, by resuming a moved
+    // conversation under the config dir it had just left. Before this the verb
+    // stopped the process, then refused with "no transcript in the account it
+    // is pinned to" — a sentence about a pin, for a conversation sitting on
+    // disk one directory over.
+    const third = path.join(root, 'third');
+    fs.mkdirSync(third, { recursive: true });
+    writeTranscript(third, SESSION, '{}\n');
+    expect(
+      sourceDirFor(SESSION, { preferred: fromDir, roots: [fromDir, toDir, third] }),
+    ).toEqual({ dir: third, matchedPreferred: false });
+  });
+
+  it('is null when the conversation is in none of them', () => {
+    expect(
+      sourceDirFor(SESSION, { preferred: fromDir, roots: [fromDir, toDir] }),
+    ).toBeNull();
+    // And with nothing to search at all, rather than throwing.
+    expect(sourceDirFor(SESSION, { preferred: '', roots: [] })).toBeNull();
+  });
+
+  it('refuses a session id shaped like a traversal', () => {
+    // Same guard `transcriptInConfigDir` applies, re-asserted through the new
+    // entry point: this module is reachable from a command argument.
+    expect(
+      sourceDirFor('../../etc', { preferred: fromDir, roots: [fromDir] }),
+    ).toBeNull();
+  });
+
+  it('still leaves exactly one transcript when the move runs from what it found', () => {
+    // The module's own invariant, re-asserted across the self-healing path:
+    // two copies of one transcript resolve to whichever root is scanned first,
+    // which after a move is the stale one.
+    const third = path.join(root, 'third');
+    fs.mkdirSync(third, { recursive: true });
+    writeTranscript(third, SESSION, '{"who":"third"}\n');
+
+    const found = sourceDirFor(SESSION, {
+      preferred: fromDir,
+      roots: [fromDir, toDir, third],
+    });
+    expect(found?.dir).toBe(third);
+
+    return moveConversation({
+      sessionId: SESSION,
+      fromDir: found!.dir,
+      toDir,
+    }).then((result) => {
+      expect(result.ok).toBe(true);
+      expect(transcriptInConfigDir(toDir, SESSION)).not.toBeNull();
+      expect(transcriptInConfigDir(third, SESSION)).toBeNull();
+      expect(transcriptInConfigDir(fromDir, SESSION)).toBeNull();
+    });
+  });
+});
+
+describe('accountMove: the collision guard is per-ACCOUNT, not per-slug', () => {
+  it('refuses when the destination already holds this id under ANY slug', async () => {
+    // The guard used to ask "is there a file at the exact path I am about to
+    // write", which is strictly narrower than the invariant this module's header
+    // claims to enforce. A copy under another slug sailed through, the rename
+    // landed beside it, and one account ended up holding two files named after
+    // one conversation — the state every reader then has to guess its way out
+    // of. Different slugs are ordinary: the slug encodes the cwd, and a
+    // conversation resumed from a worktree of its own repo has a different one.
+    writeTranscriptAt(fromDir, '-Users-me-repo', SESSION, '{"which":"source"}\n');
+    writeTranscriptAt(
+      toDir,
+      '-Users-me-repo-worktree',
+      SESSION,
+      '{"which":"stale"}\n',
+    );
+
+    const result = await moveConversation({ sessionId: SESSION, fromDir, toDir });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('-Users-me-repo-worktree');
+    expect(copiesUnder(toDir, SESSION)).toHaveLength(1);
+    expect(copiesUnder(fromDir, SESSION)).toHaveLength(1);
+  });
+
+  it('reports the path it actually found, not the one it was going to write', async () => {
+    writeTranscriptAt(fromDir, '-a', SESSION, '{}\n');
+    const blocking = writeTranscriptAt(toDir, '-b', SESSION, '{}\n');
+    const result = await moveConversation({ sessionId: SESSION, fromDir, toDir });
+    expect(result.error).toContain(blocking);
+  });
+});
+
+describe('accountMove: setting a duplicate aside', () => {
+  it('renames rather than deletes, and the bytes are still readable', async () => {
+    // Nothing is deleted on purpose: when an id exists twice, one of those files
+    // is somebody's conversation and this module cannot tell which — that is the
+    // whole reason the move refuses instead of overwriting.
+    const file = writeTranscript(toDir, SESSION, '{"which":"other"}\n');
+    const result = await setAsideTranscript(file);
+    expect(result.ok).toBe(true);
+    expect(fs.existsSync(file)).toBe(false);
+    expect(result.path).toContain(SET_ASIDE_SUFFIX);
+    expect(fs.readFileSync(result.path as string, 'utf-8')).toBe(
+      '{"which":"other"}\n',
+    );
+  });
+
+  it('takes the id out of every reader\'s namespace, because the name stops ending in .jsonl', async () => {
+    const file = writeTranscript(toDir, SESSION, '{}\n');
+    expect(transcriptInConfigDir(toDir, SESSION)).toBe(file);
+    await setAsideTranscript(file);
+    expect(transcriptInConfigDir(toDir, SESSION)).toBeNull();
+    expect(path.extname(String((await setAsideTranscript(file)).path))).not.toBe(
+      '.jsonl',
+    );
+  });
+
+  it('unblocks the move that refused, which is the whole point', async () => {
+    const mine = writeTranscript(fromDir, SESSION, '{"which":"mine"}\n');
+    const blocking = writeTranscriptAt(toDir, '-elsewhere', SESSION, '{}\n');
+
+    const refused = await moveConversation({ sessionId: SESSION, fromDir, toDir });
+    expect(refused.ok).toBe(false);
+
+    expect((await setAsideTranscript(blocking)).ok).toBe(true);
+    const second = await moveConversation({ sessionId: SESSION, fromDir, toDir });
+    expect(second.ok).toBe(true);
+    expect(copiesUnder(toDir, SESSION)).toHaveLength(1);
+    expect(fs.existsSync(mine)).toBe(false);
+  });
+
+  it('does not clobber a file already set aside under the same name', async () => {
+    const first = writeTranscript(toDir, SESSION, '{"n":1}\n');
+    const one = await setAsideTranscript(first);
+    const second = writeTranscript(toDir, SESSION, '{"n":2}\n');
+    fs.utimesSync(
+      second,
+      fs.statSync(one.path as string).mtimeMs / 1000,
+      fs.statSync(one.path as string).mtimeMs / 1000,
+    );
+    const two = await setAsideTranscript(second);
+    expect(two.ok).toBe(true);
+    expect(two.path).not.toBe(one.path);
+    expect(fs.readFileSync(one.path as string, 'utf-8')).toBe('{"n":1}\n');
+    expect(fs.readFileSync(two.path as string, 'utf-8')).toBe('{"n":2}\n');
+  });
+
+  it('says no rather than throwing when there is nothing there', async () => {
+    const result = await setAsideTranscript(path.join(toDir, 'nope.jsonl'));
+    expect(result.ok).toBe(false);
+    expect(result.error).toBeDefined();
+  });
+});
+
+describe('accountMove: transcriptCopyInConfigDir', () => {
+  it('carries the size and the mtime, so a refusal can describe what it found', () => {
+    const file = writeTranscript(fromDir, SESSION, '{"a":1}\n');
+    const facts = transcriptCopyInConfigDir(fromDir, SESSION);
+    expect(facts?.path).toBe(file);
+    expect(facts?.bytes).toBe(fs.statSync(file).size);
+    expect(facts?.mtimeMs).toBe(fs.statSync(file).mtimeMs);
+  });
+
+  it('is null for an account that does not hold it', () => {
+    expect(transcriptCopyInConfigDir(toDir, SESSION)).toBeNull();
   });
 });

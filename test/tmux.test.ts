@@ -15,6 +15,7 @@ import * as path from 'node:path';
 import {
   TMUX_CONF,
   TMUX_SOCKET,
+  buildRemoveEnvArgs,
   buildRespawnArgs,
   buildSetEnvArgs,
   buildTmuxArgs,
@@ -22,13 +23,17 @@ import {
   findTmuxBinary,
   tmuxAdvice,
   tmuxInstallHint,
+  killTmuxSessionTree,
   parseClientSessions,
   parsePanePid,
+  parseTmuxSessions,
   resolveTmuxSpawn,
+  respawnCommands,
   sessionIdOfTmuxName,
   tmuxNameOfTerminal,
   tmuxSessionName,
 } from '../src/tmux';
+import { CONFIG_DIR_ENV } from '../src/accounts';
 import { ENV_NODE_ID } from '../src/types';
 
 const SID = '0f0000a1-0000-4000-8000-0000000000a1';
@@ -176,6 +181,28 @@ describe('the conf keeps tmux invisible', () => {
     expect(TMUX_CONF).toContain('mouse on');
     expect(TMUX_CONF).toMatch(/history-limit \d{4,}/);
   });
+
+  it("removes every config-dir variable from the server's global environment", () => {
+    // NOT a tmux preference — an account fix. The server keeps the environment
+    // of the FIRST client that forked it, so the first wrapped session started
+    // on a custom account puts that account's CLAUDE_CONFIG_DIR into the
+    // global environment and every later session inherits it: a conversation
+    // on the default login running against somebody else's config directory,
+    // with no verb used and nothing on screen to say so. Measured on 3.6a:
+    // with these lines the pane sees the variable UNSET, and a session that
+    // passes its own `-e` still wins, because a session value outranks the
+    // global.
+    expect(TMUX_CONF).toContain('set-environment -gr CLAUDE_CONFIG_DIR');
+    expect(TMUX_CONF).toContain('set-environment -gr CODEX_HOME');
+    // One line per config-dir variable, derived from the constant the LAUNCHER
+    // reads, so a provider that gains one cannot be forgotten here.
+    for (const key of Object.values(CONFIG_DIR_ENV)) {
+      expect(TMUX_CONF).toContain(`set-environment -gr ${key}`);
+    }
+    expect(TMUX_CONF.match(/set-environment -gr /g) ?? []).toHaveLength(
+      Object.values(CONFIG_DIR_ENV).length,
+    );
+  });
 });
 
 describe('ensureTmuxConf', () => {
@@ -277,7 +304,6 @@ describe('tmuxAdvice', () => {
     platform: 'darwin',
     mode: 'auto' as string | undefined,
     binary: null as string | null,
-    workspacesEnabled: true,
     dismissed: false,
   };
 
@@ -301,8 +327,18 @@ describe('tmuxAdvice', () => {
     expect(tmuxAdvice({ ...base, platform: 'win32' })).toBe('none');
   });
 
-  it('stays quiet with workspaces off — parking is the only feature it serves', () => {
-    expect(tmuxAdvice({ ...base, workspacesEnabled: false })).toBe('none');
+  it('no longer depends on the workspace switcher being on', () => {
+    // It used to return 'none' whenever `lineage.workspaces.enabled` was false,
+    // on the grounds that workspace parking was the only feature the detach
+    // tier served. That stopped being true: solo mode parks in every window
+    // model and the detach grace runs at every level, so a machine with the
+    // switcher off still detaches sessions and still loses in-flight turns
+    // without tmux. The input is gone; the advice is the same whatever model
+    // this window is in.
+    expect(tmuxAdvice(base)).toBe('install');
+    expect(tmuxAdvice({ ...base, mode: 'off', binary: '/usr/bin/tmux' })).toBe(
+      'enable',
+    );
   });
 
   it('is asked once per install, not on a timer', () => {
@@ -379,5 +415,141 @@ describe('buildSetEnvArgs', () => {
       '-L', 'lineage', 'set-environment', '-t', '=lineage-abc',
       'CLAUDE_CONFIG_DIR', '/home/p',
     ]);
+  });
+});
+
+describe('buildRemoveEnvArgs', () => {
+  it('uses -r, which shadows the global, and never -u, which does not', () => {
+    // MEASURED on tmux 3.6a, not read off a manual page, because the two look
+    // interchangeable and are not: our private server keeps the environment of
+    // the FIRST client that forked it, so a CLAUDE_CONFIG_DIR that leaked in
+    // that way is still visible through the global environment after `-u`
+    // deletes the session's own entry. `-r` marks the name removed for the
+    // session and shadows the global. `-e KEY=` is not a third option: that
+    // sets the empty string, which is a config dir at the filesystem root.
+    expect(buildRemoveEnvArgs('lineage-abc', 'CLAUDE_CONFIG_DIR')).toEqual([
+      '-L', 'lineage', 'set-environment', '-t', '=lineage-abc',
+      '-r', 'CLAUDE_CONFIG_DIR',
+    ]);
+  });
+});
+
+describe('respawnCommands', () => {
+  it('runs the removals BEFORE the respawn and the sets after it', () => {
+    // THE ORDER IS NOT COSMETIC. `respawn-pane` snapshots the environment the
+    // new process gets at the moment it spawns (measured on 3.6a), so a
+    // removal issued afterwards corrects the session's records about a process
+    // that has already launched on the wrong account — which is exactly the
+    // bug: `-e` can only SET, so moving a wrapped conversation back to the
+    // default login left the previous account's config dir in place and the
+    // resumed CLI read the account the transcript had just left.
+    const cmds = respawnCommands({
+      name: 'lineage-abc',
+      env: { LINEAGE_NODE_ID: 'a' },
+      remove: ['CLAUDE_CONFIG_DIR'],
+      command: ['/bin/claude', '--resume', 'a'],
+    });
+    expect(cmds).toHaveLength(3);
+    expect(cmds[0]).toEqual(buildRemoveEnvArgs('lineage-abc', 'CLAUDE_CONFIG_DIR'));
+    expect(cmds[1]).toContain('respawn-pane');
+    expect(cmds[2]).toEqual(
+      buildSetEnvArgs('lineage-abc', 'LINEAGE_NODE_ID', 'a'),
+    );
+  });
+
+  it('does not remove a variable it is about to set', () => {
+    // So a caller can hand over a blunt "everything any account on this roster
+    // could set" list without having to subtract the destination's own keys.
+    const cmds = respawnCommands({
+      name: 'lineage-abc',
+      env: { CLAUDE_CONFIG_DIR: '/b' },
+      remove: ['CLAUDE_CONFIG_DIR', 'CODEX_HOME'],
+      command: ['/bin/claude'],
+    });
+    expect(cmds[0]).toEqual(buildRemoveEnvArgs('lineage-abc', 'CODEX_HOME'));
+    expect(cmds[1]).toContain('respawn-pane');
+    expect(cmds.filter((c) => c.includes('-r'))).toHaveLength(1);
+  });
+
+  it('is exactly today\'s respawn when nothing is being removed', () => {
+    const opts = {
+      name: 'lineage-abc',
+      env: { LINEAGE_NODE_ID: 'a' },
+      command: ['/bin/claude'],
+    };
+    expect(respawnCommands(opts)).toEqual([
+      buildRespawnArgs(opts),
+      buildSetEnvArgs('lineage-abc', 'LINEAGE_NODE_ID', 'a'),
+    ]);
+  });
+});
+
+describe('parseTmuxSessions', () => {
+  it('reads one name per line and skips blanks', () => {
+    expect(parseTmuxSessions('lineage-a\n\nlineage-b\n')).toEqual([
+      'lineage-a',
+      'lineage-b',
+    ]);
+    expect(parseTmuxSessions('')).toEqual([]);
+  });
+});
+
+describe('killTmuxSessionTree', () => {
+  // The composition contract, with every side injected: WALK before the kill
+  // (a dead root's children have re-parented to PID 1 and can never be found
+  // again), then kill-session, then reap root + descendants by pid.
+  function fakes(over: {
+    panePid?: number | undefined;
+    killOk?: boolean;
+  } = {}) {
+    const calls: string[] = [];
+    let reaped: readonly number[] = [];
+    const deps = {
+      panePid: async () => {
+        calls.push('walk-pid');
+        return 'panePid' in over ? over.panePid : 100;
+      },
+      listDescendants: async (root: number) => {
+        calls.push(`walk-tree:${root}`);
+        return [101, 102];
+      },
+      killSession: async () => {
+        calls.push('kill-session');
+        return over.killOk ?? true;
+      },
+      reapSurvivors: async (pids: readonly number[]) => {
+        calls.push('reap');
+        reaped = pids;
+        return { exited: pids.length, termed: 0, killed: 0 };
+      },
+    };
+    return { calls, deps, reaped: () => reaped };
+  }
+
+  it('walks BEFORE the kill and reaps root plus descendants, by pid', async () => {
+    const f = fakes();
+    await expect(
+      killTmuxSessionTree('/usr/bin/tmux', 'lineage-abc', f.deps),
+    ).resolves.toBe(true);
+    // The reap lands on a microtask behind the kill (fire-and-forget).
+    await new Promise((r) => setTimeout(r, 0));
+    expect(f.calls).toEqual(['walk-pid', 'walk-tree:100', 'kill-session', 'reap']);
+    expect(f.reaped()).toEqual([100, 101, 102]);
+  });
+
+  it('a failed kill reaps NOTHING — no walk result is licence without a kill', async () => {
+    const f = fakes({ killOk: false });
+    await expect(
+      killTmuxSessionTree('/usr/bin/tmux', 'lineage-abc', f.deps),
+    ).resolves.toBe(false);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(f.calls).toEqual(['walk-pid', 'walk-tree:100', 'kill-session']);
+  });
+
+  it('no pane pid (session already gone) still kills, but signals nobody', async () => {
+    const f = fakes({ panePid: undefined });
+    await killTmuxSessionTree('/usr/bin/tmux', 'lineage-abc', f.deps);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(f.calls).toEqual(['walk-pid', 'kill-session']);
   });
 });

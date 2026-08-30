@@ -15,6 +15,7 @@ import {
   DELEGATES,
   canEndSession,
   delegateFor,
+  delegateRefusal,
   hostMarker,
   hostOf,
   hostOfChain,
@@ -23,7 +24,7 @@ import {
   isLaunchMode,
   resolveLaunchMode,
 } from '../src/hosts';
-import type { EditorialRecord } from '../src/types';
+import type { AccountProfile, EditorialRecord } from '../src/types';
 
 const TIP = '0f0000c1-0000-4000-8000-0000000000c1';
 const OLD = '0f0000a1-0000-4000-8000-0000000000a1';
@@ -247,5 +248,64 @@ describe('the delegate table', () => {
     expect(text).toContain('tmux');
     expect(text).toContain('Close');
     expect(text).toContain('account');
+  });
+});
+
+// ------------------------------------------------------- delegateRefusal
+//
+// The routing gate for a delegated NEW launch. The delegate runs its command
+// on the machine's own default login, so the only routings it may be handed
+// are the ones that resolve to exactly that — no account at all, or the
+// default account. Everything else must open in Flock's own terminal, because
+// handing it over would silently ignore the routing: the wrong CLI outright,
+// or a launch that looks routed in the tree while its transcript is written
+// where the account's next resume will never look.
+
+describe('delegateRefusal', () => {
+  const profile = (over: Partial<AccountProfile> = {}): AccountProfile => ({
+    id: 'work',
+    provider: 'claude',
+    label: 'Work (Max)',
+    order: 0,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    ...over,
+  });
+
+  it('lets an unrouted launch and the default account through', () => {
+    // These resolve to an empty environment — exactly what the delegate runs
+    // anyway, so refusing them would break delegation for the common case.
+    expect(delegateRefusal(null)).toBeNull();
+    expect(delegateRefusal(undefined)).toBeNull();
+    expect(delegateRefusal(profile())).toBeNull();
+    // An empty extraEnv is still the default account — the same rule
+    // isDefaultAccount applies.
+    expect(delegateRefusal(profile({ extraEnv: {} }))).toBeNull();
+  });
+
+  it('refuses another CLI, naming the account and the CLI', () => {
+    const reason = delegateRefusal(
+      profile({ provider: 'codex', label: 'Work (Codex)' }),
+    );
+    expect(reason).toContain('Work (Codex)');
+    expect(reason).toContain('codex');
+    expect(delegateRefusal(profile({ provider: 'gemini' }))).not.toBeNull();
+  });
+
+  it('refuses an account with its own config directory', () => {
+    // The delegate would start the session on the default login, and the
+    // transcript would land where this account's next resume will not look.
+    const reason = delegateRefusal(profile({ configDir: '/work/.claude' }));
+    expect(reason).toContain('Work (Max)');
+  });
+
+  it('refuses an API-key account for its environment, not its CLI', () => {
+    // `generic` runs claude — the CLI test passes it — but its key would not
+    // be carried by a launch the delegate performs.
+    expect(
+      delegateRefusal(
+        profile({ provider: 'generic', extraEnv: { ANTHROPIC_API_KEY: 'k' } }),
+      ),
+    ).not.toBeNull();
   });
 });

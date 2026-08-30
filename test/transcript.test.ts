@@ -11,6 +11,7 @@ import {
   forkParentFromTranscript,
   hasTranscript,
   readTranscriptHeader,
+  transcriptCopyWins,
   transcriptFile,
   transcriptMtimeMs,
 } from '../src/transcript';
@@ -320,14 +321,91 @@ describe('transcriptFile: extraProjectsDirs', () => {
     ).toBe(true);
   });
 
-  it('the primary root wins when both hold the id', () => {
+  /** Stamp a file's mtime, in whole seconds so every filesystem agrees. */
+  function touch(file: string, atMs: number): void {
+    fs.utimesSync(file, atMs / 1000, atMs / 1000);
+  }
+
+  it('the NEWEST copy wins when an id resolves in two roots, whichever root it is in', () => {
+    // This used to assert that the primary root wins, which was not a rule so
+    // much as the shape of a bug: root order is roster order, so which of two
+    // files a reader opened depended on how the accounts happened to sort.
     const primary = tempDir('lineage-primary-');
     const profile = tempDir('lineage-profile-');
     const primaryFile = writeAt(primary, ID, '{"cwd":"/primary"}\n');
-    writeAt(profile, ID, '{"cwd":"/profile"}\n');
+    const profileFile = writeAt(profile, ID, '{"cwd":"/profile"}\n');
+    touch(primaryFile, Date.now() - 86_400_000);
+    touch(profileFile, Date.now() - 60_000);
+    expect(
+      transcriptFile(ID, { projectsDir: primary, extraProjectsDirs: [profile] }),
+    ).toBe(profileFile);
+
+    // …and the other way round, so the answer is about the files and not about
+    // which argument they arrived in.
+    touch(primaryFile, Date.now() - 30_000);
     expect(
       transcriptFile(ID, { projectsDir: primary, extraProjectsDirs: [profile] }),
     ).toBe(primaryFile);
+  });
+
+  it('prefers the conversation over a metadata-only stub in an account that sorts first', () => {
+    // The live case on the author's machine: a nine-line stub of hook records in
+    // the account listed first, the actual 12 MB conversation in the account
+    // listed second. Every reader was opening the stub — no cwd for the
+    // directory column, no opening prompt for the archived row's name.
+    const stubRoot = tempDir('lineage-stub-');
+    const realRoot = tempDir('lineage-real-');
+    const stub = writeAt(
+      stubRoot,
+      ID,
+      '{"type":"ai-title"}\n{"type":"last-prompt"}\n',
+    );
+    const real = writeAt(
+      realRoot,
+      ID,
+      '{"type":"user","cwd":"/code"}\n'.repeat(400),
+    );
+    touch(stub, Date.now() - 3_600_000);
+    touch(real, Date.now() - 120_000);
+
+    expect(
+      transcriptFile(ID, {
+        projectsDir: stubRoot,
+        extraProjectsDirs: [realRoot],
+      }),
+    ).toBe(real);
+  });
+
+  it('falls back to the larger copy only when the two were written at the same moment', () => {
+    const primary = tempDir('lineage-primary-');
+    const profile = tempDir('lineage-profile-');
+    const small = writeAt(primary, ID, '{}\n');
+    const big = writeAt(profile, ID, '{"a":1}\n'.repeat(50));
+    const same = Date.now() - 600_000;
+    touch(small, same);
+    touch(big, same);
+    expect(
+      transcriptFile(ID, { projectsDir: primary, extraProjectsDirs: [profile] }),
+    ).toBe(big);
+  });
+
+  it('scan order still decides a total tie, so the answer is stable', () => {
+    const primary = tempDir('lineage-primary-');
+    const profile = tempDir('lineage-profile-');
+    const primaryFile = writeAt(primary, ID, '{"cwd":"/aaaaaaaa"}\n');
+    const profileFile = writeAt(profile, ID, '{"cwd":"/bbbbbbbb"}\n');
+    const same = Date.now() - 600_000;
+    touch(primaryFile, same);
+    touch(profileFile, same);
+    expect(fs.statSync(primaryFile).size).toBe(fs.statSync(profileFile).size);
+    const first = transcriptFile(ID, {
+      projectsDir: primary,
+      extraProjectsDirs: [profile],
+    });
+    expect(first).toBe(primaryFile);
+    expect(
+      transcriptFile(ID, { projectsDir: primary, extraProjectsDirs: [profile] }),
+    ).toBe(first);
   });
 
   it('an unreadable extra root is skipped, not fatal', () => {
@@ -338,5 +416,37 @@ describe('transcriptFile: extraProjectsDirs', () => {
         extraProjectsDirs: [path.join(primary, 'nope', 'projects')],
       }),
     ).toBeNull();
+  });
+});
+
+describe('transcriptCopyWins', () => {
+  it('newest mtime is the primary key', () => {
+    expect(
+      transcriptCopyWins({ mtimeMs: 200, size: 1 }, { mtimeMs: 100, size: 999 }),
+    ).toBe(true);
+  });
+
+  it('a fat stale copy does not beat a lean current one', () => {
+    // Size is a proxy for "has more conversation in it" and it gets the case
+    // that matters backwards: a transcript the CLI rewrote shorter is still the
+    // file a resume would continue.
+    expect(
+      transcriptCopyWins({ mtimeMs: 100, size: 999 }, { mtimeMs: 200, size: 1 }),
+    ).toBe(false);
+  });
+
+  it('size breaks a tie on mtime', () => {
+    expect(
+      transcriptCopyWins({ mtimeMs: 100, size: 2 }, { mtimeMs: 100, size: 1 }),
+    ).toBe(true);
+    expect(
+      transcriptCopyWins({ mtimeMs: 100, size: 1 }, { mtimeMs: 100, size: 2 }),
+    ).toBe(false);
+  });
+
+  it('a total tie leaves the incumbent, so scan order decides and stays decided', () => {
+    expect(
+      transcriptCopyWins({ mtimeMs: 100, size: 1 }, { mtimeMs: 100, size: 1 }),
+    ).toBe(false);
   });
 });

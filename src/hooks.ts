@@ -57,8 +57,13 @@ export const PLUGIN_NAME = 'lineage-events';
  *  inherited, and UserPromptSubmit joined the event list — together these are
  *  the enrollment channel: a hook event carries the id of the conversation the
  *  terminal was launched for, so a session whose id has churned can be re-keyed
- *  from an exact signal rather than a guess (see HookEvent.nodeId). */
-export const PLUGIN_VERSION = 3;
+ *  from an exact signal rather than a guess (see HookEvent.nodeId).
+ *  v4: PreCompact joined the event list. It is the ONLY signal that says a
+ *  compaction has STARTED — the roster reports such a session as plainly
+ *  `busy`, indistinguishable from a turn, and the transcript's
+ *  `compact_boundary` record is only written once the compaction is already
+ *  over. Without it the purple ring has nothing to key on. */
+export const PLUGIN_VERSION = 4;
 /** semver stamped into plugin.json (the plugin loader wants a semver). */
 const PLUGIN_SEMVER = '0.1.0';
 
@@ -140,6 +145,13 @@ const HOOK_EVENTS = [
   'Stop',
   'Notification',
   'UserPromptSubmit',
+  // PreCompact (v4) is the compaction beat, and the only one there is on the
+  // way IN: a compacting session reports `busy` on the roster exactly like a
+  // session mid-turn, and the transcript's `compact_boundary` record does not
+  // exist until the compaction has already finished. The way OUT is
+  // SessionStart's `source: 'compact'`, which we already listen for. See
+  // src/compaction.ts for what the pair is read as.
+  'PreCompact',
 ] as const;
 
 /** JSON.stringify({name, version: '0.1.0', description}, null, 2) */
@@ -158,7 +170,7 @@ export function renderPluginJson(): string {
   );
 }
 
-/** The four events, each a single-element matcher-less array of
+/** Every HOOK_EVENTS entry, each a single-element matcher-less array of
  *  {hooks:[{type:'command', command: HOOK_COMMAND}]}. */
 export function renderHooksJson(): string {
   const hooks: Record<string, unknown[]> = {};

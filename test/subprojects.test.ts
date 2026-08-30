@@ -33,6 +33,7 @@ import {
   buildSubprojects,
   canReparentProject,
   canonicalCheckoutPath,
+  inCheckout,
   computeGrouping,
   matchProject,
   projectSubtree,
@@ -110,6 +111,8 @@ const EMPTY_GROUPING: GroupingResult = {
   folders: [],
   loose: [],
   hiddenCount: 0,
+  outOfScopeCount: 0,
+  hiddenRunning: null,
 };
 
 function input(
@@ -1370,6 +1373,89 @@ describe('canonicalCheckoutPath', () => {
     // /code/app-feature is not in /code/app-feat, and a prefix comparison that
     // missed that would rewrite a path in an unrelated directory.
     expect(canonicalCheckoutPath(worktrees, '/code/app-feature/api')).toBe('');
+  });
+});
+
+// `inCheckout` is the inverse, and the pair is what makes the auto-switch
+// window's Explorer land in the tree the user is editing. Grouping asks "where
+// would this session sit in the MAIN checkout" so the sidebar can file it under
+// the `api` row somebody named once; following asks "and where does that row
+// live in the checkout the session is actually in".
+
+describe('inCheckout', () => {
+  const main: Worktree = {
+    dir: '/code/app',
+    branch: 'main',
+    head: 'a',
+    detached: false,
+  };
+  const feat: Worktree = {
+    dir: '/code/app-feat',
+    branch: 'feat',
+    head: 'b',
+    detached: false,
+  };
+  const worktrees: Worktree[] = [main, feat];
+
+  it('translates a main-checkout directory into the linked worktree', () => {
+    expect(inCheckout(worktrees, feat, '/code/app/api')).toBe(
+      '/code/app-feat/api',
+    );
+  });
+
+  it('translates back the other way just as happily', () => {
+    expect(inCheckout(worktrees, main, '/code/app-feat/api')).toBe(
+      '/code/app/api',
+    );
+  });
+
+  it('leaves a path alone when `here` already contains it', () => {
+    expect(inCheckout(worktrees, feat, '/code/app-feat/api')).toBe(
+      '/code/app-feat/api',
+    );
+  });
+
+  it('leaves a path alone when nothing to translate is known', () => {
+    // No checkout contains it; no `here` at all (the probe has not landed);
+    // no path. Each is a "nothing extra to consider" state, and the caller
+    // must get back something it can still use.
+    expect(inCheckout(worktrees, feat, '/elsewhere/x')).toBe('/elsewhere/x');
+    expect(inCheckout(worktrees, undefined, '/code/app/api')).toBe(
+      '/code/app/api',
+    );
+    expect(inCheckout([], feat, '/code/app/api')).toBe('/code/app/api');
+    expect(inCheckout(worktrees, feat, undefined)).toBe('');
+  });
+
+  it('translates out of the DEEPEST containing checkout', () => {
+    // git will happily put one worktree inside another, and the deeper prefix
+    // is the one the path is actually in.
+    const nested: Worktree = {
+      dir: '/code/app/inner',
+      branch: 'inner',
+      head: 'c',
+      detached: false,
+    };
+    expect(inCheckout([...worktrees, nested], feat, '/code/app/inner/api')).toBe(
+      '/code/app-feat/api',
+    );
+  });
+
+  it('round-trips the grouping answer back into the session\'s own checkout', () => {
+    // The contract the two functions have with each other: canonicalise a
+    // session's cwd to file it, then put the filed directory back where the
+    // session can see it — and what comes back must still contain the session.
+    const cwd = '/code/app-feat/api/handlers';
+    const canonical = canonicalCheckoutPath(worktrees, cwd);
+    expect(canonical).toBe('/code/app/api/handlers');
+    const back = inCheckout(worktrees, feat, canonical);
+    expect(back).toBe(cwd);
+  });
+
+  it('matches a checkout case-insensitively, like every other path rule here', () => {
+    expect(inCheckout(worktrees, feat, '/Code/App/API')).toBe(
+      '/code/app-feat/API',
+    );
   });
 });
 

@@ -23,7 +23,10 @@ import {
   ACCOUNT_ID_FALLBACK,
   CLAUDE_CONFIG_DIR_ENV,
   CODEX_HOME_ENV,
+  accountEnvKeys,
   canHostSession,
+  canSwitchAccounts,
+  offerSwitch,
   cliOfProfile,
   configDirForProfile,
   DEFAULT_CLAUDE_PROFILE_ID,
@@ -37,8 +40,10 @@ import {
   moveUp,
   nextOrder,
   profileConfigDirFor,
+  restoreEnvFor,
   seedDefaultProfiles,
   slugify,
+  switchMovesNothing,
   sortProfiles,
   switchRefusal,
   uniqueAccountId,
@@ -775,5 +780,269 @@ describe('accounts: switchRefusal', () => {
       'cannot-host',
     );
     expect(switchRefusal(work, undefined)).toBe('cannot-host');
+  });
+});
+
+// ------------------------------------------- the ONE rule, three consumers
+//
+// `switchRefusal` above is the rule; these three apply it, and they exist
+// because three places used to apply their own version of it and disagree. The
+// disagreement was not theoretical: on the roster this extension seeds by
+// default the row menu drew "Move to Account…" on every session while the
+// picker behind it was always empty.
+
+describe('accounts: canSwitchAccounts', () => {
+  const acct = (p: Partial<AccountProfile>): AccountProfile =>
+    ({ id: 'a', provider: 'claude', label: 'A', ...p }) as AccountProfile;
+
+  // Exactly the roster `seedDefaultProfiles` mints on a machine that has a
+  // Codex login — which is most of them, and this machine.
+  const claudeDefault = acct({ id: 'claude-default' });
+  const codexDefault = acct({ id: 'codex-default', provider: 'codex' });
+
+  it('does not count a Claude account and a Codex account as two destinations', () => {
+    // THE BUG, pinned as the divergence rather than as a value. The context key
+    // used to be `filter(canHostSession).length >= 2`, and `canHostSession`
+    // accepts codex — so the old test says yes and the picker, built from
+    // switchRefusal, has nothing to show.
+    const roster = [claudeDefault, codexDefault];
+    expect(roster.filter(canHostSession).length >= 2).toBe(true);
+    expect(canSwitchAccounts(roster)).toBe(false);
+  });
+
+  it('counts two accounts that run the same CLI', () => {
+    expect(canSwitchAccounts([claudeDefault, acct({ id: 'work' })])).toBe(true);
+    // The API-key profile runs the Claude binary, so it is a real destination.
+    expect(
+      canSwitchAccounts([claudeDefault, acct({ id: 'key', provider: 'generic' })]),
+    ).toBe(true);
+  });
+
+  it('needs TWO — one account is somewhere to be, not somewhere to go', () => {
+    expect(canSwitchAccounts([claudeDefault])).toBe(false);
+    expect(canSwitchAccounts([])).toBe(false);
+  });
+
+  it('never counts a deleted account', () => {
+    expect(
+      canSwitchAccounts([claudeDefault, acct({ id: 'gone', deleted: true })]),
+    ).toBe(false);
+  });
+});
+
+describe('accounts: offerSwitch', () => {
+  const acct = (p: Partial<AccountProfile>): AccountProfile =>
+    ({ id: 'a', provider: 'claude', label: 'A', ...p }) as AccountProfile;
+
+  const claudeDefault = acct({ id: 'claude-default' });
+  const codexDefault = acct({ id: 'codex-default', provider: 'codex' });
+  const codex1 = acct({ id: 'cdx1', provider: 'codex' });
+  const codex2 = acct({ id: 'cdx2', provider: 'codex' });
+
+  it("refuses on the CONVERSATION's CLI even where switchRefusal allows the pair", () => {
+    // Two Codex logins ARE a legal pair by switchRefusal — same CLI, both
+    // hostable — and that is what let the at-the-limit notification propose a
+    // move its own verb then refused. The refusal belongs here, once, so the
+    // notification and the picker cannot get different answers.
+    expect(switchRefusal(codex1, codex2)).toBeNull();
+    expect(offerSwitch({ cli: 'codex', from: codex1, profiles: [codex1, codex2] }))
+      .toEqual({ kind: 'wrong-cli' });
+  });
+
+  it('outranks the target list, so the sentence is about the conversation', () => {
+    // Both things are wrong at once: not a Claude conversation, and no target
+    // either. The useful sentence is the one about what the user is looking at.
+    expect(offerSwitch({ cli: 'codex', from: null, profiles: [] })).toEqual({
+      kind: 'wrong-cli',
+    });
+  });
+
+  it('offers the machine default as a source, which has no pin', () => {
+    const offer = offerSwitch({
+      cli: 'claude',
+      from: null,
+      profiles: [claudeDefault],
+    });
+    expect(offer).toEqual({ kind: 'ok', targets: [claudeDefault] });
+  });
+
+  it('says no-target for the seeded roster read from its Claude account', () => {
+    expect(
+      offerSwitch({
+        cli: 'claude',
+        from: claudeDefault,
+        profiles: [claudeDefault, codexDefault],
+      }),
+    ).toEqual({ kind: 'no-target' });
+  });
+});
+
+describe('accounts: accountEnvKeys', () => {
+  const acct = (p: Partial<AccountProfile>): AccountProfile =>
+    ({ id: 'a', provider: 'claude', label: 'A', ...p }) as AccountProfile;
+
+  it('always names every config-dir variable, whatever the roster holds', () => {
+    // Not derived from the accounts present: a value can have leaked into the
+    // tmux server's global environment from a client that is long gone, and the
+    // roster it came from is not something this function can see.
+    expect(accountEnvKeys([])).toEqual(
+      [CLAUDE_CONFIG_DIR_ENV, CODEX_HOME_ENV].sort(),
+    );
+  });
+
+  it("includes an API-key account's own variable", () => {
+    const keys = accountEnvKeys([
+      acct({ id: 'key', provider: 'generic', extraEnv: { ANTHROPIC_API_KEY: 'x' } }),
+    ]);
+    expect(keys).toContain('ANTHROPIC_API_KEY');
+  });
+
+  it('drops a key that could not be an environment variable name', () => {
+    const keys = accountEnvKeys([
+      acct({ id: 'bad', extraEnv: { 'NOT A NAME': 'x', 'A=B': 'y' } }),
+    ]);
+    expect(keys).not.toContain('NOT A NAME');
+    expect(keys).not.toContain('A=B');
+  });
+
+  it('is sorted and deduplicated, and never names the re-key stamp', () => {
+    const keys = accountEnvKeys([
+      acct({ id: 'one', extraEnv: { ZED: 'a' } }),
+      acct({ id: 'two', extraEnv: { ZED: 'b' } }),
+    ]);
+    expect(keys).toEqual([...keys].sort());
+    expect(new Set(keys).size).toBe(keys.length);
+    // LINEAGE_NODE_ID is set by the launcher on every session, not by an
+    // account — if it ever landed in here the switch would strip the hook
+    // re-key stamp out of the pane it is restarting.
+    expect(keys).not.toContain('LINEAGE_NODE_ID');
+  });
+});
+
+// ------------------------------------------------------------- restoreEnvFor
+
+describe('accounts: restoreEnvFor', () => {
+  const DEFAULT_DIR = '/home/me/.claude';
+
+  it('restores into the dir the transcript was FOUND in, not the one the pin claims', () => {
+    // `sourceDirFor` looks past the pin on purpose — the pin is a claim, the
+    // file is a fact — and the restore path was rebuilding its environment from
+    // the claim, so the CLI came back up under an account that does not hold the
+    // conversation and `claude --resume` found nothing.
+    expect(
+      restoreEnvFor(profile('p', { configDir: '/pinned' }), '/found', DEFAULT_DIR),
+    ).toEqual({ [CLAUDE_CONFIG_DIR_ENV]: '/found' });
+  });
+
+  it('is exactly envForProfile when the pin was right, so the common path is unchanged', () => {
+    const p = profile('p', { configDir: '/pinned', extraEnv: { A: 'b' } });
+    expect(restoreEnvFor(p, '/pinned', DEFAULT_DIR)).toEqual(
+      envForProfile(p),
+    );
+    // A trailing separator is the one difference a hand-typed configDir makes.
+    expect(restoreEnvFor(p, '/pinned/', DEFAULT_DIR)).toEqual(envForProfile(p));
+  });
+
+  it('the DEFAULT login found in the default dir still names no config dir', () => {
+    // `{}` has to behave exactly as passing no environment did before accounts
+    // existed; naming ~/.claude explicitly would be a new variable in the pane.
+    expect(restoreEnvFor(null, DEFAULT_DIR, DEFAULT_DIR)).toEqual({});
+  });
+
+  it('the DEFAULT login found somewhere ELSE names that directory', () => {
+    expect(restoreEnvFor(null, '/profiles/personal', DEFAULT_DIR)).toEqual({
+      [CLAUDE_CONFIG_DIR_ENV]: '/profiles/personal',
+    });
+  });
+
+  it('keeps extraEnv and lets the found directory win over the profile\'s own', () => {
+    const p = profile('p', {
+      configDir: '/pinned',
+      extraEnv: { ANTHROPIC_API_KEY: 'x' },
+    });
+    expect(restoreEnvFor(p, '/found', DEFAULT_DIR)).toEqual({
+      ANTHROPIC_API_KEY: 'x',
+      [CLAUDE_CONFIG_DIR_ENV]: '/found',
+    });
+  });
+
+  it('a missing found dir falls back to the profile rather than blanking it', () => {
+    const p = profile('p', { configDir: '/pinned' });
+    expect(restoreEnvFor(p, '', DEFAULT_DIR)).toEqual(envForProfile(p));
+  });
+});
+
+// --------------------------------------------------------- switchMovesNothing
+
+describe('accounts: switchMovesNothing', () => {
+  const DEFAULT_DIR = '/home/me/.claude';
+
+  it('the seeded roster really can offer a move that moves nothing', () => {
+    // The equality this whole short-circuit rests on, pinned so it cannot drift:
+    // the default login and the seeded claude profile resolve to one directory,
+    // and `switchTargets` will offer the second to a session on the first.
+    const seeded = profile('claude-default');
+    expect(configDirForProfile(null, DEFAULT_DIR)).toBe(
+      configDirForProfile(seeded, DEFAULT_DIR),
+    );
+    expect(
+      switchMovesNothing({
+        fromDir: DEFAULT_DIR,
+        toDir: DEFAULT_DIR,
+        from: null,
+        to: seeded,
+      }),
+    ).toBe(true);
+  });
+
+  it('two different directories always move something', () => {
+    expect(
+      switchMovesNothing({
+        fromDir: '/a',
+        toDir: '/b',
+        from: profile('a', { configDir: '/a' }),
+        to: profile('b', { configDir: '/b' }),
+      }),
+    ).toBe(false);
+  });
+
+  it('the DIRECTORIES are not enough: an extraEnv difference still needs the restart', () => {
+    // An API-key account shares a config directory and authenticates
+    // differently, and the environment is read once at exec — so the process has
+    // to be restarted even though not one byte moves.
+    expect(
+      switchMovesNothing({
+        fromDir: DEFAULT_DIR,
+        toDir: DEFAULT_DIR,
+        from: profile('plain'),
+        to: profile('bykey', { extraEnv: { ANTHROPIC_API_KEY: 'x' } }),
+      }),
+    ).toBe(false);
+    // …and in the other direction, where the variable has to be REMOVED.
+    expect(
+      switchMovesNothing({
+        fromDir: DEFAULT_DIR,
+        toDir: DEFAULT_DIR,
+        from: profile('bykey', { extraEnv: { ANTHROPIC_API_KEY: 'x' } }),
+        to: profile('plain'),
+      }),
+    ).toBe(false);
+  });
+
+  it('the same extraEnv either side is still a re-pin', () => {
+    expect(
+      switchMovesNothing({
+        fromDir: '/shared',
+        toDir: '/shared',
+        from: profile('a', { configDir: '/shared', extraEnv: { A: 'b' } }),
+        to: profile('b', { configDir: '/shared', extraEnv: { A: 'b' } }),
+      }),
+    ).toBe(true);
+  });
+
+  it('an empty directory is never a match — an unknown source moves something', () => {
+    expect(
+      switchMovesNothing({ fromDir: '', toDir: '', from: null, to: null }),
+    ).toBe(false);
   });
 });

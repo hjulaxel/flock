@@ -168,6 +168,134 @@ export function switchRefusal(
   return null;
 }
 
+/**
+ * Every account this conversation could actually be moved to.
+ *
+ * `switchRefusal` already IS the rule; this only applies it to a roster, and it
+ * exists so that nobody has to apply it again by hand. Three places used to
+ * each have their own idea of the same question — the menu's context key
+ * counted host-capable accounts, the picker filtered on `switchRefusal`, and
+ * the at-the-limit offer filtered on `switchRefusal` without asking what CLI
+ * the CONVERSATION was written by — and the three answers disagreed on the
+ * default roster of one Claude login plus one Codex login. `sortProfiles` above
+ * states the house answer to exactly this shape of problem: one function,
+ * because the consumers have to agree.
+ */
+export function switchTargets(
+  from: AccountProfile | null | undefined,
+  profiles: readonly AccountProfile[],
+): AccountProfile[] {
+  return (profiles ?? []).filter(
+    (p): p is AccountProfile => !!p && switchRefusal(from, p) === null,
+  );
+}
+
+/**
+ * Is there anywhere on this roster a conversation could be moved BETWEEN?
+ *
+ * Counts accounts that run the CLAUDE cli (see `cliOfProfile` — `generic`, the
+ * API-key profile, runs it too) and that a session can start on. NOT accounts
+ * that can host a session, which is the test this replaced and the reason the
+ * menu entry went wrong: `SESSION_PROVIDERS` gained `codex` the day the
+ * launcher learned to exec that binary, and from that day on a machine with
+ * one Claude login and one Codex login counted two destinations while the
+ * picker — built from `switchRefusal`, which refuses a cross-CLI pair — was
+ * always empty. That is the shape this machine seeds by default whenever
+ * `~/.codex/auth.json` exists, so it was most installs, and the symptom was a
+ * verb offered on every session row that never had anywhere to go.
+ *
+ * TWO, and the case deliberately excluded is one Claude account plus an
+ * unpinned conversation: `switchRefusal(null, thatAccount)` is legal, so the
+ * palette can still run the verb and pin a conversation that has never been
+ * pinned. It moves no bytes (both ends resolve to the same config directory),
+ * and a row menu does not owe a slot to a move whose only effect is on a label.
+ */
+export function canSwitchAccounts(
+  profiles: readonly AccountProfile[],
+): boolean {
+  let n = 0;
+  for (const p of profiles ?? []) {
+    if (!p || p.deleted === true) continue;
+    if (cliOfProfile(p) !== 'claude') continue;
+    if (!canHostSession(p)) continue;
+    n++;
+    if (n >= 2) return true;
+  }
+  return false;
+}
+
+/** What `offerSwitch` decided: the accounts to offer, or the one sentence's
+ *  worth of reason there are none. */
+export type SwitchOffer =
+  | { kind: 'ok'; targets: AccountProfile[] }
+  /** The conversation was not written by a CLI Flock knows how to move. */
+  | { kind: 'wrong-cli' }
+  /** Claude's, but the roster holds nowhere else to put it. */
+  | { kind: 'no-target' };
+
+/**
+ * The WHOLE decision behind "move this conversation to another account",
+ * for the picker, the notification and anything else that has to ask.
+ *
+ * `cli` is the CONVERSATION's, never the pin's, and that is the fix rather
+ * than a detail. A pin is a claim a user can change with another verb; the CLI
+ * that wrote a transcript is a fact about the bytes, and it is the bytes this
+ * feature moves. Reading the pin instead meant an unpinned Codex conversation
+ * — one started in a terminal, which never gets a record at all — passed the
+ * CLI gate (a missing pin reads as the default provider, i.e. claude) and was
+ * then told by the transcript test that it "has not taken a turn yet", the one
+ * sentence that gate exists to prevent.
+ *
+ * `wrong-cli` OUTRANKS the target list on purpose: when both are true the
+ * useful sentence is about the user's conversation, not about their roster.
+ * That ordering is also what stops the at-the-limit offer proposing a
+ * Codex→Codex move — a legal pair by `switchRefusal`, since two Codex logins
+ * really are the same CLI, and one the mover has simply never been written to
+ * perform.
+ */
+export function offerSwitch(opts: {
+  /** The CLI that wrote the conversation. */
+  cli: SessionCli;
+  /** The account it is pinned to now, or null for the default login. */
+  from: AccountProfile | null | undefined;
+  profiles: readonly AccountProfile[];
+}): SwitchOffer {
+  if (opts?.cli !== 'claude') return { kind: 'wrong-cli' };
+  const targets = switchTargets(opts.from, opts.profiles);
+  return targets.length === 0 ? { kind: 'no-target' } : { kind: 'ok', targets };
+}
+
+/**
+ * Every environment variable a launch ON THIS ROSTER could set.
+ *
+ * Built from the roster rather than from a list somebody types out, because
+ * its one consumer is the account switch's tmux tier, which has to REMOVE the
+ * variables the account it is leaving set. `-e` on a respawn can only ever
+ * set, so a move onto an account with a smaller environment — most obviously
+ * back onto the default account, whose environment is empty — leaves the old
+ * account's config dir behind in the pane's session environment and the
+ * resumed CLI reads the account the conversation just left. A hardcoded pair
+ * would go stale the first time somebody adds an API-key account.
+ *
+ * Every value of `CONFIG_DIR_ENV` is included whatever the roster holds: a
+ * variable can have leaked into the tmux server's global environment from a
+ * client that is long gone, and the roster it came from is not something this
+ * function can see.
+ */
+export function accountEnvKeys(
+  profiles: readonly AccountProfile[],
+): string[] {
+  const keys = new Set<string>(Object.values(CONFIG_DIR_ENV));
+  for (const p of profiles ?? []) {
+    const extra = p?.extraEnv;
+    if (!extra || typeof extra !== 'object' || Array.isArray(extra)) continue;
+    for (const key of Object.keys(extra)) {
+      if (isEnvVarName(key)) keys.add(key);
+    }
+  }
+  return [...keys].sort();
+}
+
 /** POSIX environment variable name. Enforced because these end up as `-e
  *  KEY=VALUE` arguments to the tmux wrap, where a key containing `=` or a
  *  space would silently redraw the boundary between name and value. */
@@ -251,6 +379,107 @@ export function configDirForProfile(
   const dir =
     typeof profile.configDir === 'string' ? profile.configDir.trim() : '';
   return dir === '' ? fallback : dir;
+}
+
+/**
+ * Two config-directory paths naming the same directory.
+ *
+ * `path.resolve` would be the obvious tool and this module may not import it:
+ * accounts.ts imports ./types and nothing else, which is what makes every rule
+ * in here callable from the command layer, the view, the launcher and a unit
+ * test alike. It costs nothing here, because both sides of every comparison
+ * come from `configDirForProfile` or from `accountMove.sourceDirFor`, and both
+ * of those deal exclusively in the absolute paths the store and the filesystem
+ * handed them. Trailing separators are the one difference a user's hand-typed
+ * `configDir` actually produces, so they are trimmed; case is NOT folded, since
+ * two spellings that differ only in case are the same directory on macOS and
+ * different directories on Linux, and guessing wrong in the permissive
+ * direction here would suppress a restart that is needed.
+ */
+function sameConfigDir(a: string, b: string): boolean {
+  const norm = (v: unknown): string =>
+    typeof v === 'string' ? v.trim().replace(/[/\\]+$/, '') : '';
+  const left = norm(a);
+  return left !== '' && left === norm(b);
+}
+
+/**
+ * The environment a conversation must be PUT BACK on when a move refuses.
+ *
+ * The distinction this exists for: the pin is a claim and the file is a fact.
+ * `accountMove.sourceDirFor` deliberately looks past the pin — a conversation
+ * whose pin has come apart from its bytes is found in whichever account
+ * actually holds it — and the restore path was then rebuilding its environment
+ * from the PROFILE, i.e. from the claim. So on the one path that can reach it (a
+ * wrong pin and a refused move at the same time) the CLI was relaunched with
+ * `CLAUDE_CONFIG_DIR` pointing at an account that does not contain the
+ * conversation, and `claude --resume <id>` found nothing. "Put it back exactly
+ * where it was" has to mean the directory the transcript was found in.
+ *
+ * CLAUDE'S VARIABLE SPECIFICALLY, and not `CONFIG_DIR_ENV[profile.provider]`:
+ * the only mechanism that calls this moves Claude conversations, because
+ * Claude's history layout is the only one Flock knows how to relocate
+ * (`offerSwitch` refuses everything else up front), and `from` may be null —
+ * the default login has no profile and therefore no provider to look one up by.
+ *
+ * When the pin was right this returns exactly `envForProfile(profile)`, so the
+ * common path is unchanged and there is no new behaviour to regress.
+ */
+export function restoreEnvFor(
+  profile: AccountProfile | null | undefined,
+  /** The config dir the transcript was actually found in (`sourceDirFor`). */
+  foundDir: string,
+  /** `~/.claude`, the directory the default login uses. */
+  defaultDir: string,
+): Record<string, string> {
+  const base = envForProfile(profile);
+  const found = typeof foundDir === 'string' ? foundDir.trim() : '';
+  if (found === '') return base;
+  if (sameConfigDir(configDirForProfile(profile, defaultDir), found)) {
+    return base;
+  }
+  return { ...base, [CLAUDE_CONFIG_DIR_ENV]: found };
+}
+
+/**
+ * Would this account move actually MOVE anything?
+ *
+ * There is a real move whose answer is no. Two profiles can resolve to one
+ * config directory — the default login and any provider with no config-dir
+ * variable both land on `~/.claude`, and the roster this extension seeds by
+ * default contains exactly such a pair — so the palette can offer, and a user
+ * can confirm, a "switch" that is nothing but a re-pin. `moveConversation`
+ * already knows: it early-returns `ok` having renamed nothing. The problem is
+ * that the mechanism stops the process BEFORE it asks, so a change of label was
+ * costing a killed turn and a respawned CLI, which is the one cost the
+ * confirmation dialog leads with.
+ *
+ * THE DIRECTORIES ARE NOT ENOUGH, and this is the correction that matters. Two
+ * profiles sharing a config dir can still differ in `extraEnv` — an API-key
+ * account is exactly that shape — and there the restart is the whole point,
+ * because the environment is read once at exec. And a pane that leaked a
+ * `CLAUDE_CONFIG_DIR` from an older switch needs the respawn's removal list to
+ * clear it, which only a restart applies. So both halves have to match: same
+ * directory AND the same environment either side.
+ *
+ * `fromDir` is where the BYTES are (`sourceDirFor`), not where the pin says they
+ * are. A pin that names the destination while the transcript sits in a third
+ * account is a move that genuinely has to happen.
+ */
+export function switchMovesNothing(opts: {
+  /** The config dir the transcript was found in. */
+  fromDir: string;
+  /** The config dir it would move to. */
+  toDir: string;
+  from: AccountProfile | null | undefined;
+  to: AccountProfile | null | undefined;
+}): boolean {
+  if (!sameConfigDir(opts?.fromDir ?? '', opts?.toDir ?? '')) return false;
+  const before = envForProfile(opts?.from);
+  const after = envForProfile(opts?.to);
+  const keys = Object.keys(before);
+  if (keys.length !== Object.keys(after).length) return false;
+  return keys.every((key) => before[key] === after[key]);
 }
 
 /** True for a profile that resolves to an empty environment: the account that

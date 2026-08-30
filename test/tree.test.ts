@@ -20,6 +20,8 @@ import {
   TREE_DND_MIME,
   CLOSED_COLOR_ID,
   DONE_COLOR_ID,
+  CLOSED_DOT,
+  COMPACTING_COLOR_ID,
   RUNNING_COLOR_ID,
   STATUS_DOT,
 } from '../src/types';
@@ -236,10 +238,10 @@ describe('sessionContextValue', () => {
         node(A, { status: 'waiting', attention: 'waiting', parentId: B }),
         false,
       ),
-    ).toBe(';session;shown;notified;live;waiting;hosted;forked;');
+    ).toBe(';session;shown;notified;live;waiting;hosted;here;claude;forked;');
 
     expect(sessionContextValue(node(A, { status: 'idle' }), true)).toBe(
-      ';session;shown;notified;live;idle;hosted;bound;root;',
+      ';session;shown;notified;live;idle;hosted;here;claude;bound;root;',
     );
 
     expect(
@@ -248,7 +250,7 @@ describe('sessionContextValue', () => {
 
     expect(
       sessionContextValue(node(A, { status: 'busy', source: 'minted' }), false),
-    ).toBe(';session;shown;notified;live;busy;hosted;ours;root;');
+    ).toBe(';session;shown;notified;live;busy;hosted;here;claude;ours;root;');
 
     // Archived rows must NOT carry ;live;, or every live-gated verb
     // (fork inline, close, ask) would light up on a closed session.
@@ -257,7 +259,7 @@ describe('sessionContextValue', () => {
         node(A, { archived: true, status: 'exited' }),
         false,
       ),
-    ).toBe(';session;shown;notified;archived;exited;root;');
+    ).toBe(';session;shown;notified;archived;exited;claude;root;');
   });
 
   // The ownership pair the Close verbs are gated on. Exactly one of the two on
@@ -303,6 +305,40 @@ describe('sessionContextValue', () => {
     expect(sessionContextValue(node(A, { status: 'idle' }), false)).toContain(
       ';notified;',
     );
+  });
+
+  // WHICH CLI WROTE THIS, as a complementary pair — the same shape as
+  // hidden/shown and hosted/foreign, and for the same reason: "Move to
+  // Account…" needs a POSITIVE clause to match on, because this manifest never
+  // negates a viewItem regex.
+  it("names the conversation's CLI, and never claims one for a ghost", () => {
+    expect(
+      sessionContextValue(node(A, { status: 'idle' }), false, 'here', 'codex'),
+    ).toContain(';codex;');
+    expect(
+      sessionContextValue(node(A, { status: 'idle' }), false, 'here', 'codex'),
+    ).not.toContain(';claude;');
+    expect(
+      sessionContextValue(node(A, { status: 'idle' }), false, 'here', 'claude'),
+    ).toContain(';claude;');
+
+    // An ABSENT lookup reads as claude, deliberately. The failure this token
+    // exists to stop is a Codex row being OFFERED the verb, not a Claude row
+    // being denied it, so a wiring with no opinion keeps the menu it had.
+    expect(sessionContextValue(node(A, { status: 'idle' }), false)).toContain(
+      ';claude;',
+    );
+
+    // A ghost is an inferred ancestor with no transcript on disk, so either
+    // answer would be invented — the same refusal the provider glyph makes.
+    const ghost = sessionContextValue(
+      node(A, { ghost: true, status: 'exited' }),
+      false,
+      undefined,
+      'claude',
+    );
+    expect(ghost).not.toContain(';claude;');
+    expect(ghost).not.toContain(';codex;');
   });
 
   it('is delimited on both sides so /;live;/ cannot match ;livewire;', () => {
@@ -364,6 +400,99 @@ describe('LineageTreeProvider.getChildren', () => {
     expect(p.getChildren(ref(A))).toEqual([ref(B)]);
     expect(p.getChildren(ref(D))).toEqual([]);
   });
+
+  it('drops an out-of-scope session ENTIRELY, running or not — no appendix row', () => {
+    // Folder mode's fence is a boundary, not a filter: B is running and still
+    // gets no row here, because this window has no verb that could act on it
+    // (the launch fence in extension.ts refuses a foreign cwd outright). Its
+    // own window shows it; if no window has /code/other open then nothing of
+    // its is running at all — window close ends a folder's sessions after the
+    // reload grace. The dead out-of-scope session C is dropped as always.
+    const h = harness(
+      forestOf([
+        node(A, { cwd: '/code/app/src', status: 'busy' }),
+        node(B, { cwd: '/code/other', status: 'busy' }),
+        node(C, { cwd: '/code/other', archived: true, status: 'exited' }),
+      ]),
+    );
+    const p = new LineageTreeProvider({
+      ...h.deps,
+      scopeDirs: () => ['/code/app'],
+    });
+
+    const roots = p.getChildren();
+    // Only A survives, and nothing appendix-shaped was appended.
+    expect(roots.map((r) => (r as { id?: string }).id ?? null)).toEqual([A]);
+    expect(
+      roots.some((r) => (r as GroupNode).label === 'Still running'),
+    ).toBe(false);
+  });
+
+  // END TO END for the badge's own broken promise: the provider counts every
+  // live process on the machine, and an ARCHIVED record whose process the
+  // roster still reports had no row anywhere to point at — found on a real
+  // machine reading 6 with four rows. The rescue is a row, not a smaller
+  // number: making the badge agree with the view would delete the only
+  // on-screen evidence of a running process nothing owns.
+  it('appends an ARCHIVED session whose process is still running', () => {
+    const h = harness(
+      forestOf([
+        node(A, { cwd: '/code/app/src', status: 'busy' }),
+        node(B, { cwd: '/code/app/src', status: 'busy', deleted: true }),
+      ]),
+    );
+    const p = new LineageTreeProvider(h.deps);
+
+    const roots = p.getChildren();
+    // B is archived, so it is NOT an ordinary row in the tree.
+    expect(
+      roots.filter((n) => n.type === 'session').map((n) => (n as SessionRef).id),
+    ).not.toContain(B);
+    const last = roots[roots.length - 1] as GroupNode;
+    expect(last.label).toBe('Still running');
+    expect(last.rootIds).toEqual([B]);
+    // And the number the badge shows has a row behind every unit of it.
+    expect(p.runningCount()).toBe(2);
+    expect(p.getChildren(last)).toEqual([ref(B)]);
+  });
+
+  it('still appends IN-SCOPE running work a view preference hid', () => {
+    // The appendix survives for what it was always for: a session this window
+    // owns, that the user's own filter would hide. B is inside the scope and
+    // in a hidden folder — rescued, and its verbs work.
+    const h = harness(
+      forestOf([
+        node(A, { cwd: '/code/app/src', status: 'busy' }),
+        node(B, { cwd: '/code/app/vendor', status: 'busy' }),
+      ]),
+    );
+    h.setHiddenFolders(['/code/app/vendor']);
+    const p = new LineageTreeProvider({
+      ...h.deps,
+      scopeDirs: () => ['/code/app'],
+    });
+
+    const roots = p.getChildren();
+    const last = roots[roots.length - 1] as GroupNode;
+    expect(last.type).toBe('group');
+    expect(last.label).toBe('Still running');
+    expect(last.rootIds).toEqual([B]);
+    // Its children are ordinary session rows, one click from Close Now.
+    expect(p.getChildren(last)).toEqual([ref(B)]);
+
+    // Collapsed by default (a ledger, not a workspace) and NOT a folder row:
+    // no folder verbs on a row with no directory.
+    const item = p.getTreeItem(last);
+    expect(item.collapsibleState).toBe(1); // TreeItemCollapsibleState.Collapsed
+    expect(item.contextValue).toContain(';elsewhere;');
+    expect(item.contextValue).not.toContain(';group;');
+
+    // The user expanding it is remembered.
+    p.noteExpanded(last);
+    expect(p.getTreeItem(last).collapsibleState).toBe(2); // Expanded
+    p.noteCollapsed(last);
+    expect(p.getTreeItem(last).collapsibleState).toBe(1);
+  });
 });
 
 // --------------------------------------------------------------- getTreeItem
@@ -411,6 +540,39 @@ describe('LineageTreeProvider.getTreeItem', () => {
         }),
       ]),
     );
+    expect(p.getTreeItem(ref(A)).description).toBe('now');
+  });
+
+  // Both surfaces must read a grace row identically. Since the 2026-08-28
+  // review that means the countdown is NOT on the row — the row's existence,
+  // not its wording, is what makes the detached state reachable — and the hover
+  // is where the words went.
+  it('keeps the grace countdown out of the description', () => {
+    h.setForest(
+      forestOf([
+        node(A, {
+          status: 'idle',
+          startedAt: Date.now(),
+          graceDeadlineAt: Date.now() + 9 * 60_000 + 41_000,
+        }),
+      ]),
+    );
+    expect(p.getTreeItem(ref(A)).description).toBe('now');
+  });
+
+  it('keeps the archived conclusion out of the description', () => {
+    h.setForest(
+      forestOf([
+        node(A, {
+          archived: true,
+          status: 'exited',
+          startedAt: Date.now(),
+          lastExchange: 'concluded:\n use BM25',
+        }),
+      ]),
+    );
+    // A closed row is a name and an age. The conclusion is one hover away —
+    // see the resolveTreeItem tests.
     expect(p.getTreeItem(ref(A)).description).toBe('now');
   });
 
@@ -501,7 +663,16 @@ describe('LineageTreeProvider.getParent', () => {
     h.setGrouping(false);
     const p = new LineageTreeProvider(h.deps);
 
-    expect(p.getChildren().map((n) => (n as SessionRef).id)).toEqual([C]);
+    // Session rows only: A is live and this hand-built fixture gives it no row,
+    // so it is now also rescued into the "Still running" appendix (see
+    // viewmodel.runningWithoutRow) — a group row at the tail, and nothing this
+    // test is about.
+    expect(
+      p
+        .getChildren()
+        .filter((n) => n.type === 'session')
+        .map((n) => (n as SessionRef).id),
+    ).toEqual([C]);
     expect(p.getParent(ref(C))).toBeUndefined();
   });
 
@@ -545,29 +716,69 @@ describe('LineageTreeProvider.attentionCount', () => {
     expect(p.attentionCount()).toBe(1);
   });
 
-  // Regression: the badge read forest.attentionCount, which buildForest
-  // computes without ever seeing the projects or the hidden-folder list. A
-  // waiting session in a hidden folder pinned a badge with no row behind it.
-  it('ignores a waiting session inside a hidden folder', () => {
+  // FLIPPED with the appendix rescue. These two once locked a regression fix
+  // ("the badge counted a waiting session in a hidden folder that had no row
+  // behind it") by dropping the count to zero — but the honest fix for a
+  // RUNNING session was never to drop the count, it was to give it the row:
+  // hidden-folder and onlyProjectSessions drops now rescue running roots into
+  // "Still running" exactly like the scope fence and closed projects do,
+  // so the dot renders and the badge counts what the tree shows. (A waiting
+  // session is by definition a running one; dead sessions still drop and
+  // still count nothing — see the projects describe below.)
+  it('counts a waiting session inside a hidden folder — it renders in the appendix now', () => {
     const h = harness(forestOf([waiting(A, '/tmp/alpha')]));
     h.setHiddenFolders(['/tmp/alpha']);
     const p = new LineageTreeProvider(h.deps);
-    expect(p.attentionCount()).toBe(0);
+    expect(p.attentionCount()).toBe(1);
   });
 
-  it('ignores a waiting session dropped by onlyProjectSessions', () => {
+  it('counts a waiting session onlyProjectSessions rescued into the appendix', () => {
     const h = harness(forestOf([waiting(A, '/tmp/alpha')]));
     h.setProjects([project('p1', 'Beta', '/tmp/beta')]);
     h.setOnlyProjectSessions(true);
     const p = new LineageTreeProvider(h.deps);
-    expect(p.attentionCount()).toBe(0);
+    expect(p.attentionCount()).toBe(1);
   });
 
-  it('ignores a waiting session belonging to a hidden project', () => {
+  it('counts a WAITING session of a hidden project — it renders in "Still running"', () => {
+    // A waiting session is a running one, and closing its project no longer
+    // drops its row (that hid a live process): it files into the collapsed
+    // appendix group instead, dot and all — so the badge counts what the
+    // tree shows. A DEAD session of a hidden project stays dropped and
+    // uncounted, as before.
     const h = harness(forestOf([waiting(A, '/tmp/alpha')]));
     h.setProjects([project('p1', 'Alpha', '/tmp/alpha', { hidden: true })]);
     const p = new LineageTreeProvider(h.deps);
-    expect(p.attentionCount()).toBe(0);
+    expect(p.attentionCount()).toBe(1);
+  });
+});
+
+describe('LineageTreeProvider.runningCount', () => {
+  it('counts rendered live processes — grace included, closed rows not', () => {
+    const h = harness(
+      forestOf([
+        node(A, { cwd: '/tmp/alpha', status: 'busy' }),
+        node(B, {
+          cwd: '/tmp/alpha',
+          status: 'idle',
+          graceDeadlineAt: 2_000_000,
+        }),
+        node(C, { cwd: '/tmp/alpha', archived: true, status: 'exited' }),
+      ]),
+    );
+    const p = new LineageTreeProvider(h.deps);
+    expect(p.runningCount()).toBe(2);
+  });
+
+  it('counts a live session inside a hidden folder — the badge is machine-wide', () => {
+    // The count is the levels invariant as a number: a running process costs
+    // the machine the same memory whichever window's filters apply, so no
+    // filter may shrink it. (Filtered RUNNING roots keep a row too — the
+    // "Still running" group — for the fence and closed-project drops.)
+    const h = harness(forestOf([node(A, { cwd: '/tmp/alpha', status: 'busy' })]));
+    h.setHiddenFolders(['/tmp/alpha']);
+    const p = new LineageTreeProvider(h.deps);
+    expect(p.runningCount()).toBe(1);
   });
 });
 
@@ -585,6 +796,66 @@ describe('LineageTreeProvider.resolveTreeItem', () => {
     expect(tip.value).toContain(A);
     expect(tip.value).toContain('/tmp/alpha');
     expect(tip.value).toContain('parent: none (root)');
+  });
+
+  // The hover is now the only place either surface says how long a detached
+  // process has left — and the sentence is viewmodel.graceTooltipLine's, shared
+  // with the inline sidebar so the two cannot drift.
+  it('carries the whole detached-running deal, countdown included', () => {
+    const deadline = Date.now() + 9 * 60_000 + 41_000;
+    const h = harness(
+      forestOf([node(A, { status: 'idle', graceDeadlineAt: deadline })]),
+    );
+    const p = new LineageTreeProvider(h.deps);
+    const item = p.resolveTreeItem(p.getTreeItem(ref(A)), ref(A));
+    const tip = item.tooltip as { value: string };
+    expect(tip.value).toContain(
+      'detached: tab closed, process kept for instant re-attach',
+    );
+    expect(tip.value).toContain('closing in 10m');
+    expect(tip.value).toContain('closes at');
+  });
+
+  // The other half of what came off the row: a closed session's conclusion is
+  // still readable without resuming, it is just readable on hover.
+  it('still carries a closed session’s last exchange', () => {
+    const h = harness(
+      forestOf([
+        node(A, {
+          archived: true,
+          status: 'exited',
+          lastExchange: 'concluded:\n use BM25',
+        }),
+      ]),
+    );
+    const p = new LineageTreeProvider(h.deps);
+    const item = p.resolveTreeItem(p.getTreeItem(ref(A)), ref(A));
+    const tip = item.tooltip as { value: string };
+    expect(tip.value).toContain('last exchange: concluded: use BM25');
+  });
+
+  // Same rule as the inline hover, and the pair of tests exists so the two
+  // cannot drift: a recorded summary must not swallow the last exchange, since
+  // neither is on the row any more and the hover is the only surface left.
+  it('carries the summary AND the last exchange when both exist', () => {
+    const h = harness(
+      forestOf([
+        node(A, {
+          archived: true,
+          status: 'exited',
+          summary: 'shipped it',
+          lastExchange: 'the long answer',
+        }),
+      ]),
+    );
+    const p = new LineageTreeProvider(h.deps);
+    const item = p.resolveTreeItem(p.getTreeItem(ref(A)), ref(A));
+    const tip = item.tooltip as { value: string };
+    expect(tip.value).toContain('summary: shipped it');
+    expect(tip.value).toContain('last exchange: the long answer');
+    expect(tip.value.indexOf('summary:')).toBeLessThan(
+      tip.value.indexOf('last exchange:'),
+    );
   });
 
   it('spells out last active alongside started, when both are known', () => {
@@ -697,24 +968,63 @@ describe('LineageTreeProvider projects', () => {
     expect(p.getParent(roots[0])).toBeUndefined();
   });
 
-  it('removes a hidden folder from the tree entirely', () => {
+  it('a hidden folder drops its DEAD sessions; a RUNNING one moves to the appendix', () => {
+    // FLIPPED with the appendix rescue: the fixture's sessions are live
+    // (status 'idle' is a running process), and no view preference may hide a
+    // process that is still spending this machine's memory — so hiding
+    // /elsewhere re-files C under "Still running" instead of dropping it.
     const h = harness(forest());
     h.setHiddenFolders(['/elsewhere']);
     const p = new LineageTreeProvider(h.deps);
+    expect((p.getChildren() as GroupNode[]).map((g) => g.label)).toEqual([
+      'src',
+      'web',
+      'Still running',
+    ]);
 
-    const labels = (p.getChildren() as GroupNode[]).map((g) => g.label);
-    expect(labels).toEqual(['src', 'web']); // C's /elsewhere row is gone
+    // The half the verb actually promises: once nothing runs there, a hidden
+    // folder is hidden ENTIRELY — the rescue lives exactly as long as the
+    // process.
+    const dead = harness(
+      forestOf([
+        node(A, { cwd: '/code/api/src' }),
+        node(C, { cwd: '/elsewhere', status: 'exited' }),
+      ]),
+    );
+    dead.setHiddenFolders(['/elsewhere']);
+    const pd = new LineageTreeProvider(dead.deps);
+    // One root (A's, rendered however a lone root renders) and no appendix.
+    const roots = pd.getChildren();
+    expect(roots).toHaveLength(1);
+    expect(
+      roots.some((r) => (r as GroupNode).label === 'Still running'),
+    ).toBe(false);
   });
 
-  it('honours onlyProjectSessions once a project exists', () => {
+  it('honours onlyProjectSessions for DEAD sessions; RUNNING ones keep an appendix row', () => {
+    // FLIPPED with the appendix rescue, same reasoning as the hidden-folder
+    // test above: the filter still applies, but its running victims file into
+    // the collapsed group rather than out of the tree.
     const h = harness(forest());
     h.setProjects([project('p1', 'API', '/code/api')]);
     h.setOnlyProjectSessions(true);
     const p = new LineageTreeProvider(h.deps);
 
     const roots = p.getChildren();
-    expect(roots).toHaveLength(1);
+    expect(roots).toHaveLength(2); // the project + the appendix
     expect((roots[0] as ProjectGroupNode).rootIds).toEqual([A]);
+    expect((roots[1] as GroupNode).label).toBe('Still running');
+
+    const dead = harness(
+      forestOf([
+        node(A, { cwd: '/code/api/src' }),
+        node(C, { cwd: '/elsewhere', status: 'exited' }),
+      ]),
+    );
+    dead.setProjects([project('p1', 'API', '/code/api')]);
+    dead.setOnlyProjectSessions(true);
+    const pd = new LineageTreeProvider(dead.deps);
+    expect(pd.getChildren()).toHaveLength(1);
   });
 
   it('recomputes when a project changes even though the forest did not', () => {
@@ -1032,6 +1342,32 @@ describe('SessionDecorationProvider.provideFileDecoration', () => {
     expect((d?.color as unknown as { id: string }).id).toBe(RUNNING_COLOR_ID);
   });
 
+  it('rings a compacting session in purple rather than running-amber', () => {
+    // A compaction reports `busy`, so without the tone this row wore the amber
+    // dot for work nobody asked for — then the red one when it finished.
+    const p = build([node(A, { status: 'busy', compaction: 'compacting' })]);
+    const d = p.provideFileDecoration(sessionUri(A) as never);
+    expect(d?.badge).toBe(CLOSED_DOT);
+    expect((d?.color as unknown as { id: string }).id).toBe(COMPACTING_COLOR_ID);
+    expect(d?.tooltip).toBe('compacting');
+  });
+
+  it('fills the purple dot once the compaction has settled', () => {
+    // Same colour, filled — and it outranks the 'waiting' underneath it,
+    // because a compaction ends with the session quiet and the purple would
+    // otherwise never draw.
+    const p = build([
+      node(A, {
+        status: 'waiting',
+        attention: 'waiting',
+        compaction: 'compacted',
+      }),
+    ]);
+    const d = p.provideFileDecoration(sessionUri(A) as never);
+    expect(d?.badge).toBe(STATUS_DOT);
+    expect((d?.color as unknown as { id: string }).id).toBe(COMPACTING_COLOR_ID);
+  });
+
   // Greys the ghost, draws no mark: an empty ring here would say what the grey
   // label already says, on every dead row in the tree.
   it('greys a ghost without marking it', () => {
@@ -1307,6 +1643,130 @@ describe('LineageTreeProvider: directory subprojects', () => {
     const provider = new LineageTreeProvider(h.deps);
     const app = provider.getChildren()[0] as ProjectGroupNode;
     expect(provider.getChildren(app).map((k) => k.type)).toEqual(['session']);
+  });
+});
+
+// A2 on the native surface. This renderer has no second line to withhold — the
+// branch reaches a row as the FIRST token of its description — so the
+// compaction here is dropping that token, and the transparency rule
+// (sessionBranchNamesFor's `spoken`) is the same one the inline renderer
+// applies. Both are pinned, in both files, because a disagreement between them
+// would be silent.
+describe('LineageTreeProvider: the branch name on a session row', () => {
+  const APP = project('app', 'app', '/code/app');
+  const WORKTREES = [
+    { dir: '/code/app', branch: 'main', head: 'aaa', detached: false },
+    { dir: '/code/app-feat', branch: 'feat/x', head: 'bbb', detached: false },
+  ];
+
+  const build = (
+    forest: ReturnType<typeof forestOf>,
+    over: Partial<TreeDeps> = {},
+  ): LineageTreeProvider => {
+    const h = harness(forest);
+    h.setProjects([APP]);
+    const provider = new LineageTreeProvider({
+      ...h.deps,
+      worktreesOf: () => WORKTREES,
+      branchRows: () => true,
+      branchDisplay: () => 'inline',
+      ...over,
+    });
+    // Warms the grouping — sessionBranchNamesFor reads the group cache, which
+    // only the children walk fills.
+    provider.getChildren();
+    return provider;
+  };
+  const desc = (p: LineageTreeProvider, id: string): string =>
+    String(p.getTreeItem(ref(id)).description ?? '');
+  const hover = (p: LineageTreeProvider, id: string): string =>
+    (p.resolveTreeItem(p.getTreeItem(ref(id)), ref(id)).tooltip as {
+      value: string;
+    }).value;
+
+  it('names the branch on a live row and withholds it from a closed one', () => {
+    const p = build(
+      forestOf([
+        node(A, { cwd: '/code/app', archived: true, status: 'exited' }),
+        node(B, { cwd: '/code/app-feat', status: 'idle' }),
+      ]),
+    );
+    expect(desc(p, A)).not.toContain('main');
+    expect(desc(p, B).startsWith('feat/x')).toBe(true);
+  });
+
+  it('is transparent: a live child of a closed row names the branch instead', () => {
+    const p = build(
+      forestOf([
+        node(A, {
+          cwd: '/code/app',
+          archived: true,
+          status: 'exited',
+          children: [C],
+          visibleChildren: [C],
+        }),
+        node(C, { parentId: A, cwd: '/code/app', status: 'idle' }),
+      ]),
+    );
+    expect(desc(p, A)).not.toContain('main');
+    expect(desc(p, C).startsWith('main')).toBe(true);
+  });
+
+  // THE HOVER IS WHERE THE FACT SURVIVES THE COMPACTION. The description can
+  // only afford the name on some rows — never on a closed one — so with no
+  // branch line in this renderer's hover, closing a session took the branch
+  // name out of the native tree altogether. The inline surface has always
+  // carried `branch: …` on every row a scope claims (pinned beside this in
+  // test/viewmodel.test.ts), and one of the two surfaces losing a fact the
+  // other keeps is the silent disagreement both of these files exist to catch.
+  it('names the branch in the hover on a closed row as well as a live one', () => {
+    const p = build(
+      forestOf([
+        node(A, { cwd: '/code/app', archived: true, status: 'exited' }),
+        node(B, { cwd: '/code/app-feat', status: 'idle' }),
+      ]),
+    );
+    // The row itself is compacted — this is the fact having nowhere else to be.
+    expect(desc(p, A)).not.toContain('main');
+    expect(hover(p, A)).toContain('branch: main');
+    expect(hover(p, B)).toContain('branch: feat/x');
+  });
+
+  // A single-checkout project draws no branch chips at all (BRANCH_CHIPS_MIN),
+  // and no row of it says a branch — but the inline hover still does, so this
+  // one does too. The gates are about ROW WIDTH; a hover has none.
+  it('names it in the hover even below the chip threshold', () => {
+    const h = harness(forestOf([node(A, { cwd: '/code/app' })]));
+    h.setProjects([APP]);
+    const p = new LineageTreeProvider({
+      ...h.deps,
+      worktreesOf: () => [WORKTREES[0]],
+      branchRows: () => true,
+      branchDisplay: () => 'inline',
+    });
+    p.getChildren();
+    expect(desc(p, A)).not.toContain('main');
+    expect(hover(p, A)).toContain('branch: main');
+  });
+
+  // Under `lineage.groupSessionsByBranch` the session hangs off a BRANCH ROW,
+  // which says the name one line up and in bigger type — so the description
+  // repeating it is the same redundancy the transparency rule already removes
+  // from a fork that stayed in its parent's checkout. What must NOT happen is
+  // the blunt fix: a fork in ANOTHER worktree nests under its parent, so the
+  // row above it names the wrong checkout and its name is load-bearing.
+  it('lets the branch ROW speak for its own sessions, but not for a fork in another worktree', () => {
+    const p = build(
+      forestOf([
+        node(A, { cwd: '/code/app', children: [C], visibleChildren: [C] }),
+        node(C, { parentId: A, cwd: '/code/app-feat' }),
+      ]),
+      { groupSessionsByBranch: () => true },
+    );
+    expect(desc(p, A)).not.toContain('main');
+    expect(desc(p, C).startsWith('feat/x')).toBe(true);
+    // And the hover keeps both, grouping or not.
+    expect(hover(p, A)).toContain('branch: main');
   });
 });
 

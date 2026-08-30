@@ -374,12 +374,17 @@ body {
   bottom: calc(-1 * (var(--branch-line-h) - var(--branch-line-lift)));
 }
 
-/* A muted or closed session takes its branch line down with it, for the reason
- * the tint rules below give at length: "this is over" outranks "this is on
- * feat/x", and a line left at full strength under a grey name would read as the
- * live half of a dead row. */
-.row.muted .row-branch,
-.row.closed .row-branch {
+/* A muted session takes its branch line down with it, for the reason the tint
+ * rules below give at length: "this is put away" outranks "this is on feat/x",
+ * and a line left at full strength under a grey name would read as the live
+ * half of a dead row.
+ *
+ * `.row.closed` used to be in this list and is not any more: a closed row no
+ * longer HAS a branch line at all — viewmodel.pushSession withholds it, so the
+ * row stays one row tall (see the `compact` note there). The selector would be
+ * a rule describing a state the model cannot produce. A muted row still can be
+ * live, so the muted half stays. */
+.row.muted .row-branch {
   color: var(--vscode-disabledForeground);
   opacity: 0.75;
 }
@@ -969,6 +974,34 @@ body {
  * every other surface on the screen uses for "resolved, nothing to do". */
 .badge.done {
   background: var(--lineage-done, var(--vscode-charts-red));
+}
+
+/* COMPACTION — one purple, two shapes, and the shape is the whole message.
+ *
+ * A compaction is neither work you asked for nor a question for you, which is
+ * why it gets a hue of its own rather than borrowing the amber that means
+ * "running" or the red that means "wants you" — the two costumes it used to
+ * wear in turn. Purple is what was left, and the branch chips already spend it
+ * on "merged", which is the same idea: something that has settled.
+ *
+ * Hollow while it runs, filled once it has. That is the grammar this tree
+ * already uses on its own spine six hundred lines up — a ring is a node with
+ * more to come, a filled dot is where the line stops — so a reader who has
+ * looked at the left-hand column has already learnt to read this one.
+ *
+ * The two are the same 8px circle at the same place in the row: `box-sizing:
+ * border-box` (top of this file) is what keeps the ring's outer diameter equal
+ * to the filled dot's, so a compaction finishing fills the mark in rather than
+ * growing it, and the column never shifts. 1.5px rather than 1px because at
+ * 8px across a hairline ring reads as a smudge on a low-DPI display, where the
+ * spine's rings can afford 1px at 9px across with nothing else nearby. */
+.badge.compacting {
+  background: transparent;
+  border: 1.5px solid var(--lineage-compacting, var(--vscode-charts-purple));
+}
+
+.badge.compacted {
+  background: var(--lineage-compacting, var(--vscode-charts-purple));
 }
 
 /* ------------------------------------------------------------- branches */
