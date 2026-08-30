@@ -4,9 +4,28 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.8] — 2026-08-30
 
 ### Added
+
+- **Continue on Another CLI…** — a conversation carries on in a different
+  provider's session. NOT a resume, and the UI never calls it one: a Codex home
+  holds no Claude transcript, so there is nothing there to resume. What it does
+  is brief a new session on the other CLI to read the transcript — a readable
+  file on this disk — and carry on from it, with a real lineage edge back to
+  where it came from. `switchRefusal` was right to refuse the move and wrong
+  only in what the refusal had been rounded up to: "cannot resume" is not
+  "cannot continue". Move to Account… still owns every same-CLI move; the two
+  verbs never overlap, and each is drawn only on the roster it can act on.
+
+- **Queue Session for Dispatch…** and **Dispatch Queue…** — an intent to start
+  a session, held until an account can actually take it. When every account's
+  five-hour window is spent, the answer used to be a refusal with a good reason
+  and nowhere for "run this when something frees up" to live; you set an alarm,
+  or you forgot. The `resetsAt` already sitting in every usage snapshot names
+  the exact moment that changes, and now something reads it. A settled entry is
+  the queue's tombstone — no merge, reload or sweep can turn one back into a
+  pending launch, because a resurrected entry is a double launch.
 
 - **Remove Worktree decides the branch's fate, out loud.** A ref the `+`
   minted whose every commit is on the main branch earns a second button —
@@ -128,6 +147,29 @@ All notable changes to Flock are recorded here. The format follows
   the count, its predicate and its tests are all still there, one setting away.
 
 ### Fixed
+
+- **The handoff verb would never have appeared.** Its menu gate read
+  `lineage.manyAccounts`, a context key 0.1.7 renamed to
+  `lineage.canSwitchAccount` when it fixed the same class of bug on Move to
+  Account… — and renamed precisely because the old name had stopped matching
+  what it counted. Pointing handoff at the surviving key would have been the
+  worse repair of the two: that key asks whether two accounts run the SAME cli,
+  and a handoff is the case where they do not, so the entry would have been
+  hidden on exactly the roster it exists for — one Claude login plus one Codex
+  login, which is what Flock seeds by default. It now has a gate of its own,
+  `lineage.canHandOff`, built from `handoffRefusal`'s own tests so the menu and
+  the picker behind it cannot drift the way the switch entry's pair did. The
+  entry is drawn on both the native tree and the inline sidebar, which is the
+  view most installs actually use.
+
+- **A respawned pane could read as "exited to a shell" forever.** The stamp
+  `/exit` leaves behind is a PANE option, so it outlives the process it
+  described — and Move to Account… restarts a conversation's process in place.
+  A move onto a wrap that had ever exited left the stamp standing, and the
+  resume verb, which believes that answer, would then kill and relaunch a
+  session that was running perfectly well. Clearing it is now part of the
+  respawn's own command list rather than the caller's job, so it is covered by
+  the test that pins the order of those commands.
 
 - **Resume no longer risks handing you a shell and calling it a conversation.**
   Groundwork for the above, and a correctness fix in its own right: the detach
