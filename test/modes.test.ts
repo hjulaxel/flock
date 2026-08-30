@@ -1,19 +1,30 @@
-// test/modes.test.ts — the folder/project mode rules.
+// test/modes.test.ts — the three window models' rules.
 //
 // src/modes.ts imports ./projects and ./types only, so none of this needs the
-// vscode mock. What is under test is the DECISIONS: how the setting parses,
-// which gate hides the switching machinery, when a session counts as another
-// window's, and which window a foreign directory routes to.
+// vscode mock. What is under test is the DECISIONS: how the setting parses, how
+// the legacy `workspaces.enabled` pair folds into the third value, which gate
+// hides which machinery, when a session counts as another window's, and which
+// window a foreign directory routes to.
+//
+// The `resolveMode` block below is the MIGRATION TABLE, spelled out case by
+// case and deliberately mirroring the table in docs/settings.md: the promise of
+// this change is that nobody is moved, and a promise like that is only worth
+// the enumeration that proves it.
 
 import { describe, expect, it } from 'vitest';
 
 import {
   DEFAULT_MODE,
+  explorerFollowOn,
+  folderScoped,
+  followsTheSession,
   launchableProjects,
   normalizeMode,
   openTargetFor,
   outsideScope,
   projectSwitchingOn,
+  resolveMode,
+  windowCovers,
   windowForDir,
 } from '../src/modes';
 import type { ProjectMatch } from '../src/projects';
@@ -46,29 +57,105 @@ function match(dir: string): ProjectMatch {
 // ---------------------------------------------------------------- the mode
 
 describe('normalizeMode', () => {
-  it('reads only the literal "project" as project mode', () => {
-    expect(normalizeMode('project')).toBe('project');
+  it('reads each of the three level names unchanged', () => {
     expect(normalizeMode('folder')).toBe('folder');
+    expect(normalizeMode('root')).toBe('root');
+    expect(normalizeMode('project')).toBe('project');
   });
 
   it('folds garbage, typos and absence into the default', () => {
-    // The safe direction: a wrong `folder` hides a verb, a wrong `project`
-    // lets a switch rearrange a window the user thinks of as a plain folder.
+    // The safe direction, and now with two ways to be unsafe: a wrong `folder`
+    // hides a verb, a wrong `project` lets a switch rearrange a window the user
+    // thinks of as a plain folder, and a wrong `root` drops the fence off a
+    // window somebody opened on a folder on purpose.
     expect(normalizeMode(undefined)).toBe(DEFAULT_MODE);
     expect(normalizeMode('Project')).toBe(DEFAULT_MODE);
+    expect(normalizeMode('Flock')).toBe(DEFAULT_MODE);
     expect(normalizeMode('workflow')).toBe(DEFAULT_MODE);
     expect(normalizeMode(42)).toBe(DEFAULT_MODE);
     expect(DEFAULT_MODE).toBe('folder');
   });
 });
 
-describe('projectSwitchingOn: the one gate', () => {
-  it('requires BOTH the mode and the old enabled key', () => {
-    expect(projectSwitchingOn('project', true)).toBe(true);
-    expect(projectSwitchingOn('project', false)).toBe(false);
-    // Folder mode turns switching off whatever the older key says.
-    expect(projectSwitchingOn('folder', true)).toBe(false);
-    expect(projectSwitchingOn('folder', false)).toBe(false);
+describe('resolveMode: the migration table', () => {
+  it('leaves an unset or folder-mode window exactly where it was', () => {
+    // `workspaces.enabled` never meant anything to a window that was not in
+    // project mode, and it still does not.
+    expect(resolveMode(undefined, true)).toBe('folder');
+    expect(resolveMode(undefined, false)).toBe('folder');
+    expect(resolveMode('folder', true)).toBe('folder');
+    expect(resolveMode('folder', false)).toBe('folder');
+  });
+
+  it('leaves the auto-switch user on auto-switch', () => {
+    // Axel's own machine: `lineage.mode: "project"` and no `workspaces.enabled`
+    // key at all, so the boolean arrives as its `true` default. Zero delta.
+    expect(resolveMode('project', true)).toBe('project');
+  });
+
+  it('folds the old (project, workspaces off) pair to the Flock-only model', () => {
+    // The whole point. That pair ALREADY behaved this way — no auto-switch, no
+    // status-bar button, no fence, switch verb still available — so giving it a
+    // name moves nobody. Honouring the mode alone instead would switch
+    // auto-switching back on for the one population that turned it off by hand.
+    expect(resolveMode('project', false)).toBe('root');
+  });
+
+  it('never demotes on anything but a literal false', () => {
+    // An older wiring or a unit double handing in `undefined` means "no
+    // opinion", and an absent opinion must not cost somebody their level.
+    expect(
+      resolveMode('project', undefined as unknown as boolean),
+    ).toBe('project');
+  });
+
+  it('leaves an explicit flock window alone whatever the old key says', () => {
+    expect(resolveMode('root', true)).toBe('root');
+    expect(resolveMode('root', false)).toBe('root');
+  });
+
+  it('folds garbage to the default before the pair is even consulted', () => {
+    expect(resolveMode('Project', false)).toBe('folder');
+    expect(resolveMode(42, false)).toBe('folder');
+  });
+});
+
+describe('the four gates', () => {
+  it('projectSwitchingOn is true only where the window switches BY ITSELF', () => {
+    // Auto-switch alone. The Flock-only window keeps the switch verb — it just
+    // never fires it for you and never draws the status-bar button.
+    expect(projectSwitchingOn('project')).toBe(true);
+    expect(projectSwitchingOn('root')).toBe(false);
+    expect(projectSwitchingOn('folder')).toBe(false);
+  });
+
+  it('folderScoped is true only where a folder fences the window', () => {
+    // The scope fence and the launch fence are one fact, and it is `folder`:
+    // the Flock-only model shows everything on purpose, and auto-switch cannot
+    // fence because its roots change on every focus change.
+    expect(folderScoped('folder')).toBe(true);
+    expect(folderScoped('root')).toBe(false);
+    expect(folderScoped('project')).toBe(false);
+  });
+
+  it('followsTheSession is true only in auto-switch, and adds NO enum value', () => {
+    // The first draft of the follow work proposed a fourth `lineage.mode`
+    // value for this. It was rejected: two values both meaning "the window
+    // follows something" is the truth table the three-model consolidation
+    // exists to remove. Following the session is what auto-switch MEANS.
+    expect(followsTheSession('project')).toBe(true);
+    expect(followsTheSession('root')).toBe(false);
+    expect(followsTheSession('folder')).toBe(false);
+  });
+
+  it('explorerFollowOn is the model AND the user\'s own setting', () => {
+    // Turning the file-tree follow off leaves you in the auto-switch model —
+    // tabs still switch, the line still says where you are, Source Control
+    // still follows the checkout. It is not a way to say "different model".
+    expect(explorerFollowOn('project', true)).toBe(true);
+    expect(explorerFollowOn('project', false)).toBe(false);
+    expect(explorerFollowOn('root', true)).toBe(false);
+    expect(explorerFollowOn('folder', true)).toBe(false);
   });
 });
 
@@ -110,6 +197,52 @@ describe('outsideScope', () => {
     expect(outsideScope([], '/code/other')).toBe(false);
     expect(outsideScope(['/code/app'], undefined)).toBe(false);
     expect(outsideScope(['/code/app'], '')).toBe(false);
+  });
+});
+
+// --------------------------------------------------------- the self-check
+
+describe('windowCovers', () => {
+  // The mirror image of outsideScope, and the pair have to be read together:
+  // one withholds a verb only on a POSITIVE elsewhere, the other suppresses a
+  // new window only on a POSITIVE here. Getting the asymmetry backwards is
+  // silent both ways — a verb that refuses everything, or one that opens a
+  // second window on the folder you are already in.
+  it('is true when any real folder of this window contains the target', () => {
+    expect(windowCovers(['/code/app'], '/code/app')).toBe(true);
+    expect(windowCovers(['/code/app'], '/code/app/src')).toBe(true);
+    // Multi-root: the second root counts exactly as much as the first, which is
+    // what makes a converted explorer-follow window (anchor at folder[0]) or an
+    // ordinary multi-root workspace answer correctly.
+    expect(windowCovers(['/code/app', '/code/lib'], '/code/lib/pkg')).toBe(
+      true,
+    );
+  });
+
+  it('is false for a sibling directory, prefixes included', () => {
+    expect(windowCovers(['/code/app'], '/code/other')).toBe(false);
+    // `/code/app-feat-x` is a worktree of the same repository and not a child
+    // of the checkout — the case the verb exists for, so the string-prefix bug
+    // here would be the one that hurts most.
+    expect(windowCovers(['/code/app'], '/code/app-feat-x')).toBe(false);
+  });
+
+  it('claims nothing on the strength of knowing nothing', () => {
+    // THE ASYMMETRY. `!outsideScope(undefined, dir)` is TRUE — no fence means
+    // nothing is proven foreign — and a self-check written that way would make
+    // the verb silently do nothing in every model but `folder`, which is
+    // precisely the two models it was written for. An unknown target and a
+    // window with no folders are both "no claim".
+    expect(windowCovers(undefined, '/code/app')).toBe(false);
+    expect(windowCovers([], '/code/app')).toBe(false);
+    expect(outsideScope(undefined, '/code/app')).toBe(false);
+    expect(windowCovers([''], '/code/app')).toBe(false);
+    expect(windowCovers(['/code/app'], undefined)).toBe(false);
+    expect(windowCovers(['/code/app'], '')).toBe(false);
+  });
+
+  it('ignores junk roots without losing the real ones', () => {
+    expect(windowCovers(['', '/code/app'], '/code/app/src')).toBe(true);
   });
 });
 

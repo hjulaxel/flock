@@ -313,24 +313,30 @@
       },
       {
         "command": "lineage.deleteSession",
-        "title": "Delete Session",
+        "title": "Archive Session",
         "category": "Flock",
-        "icon": "$(trash)"
+        "icon": "$(archive)"
       },
       {
         "command": "lineage.deleteSessions",
-        "title": "Delete Selected Sessions",
+        "title": "Archive Selected Sessions",
         "category": "Flock",
-        "icon": "$(trash)"
+        "icon": "$(archive)"
       },
       {
         "command": "lineage.restoreSession",
-        "title": "Restore Deleted Session...",
+        "title": "Restore Archived Session...",
         "category": "Flock"
       },
       {
+        "command": "lineage.archivedSessions",
+        "title": "Archived Sessions...",
+        "category": "Flock",
+        "icon": "$(archive)"
+      },
+      {
         "command": "lineage.deleteStale",
-        "title": "Delete Stale Sessions...",
+        "title": "Archive Stale Sessions...",
         "category": "Flock",
         "icon": "$(clear-all)"
       },
@@ -436,6 +442,12 @@
         "icon": "$(checklist)"
       },
       {
+        "command": "lineage.chooseWindowModel",
+        "title": "Choose Window Model...",
+        "category": "Flock",
+        "icon": "$(window)"
+      },
+      {
         "command": "lineage.settingsMenu",
         "title": "Settings and Housekeeping...",
         "category": "Flock",
@@ -459,7 +471,7 @@
       },
       {
         "command": "lineage.followInExplorer",
-        "title": "Follow the Active Project in the Explorer",
+        "title": "Follow the Session I Am In",
         "category": "Flock",
         "icon": "$(gear)"
       },
@@ -471,7 +483,7 @@
       },
       {
         "command": "lineage.stopFollowingInExplorer",
-        "title": "Stop Following the Active Project in the Explorer",
+        "title": "Stop Following — Reopen as a Plain Window",
         "category": "Flock"
       },
       {
@@ -586,6 +598,11 @@
       {
         "command": "lineage.openWorktreeWindow",
         "title": "Open Worktree in New Window",
+        "category": "Flock"
+      },
+      {
+        "command": "lineage.openSessionWorkspace",
+        "title": "Open Workspace for This Session",
         "category": "Flock"
       },
       {
@@ -726,6 +743,16 @@
           "group": "0_open@2"
         },
         {
+          "command": "lineage.openSessionWorkspace",
+          "when": "view == lineageSessions && viewItem =~ /;live;/",
+          "group": "0_open@3"
+        },
+        {
+          "command": "lineage.openSessionWorkspace",
+          "when": "view == lineageSessions && viewItem =~ /;archived;/",
+          "group": "0_open@3"
+        },
+        {
           "command": "lineage.newSessionInBranch",
           "when": "config.lineage.git.branches && view == lineageSessions && viewItem =~ /;branch;/",
           "group": "inline@1"
@@ -817,18 +844,18 @@
         },
         {
           "command": "lineage.switchSessionAccount",
-          "when": "view == lineageSessions && viewItem =~ /;session;/ && lineage.manyAccounts",
-          "group": "1_actions@3"
+          "when": "view == lineageSessions && viewItem =~ /;session;/ && viewItem =~ /;claude;/ && lineage.canSwitchAccount",
+          "group": "1_actions@4"
         },
         {
           "command": "lineage.closeSession",
           "when": "view == lineageSessions && viewItem =~ /;hosted;/",
-          "group": "2_close@1"
+          "group": "2_close@2"
         },
         {
           "command": "lineage.closeWithSummary",
-          "when": "view == lineageSessions && viewItem =~ /;hosted;/",
-          "group": "2_close@2"
+          "when": "view == lineageSessions && viewItem =~ /;here;/",
+          "group": "2_close@3"
         },
         {
           "command": "lineage.closeSessionNow",
@@ -853,12 +880,12 @@
         {
           "command": "lineage.deleteSession",
           "when": "view == lineageSessions && viewItem =~ /;session;/ && !lineage.multiSelect",
-          "group": "2_close@3"
+          "group": "2_close@4"
         },
         {
           "command": "lineage.deleteSessions",
           "when": "view == lineageSessions && viewItem =~ /;session;/ && lineage.multiSelect",
-          "group": "2_close@3"
+          "group": "2_close@4"
         },
         {
           "command": "lineage.muteSessionNotifications",
@@ -908,7 +935,7 @@
         {
           "command": "lineage.switchWorkspace",
           "group": "0_open@0",
-          "when": "view == lineageSessions && viewItem =~ /;project;/ && lineage.mode == 'project'"
+          "when": "view == lineageSessions && viewItem =~ /;project;/ && lineage.mode != 'folder'"
         },
         {
           "command": "lineage.newSessionInProject",
@@ -928,6 +955,11 @@
         {
           "command": "lineage.addSessionToProject",
           "group": "0_open@4",
+          "when": "view == lineageSessions && viewItem =~ /;project;/"
+        },
+        {
+          "command": "lineage.archivedSessions",
+          "group": "0_open@6",
           "when": "view == lineageSessions && viewItem =~ /;project;/"
         },
         {
@@ -1008,7 +1040,7 @@
         {
           "command": "lineage.newWorktree",
           "when": "config.lineage.git.branches && view == lineageSessions && viewItem =~ /;project;/",
-          "group": "0_open@4"
+          "group": "0_open@5"
         },
         {
           "command": "lineage.unfoldBranches",
@@ -1028,13 +1060,13 @@
         {
           "command": "lineage.newWorktree",
           "when": "config.lineage.git.branches && view == lineageSessions && viewItem =~ /;subproject;/",
-          "group": "0_open@4"
+          "group": "0_open@5"
         }
       ],
       "commandPalette": [
         {
           "command": "lineage.switchWorkspace",
-          "when": "lineage.mode == 'project'"
+          "when": "lineage.mode != 'folder'"
         },
         {
           "command": "lineage.focusSession",
@@ -1066,6 +1098,10 @@
         },
         {
           "command": "lineage.copySessionId",
+          "when": "false"
+        },
+        {
+          "command": "lineage.openSessionWorkspace",
           "when": "false"
         },
         {
@@ -1215,6 +1251,16 @@
           "group": "0_open@2"
         },
         {
+          "command": "lineage.openSessionWorkspace",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;live;/",
+          "group": "0_open@3"
+        },
+        {
+          "command": "lineage.openSessionWorkspace",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;archived;/",
+          "group": "0_open@3"
+        },
+        {
           "command": "lineage.projectFromFolder",
           "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;group;/",
           "group": "0_open@1"
@@ -1241,18 +1287,18 @@
         },
         {
           "command": "lineage.switchSessionAccount",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;session;/ && lineage.manyAccounts",
-          "group": "1_actions@3"
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;session;/ && viewItem =~ /;claude;/ && lineage.canSwitchAccount",
+          "group": "1_actions@4"
         },
         {
           "command": "lineage.closeSession",
           "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;hosted;/",
-          "group": "2_close@1"
+          "group": "2_close@2"
         },
         {
           "command": "lineage.closeWithSummary",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;hosted;/",
-          "group": "2_close@2"
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;here;/",
+          "group": "2_close@3"
         },
         {
           "command": "lineage.closeSessionNow",
@@ -1272,12 +1318,12 @@
         {
           "command": "lineage.deleteSession",
           "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;session;/ && !lineage.multiSelect",
-          "group": "2_close@3"
+          "group": "2_close@4"
         },
         {
           "command": "lineage.deleteSessions",
           "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;session;/ && lineage.multiSelect",
-          "group": "2_close@3"
+          "group": "2_close@4"
         },
         {
           "command": "lineage.muteSessionNotifications",
@@ -1352,7 +1398,7 @@
         {
           "command": "lineage.switchWorkspace",
           "group": "0_open@0",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/ && lineage.mode == 'project'"
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/ && lineage.mode != 'folder'"
         },
         {
           "command": "lineage.newSessionInProject",
@@ -1372,6 +1418,11 @@
         {
           "command": "lineage.addSessionToProject",
           "group": "0_open@4",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/"
+        },
+        {
+          "command": "lineage.archivedSessions",
+          "group": "0_open@6",
           "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/"
         },
         {
@@ -1437,7 +1488,7 @@
         {
           "command": "lineage.newWorktree",
           "when": "config.lineage.git.branches && webviewId == 'lineageSessionsInline' && viewItem =~ /;project;/",
-          "group": "0_open@4"
+          "group": "0_open@5"
         },
         {
           "command": "lineage.unfoldBranches",
@@ -1457,7 +1508,7 @@
         {
           "command": "lineage.newWorktree",
           "when": "config.lineage.git.branches && webviewId == 'lineageSessionsInline' && viewItem =~ /;subproject;/",
-          "group": "0_open@4"
+          "group": "0_open@5"
         }
       ]
     },
@@ -1602,7 +1653,7 @@
           "type": "number",
           "default": 10,
           "minimum": 0,
-          "markdownDescription": "When a workspace switch (or solo mode) closes a tmux-wrapped session's tab, the process keeps running detached for this many minutes so switching back reattaches instantly — shown in the tree as a countdown row. At the deadline an idle session is closed to an archived row; a busy one closes after its turn ends. At most 8 sessions run detached at once; overflow closes the oldest idle one first. `0` disables the grace — the tab still closes instantly, and the process is ended by the next sweep within a minute."
+          "markdownDescription": "When a workspace switch (or solo mode) closes a tmux-wrapped session's tab, the process keeps running detached for this many minutes so switching back reattaches instantly. Its row stays in the tree and its hover says how long is left. At the deadline an idle session is closed to an archived row; a busy one closes after its turn ends. At most 8 sessions run detached at once; overflow closes the oldest idle one first. `0` disables the grace — the tab still closes instantly, and the process is ended by the next sweep within a minute."
         },
         "lineage.session.reloadGraceSeconds": {
           "type": "number",
@@ -1610,6 +1661,28 @@
           "minimum": 0,
           "maximum": 60,
           "markdownDescription": "How many seconds a session may keep running after the window that owned it closed. This is a measurement, not a reprieve: VS Code reports a window **reload** and a window **close** identically, so the only way to tell them apart is to wait — a reload comes back and reattaches, a close never does. At the deadline the session settles to an archived row you can resume, because a folder no window has open should have nothing running in it. Keep this low; raise it only if reloads on this machine are slow enough to lose sessions. `0` ends sessions the moment the window goes, which also means every reload loses them."
+        },
+        "lineage.fork.notifyParent": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "After a fork, type **one sentence into the parent conversation** saying that a branch was made, what it is called and \u2014 when you gave the fork an opening prompt \u2014 what it is for.\n\n**This is new, not something being switched on.** Flock has no session-to-session messaging and never has had: the in-session verbs channel runs one way, session \u2192 Flock, and the only text that has ever gone the other way is a fork's opening prompt, delivered once when the branch starts. This note rides the one channel that can reach a conversation already running \u2014 the same one the **Wrap Up Session** prompt uses \u2014 which **types into the terminal**. It costs the parent a real turn, and if you have half a message typed in that input box the note is appended to it and sent with it.\n\n**It only works while the parent's tab is open in this window.** A parent that is closed, hosted by another VS Code window, running outside Flock, or parked detached by a workspace switch cannot be typed into, and in all four cases **nothing is queued and nothing is retried** \u2014 the note simply does not happen, with one line in the **Flock** output channel. Those are the ordinary cases, not the exotic ones. The tree already shows you the fork either way.\n\nNot sent when **Claude itself** asked for the fork (\"fork this session\", the in-session verb): the verbs CLI already reports the new branches into that same turn, and a second copy typed into the terminal would both duplicate it and land keystrokes mid-turn. A branch renamed on its row in the inline sidebar is announced under its **generated** name \u2014 the note goes out while the rename editor is still open."
+        },
+        "lineage.close.summaryMode": {
+          "type": "string",
+          "default": "compact-and-tell-parent",
+          "enum": [
+            "compact-and-tell-parent",
+            "compact-only",
+            "ask-me",
+            "off"
+          ],
+          "enumDescriptions": [
+            "Send /compact, keep the summary the Claude CLI writes, type a short form of it into the parent conversation, then close. One to three minutes; Claude only; needs the session's tab open in this window.",
+            "The same, but tell nobody: the summary is recorded on the row and the parent is left alone.",
+            "The old behaviour: an input box asking you to type the summary yourself.",
+            "Close with no summary at all \u2014 exactly what Close Session does."
+          ],
+          "markdownDescription": "What **Close with Summary** does.\n\n**How the summary is produced, precisely.** Flock cannot ask a model for a summary: it has no API client, and it can only speak to a running conversation by typing into its terminal. So the two compacting modes **send `/compact`** \u2014 a command the Claude CLI interprets \u2014 and then **read back the summary the CLI wrote** into the transcript. The words are genuinely the model's; the driving is a keystroke. It is not a scrape of the last exchange, and it is not something Flock wrote.\n\n**What that costs.** A compaction takes roughly **one to three minutes**, during which a progress notification with a **Cancel** button is shown. It **squashes the branch's own context** \u2014 acceptable only because the branch is being closed in the same breath, so if you cancel or it times out, you are left with a compacted branch. It is **Claude only**: a Codex session is offered the plain close by name instead. It needs the session's **tab open in this window**; a closed row, a session another window hosts, a foreign process and a session parked by a workspace switch are all refused **before** anything is typed. And if no summary comes back, **nothing is closed** \u2014 the session is mid-turn and cutting it off would lose the compaction too.\n\n`compact-and-tell-parent` (the default) also types a short form of the summary into the **parent** conversation, over the same channel and with the same limits as `#lineage.fork.notifyParent#`: only while the parent's tab is open here, nothing queued otherwise.\n\n`ask-me` is the behaviour this replaced, kept by name so it can be chosen deliberately. It is also what every refusal above falls back to when you pick **Type a Summary\u2026**."
         },
         "lineage.launch.mode": {
           "type": "string",
@@ -1655,7 +1728,7 @@
         "lineage.onlyActiveSessions": {
           "type": "boolean",
           "default": false,
-          "description": "Show only sessions that are still running. Closed, exited and inferred-ancestor rows are filtered out of the tree — nothing is deleted, and a live session forked from a closed one keeps its place. This is the \"Show Only Active Sessions\" toggle in the view title."
+          "description": "Show only sessions that are still running. Closed, exited and inferred-ancestor rows are filtered out of the tree — nothing is archived or removed, and a live session forked from a closed one keeps its place. This is the \"Show Only Active Sessions\" toggle in the view title."
         },
         "lineage.showGhosts": {
           "type": "boolean",
@@ -1665,7 +1738,7 @@
         "lineage.showArchived": {
           "type": "boolean",
           "default": false,
-          "description": "Show ALL closed sessions found in ~/.claude/projects, even ones this tree never knew. Off by default: your own sessions already stay in the tree after their tab closes (as dimmed, resumable inactive rows, until you delete them) — this switch only adds foreign history on top."
+          "description": "Show ALL closed sessions found in ~/.claude/projects, even ones this tree never knew. Off by default: your own sessions already stay in the tree after their tab closes (as dimmed, resumable inactive rows, until you archive them) — this switch only adds foreign history on top. This is NOT the archive: sessions you archived are behind \"Archived Sessions...\" on the project's row."
         },
         "lineage.showPhantomRows": {
           "type": "boolean",
@@ -1676,7 +1749,7 @@
           "type": "number",
           "default": 48,
           "minimum": 1,
-          "description": "Age at which \"Delete Stale Sessions...\" pre-ticks a session. This never removes anything on its own — it only decides which checkboxes start ticked in that command."
+          "description": "Age at which \"Archive Stale Sessions...\" pre-ticks a session. This never removes anything on its own — it only decides which checkboxes start ticked in that command."
         },
         "lineage.busyStaleMinutes": {
           "type": "number",
@@ -1708,19 +1781,27 @@
           "type": "string",
           "enum": [
             "folder",
+            "root",
             "project"
           ],
+          "enumItemLabels": [
+            "One folder per project",
+            "Root (Flock only)",
+            "Auto-switch"
+          ],
           "enumDescriptions": [
-            "Native VS Code: a window is the folder you opened. The sidebar shows the sessions under that folder, grouped by the projects that claim them; other projects' work routes to their own windows. No in-window switching — the switch verbs and the workspace status-bar item are hidden, and file tabs are never touched.",
-            "One window spans many projects and switches between them transactionally: switching saves the layout you leave and restores the target's. The pre-0.2 behaviour, still additionally gated by lineage.workspaces.enabled."
+            "Native VS Code: a window is the folder you opened. The sidebar shows the sessions under that folder, grouped by the projects that claim them; other projects' work routes to their own windows. Nothing rearranges itself and file tabs are never touched. Needs no tmux and no window management; costs a window per project, and alt-tab is your switcher.",
+            "The window is Flock's: no folder is opened, nothing scopes the tree, and the sidebar holds everything on the machine — you open a session's own window when you want its files. In-window switching is still there when you ask for it, but nothing ever switches by itself and no workspace item appears in the status bar. Costs you that window, and a sidebar with nothing narrowing it.",
+            "One window follows you: work in another project's session and the window switches there, saving the layout you leave and restoring the target's. The most convenient of the three and the hardest to keep straight — it wants tmux, so the sessions you switch away from keep running, and one reload (Flock: Follow the Session I Am In) before the file tree follows you too \u2014 down to the session's own subproject directory, in the git worktree that session is checked out in, with Source Control showing that same checkout."
           ],
           "default": "folder",
-          "markdownDescription": "What a window is. `folder` (the default): the window is the folder you opened — the tree scopes itself to sessions under it, and working on another project means going to that project's own window. `project`: one window switches between project workspaces via the status-bar switcher. Navigation never changes a session's lifecycle in either mode: closed tabs get a grace countdown in the tree, then archive to a click-to-resume row."
+          "markdownDescription": "What a window **is** — three answers, from the window that holds one thing to the window that follows you. **One folder per project** (`folder`, the default): the window is the folder you opened, the tree scopes itself to sessions under it, and working on another project means going to that project's own window. **Root**, i.e. Flock only (`root`): the window is Flock's — nothing fenced, nothing scoped, nothing rearranging itself, and you open a window on a session when you want its files. **Auto-switch** (`project`): one window spans many projects and switches between them as your attention moves. Navigation never changes a session's lifecycle in any of the three: a closed tab keeps its row under a detach grace (the hover says how long is left), then archives to a click-to-resume row. Run **Flock: Choose Window Model…** to pick one with what it costs written beside it — the picker is also the only thing that clears the deprecated `lineage.workspaces.enabled` below."
         },
         "lineage.workspaces.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Show the workspace switcher in the status bar (project mode only — in folder mode, `lineage.mode` hides it whatever this says). A workspace scopes this window to one project: switching saves the current tab layout under the project you leave, hides what does not belong to the target, and restores the target's saved layout. Foreign session tabs close under a detach grace: with tmux installed (see `lineage.tmux`) the conversation keeps running detached for `lineage.session.detachGraceMinutes` — a countdown row in the tree, click to reattach — and archives to a click-to-resume row after that; without tmux the terminal closes and the conversation resumes from its transcript, in which case busy sessions are never closed. Unsaved editors and terminals Flock does not own are never touched. The terminal panel is never used."
+          "markdownDeprecationMessage": "Superseded by `#lineage.mode#`, and still honoured: while this is `false` and the mode is `project`, this window resolves to the **Root** (Flock only) model — which is what that pair has always actually meant. Set `#lineage.mode#` to the model you want, or run **Flock: Choose Window Model…**, which writes both; then this key can go.",
+          "description": "Show the workspace switcher in the status bar. A workspace scopes this window to one project: switching saves the current tab layout under the project you leave, hides what does not belong to the target, and restores the target's saved layout. Foreign session tabs close under a detach grace: with tmux installed (see `lineage.tmux`) the conversation keeps running detached for `lineage.session.detachGraceMinutes` — its row stays in the tree, its hover says how long is left, click to reattach — and archives to a click-to-resume row after that; without tmux the terminal closes and the conversation resumes from its transcript, in which case busy sessions are never closed. Unsaved editors and terminals Flock does not own are never touched. The terminal panel is never used."
         },
         "lineage.workspaces.resumeSessions": {
           "type": "boolean",
@@ -1735,7 +1816,7 @@
         "lineage.explorer.followProject": {
           "type": "boolean",
           "default": true,
-          "description": "The Explorer follows the active project: switching projects swaps the built-in file tree to that project's directories — the main one on top, any extra connected directories as their own collapsible roots below it, wherever they live on disk. Outline and Timeline are untouched. Requires running \"Flock: Follow the Active Project in the Explorer\" once per window, which converts it to a Flock workspace (one reload, then switching is instant and no terminal is lost). With this off, an already-converted window keeps its folders where they are."
+          "description": "The Explorer follows the session you are working in: the file tree roots itself at that session's subproject directory, inside the git worktree the session is actually checked out in. Auto-switch only — the other two window models never move the tree. Requires running \"Flock: Follow the Session I Am In\" once per window, which converts it to a Flock workspace (one reload, then following is instant and no terminal is lost). Turning it off leaves you in the auto-switch model with the file tree where you put it: tabs still switch, the status-bar line still says where you are, and Source Control still follows the session's checkout — none of which reroots a tree you asked to be left alone."
         },
         "lineage.explorer.scope": {
           "type": "string",
@@ -1744,11 +1825,11 @@
             "project"
           ],
           "enumDescriptions": [
-            "One root: the directory you are working in. Which one that is follows the session you have focused, so the file tree moves with you. The Project view lists the rest — click one to send the tree there.",
-            "Every connected directory as its own collapsible root, the main one on top. The shape Flock shipped before this setting existed."
+            "One root: the directory you are working in — the session's subproject directory inside the session's own checkout. The Project view lists the rest — click one to send the tree there.",
+            "Every connected directory as its own collapsible root, the main one on top. The shape Flock shipped before this setting existed — and the shape in which the tree does NOT follow you, because a scope that expands every directory into a root has nothing left to narrow."
           ],
           "default": "directory",
-          "markdownDescription": "How much of the active project the Explorer shows. `directory` keeps the file tree to the one directory you are in, the way a plain folder window does; `project` shows every connected directory as its own root. Only applies when `#lineage.explorer.followProject#` is on. Takes effect on the next project switch — no reload."
+          "markdownDescription": "How much of the active project the Explorer shows. `directory` keeps the file tree to the one directory you are in, the way a plain folder window does; `project` shows every connected directory as its own root. Only applies when `#lineage.explorer.followProject#` is on, and only in the **Auto-switch** window model (`#lineage.mode#`). Following the session is a `directory` behaviour by construction — under `project` the folder tree stops moving on its own and only a switch reshapes it, while Source Control goes on following the session's checkout either way. Takes effect on the next focus change — no reload."
         },
         "lineage.accounts.enabled": {
           "type": "boolean",
@@ -1851,11 +1932,6 @@
           "type": "boolean",
           "default": false,
           "markdownDescription": "PREVIEW. Hang the branch rows off a **directory** instead of off the project, and list **every local branch** of that directory’s repository rather than only the checked-out ones.\n\nA project’s directories are its subprojects, and a directory is exactly one git repository (or none) — so the directory is the row a branch belongs under. A project spanning three repositories no longer shows three branches called `main` with no way to tell which is which.\n\nOutside the fold: the directory’s **own checkout**, and any branch with a **session running on it**. Everything else — including a worktree with nothing running in it — goes in one **Branches (N)** row, newest commit first, **shut by default**. That is what makes listing a 180-branch repository cost one row.\n\nNeeds `#lineage.git.branches#`. Draws in the inline sidebar (`#lineage.viewStyle#`: `inline`, the default); the native tree keeps the rows it has today."
-        },
-        "lineage.preview.demoProject": {
-          "type": "boolean",
-          "default": false,
-          "markdownDescription": "PREVIEW. Add a **fabricated project** to the tree — *Flock (demo)* — to look at the directory-and-branch layout without needing a repository shaped the right way.\n\nThree directories: one repository with two checkouts, one directory *inside* that repository, and one that is not a repository at all. Nothing on it is real, nothing on it can be clicked into existence, and it has **no sessions** — a session row comes from the real roster, so a made-up one would draw nothing. For sessions under a branch, use `#lineage.preview.directoryModel#` on your own projects.\n\nTurning this off removes it completely."
         }
       }
     },

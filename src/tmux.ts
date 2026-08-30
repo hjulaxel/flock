@@ -55,6 +55,7 @@ import { execFile } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
+import { CONFIG_DIR_ENV } from './accounts';
 import { log, logError } from './log';
 import { listDescendants, reapSurvivors } from './procs';
 import { isSessionId } from './types';
@@ -76,6 +77,28 @@ export const TMUX_CONF_NAME = 'tmux.conf';
  * be a keybinding regression in every wrapped session. Copy-mode stays
  * reachable — `mouse on` maps wheel-scroll into it, which is how scrollback
  * works in a wrapped session.
+ *
+ * THE `set-environment -gr` LINES ARE AN ACCOUNT FIX, not a tmux preference.
+ * The server keeps the environment of the FIRST client that forked it — this
+ * file's header says so, and it is why every launch passes `-e
+ * LINEAGE_NODE_ID` — which means the first wrapped session started on a custom
+ * account puts that account's `CLAUDE_CONFIG_DIR` into the server's GLOBAL
+ * environment, where every later session inherits it. A conversation launched
+ * on the default login then runs `claude` against somebody else's config
+ * directory, with no verb having been used and nothing on screen to say so.
+ * `-gr` marks those names removed globally, so a session that passes no `-e`
+ * for them sees nothing; a session that does pass one still wins, because a
+ * session-level value outranks the global (measured on tmux 3.6a, alongside
+ * the `-r`-versus-`-u` measurement in `buildRemoveEnvArgs`).
+ *
+ * Generated from `CONFIG_DIR_ENV` rather than typed out, so the conf cannot
+ * fall behind the launcher the day a third provider gets a config-dir
+ * variable. Two limits worth stating rather than discovering: the conf is read
+ * at SERVER start only, so a server already running keeps the leak until it
+ * exits (which `exit-empty on` makes routine — it goes with its last session),
+ * and an account's own `extraEnv` keys cannot be baked into a static conf at
+ * all. Both gaps are covered from the other end, by the `remove` list the
+ * account switch hands `respawnTmuxPane`.
  */
 export const TMUX_CONF = `# Written by the Flock extension on every activation — edits do not survive.
 # This is the conf for Flock's PRIVATE tmux server (tmux -L ${TMUX_SOCKET}); your own
@@ -92,6 +115,11 @@ set -g focus-events on
 set -g allow-passthrough on
 set -s exit-empty on
 set -g set-titles off
+# Account isolation: the server inherits the first client's environment, so
+# these are removed globally and only a session that passes its own -e has one.
+${Object.values(CONFIG_DIR_ENV)
+  .map((key) => `set-environment -gr ${key}`)
+  .join('\n')}
 `;
 
 /**
@@ -528,6 +556,78 @@ export function buildSetEnvArgs(
 }
 
 /**
+ * Pure. The argv that TAKES ONE VARIABLE AWAY from a wrapped session, so the
+ * next process spawned in its pane does not see it at all.
+ *
+ * `-r`, not `-u`, and the difference is the bug this exists to fix rather than
+ * a preference. `-u` unsets the SESSION's entry, which is only half the story:
+ * our private server keeps the environment of the first client that forked it
+ * (see this file's header), so a variable that leaked in that way is still
+ * visible through the global environment once the session's own copy is gone.
+ * `-r` marks the name REMOVED for that session, which shadows the global. Both
+ * behaviours were measured on tmux 3.6a — the same version every other
+ * measured claim in this file is pinned to — not read off a manual page:
+ * `set-environment -u` left the leaked value showing, `-r` did not.
+ *
+ * `-e KEY=` is not the third option it looks like: that sets the empty string,
+ * and an empty `CLAUDE_CONFIG_DIR` is a config dir at the filesystem root, not
+ * an absent one.
+ */
+export function buildRemoveEnvArgs(name: string, key: string): string[] {
+  return ['-L', TMUX_SOCKET, 'set-environment', '-t', `=${name}`, '-r', key];
+}
+
+/**
+ * Pure. Every tmux invocation a respawn is made of, IN THE ORDER THEY MUST RUN.
+ *
+ * Split out from `respawnTmuxPane` so the order can be tested without a tmux,
+ * because the order is the load-bearing part and it is not obvious:
+ *
+ *   1. the REMOVALS, before anything else. `respawn-pane` snapshots the
+ *      environment the new process gets at the moment it spawns, so a removal
+ *      issued afterwards corrects the session's records about a process that
+ *      has already launched on the wrong account. This is exactly the failure
+ *      the account switch used to ship: `-e` can only ever SET, so moving a
+ *      wrapped conversation back to the default login — whose environment
+ *      names no config dir at all — left the previous account's
+ *      `CLAUDE_CONFIG_DIR` in place and the resumed CLI went looking in the
+ *      account the transcript had just left.
+ *   2. the RESPAWN itself, carrying `-e KEY=VALUE` for everything the new
+ *      account does set.
+ *   3. the SESSION-level sets, after, for the reason `respawnTmuxPane`
+ *      explains: `-e` on the respawn reaches the process and not the session
+ *      record, and anything that reads the session's environment later would
+ *      otherwise be told the conversation is on an account it left.
+ */
+export function respawnCommands(opts: {
+  name: string;
+  cwd?: string;
+  env?: Readonly<Record<string, string>>;
+  /** Variables to take away — see `buildRemoveEnvArgs`. A key that is also in
+   *  `env` is dropped here rather than being removed and immediately set
+   *  again, so a caller can hand over a blunt "everything any account could
+   *  set" list without having to subtract. */
+  remove?: readonly string[];
+  command: readonly string[];
+}): string[][] {
+  const env = opts.env ?? {};
+  const out: string[][] = [];
+  const seen = new Set<string>();
+  for (const key of opts.remove ?? []) {
+    if (typeof key !== 'string' || key === '') continue;
+    if (key in env) continue;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(buildRemoveEnvArgs(opts.name, key));
+  }
+  out.push(buildRespawnArgs(opts));
+  for (const [key, value] of Object.entries(env)) {
+    out.push(buildSetEnvArgs(opts.name, key, value));
+  }
+  return out;
+}
+
+/**
  * Restart a wrapped session's process IN PLACE, on a different environment.
  *
  * WHY THIS EXISTS: an account is a config directory, and a config directory is
@@ -549,9 +649,17 @@ export function buildSetEnvArgs(
  * conversation is on an account it left. So each variable is written into the
  * session too.
  *
- * Returns whether the RESPAWN succeeded; a `set-environment` that fails is
- * logged and survived, because by then the process is already running on the
- * right account and the stale copy is a cosmetic lie rather than a wrong launch.
+ * AND THE REMOVALS BEFORE IT. `-e` sets and never unsets, so a respawn onto an
+ * account with a SMALLER environment than the one it is leaving inherits the
+ * difference. See `respawnCommands` for the ordering and `buildRemoveEnvArgs`
+ * for why the removal is `-r` rather than `-u`.
+ *
+ * Returns whether the RESPAWN succeeded; a `set-environment` that fails —
+ * either half — is logged and survived. For a set, by then the process is
+ * already running on the right account and the stale record is a cosmetic lie.
+ * For a removal it is worse than cosmetic, but the honest fallback is the same
+ * one an old tmux forces anyway: today's behaviour, which is what the caller
+ * had before this argument existed.
  *
  * Never throws. `false` means the caller must fall back to disposing the
  * terminal and launching afresh — which is what a session outside the detach
@@ -563,42 +671,43 @@ export async function respawnTmuxPane(
     name: string;
     cwd?: string;
     env?: Readonly<Record<string, string>>;
+    /** Variables the new process must NOT inherit. */
+    remove?: readonly string[];
     command: readonly string[];
   },
 ): Promise<boolean> {
-  const ok = await new Promise<boolean>((resolve) => {
-    try {
-      execFile(
-        binary,
-        buildRespawnArgs(opts),
-        { timeout: 5000 },
-        (err) => resolve(!err),
-      );
-    } catch (err) {
-      logError('tmux.respawnPane', err);
-      resolve(false);
-    }
-  });
-  if (!ok) return false;
-
-  for (const [key, value] of Object.entries(opts.env ?? {})) {
-    await new Promise<void>((resolve) => {
+  const run = (args: string[], timeout: number): Promise<boolean> =>
+    new Promise<boolean>((resolve) => {
       try {
-        execFile(
-          binary,
-          buildSetEnvArgs(opts.name, key, value),
-          { timeout: 2000 },
-          (err) => {
-            // Never logs the VALUE: on an API-key account it is the credential.
-            if (err) logError(`tmux.setEnvironment: ${key} not updated`, err);
-            resolve();
-          },
-        );
+        execFile(binary, args, { timeout }, (err) => resolve(!err));
       } catch (err) {
-        logError('tmux.setEnvironment', err);
-        resolve();
+        logError('tmux.respawnPane', err);
+        resolve(false);
       }
     });
+
+  const commands = respawnCommands(opts);
+  // The respawn is the one command whose failure is this function's answer.
+  // Found by looking for it rather than by counting the removals in front of
+  // it: `respawnCommands` drops a removal that is also being set, and a second
+  // copy of that rule here is a place for the two to disagree.
+  const respawnAt = commands.findIndex((args) => args.includes('respawn-pane'));
+  for (let i = 0; i < commands.length; i++) {
+    const args = commands[i];
+    if (i === respawnAt) {
+      if (!(await run(args, 5000))) return false;
+      continue;
+    }
+    const removal = i < respawnAt;
+    // Never logs the VALUE: on an API-key account it is the credential. The
+    // KEY is safe and is the only thing worth knowing here.
+    const key = removal ? args[args.length - 1] : args[args.length - 2];
+    if (!(await run(args, 2000))) {
+      logError(
+        `tmux.setEnvironment: ${key} not ${removal ? 'removed' : 'updated'}`,
+        new Error('set-environment failed'),
+      );
+    }
   }
   return true;
 }
@@ -633,11 +742,20 @@ export type TmuxAdvice = 'none' | 'install' | 'enable';
  *
  * It stays quiet in every case where it would be noise:
  *  - Windows, where the tier does not exist at all (see findTmuxBinary).
- *  - Workspaces off, which is the only feature the tier serves — no parking,
- *    no reason to care how parking is implemented.
  *  - `lineage.tmux: off` on a machine with no tmux: two problems to fix in one
  *    toast is a worse message than none, and this user has opted out anyway.
  *  - Already dismissed. Asked once per install, never on a timer.
+ *
+ * IT USED TO STAY QUIET FOR A FOURTH REASON — `lineage.workspaces.enabled`
+ * off — on the stated grounds that workspace parking was "the only feature the
+ * tier serves". That was not true and had not been for a while: solo mode parks
+ * (`parkOthers`, extension.ts) in every window model, and the detach grace runs
+ * at every level, so a machine with the switcher off still detaches and still
+ * loses in-flight turns without tmux. The gate has gone, along with the
+ * argument for it. The one consequence, said plainly because somebody will meet
+ * it: a person who had the switcher off can now get the once-per-install nudge
+ * they were not getting yesterday. It is dismissible, and it is correct advice
+ * for them — their sessions do park.
  */
 export function tmuxAdvice(opts: {
   platform: string;
@@ -645,13 +763,10 @@ export function tmuxAdvice(opts: {
   mode: string | undefined;
   /** findTmuxBinary(), injected so tests need no PATH. */
   binary: string | null;
-  /** `lineage.workspaces.enabled`. */
-  workspacesEnabled: boolean;
   dismissed: boolean;
 }): TmuxAdvice {
   if (opts.dismissed) return 'none';
   if (opts.platform === 'win32') return 'none';
-  if (!opts.workspacesEnabled) return 'none';
   // Switched off by hand. Worth one reminder if the tier is actually available,
   // silence otherwise.
   if (opts.mode === 'off') return opts.binary === null ? 'none' : 'enable';

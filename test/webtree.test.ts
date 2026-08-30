@@ -32,6 +32,7 @@ import {
   sessionRowKey,
   subprojectRowKey,
 } from '../src/viewmodel';
+import type { ViewRow } from '../src/viewmodel';
 import type {
   ProjectRecord,
   ProviderId,
@@ -214,6 +215,7 @@ interface Internals {
   view?: FakeView;
   collapsed: Set<string>;
   onMessage(msg: Record<string, unknown>): Promise<void>;
+  rows(): ViewRow[];
 }
 
 function internals(p: LineageWebtreeProvider): Internals {
@@ -981,6 +983,71 @@ describe('LineageWebtreeProvider: the branch line under a session', () => {
         { type: 'branch', projectId: 'p1', dir: '/proj-feat', branch: 'feat/x' },
       ],
     ]);
+  });
+});
+
+// ---------------------------------------------------------- project rows
+
+describe('LineageWebtreeProvider: project rows', () => {
+  it('draws only the projects the deps supply', () => {
+    // REGRESSION, and a standing guard rather than a test of one bug. The
+    // grouping this sidebar renders is exactly what computeGrouping returned;
+    // nothing is appended to it afterwards. The one time something was — the
+    // demo project, spliced in behind `lineage.preview.demoProject` on the
+    // argument that a fabricated project with prefixed ids and no real
+    // directory could not hurt anybody — the fence held and it did not matter,
+    // because `lineage.showBranchesAndWorktrees` wrote that switch ON as part
+    // of the branch bundle and people who had never heard of it found a
+    // project called *Flock (demo)* sitting among their own work.
+    //
+    // So the assertion is deliberately an equality and not a "contains": a
+    // project row this side draws that no rule of membership produced is the
+    // bug, whatever it is called next time.
+    const forest = forestOf([node(ROOT, { cwd: '/proj' })]);
+    const { deps } = makeDeps(forest, {
+      projects: () => [project('p1', 'P1', '/proj')],
+    });
+    const provider = new LineageWebtreeProvider(deps, EXT_URI);
+    internals(provider).view = fakeView();
+    const drawn = internals(provider)
+      .rows()
+      .filter((r) => r.kind === 'project')
+      .map((r) => r.label);
+    expect(drawn).toEqual(['P1']);
+  });
+});
+
+// --------------------------------------------- the "Still running" appendix
+
+describe('LineageWebtreeProvider: a running process with no row of its own', () => {
+  // The inline surface reads the same grouping as the native tree and must
+  // make the same rescue, or the badge is honest in one view style and a lie in
+  // the other. The shape is an ARCHIVED record whose process the roster still
+  // reports: `deleted: true` takes the row away, `sessionIsOver` stays false,
+  // so the container badge counts a process the tree draws nowhere.
+  it('draws the archived-but-live session in the appendix, not as an ordinary row', () => {
+    const forest = forestOf([
+      node(ROOT, { cwd: '/proj', status: 'busy' }),
+      node(CHILD, { cwd: '/proj', status: 'busy', deleted: true }),
+    ]);
+    const { deps } = makeDeps(forest);
+    const provider = new LineageWebtreeProvider(deps, EXT_URI);
+    internals(provider).view = fakeView();
+    // The appendix is seeded COLLAPSED (it is a ledger, not a workspace), so
+    // the row under it only exists once it is opened — open it, because the
+    // point of the rescue is that the session can be reached from there.
+    (internals(provider).collapsed as Set<string>).clear();
+    const rows = internals(provider).rows();
+    const appendix = rows.findIndex((r) => r.label === 'Still running');
+    expect(appendix).toBeGreaterThan(-1);
+    expect(rows.slice(appendix + 1).map((r) => r.key)).toContain(
+      sessionRowKey(CHILD),
+    );
+    // ...and it is not an ordinary row anywhere above the appendix.
+    expect(rows.slice(0, appendix).map((r) => r.key)).not.toContain(
+      sessionRowKey(CHILD),
+    );
+    expect(provider.runningCount()).toBe(2);
   });
 });
 

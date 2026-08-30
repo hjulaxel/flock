@@ -585,6 +585,59 @@ export function canonicalCheckoutPath(
 }
 
 /**
+ * The other direction: where a directory of the MAIN checkout lives in the
+ * checkout somebody is actually working in.
+ *
+ * `canonicalCheckoutPath` above answers the GROUPING question — "where would
+ * this session sit in the main checkout", so the sidebar can file a worktree
+ * session under the `api` row the user named once, in the checkout they were
+ * looking at the day they split the monorepo up. This answers the FOLLOWING
+ * question, which is its inverse: "and where does that row live in the checkout
+ * this session is actually in", so a file tree opened on it is a tree the user
+ * is editing rather than one they are not. The pair exists because those are
+ * two different questions with two different right answers, and a feature that
+ * asked only the first one would root the Explorer at `~/mono/api` while the
+ * session types in `~/mono-feat-x/api`.
+ *
+ * `here` is the checkout the session is in (`deepSwitch.checkoutAt`). `dir` is
+ * translated out of whichever checkout contains it — deepest wins, exactly as
+ * above, because `git worktree add` may nest — and into `here`. Anything with
+ * nothing to translate comes back normalized and otherwise untouched: no
+ * checkout contains `dir`, the containing checkout already IS `here`, or the
+ * caller has no `here` because the probe has not landed.
+ *
+ * Sliced on the normalized spellings for the same reason `canonicalCheckoutPath`
+ * is: `isWithin` compares case-folded prefixes of exactly these strings, so a
+ * match guarantees the prefix is that many characters long.
+ *
+ * WHAT IT DELIBERATELY DOES NOT DO is check that the translated path exists. A
+ * worktree of a monorepo may legitimately be missing a directory the main
+ * checkout has (a branch that predates it), and the honest place to notice that
+ * is `ExplorerSync.filterMissing`, which is the ONE place in this feature that
+ * is allowed to let the filesystem change an answer. Duplicating the check here
+ * would put a `stat` inside a pure module and give two different layers a vote
+ * on the same fact.
+ */
+export function inCheckout(
+  checkouts: readonly Worktree[],
+  here: Worktree | undefined,
+  dir: string | undefined,
+): string {
+  const target = normalizeDir(dir);
+  const into = normalizeDir(here?.dir);
+  if (target === '' || into === '') return target;
+
+  let from = '';
+  for (const wt of checkouts ?? []) {
+    const root = normalizeDir(wt?.dir);
+    if (root === '' || !isWithin(root, target)) continue;
+    if (root.length > from.length) from = root;
+  }
+  if (from === '' || pathKey(from) === pathKey(into)) return target;
+  return `${into}${target.slice(from.length)}`;
+}
+
+/**
  * Which directory row a session belongs to, or -1.
  *
  * Two passes over the same question, and the order between them is the whole
@@ -1194,13 +1247,26 @@ function beatsAtEqualDepth(
 /**
  * Every CHAT this project has ever had, newest first.
  *
- * Membership is derived exactly as it is for a session — the project whose
- * directory is the longest match for the conversation's cwd — and for the same
- * reason: a chat is a conversation running somewhere, and the alternative (a
- * list of ids kept on the ProjectRecord) is a set stored in a record whose
- * merge rule is newest-WINS, not newest-unions. Two windows opening a chat in
- * the same project a second apart would each write a one-element list and the
- * loser's chat would drop off the history for good.
+ * Membership is derived exactly as it is for a ROW — EVERY project claiming
+ * the conversation's cwd, `matchProjects` and not its head — and for the same
+ * reason the alternative (a list of ids kept on the ProjectRecord) is refused:
+ * that is a set stored in a record whose merge rule is newest-WINS, not
+ * newest-unions, so two windows opening a chat in the same project a second
+ * apart would each write a one-element list and the loser's chat would drop off
+ * the history for good.
+ *
+ * PLURAL, and this function used to be singular. A directory two projects both
+ * list is a supported arrangement (see matchProjects and projectClaiming, which
+ * announces the sharing rather than refusing it), and the grouping pass files a
+ * live session's row under BOTH claimants on the stated grounds that "picking a
+ * winner made the losing project display nothing while still claiming
+ * everything". A singular matcher here reproduced exactly that: the chat had a
+ * row under Bravo a moment ago, and Bravo's history said it had never had one.
+ * Depth is still singular — a project rooted at `app/api` takes those chats off
+ * one rooted at `app`, because nesting is how a monorepo is divided — so this
+ * only ever widens the equal-depth case. `archivedForProject` below was changed
+ * in the same pass and for the same reason; the two must agree, because they
+ * are two doors onto one project's history.
  *
  * A chat with NO cwd, or one whose directory no project claims, belongs to no
  * project and appears in no history. That is the honest answer: the project it
@@ -1220,13 +1286,127 @@ export function chatsForProject(
   const out: EditorialRecord[] = [];
   for (const record of Object.values(records ?? {})) {
     if (!record || record.chat !== true || record.deleted === true) continue;
-    const match = matchProject(projects, record.cwd, extraDirs);
-    if (match?.project.id !== projectId) continue;
+    const matches = matchProjects(projects, record.cwd, extraDirs);
+    if (!matches.some((m) => m.project.id === projectId)) continue;
     out.push(record);
   }
   return out.sort(
     (a, b) => cmp(b.createdAt ?? '', a.createdAt ?? '') || cmp(a.id, b.id),
   );
+}
+
+// ----------------------------------------------------------------- archive
+
+/**
+ * Every session this project has ARCHIVED — `deleted: true`, the state the UI
+ * calls Archived — newest first.
+ *
+ * Membership is derived exactly as it is for a row or a chat: EVERY project
+ * whose directories claim the session's working directory at the winning depth
+ * — `matchProjects`, not its head. The alternative — stamping a project id onto
+ * the record when it is archived — would be a second, divergent answer to a
+ * question the sidebar already answers, and it would go stale the moment a
+ * project is re-pointed at a different directory.
+ *
+ * THE PLURAL IS THE POINT, and this used to read `matchProject`. Two projects
+ * are allowed to list the same directory, and the grouping pass files the live
+ * row under both; the singular head then filed the ARCHIVE under one of them,
+ * chosen by a name-and-id tie-break, so renaming Alpha to Zulu silently moved a
+ * project's whole archive to its neighbour and the loser's browser said
+ * "Nothing archived" about a session whose row it had drawn seconds earlier.
+ * That is the same failure the grouping comment already names as its reason for
+ * being plural. Keeping it singular and rewording the doc was the other
+ * defensible answer — one archive, one door, and a restore only needs to be
+ * reachable from somewhere — but it leaves a surface that says nothing while
+ * claiming everything, which is the shape this codebase has decided against.
+ * A session claimed twice is therefore offered under both, and restoring it
+ * from either puts its row back under both; the restore is idempotent, so the
+ * duplication costs a listing and nothing else.
+ *
+ * CHATS ARE EXCLUDED. A chat has no row, so there is nothing to restore, and
+ * `chatsForProject` is already its own door. Including them here would offer
+ * to give a chat a row, which is the one thing a chat is defined by not having.
+ *
+ * `cwdOf` IS NOT AN OPTIMISATION, it is the difference between a list and a
+ * blind spot. Measured on a real store, 32 of 159 archived records carry no
+ * `record.cwd` at all — they predate the field or arrived through an import —
+ * and 28 of those 32 have one in their transcript's own head. Matching on the
+ * record alone would quietly hide a fifth of every project's archive, and the
+ * user would have no way to tell an empty list from an incomplete one. The seam
+ * is a callback rather than a direct read because this module imports ./types
+ * and nothing else; the transcript index lives on the other side of that line.
+ *
+ * A record with no cwd ANYWHERE belongs to no project and appears in no
+ * project's archive (4 of the same 159). That is honest rather than a bug —
+ * filing it somewhere would put a session in a list it does not belong to — and
+ * it is why the whole-machine restore picker stays.
+ */
+export function archivedForProject(
+  records: Record<string, EditorialRecord> | undefined,
+  projects: readonly ProjectRecord[],
+  projectId: string,
+  opts?: {
+    /** See {@link matchProjects} — the project's worktree reach. */
+    extraDirs?: (project: ProjectRecord) => readonly string[];
+    /** Where a record carries no cwd of its own. */
+    cwdOf?: (id: string) => string | undefined;
+  },
+): EditorialRecord[] {
+  const out: EditorialRecord[] = [];
+  for (const record of Object.values(records ?? {})) {
+    if (!record || record.deleted !== true || record.chat === true) continue;
+    const cwd = record.cwd ?? opts?.cwdOf?.(record.id);
+    const matches = matchProjects(projects, cwd, opts?.extraDirs);
+    if (!matches.some((m) => m.project.id === projectId)) continue;
+    out.push(record);
+  }
+  // `updatedAt` before `createdAt`: archiving itself writes the record, so the
+  // most recently archived session sorts to the top — which is the one a user
+  // opening this list seconds after a mistaken archive is looking for. Ties
+  // break on id so the order never depends on object iteration.
+  return out.sort(
+    (a, b) =>
+      cmp(b.updatedAt ?? b.createdAt ?? '', a.updatedAt ?? a.createdAt ?? '') ||
+      cmp(a.id, b.id),
+  );
+}
+
+/**
+ * Every project id that is CLOSED, inheritance included.
+ *
+ * CLOSING A PARENT CLOSES ITS SUBTREE. Anything else would be a lie about what
+ * the gesture did: the subprojects would stay on screen as top-level rows —
+ * promoted by the very act of putting their parent away — and closing "app"
+ * would scatter its four services across the tree instead of taking them with
+ * it. Reopening the parent brings the whole thing back, because nothing is
+ * written on the children; that is why this is derived on every read rather
+ * than stamped onto the records.
+ *
+ * It is EXPORTED, and it used to be eight lines inside `computeGrouping`. The
+ * grouping is not the only thing that needs to know a project is put away: a
+ * verb that has just restored a session has to be able to say whether the row
+ * it produced landed anywhere, and answering that with `project.hidden` alone
+ * would miss every subproject of a closed parent — the row would be invisible
+ * and the verb would say nothing. One derivation, two readers, rather than the
+ * near-copy that would have drifted.
+ *
+ * The tree may be passed in by a caller that has already built one, purely so
+ * `computeGrouping` does not build it twice per rebuild.
+ */
+export function closedProjectIds(
+  projects: readonly ProjectRecord[],
+  tree?: ProjectTree,
+): Set<string> {
+  const built = tree ?? buildProjectTree(projects ?? []);
+  const closed = new Set<string>();
+  for (const id of built.order) {
+    const node = built.byId.get(id);
+    if (!node) continue;
+    const inheritedlyClosed =
+      node.parentId !== null && closed.has(node.parentId);
+    if (node.project.hidden === true || inheritedlyClosed) closed.add(id);
+  }
+  return closed;
 }
 
 /** True when `cwd` sits inside any hidden folder. */
@@ -1749,6 +1929,33 @@ export interface GroupingInput {
    * the pre-invariant behaviour.
    */
   hasRunning?: (rootId: string) => boolean;
+  /**
+   * Live sessions that have NO row at all — not filtered out of one, simply
+   * never in `visibleRootIds` (see viewmodel.runningWithoutRow, which is what
+   * every caller passes). They join the "Still running" appendix directly,
+   * without going through any of the rules above.
+   *
+   * WHY THEY BYPASS THE RULES. The rules decide which bucket a row belongs in;
+   * these ids have already lost their row for a reason outside this module —
+   * today exactly one, an ARCHIVED record whose process the roster still
+   * reports — and filing them normally would put an archived session back in
+   * the middle of the tree as an ordinary row, which is the opposite of what
+   * archiving means. The appendix is the honest place: collapsed, at the
+   * bottom, and the one row from which the process can still be seen and
+   * closed. Without it the running badge counts a process with nothing on
+   * screen to point at, which is the levels invariant broken in the direction
+   * the badge exists to make visible.
+   *
+   * THE SCOPE FENCE STILL APPLIES, and is re-applied here rather than trusted
+   * to the caller: it is the one rule in this file that is a boundary rather
+   * than a preference (see hasRunning), and a folder-mode window must not grow
+   * rows for another folder's work through a new input. The caller filters too,
+   * because the BADGE is scoped and the two numbers have to match.
+   *
+   * Absent (older wirings, every test that predates it) rescues nothing, which
+   * is the previous behaviour exactly.
+   */
+  rowlessRunningIds?: readonly string[];
   /** lineage.groupByFolder — applies to what is left over after projects. */
   groupByFolder: boolean;
   /** lineage.onlyProjectSessions — drop everything no project claims. Ignored
@@ -2000,20 +2207,28 @@ export function computeGrouping(
   // still owns its directories (see the session loop below), and its children
   // have to be reachable from it in order to be closed along with it.
   const tree = buildProjectTree(all);
-  // CLOSING A PARENT CLOSES ITS SUBTREE. Anything else would be a lie about
-  // what the gesture did: the subprojects would stay on screen as top-level
-  // rows — promoted by the very act of putting their parent away — and closing
-  // "app" would scatter its four services across the tree instead of taking
-  // them with it. Reopening the parent brings the whole thing back, because
-  // nothing was written on the children.
-  const closed = new Set<string>();
-  for (const id of tree.order) {
-    const node = tree.byId.get(id);
-    if (!node) continue;
-    const inheritedlyClosed =
-      node.parentId !== null && closed.has(node.parentId);
-    if (node.project.hidden === true || inheritedlyClosed) closed.add(id);
+  // Closing a parent closes its subtree — the rule and the reasoning live on
+  // `closedProjectIds`, which the restore verbs read too so that the tree and
+  // the thing telling you where a row went can never disagree.
+  const closed = closedProjectIds(all, tree);
+  // Every project's worktree reach, resolved ONCE per project rather than once
+  // per session: `worktreesOf` is a cache read, but the union-and-dedupe inside
+  // projectWorktrees is not free and a window with 40 live sessions would
+  // otherwise run it 40 times over the same handful of projects.
+  //
+  // It sits HERE, above the fence, rather than beside the session loop that was
+  // its only consumer, because the fence has to ask the same question the loop
+  // does. A project's worktree reach is part of what the project IS (see
+  // projectWorktrees), so a fence that could not see the reach fenced out the
+  // very project a worktree window belongs to. Sharing the one map also means
+  // the fence and the claim pass can never disagree about a project's reach.
+  const worktreesByProject = new Map<string, Worktree[]>();
+  for (const p of all) {
+    worktreesByProject.set(p.id, projectWorktrees(p, input?.worktreesOf));
   }
+  const extraDirs = (p: ProjectRecord): readonly string[] =>
+    (worktreesByProject.get(p.id) ?? []).map((w) => w.dir);
+
   // FOLDER MODE's fence over PROJECT ROWS, the same boundary the session loop
   // below applies to session rows.
   //
@@ -2023,21 +2238,30 @@ export function computeGrouping(
   // every OTHER project on the machine, each with a `+` that the launch fence
   // now refuses. An empty window showed the whole roster and nothing runnable.
   //
-  // Kept when the project OR ANY DESCENDANT has a directory in scope: a parent
-  // is the only path to its children, so fencing it out would strand an
-  // in-scope subproject. Walked over the whole tree (closed ones included) for
-  // the same reason the closed-inheritance pass above is.
+  // Kept when the project OR ANY DESCENDANT touches the scope — where "touches"
+  // is containment in EITHER direction, over the project's declared directories
+  // AND its worktrees (see ownDirsInScope for why both halves are load-bearing).
+  // The descendant clause is there because a parent is the only path to its
+  // children, so fencing it out would strand an in-scope subproject. Walked over
+  // the whole tree (closed ones included) for the same reason the
+  // closed-inheritance pass above is.
   //
   // `isWithin` inline rather than modes.outsideScope, which would be a cycle
-  // (modes.ts imports this module). Same asymmetry, deliberately: a project
-  // with no placeable directory is not proven foreign and stays.
+  // (modes.ts imports this module).
   const scopeDirsRaw = (input?.scopeDirs ?? [])
     .map((d) => normalizeDir(d))
     .filter((d) => d !== '');
   const outOfScopeProjects = new Set<string>();
   if (scopeDirsRaw.length > 0) {
     const ownDirsInScope = (p: ProjectRecord): boolean => {
-      const dirs = projectDirs(p)
+      // The project's DECLARED directories plus its worktree reach. Both,
+      // because a linked checkout is not a decoration on the row: a window
+      // opened on `~/app-feat-x`, a worktree of the repository at `~/app`, is
+      // a window on the project rooted at `~/app` — the session loop below
+      // files its sessions there through the same `extraDirs`, and a fence
+      // that read only `projectDirs` therefore threw away the project row
+      // whose sessions the loop then had nowhere to put.
+      const dirs = [...projectDirs(p), ...extraDirs(p)]
         .map((d) => normalizeDir(d))
         .filter((d) => d !== '');
       // NO DIRECTORY AT ALL is fenced OUT, and this is the one place the
@@ -2052,9 +2276,34 @@ export function computeGrouping(
       // state.json rather than a fixture. A project row with no directory is
       // not information, and a window scoped to a folder is the last place to
       // show one.
+      //
+      // Reading `dirs` (reach included) rather than projectDirs alone costs
+      // nothing here: worktree reach is discovered BY asking the declared
+      // directories, so a project with none has no reach either.
       if (dirs.length === 0) return false;
+      // CONTAINMENT IN EITHER DIRECTION, and this is the whole of the folder
+      // bug that shipped with the first version of this fence.
+      //
+      // `isWithin` is asymmetric, and asking it only one way ("is the
+      // project's directory inside the folder this window opened?") answers
+      // the wrong question for the commonest window there is. Open VS Code on
+      // `~/app/api` — a subdirectory of the project at `~/app` — and the
+      // project's directory is not inside the scope; it CONTAINS it. The
+      // project row was fenced out, its `claimed` bucket therefore never
+      // existed, and the session loop below quietly dropped every session in
+      // the folder the window is actually open on: the badge counted them and
+      // the tree drew nothing.
+      //
+      // A window opened on part of a project is that project's window. The
+      // rejected alternative was to keep the one-way test and rescue the
+      // stranded sessions into folder rows further down — which would have
+      // drawn the sessions under a bare directory row while the project they
+      // belong to, with its verbs and its `+`, stayed invisible in a window
+      // that is looking straight at it.
       return dirs.some((dir) =>
-        scopeDirsRaw.some((scope) => isWithin(scope, dir)),
+        scopeDirsRaw.some(
+          (scope) => isWithin(scope, dir) || isWithin(dir, scope),
+        ),
       );
     };
     // Reverse preorder = children before parents, so a parent can read the
@@ -2096,16 +2345,6 @@ export function computeGrouping(
     if (list) list.push(lane);
     else lanesByProject.set(lane.projectId, [lane]);
   }
-
-  // Resolved ONCE per project, not once per session: `worktreesOf` is a cache
-  // read, but the union-and-dedupe below is not free and a window with 40 live
-  // sessions would otherwise run it 40 times over the same handful of projects.
-  const worktreesByProject = new Map<string, Worktree[]>();
-  for (const p of all) {
-    worktreesByProject.set(p.id, projectWorktrees(p, input?.worktreesOf));
-  }
-  const extraDirs = (p: ProjectRecord): readonly string[] =>
-    (worktreesByProject.get(p.id) ?? []).map((w) => w.dir);
 
   const claimed = new Map<string, string[]>(); // projectId -> rootIds
   for (const p of projects) claimed.set(p.id, []);
@@ -2183,7 +2422,27 @@ export function computeGrouping(
       let filed = false;
       for (const match of matches) {
         if (closed.has(match.project.id)) continue;
-        claimed.get(match.project.id)?.push(rootId);
+        // `filed` means A BUCKET TOOK IT, not "a bucket ought to have".
+        //
+        // This used to read `claimed.get(id)?.push(rootId); filed = true;`,
+        // and the optional chain was where a critical bug hid: when the
+        // project-row fence above removed a project from `projects`, `claimed`
+        // had no bucket for it, the push evaporated, and `filed = true` ran
+        // anyway — so the `!filed` branch below never counted the session and
+        // never rescued it. The row was gone from every bucket while the
+        // running badge still counted the process.
+        //
+        // With the fence's containment now symmetric this is unreachable by
+        // construction: a project can only claim a cwd by having a directory
+        // that contains it, the scope contains that same cwd, and two
+        // directories containing one path are always comparable — so a
+        // claimant of an in-scope session is always in scope itself. The guard
+        // stays regardless, because "unreachable" is a property of today's
+        // fence and the next fence should fail loudly (a counted, rescuable
+        // session) instead of silently.
+        const bucket = claimed.get(match.project.id);
+        if (bucket === undefined) continue;
+        bucket.push(rootId);
         filed = true;
       }
       // Every claimant closed: the rows go away with their projects — except
@@ -2215,6 +2474,24 @@ export function computeGrouping(
       continue;
     }
     leftover.push(rootId);
+  }
+
+  // The rowless running sessions, appended AFTER the rules: they have no row
+  // to be filtered, so there is no rule for them to pass — see
+  // GroupingInput.rowlessRunningIds. Deduped against the rescues above because
+  // a caller reading a stale forest could hand back an id the walk already
+  // placed, and one session must never render twice in one group.
+  for (const rootId of input?.rowlessRunningIds ?? []) {
+    if (hiddenRunningRoots.includes(rootId)) continue;
+    const cwd = input.cwdOf(rootId);
+    if (
+      scopes.length > 0 &&
+      normalizeDir(cwd) !== '' &&
+      !scopes.some((scope) => isWithin(scope, cwd ?? ''))
+    ) {
+      continue;
+    }
+    hiddenRunningRoots.push(rootId);
   }
 
   // Depth-first over the VISIBLE half of the tree. `tree.order` is already a

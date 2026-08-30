@@ -283,6 +283,7 @@ function sanitizeRecord(key: string, value: unknown): EditorialRecord | null {
     'summary',
     'cwd',
     'wrapRequestedAt',
+    'summaryRequestedAt',
     'doneAt',
     'seenAt',
     'notifyDismissedAt',
@@ -336,14 +337,32 @@ function sanitizeAccount(key: string, value: unknown): AccountProfile | null {
   // A tombstone, exactly as with projects: an id plus a merge stamp, reduced
   // to the fields the merge compares so a hand-edited file cannot hand a
   // reader a half-real account.
+  //
+  // WITH TWO EXCEPTIONS, and they are what makes an account move durable.
+  // `provider` and `configDir` survive, because removing an account must not
+  // make the conversations INSIDE it disappear. Every reader that finds a
+  // transcript — `transcript.transcriptFile`, `hasTranscript`, the archive
+  // indexer — walks the live roster's config dirs, so dropping the directory
+  // here meant a removal took every conversation that had ever been moved onto
+  // that account off the tree with it: rows without transcripts, resume and
+  // fork refusing, and the removal dialog's promise that "sessions already
+  // running on it are not touched" quietly false.
+  //
+  // A directory to READ is not an account you can launch on. The tombstone
+  // still fails `getAccounts()` and `getAccount()`, still appears in no
+  // picker, and is still resurrectable only by re-adding the account by hand;
+  // `retiredClaudeConfigDirs` is the one place it comes back, and it comes
+  // back as a path, not as a login.
   if (value.deleted === true) {
     const stamp = isNonEmptyString(value.updatedAt) ? value.updatedAt : nowIso();
+    const dir = typeof value.configDir === 'string' ? value.configDir.trim() : '';
     return {
       id: key,
-      provider: DEFAULT_PROVIDER,
+      provider: isProviderId(value.provider) ? value.provider : DEFAULT_PROVIDER,
       label: '',
       order: 0,
       deleted: true,
+      ...(dir === '' ? {} : { configDir: dir }),
       createdAt: isNonEmptyString(value.createdAt) ? value.createdAt : stamp,
       updatedAt: stamp,
     };
@@ -2084,16 +2103,46 @@ export class StateStore implements DisposableLike {
     if (!isNonEmptyString(id)) return Promise.resolve();
     return this.enqueue((state, stamp) => {
       if (!isPlainObject(state.accounts)) state.accounts = {};
+      const was = state.accounts[id];
+      // The directory and the provider are carried into the grave — see
+      // `sanitizeAccount`'s tombstone branch for why the transcripts inside a
+      // removed account have to stay findable. Worth stating what a mixed
+      // fleet does with them: an OLDER window that merges this file runs the
+      // old sanitizer, drops both fields, and degrades to exactly today's
+      // behaviour. Additive and idempotent, never corrupting.
+      const dir = typeof was?.configDir === 'string' ? was.configDir.trim() : '';
       state.accounts[id] = {
         id,
-        provider: DEFAULT_PROVIDER,
+        provider: isProviderId(was?.provider) ? was.provider : DEFAULT_PROVIDER,
         label: '',
         order: 0,
         deleted: true,
+        ...(dir === '' ? {} : { configDir: dir }),
         createdAt: state.accounts[id]?.createdAt ?? stamp,
         updatedAt: stamp,
       };
     });
+  }
+
+  /**
+   * The config directories of REMOVED claude accounts.
+   *
+   * Read-only company for `claudeProfileConfigDirs`: a conversation that was
+   * moved onto an account and left there when the account was removed is still
+   * on disk, and a reader that does not look in the retired directory reports
+   * it as having no transcript at all. Not merged into `getAccounts()`,
+   * deliberately — a directory to read is not a login to launch on, and the
+   * moment a tombstone appears in a picker it is an account again.
+   */
+  retiredClaudeConfigDirs(): string[] {
+    const out: string[] = [];
+    for (const value of Object.values(this.memory.accounts ?? {})) {
+      if (value?.deleted !== true) continue;
+      if (value.provider !== 'claude') continue;
+      const dir = typeof value.configDir === 'string' ? value.configDir.trim() : '';
+      if (dir !== '') out.push(dir);
+    }
+    return out;
   }
 
   /** One account's position. Its own method rather than `upsertAccount({order})`

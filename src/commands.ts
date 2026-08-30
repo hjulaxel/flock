@@ -37,16 +37,18 @@ import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 
 import { log, logError } from './log';
-import { isDemoId } from './demoProject';
-import { recommendedPlan, surfaceChoices } from './recommend';
+import { recommendedPlan, surfaceChoices, windowModelChoices } from './recommend';
 import type {
+  RecommendedSetting,
   RecommendedStep,
   RecommendedStepId,
   RecommendedWorld,
   SurfaceChoice,
+  WindowModelChoice,
 } from './recommend';
 import {
   COMMANDS,
+  COMPACT_PROMPT,
   CONTEXT_HOOKS_INSTALLED,
   MAX_PROJECT_NAME_LEN,
   PROVIDERS,
@@ -59,6 +61,7 @@ import type {
   AccountProfile,
   BackgroundJob,
   BranchInfo,
+  CloseSummaryMode,
   CommandDeps,
   DisposableLike,
   EditorialRecord,
@@ -68,13 +71,41 @@ import type {
   SessionForest,
   SessionNode,
   SubprojectRecord,
+  TranscriptFacts,
   UnlistedSession,
   Worktree,
 } from './types';
+// One PURE function off the transcript index: the archived-name chain. The
+// index's fs half is never reached from here — importing the module rather
+// than copying the chain is what stops a row and an archive-browser entry
+// from disagreeing about what a session is called.
+import { transcriptFallbackName } from './archive';
+// The ONE "is this session over?" predicate, defined where SessionNode is (see
+// lineage.sessionIsOver): the row's dimming, the promotion pass and every verb
+// here have to agree about a single node, and a second copy in this file would
+// be the way they stop agreeing.
+import { sessionIsOver } from './lineage';
+// The two pure halves of "tell somebody what happened here": composing the one
+// line a fork types into its parent, and reading back the summary the Claude
+// CLI writes when it is asked to compact. Both are string work with no vscode
+// in them, so both are testable without a workbench — which is the whole
+// reason they are not inlined below.
+import {
+  composeForkNote,
+  forkNoteDeliverable,
+  forkPurposeOf,
+} from './forkNote';
+import {
+  COMPACT_SUMMARY_WAIT_MS,
+  summaryForParentNote,
+  summaryForRecord,
+} from './closeSummary';
 import {
   type ProjectMatch,
+  archivedForProject,
   buildProjectTree,
   chatsForProject,
+  closedProjectIds,
   isWithin,
   matchProject,
   matchProjects,
@@ -87,7 +118,12 @@ import {
   subprojectLabels,
   validateProjectName,
 } from './projects';
-import { launchableProjects, openTargetFor, outsideScope } from './modes';
+import {
+  launchableProjects,
+  openTargetFor,
+  outsideScope,
+  windowCovers,
+} from './modes';
 import {
   canHostSession,
   envForProfile,
@@ -95,9 +131,8 @@ import {
   isEnvVarName,
   moveDown,
   moveUp,
-  cliOfProfile,
+  offerSwitch,
   slugify,
-  switchRefusal,
   uniqueAccountId,
   validateAccountLabel,
 } from './accounts';
@@ -132,7 +167,10 @@ import {
 } from './worktrees';
 // The deep switch's placement rule, shared with workspaces.ts's arrival reveal:
 // a lane that pins a branch launches (and reveals) in that branch's checkout.
-import { planDeepReveal } from './deepSwitch';
+// `checkoutAt` is the other half of the same idea, asked the other way round:
+// given a directory, which checkout is it in? That is what "the session's
+// worktree" means for the go-to-workspace verb below.
+import { checkoutAt, planDeepReveal } from './deepSwitch';
 import { branchWebUrl } from './pullRequests';
 import { accountIdOf, usageSummaryOf } from './accountsView';
 import type { AccountDeps } from './accountsView';
@@ -145,10 +183,6 @@ const MAX_TITLE_LEN = 80;
  *  A quick-pick row elides at its own width anyway; this only stops a pasted
  *  wall of text from being carried around as one. */
 const CHAT_LABEL_LEN = 72;
-/** The opening turn a "Fork and Compact" branch is launched with. A CLI slash
- *  command, passed as the positional prompt — so the compaction is the
- *  branch's FIRST turn and the parent is never asked to compact anything. */
-const COMPACT_PROMPT = '/compact';
 
 // ----------------------------------------------------------------- helpers
 
@@ -463,42 +497,6 @@ function unknownGroupRefusal(arg: unknown): string {
   return 'Flock: those sessions report no working directory, so there is no folder to act on.';
 }
 
-/**
- * '' when the row is actionable, else the reason it is not — for the DEMO project.
- *
- * `lineage.preview.demoProject` puts a fabricated project in the tree, and its
- * rows carry real-looking context objects because that is what makes the menus
- * draw at all. So every verb that could reach one has to refuse it here, at the
- * front, rather than downstream where `getProject` returns undefined and the flow
- * says "that project no longer exists" — which is true of a project that never
- * existed and still the wrong thing to tell somebody.
- *
- * Checked on the ROW's id rather than on the setting: turning the switch off
- * between a click and its handler is not a case worth a second read, and an id
- * that starts with the demo prefix is never a real one either way.
- */
-/** Every id-shaped field a command argument can carry, so one guard can look at
- *  all of them without knowing which row kind it was handed. Shape-only and
- *  total: anything that is not an object contributes nothing. */
-function idsInArg(arg: unknown): string[] {
-  if (arg === null || typeof arg !== 'object') return [];
-  const obj = arg as Record<string, unknown>;
-  const out: string[] = [];
-  for (const field of ['projectId', 'id', 'sessionId']) {
-    const value = obj[field];
-    if (typeof value === 'string' && value !== '') out.push(value);
-  }
-  return out;
-}
-
-function demoRefusal(...ids: readonly (string | undefined)[]): string {
-  if (!ids.some((id) => isDemoId(id))) return '';
-  return (
-    'Flock: that is the demo project — nothing on it is real, and no directory ' +
-    'behind it exists. Turn off lineage.preview.demoProject to remove it.'
-  );
-}
-
 /** A ProjectGroupNode's id, when the command came from a project row. */
 export function projectIdFromArg(arg: unknown): string | undefined {
   if (arg === null || typeof arg !== 'object') return undefined;
@@ -663,16 +661,28 @@ function labelFor(deps: CommandDeps, sessionId: string): string {
  * which at least says what the tab is. So the shortId fallbacks the forest
  * builds for an unnamed session (`1a2b3c4d`, `1a2b3c4d (gone)`) are rejected
  * here, and everything a human or the CLI actually named survives:
- * `record.title` > roster name > transcript `customTitle`, which is the label
- * precedence the row already renders.
+ * `record.title` > roster name > transcript `customTitle` > the CLI's own
+ * generated `ai-title`, which is the label precedence the row already renders.
+ *
+ * The third rejected shape is the QUOTATION an archived row falls back to when
+ * the transcript offers no title at all — `“cd ..”`, the conversation's opening
+ * words (see archive.transcriptFallbackName). It reads as a name on a row,
+ * because the quotes say what it is; on a terminal tab, stripped of that
+ * context and sitting beside real tab names, it would be worse than
+ * `claude · 1a2b3c4d` — the same argument this function already makes about the
+ * short id. One of the two call sites is the RESUME path, which is exactly how
+ * a closed row becomes a tab, so this is not a theoretical case. Keyed off
+ * `SessionNode.labelIsFallback` rather than sniffing a leading quote character:
+ * a user is allowed to name a session with one.
  */
 export function tabTitleFor(
   deps: CommandDeps,
   sessionId: string,
 ): string | undefined {
+  const node = deps.getForest().nodes.get(sessionId);
   return tabTitleFrom(
     sessionId,
-    deps.getForest().nodes.get(sessionId)?.label,
+    node?.labelIsFallback === true ? undefined : node?.label,
     deps.getRecord(sessionId)?.title,
   );
 }
@@ -692,6 +702,49 @@ export function tabTitleFrom(
   }
   const title = recordTitle?.trim();
   return title !== undefined && title !== '' ? title : undefined;
+}
+
+/**
+ * The stem a fork's generated name is built from — the parent's name, when the
+ * parent HAS one.
+ *
+ * `labelFor` is the wrong tool here for the same reason it is the wrong tool for
+ * a terminal tab, and then for one more. An archived row with no title of any
+ * kind falls back to the conversation's opening words in typographic quotes
+ * (archive.transcriptFallbackName) — that reads as a name on a row because the
+ * quotes say what it is, but `defaultForkTitle` would turn it into
+ * `“I want to post this on linkedIn, help me write it” 2`, and that string is
+ * handed to `launchSession` as the terminal tab name AND written to the child's
+ * record. `tabTitleFor` refuses the quotation on the resume path precisely so it
+ * never reaches a tab; a fork that launders it into `record.title` defeats that
+ * guard permanently, because from then on the tab name comes from the record and
+ * the row shows a quotation of a conversation it is not a quotation of.
+ *
+ * So the quotation is dropped — but NOT down to `labelFor`'s `shortId`, which
+ * would name the fork `0f0000aa 2`. A bare hex row name is the exact thing the
+ * naming work in lineage.ts exists to remove (71.2% of closed rows down to
+ * 6.8%), and reintroducing it through the fork verb would be undoing that by
+ * another road. The fallback is `defaultSessionTitle(cwd)` instead — the
+ * directory basename a brand-new root is offered — so a fork of a
+ * quotation-named row is named after the checkout it opens in (`app 2`), which
+ * is a true fact about it rather than a borrowed one.
+ *
+ * Only `labelIsFallback` is refused, deliberately: a LIVE unnamed row's label is
+ * a short id, and forking it still gives `0f0000aa 2` today. Widening this to
+ * "refuse any label that is a short id" would change how every unnamed live
+ * session's fork is named, which is a naming decision nobody has made — and
+ * unlike the quotation, that string is at least what the row it forked says.
+ */
+export function forkStemFor(deps: CommandDeps, sessionId: string): string {
+  const node = deps.getForest().nodes.get(sessionId);
+  const record = deps.getRecord(sessionId);
+  const label = node?.label?.trim();
+  if (node?.labelIsFallback !== true && label !== undefined && label !== '') {
+    return label;
+  }
+  const title = record?.title?.trim();
+  if (title !== undefined && title !== '') return title;
+  return defaultSessionTitle(node?.cwd ?? record?.cwd);
 }
 
 // ------------------------------------------------------------- staleness
@@ -861,9 +914,15 @@ async function pickSession(
   filter: (node: SessionNode) => boolean,
   emptyMessage: string,
 ): Promise<string | undefined> {
-  // `!n.deleted`, not `!n.hidden`: a deleted session has no row, so offering it
-  // would act on something the user cannot see. A HIDDEN one is on screen —
+  // `!n.deleted`, not `!n.hidden`: an ARCHIVED session has no row, so offering
+  // it would act on something the user cannot see. A HIDDEN one is on screen —
   // greyed, at the bottom — and every verb still applies to it.
+  //
+  // This filter is why archiving MUST end a session first (see endForArchive):
+  // a live process behind an archived row would be unreachable from every verb
+  // in this file, including the one that would have closed it. Restore was the
+  // only door back, and a user who did not know that had a `claude` running
+  // that nothing on screen accounted for.
   const nodes = orderedNodes(deps.getForest()).filter(
     (n) => !n.deleted && filter(n),
   );
@@ -887,11 +946,17 @@ async function pickSession(
 }
 
 /**
- * Sessions carrying `deleted`, for the restore verb.
+ * Sessions carrying `deleted` — the ARCHIVE, in the words the UI uses — for the
+ * whole-machine restore verb.
  *
- * Driven off the RECORDS rather than the forest on purpose: a deleted session
+ * Driven off the RECORDS rather than the forest on purpose: an archived session
  * has no visible row and may not be in the forest at all, so the editorial
- * store is the only place that still remembers the user removed it.
+ * store is the only place that still remembers the user put it away.
+ *
+ * The per-project browser (`archivedSessionsFlow`) is the same list narrowed to
+ * one project and labelled off the transcript index. This one stays because it
+ * is the door for the case that browser cannot serve: a session whose directory
+ * no project claims, or one you cannot remember the project of.
  */
 async function pickFlaggedSession(
   deps: CommandDeps,
@@ -903,7 +968,7 @@ async function pickFlaggedSession(
   );
   if (flagged.length === 0) {
     void vscode.window.showInformationMessage(
-      'Flock: no deleted sessions to restore.',
+      'Flock: no archived sessions to restore.',
     );
     return undefined;
   }
@@ -1363,8 +1428,8 @@ interface UnlistedPick extends vscode.QuickPickItem {
  *
  * A record with no facts in it is already a row (see archive.memberKeepIds):
  * presence is the whole claim. `deleted: false` is written deliberately — the
- * only ids that can reach here with a deleted record are ones the user typed,
- * and typing the id of something you deleted is as explicit as Restore gets.
+ * only ids that can reach here with an archived record are ones the user typed,
+ * and typing the id of something you archived is as explicit as Restore gets.
  * `cwd` is copied in when the pool knew it, because an archived transcript's
  * head read already answered it and the grouping pass would otherwise have to
  * re-derive it from the same file.
@@ -1580,7 +1645,7 @@ export async function importSessionsFlow(deps: CommandDeps): Promise<void> {
   if (pool.length === 0) {
     void vscode.window.showInformationMessage(
       'Flock: nothing to import — every session this machine knows about ' +
-        'already has a row, or was deleted from one.',
+        'already has a row, or was archived out of one.',
     );
     return;
   }
@@ -1806,11 +1871,17 @@ async function applyRecommendedStep(
       // the person was shown the door, which is what this step promised.
       await importSessionsFlow(deps);
       return true;
-    case 'surface': {
+    case 'surface':
+    case 'windowModel': {
       // The explicit question the step promised. The choice writes; the tick
       // did not — so a cancelled picker is "no" and costs nothing, exactly as
-      // recommend.ts's contract for a TASTE question requires.
-      const choice = await chooseSurface(world);
+      // recommend.ts's contract for a TASTE question requires. Both taste steps
+      // land here because they are the same shape of thing: open a picker, and
+      // write whatever the chosen option carries.
+      const choice =
+        step.id === 'surface'
+          ? await chooseSurface(world)
+          : await chooseWindowModel(world);
       if (choice === undefined) return false;
       const unwritable = (await deps.writeSettings?.(choice.settings)) ?? [
         ...choice.settings.map((s) => s.key),
@@ -1826,40 +1897,56 @@ async function applyRecommendedStep(
   }
 }
 
-/** One row of the surface picker. The choice id rides along for the same
- *  reason RecommendedPick carries a step id: items come back by identity, and
- *  the id is the only field this side needs. */
-interface SurfacePick extends vscode.QuickPickItem {
-  choiceId: SurfaceChoice['id'];
+/** One row of a taste picker. The choice id rides along for the same reason
+ *  RecommendedPick carries a step id: items come back by identity, and the id
+ *  is the only field this side needs. */
+interface ChoicePick extends vscode.QuickPickItem {
+  choiceId: string;
+}
+
+/** What both taste pickers offer: an id, a label, a sentence, and whether this
+ *  is where the person already lives. Structural rather than a union of the two
+ *  concrete choice types, so a third question can reuse this without editing
+ *  it. */
+interface TasteChoice {
+  readonly id: string;
+  readonly label: string;
+  readonly description: string;
+  readonly settings: readonly RecommendedSetting[];
+  readonly current: boolean;
 }
 
 /**
- * "Where should sessions open?" — the four places, single select, the current
- * one both suffixed "(current)" and given the cursor.
+ * A single-select question, the current answer both suffixed "(current)" and
+ * given the cursor.
  *
  * `createQuickPick` where the host has one, because starting the cursor ON the
  * current answer is the difference between a question ("this is where you are —
  * move, or press Enter to stay") and a list that pretends the person lives
  * nowhere. `showQuickPick` has no active-item control, so a host without the
- * builder (the unit mock, a slim host) gets the same rows with the suffix
- * doing the pointing alone.
+ * builder (the unit mock, a slim host) gets the same rows with the suffix doing
+ * the pointing alone.
+ *
+ * SHARED by both taste questions rather than copied for the second one. The
+ * fifty lines below are subtle and the argument for them is written down right
+ * here; a copy would carry the plumbing to the second question and leave the
+ * argument behind, where it would rot the first time either half changed.
  */
-async function chooseSurface(
-  world: RecommendedWorld,
-): Promise<SurfaceChoice | undefined> {
-  const choices = surfaceChoices(world);
-  const items: SurfacePick[] = choices.map((c) => ({
+async function chooseFromTaste<T extends TasteChoice>(
+  choices: readonly T[],
+  placeHolder: string,
+): Promise<T | undefined> {
+  const items: ChoicePick[] = choices.map((c) => ({
     label: c.current ? `${c.label} (current)` : c.label,
     detail: c.description,
     choiceId: c.id,
   }));
-  const placeHolder = 'Where should sessions open?';
 
   const host: Partial<typeof vscode.window> = vscode.window;
-  let pickedId: SurfaceChoice['id'] | undefined;
+  let pickedId: string | undefined;
   if (typeof host.createQuickPick === 'function') {
-    const quickPick = host.createQuickPick<SurfacePick>();
-    pickedId = await new Promise<SurfaceChoice['id'] | undefined>((resolve) => {
+    const quickPick = host.createQuickPick<ChoicePick>();
+    pickedId = await new Promise<string | undefined>((resolve) => {
       quickPick.placeholder = placeHolder;
       quickPick.items = items;
       quickPick.matchOnDetail = true;
@@ -1891,6 +1978,34 @@ async function chooseSurface(
     pickedId = picked?.choiceId;
   }
   return choices.find((c) => c.id === pickedId);
+}
+
+/** "Where should sessions open?" — the four places. */
+async function chooseSurface(
+  world: RecommendedWorld,
+): Promise<SurfaceChoice | undefined> {
+  return chooseFromTaste(surfaceChoices(world), 'Where should sessions open?');
+}
+
+/**
+ * "What is a window?" — the three window models (src/modes.ts), named the way a
+ * person would name them rather than by their enum values.
+ *
+ * The picker is the answer to a real complaint: the choice existed, it was
+ * three-way once the legacy `workspaces.enabled` pair was folded into a value,
+ * and there was no route to it but a dropdown among forty-odd settings rows.
+ * `windowModelChoices` resolves "current" with the same function every gate in
+ * the extension runs, so the row marked "(current)" is the model the window is
+ * actually in — including for somebody carrying the old pair, who is correctly
+ * shown as Flock only.
+ */
+async function chooseWindowModel(
+  world: RecommendedWorld,
+): Promise<WindowModelChoice | undefined> {
+  return chooseFromTaste(
+    windowModelChoices(world),
+    'What is a window? — how Flock uses this VS Code window',
+  );
 }
 
 /**
@@ -3112,6 +3227,85 @@ export function activeForkTarget(deps: CommandDeps): ForkTargetResolution {
 }
 
 /**
+ * Tell the PARENT that a branch was just made of it.
+ *
+ * `lineage.fork.notifyParent`, off by default. One sentence, typed into the
+ * parent's terminal by the same `sendTextToSession` the wrap verb uses — see
+ * src/forkNote.ts for what that channel is and, more importantly, what it is
+ * NOT: Flock has no session-to-session messaging, and this is new construction
+ * on the one channel that can put text into a conversation already running.
+ *
+ * WHEN THE NOTE DOES NOT HAPPEN, which is most of the time and by design.
+ * `sendTextToSession` answers only for a terminal bound in THIS window, so all
+ * four of these lose the note outright:
+ *
+ *   * the parent is CLOSED — a row with no process has nothing to type into;
+ *   * the parent is hosted by ANOTHER Flock window — the terminal registry
+ *     holds this window's bindings and no others;
+ *   * the parent is FOREIGN — Flock never launched it and owns no pty for it;
+ *   * the parent is DETACHED under the tmux grace — its tab is gone by
+ *     definition, which is what "parked" means.
+ *
+ * In every one of those the note is dropped, one line goes to the output
+ * channel, and nothing is written on the parent's record. NOTHING IS QUEUED,
+ * deliberately: a mailbox would be a second lifecycle to get wrong — how long
+ * does an undelivered note live, does it fire when the parent is resumed six
+ * days later, into the middle of what turn — and the person already learns
+ * about the fork from the child's row nested under the parent's in the tree.
+ * The note is a courtesy to the MODEL, and a courtesy that cannot be paid is
+ * simply not paid. No toast either: the user did not ask to be told about a
+ * conversation they can see.
+ *
+ * It never throws and never fails the fork. A branch that launched correctly
+ * must not be reported as broken because a sentence did not land.
+ */
+async function notifyParentOfFork(
+  deps: CommandDeps,
+  parentId: string,
+  childId: string,
+  opts: { prompt?: string; titleGiven: boolean },
+): Promise<void> {
+  try {
+    // The TIP, not the id that was clicked: a compaction or a resume re-mints
+    // the conversation's id, and the terminal is bound under whichever
+    // generation is current. `sendTextToSession` walks the chain itself, but
+    // asking the right question here keeps the log line honest about which
+    // generation was addressed.
+    const tip = deps.tipOf(parentId);
+    const host = hostOf(deps, tip);
+    if (!forkNoteDeliverable(host)) {
+      log(
+        'fork note: not delivered for',
+        shortId(tip),
+        `— host is '${host}', which has no terminal in this window`,
+      );
+      return;
+    }
+    const purpose = forkPurposeOf({
+      ...(opts.prompt !== undefined ? { prompt: opts.prompt } : {}),
+      title: labelFor(deps, childId),
+      // A name the caller did not give is `defaultForkTitle`'s counter, and
+      // announcing `auth 3` to the parent as the branch's PURPOSE would dress
+      // a counter up as an intention.
+      generatedTitle: !opts.titleGiven,
+    });
+    const note = composeForkNote({
+      childLabel: labelFor(deps, childId),
+      ...(purpose !== undefined ? { purpose } : {}),
+    });
+    if (!deps.sendTextToSession(tip, note)) {
+      // The host said `here` a moment ago, so this is the race rather than the
+      // ordinary case: the tab closed between the two calls.
+      log('fork note: send refused for', shortId(tip), '— no bound terminal');
+      return;
+    }
+    log('fork note: told', shortId(tip), 'about', shortId(childId));
+  } catch (err) {
+    logError('commands.notifyParentOfFork', err);
+  }
+}
+
+/**
  * Fork = mint a child uuid, record the parent edge BEFORE launching, then
  * launch `--fork-session --resume <parent> --session-id <child>`. The edge is
  * exact by construction; nothing about it is ever inferred.
@@ -3197,7 +3391,10 @@ async function forkFlow(
   let title = opts?.title;
   const titleGiven = title !== undefined;
   if (title === undefined) {
-    const parentLabel = node?.label ?? labelFor(deps, clickedId);
+    // Not `node?.label` directly: an archived row's label can be the
+    // conversation's opening words in quotes, which must not become a tab name
+    // or a stored title. See forkStemFor.
+    const parentLabel = forkStemFor(deps, clickedId);
     const siblings = (node?.children ?? [])
       .map((id) => forest.nodes.get(id)?.label)
       .filter((l): l is string => typeof l === 'string');
@@ -3270,7 +3467,67 @@ async function forkFlow(
   // confirm — only a branch that fell back to the generated name opens an
   // editor on its row.
   if (!titleGiven) await nameJustCreatedSession(deps, childId);
+  // AFTER the naming, so the note carries the name the user actually typed
+  // wherever that is knowable. It is knowable on the native path, where the
+  // quick-input rename resolves on commit; it is not on the inline-sidebar
+  // path, where `beginInlineRename` resolves as soon as the editor OPENS and
+  // the commit arrives later as a separate message from the webview. So a
+  // branch renamed in the sidebar is announced under its generated name, and
+  // the setting's description says so rather than leaving it to be discovered.
+  //
+  // NOT ON THE AGENT PATH (`quiet`), and this is the important gate. There the
+  // fork was requested BY the parent conversation, and the verbs CLI already
+  // prints "Forked N new sessions — <titles>" straight into that same model's
+  // turn. Typing a second copy into its terminal would both duplicate the
+  // sentence and land keystrokes in the middle of a turn the model is running
+  // — the same reasoning the launch-failure toast above uses for the same flag.
+  if (opts?.quiet !== true && notifyParentOnFork(deps)) {
+    // COMPACT_PROMPT IS NOT A PURPOSE. Fork and Compact reaches this function
+    // with `prompt: COMPACT_PROMPT`, which is machinery Flock injects itself —
+    // and forkPurposeOf's rule is that a purpose is "the user's own words"
+    // (src/forkNote.ts), the same reasoning that already excludes a generated
+    // title. Handing it through announced the branch as "It is for: /compact",
+    // presenting the compaction command to the parent's model as the branch's
+    // stated intention. Withholding it here makes the note fall through to the
+    // short sentence a plain unnamed fork gets, which is the honest one.
+    //
+    // The gate is this exact string rather than the tempting general rule
+    // "ignore any prompt beginning with a slash": a real fork prompt can
+    // legitimately open with a path ("/src/api is drifting…") or with a
+    // user-defined slash command that genuinely IS what the branch is for, and
+    // that rule would silence both. COMPACT_PROMPT is the one prompt Flock
+    // writes on the user's behalf, so it is the one prompt excluded, and the
+    // knowledge lives at the call site that knows where the prompt came from
+    // rather than in the pure composer, which cannot tell.
+    //
+    // As of this writing COMPACT_PROMPT is in fact the ONLY prompt that reaches
+    // here at all — the agent path is the sole other prompt-carrying caller and
+    // it is `quiet` — so the exactness buys nothing today and everything the
+    // moment a prompt-carrying verb comes back (`lineage.askSession` was one
+    // and may be again). Written for that caller rather than for this one.
+    const purposePrompt =
+      opts?.prompt !== undefined && opts.prompt !== COMPACT_PROMPT
+        ? opts.prompt
+        : undefined;
+    await notifyParentOfFork(deps, clickedId, childId, {
+      ...(purposePrompt !== undefined ? { prompt: purposePrompt } : {}),
+      titleGiven,
+    });
+  }
   return childId;
+}
+
+/** `lineage.fork.notifyParent`, read through the dep and defaulted the safe
+ *  way round: an absent dep (every unit double, and any wiring that has not
+ *  been taught the setting) means no note, which is exactly what forking did
+ *  before this existed. */
+function notifyParentOnFork(deps: CommandDeps): boolean {
+  try {
+    return deps.notifyParentOnFork?.() === true;
+  } catch (err) {
+    logError('commands.notifyParentOnFork', err);
+    return false;
+  }
 }
 
 /**
@@ -3313,7 +3570,10 @@ export async function forkForAgent(
 
   const forest = deps.getForest();
   const node = forest.nodes.get(tip);
-  const parentLabel = node?.label ?? labelFor(deps, tip);
+  // Same refusal the click path makes — see forkStemFor. An agent forks a LIVE
+  // tip, so a quoted fallback label is not reachable here today; it is the same
+  // call because "how a fork is named" must not have two answers.
+  const parentLabel = forkStemFor(deps, tip);
   const taken = (node?.children ?? [])
     .map((id) => forest.nodes.get(id)?.label)
     .filter((l): l is string => typeof l === 'string');
@@ -3411,7 +3671,8 @@ export async function adoptBackgroundJob(
   let title = record?.title;
   if (title === undefined || title.trim() === '') {
     const parentNode = deps.getForest().nodes.get(parentId);
-    const parentLabel = parentNode?.label ?? labelFor(deps, parentId);
+    // Same refusal, same reason — see forkStemFor.
+    const parentLabel = forkStemFor(deps, parentId);
     const siblings = (parentNode?.children ?? [])
       .filter((id) => id !== sessionId)
       .map((id) => deps.getForest().nodes.get(id)?.label)
@@ -3715,7 +3976,9 @@ export async function resumeFlow(
   // session running somewhere the roster cannot see looks like — a `claude`
   // under a config directory no configured account names, a home directory
   // shared with another machine, an archived row surfaced by
-  // `lineage.showArchived` that Flock has never met. Resuming one of those puts
+  // `lineage.showArchived` — which is about level 2, a CLOSED session read off
+  // disk, and has nothing to do with the Archive verb — that Flock has never
+  // met. Resuming one of those puts
   // a second claude on a transcript the first is still appending to, and that is
   // the worst thing this file can do.
   //
@@ -3947,7 +4210,10 @@ export async function configureProjectFlow(
       },
       // No Switch Workspace row in folder mode: in-window switching does not
       // exist there, and Open in New Window (below) IS the folder-mode way to
-      // "go to" a project.
+      // "go to" a project. The FLOCK-ONLY model keeps the row on purpose —
+      // switching deliberately is one of the two things it can do that folder
+      // mode cannot; what it does not do is switch on its own. Same comparison
+      // as the verb's own refusal above, and it must stay the same one.
       ...(deps.lineageMode?.() === 'folder'
         ? ([] as ActionPick[])
         : [
@@ -4437,6 +4703,90 @@ async function projectForSession(
   return main === undefined || main === ''
     ? null
     : matchProject(deps.allProjects(), main);
+}
+
+/**
+ * WHERE A SESSION'S WINDOW SHOULD OPEN — the whole decision behind
+ * `lineage.openSessionWorkspace`, resolved before anything opens.
+ *
+ * Three tiers, most specific first, and the order is Axel's: "we should be able
+ * to go to the workspace for that session".
+ *
+ *   1. THE SESSION'S WORKTREE — the deepest checkout containing its cwd
+ *      (`deepSwitch.checkoutAt`). A window exists to show this conversation's
+ *      files and its Source Control, and for anyone running one agent per
+ *      worktree the linked checkout is the only answer that gets both right:
+ *      open the project's root instead and the git extension reports the main
+ *      checkout's branch, which is not the branch the session is on.
+ *   2. THE LANE'S DIRECTORY, when the session is filed in one and that
+ *      directory actually contains the cwd. A lane is the editorial answer to
+ *      "which piece of work", and for a session in a plain (non-git) directory
+ *      it is the only answer better than the project's root.
+ *   3. THE PROJECT'S CLAIM (`modes.openTargetFor`) — the same target
+ *      `routeForeign` offers, falling through to the cwd itself when no project
+ *      claims it.
+ *
+ * THE INVARIANT EVERY TIER MUST SATISFY: the answer CONTAINS the session's cwd.
+ * This is not tidiness. The new window's launch fence refuses any launch whose
+ * cwd falls outside its real folders, and its grouping fence is a BOUNDARY
+ * rather than a filter — a session whose known cwd is outside every root gets
+ * no row at all, not even in the "running elsewhere" appendix. So a target that
+ * does not contain the cwd produces the one outcome this verb must never
+ * produce: a window opened FOR a session that has neither a row for it nor the
+ * ability to resume it.
+ *
+ * Tiers 1 and 3 satisfy that by construction — `checkoutAt` and `matchProjects`
+ * both match by containment. Tier 2 does NOT, which is why the lane is guarded
+ * here rather than trusted: `SubprojectRecord.dir` is editorial and is
+ * explicitly allowed not to be one of the project's own directories, and a lane
+ * that pins a branch can be redirected to a checkout that has nothing to do
+ * with this session. A lane pointing elsewhere is a real state and not an
+ * error, so it is skipped rather than refused, and tier 3 answers.
+ *
+ * `''` — and only `''` — means "this row records no directory at all", which is
+ * the one case the verb cannot act on and has to say out loud.
+ *
+ * The worktree probe is a WARMED read (`deps.worktreesFor`), for the reason
+ * `lanePlacement` gives: the answer places a WINDOW, and a cached list could
+ * name a checkout that was removed a minute ago. It is also the one blocking
+ * call this verb makes; a user-facing verb behind a right-click can afford one
+ * git call, and a probe that throws falls through to the tiers below rather
+ * than failing the verb — the pin is a preference about where, never a gate on
+ * whether.
+ *
+ * Exported so the ladder can be asserted without a workbench, the same reason
+ * `activeForkTarget`, `newSessionTarget` and `staleCandidates` are.
+ */
+export async function sessionWorkspaceTarget(
+  deps: CommandDeps,
+  sessionId: string,
+): Promise<string> {
+  // The TIP of the chain, not the id on the row: a `/clear`ed conversation
+  // wears a new id, and the directory question is about the process running
+  // today, not about the generation the row was drawn from.
+  const id = deps.tipOf(sessionId);
+  const cwd = normalizeDir(
+    deps.getForest().nodes.get(id)?.cwd ?? deps.getRecord(id)?.cwd,
+  );
+  if (cwd === '') return '';
+
+  if (deps.worktreesFor !== undefined) {
+    let list: readonly Worktree[] = [];
+    try {
+      list = await deps.worktreesFor(cwd);
+    } catch (err) {
+      logError('commands.sessionWorkspaceTarget', err);
+    }
+    const checkout = normalizeDir(checkoutAt(list, cwd)?.dir);
+    if (checkout !== '') return checkout;
+  }
+
+  const laneId = currentLaneOf(deps, id);
+  const laneDir =
+    laneId === undefined ? '' : normalizeDir(deps.getSubproject?.(laneId)?.dir);
+  if (laneDir !== '' && isWithin(laneDir, cwd)) return laneDir;
+
+  return openTargetFor(matchProjects(deps.allProjects(), cwd), cwd);
 }
 
 /**
@@ -4932,6 +5282,311 @@ export async function chatHistoryFlow(
   await resumeFlow(deps, id);
 }
 
+/**
+ * The name to put on an archived session's row in a picker, and whether it is
+ * a QUOTATION rather than a title.
+ *
+ * Five sources, best first, and the last two come from the transcript index
+ * through `transcriptFallbackName` — the SAME function the tree row's archived
+ * label goes through. That sharing is the whole point: a row and its archive
+ * entry disagreeing about what a session is called is worse than either of
+ * them being wrong, because the user then cannot tell whether they are looking
+ * at the same session.
+ *
+ *   record.title    what you named it here.
+ *   facts.label     the transcript's `custom-title` — what you named it at the
+ *                   CLI with `/title`, which the editorial record never learns.
+ *   facts.aiTitle   the CLI's own generated title. A model wrote it rather
+ *                   than a person, but it is still a genuine title OF this
+ *                   conversation and the thing it replaces is a hex id.
+ *   first prompt    the opening words, already quoted by the shared function.
+ *   shortId         a hex id, when there is nothing else on disk to read.
+ *
+ * `fallback` is true ONLY for the quotation. The picker turns it into a
+ * `first message` marker in the description, which is what stops the opening
+ * words from reading as a name somebody chose. It is deliberately the same
+ * boolean the row renderer keys its own treatment off, not a second enum
+ * describing the same fact in different words.
+ */
+function archivedPickName(
+  record: EditorialRecord,
+  facts: TranscriptFacts,
+): { text: string; fallback: boolean } {
+  const chosen = record.title ?? facts.label;
+  if (chosen !== undefined && chosen.trim() !== '') {
+    return { text: chosen, fallback: false };
+  }
+  const fromTranscript = transcriptFallbackName({
+    ...(facts.aiTitle === undefined ? {} : { aiTitle: facts.aiTitle }),
+    ...(facts.firstPrompt === undefined ? {} : { firstPrompt: facts.firstPrompt }),
+  });
+  // The text already carries its own typographic quotes — the picker must not
+  // add a second pair.
+  if (fromTranscript !== undefined) return fromTranscript;
+  return { text: shortId(record.id), fallback: false };
+}
+
+/**
+ * Say so when a restore lands on a row the tree is currently filtering out.
+ *
+ * With **Show Only Active Sessions** on, restoring a closed session puts its
+ * row back into a tree that is not showing closed rows — so the verb reports
+ * success, `revealSession` finds nothing, and the honest reading of the screen
+ * is that nothing happened. `menuState` already knows which way the filter is
+ * set; this is the one place that had never asked it.
+ *
+ * A status-bar note rather than a dialog: it is a footnote to something that
+ * worked, and a modal would make a successful restore feel like a failure.
+ *
+ * IT TAKES THE IDS, not a count, because the filter is not the only reason a
+ * restored row can be invisible and it must not take the blame for the others.
+ * `onlyActive` hides a row that is OVER; a restored session that is still
+ * RUNNING — an archived-but-live record, which really exists on real machines —
+ * gets its row back immediately, and telling that user to turn a filter off to
+ * see a row `revealSession` has just scrolled to is advice about nothing.
+ *
+ * A MISSING node counts as hidden, and that is deliberate against the tighter
+ * reading. It looks wrong — no node, no explanation — but it is the ordinary
+ * state of exactly the case this note exists for: `archive.memberKeepIds` keeps
+ * a deleted record's transcript OUT of the forest, so a closed archived session
+ * has no node while it is archived, and `deps.refresh()` schedules an
+ * asynchronous rebuild rather than producing one, so the forest read here is
+ * still the pre-restore one. Requiring a node would have silenced the note in
+ * the only case that ever needed it.
+ */
+function noteRestoredWhileFiltered(
+  deps: CommandDeps,
+  ids: readonly string[],
+): void {
+  const state = safeCall('menuState', () => deps.menuState?.());
+  if (state?.onlyActive !== true) return;
+  const forest = safeCall('getForest', () => deps.getForest());
+  const count = ids.filter((id) => {
+    const node = forest?.nodes.get(id);
+    return node === undefined || sessionIsOver(node);
+  }).length;
+  if (count <= 0) return;
+  vscode.window.setStatusBarMessage(
+    count === 1
+      ? 'Flock: restored — turn off "Show Only Active Sessions" to see its row.'
+      : `Flock: restored ${String(count)} — turn off "Show Only Active ` +
+        'Sessions" to see their rows.',
+    6000,
+  );
+}
+
+/**
+ * Say so when a restore lands in a project that is CLOSED — and offer the way
+ * back.
+ *
+ * The archive browser is deliberately reachable for a closed project: the
+ * palette entry passes `includeHidden` so that "where did that session go" has
+ * an answer even when the project it belonged to is put away. But a restored
+ * session whose every claimant project is closed lands on NO surface at all —
+ * `computeGrouping` files it under the closed project and then drops it, the
+ * record is no longer `deleted` so the browser it came from now skips it too,
+ * `revealSession` has nothing to reveal, and `noteRestoredWhileFiltered` only
+ * ever spoke about the active-only filter. The verb reported success and the
+ * screen showed nothing changing, which is indistinguishable from a failure.
+ *
+ * THE CLOSED PROJECT IS THE ONLY REASON THIS FLOW CAN PRODUCE, which is why
+ * the note names it rather than enumerating the tree's five ways of hiding a
+ * row. Every session in this list matched this project by directory, so it has
+ * a claimant by construction — and the grouping applies folder-hiding and
+ * `onlyProjectSessions` only to sessions NO project claims. The active-only
+ * filter is the one other reason a restored row can be missing, and it already
+ * has its own sentence; the ids stranded here are withheld from it so that one
+ * restore never produces two explanations of itself.
+ *
+ * ALL claimants, not the best one: a directory two projects list files its row
+ * under both (see matchProjects), so a session whose second claimant is open
+ * has a row and needs no note.
+ *
+ * A TOAST WITH A BUTTON rather than the status-bar line the filter note uses,
+ * because there is something to do about it and the flow already knows what:
+ * it was invoked on a project id. Reopening walks that project's closed
+ * ANCESTORS too — closing a parent closes its children (`closedProjectIds`),
+ * so clearing the flag on a subproject alone would leave the row exactly as
+ * absent and the button would be a lie about what it did.
+ */
+async function noteRestoredIntoClosedProject(
+  deps: CommandDeps,
+  project: ProjectRecord,
+  ids: readonly string[],
+  cwdOf: (id: string) => string | undefined,
+  reach?: (project: ProjectRecord) => readonly string[],
+): Promise<readonly string[]> {
+  const projects = safeCall('allProjects', () => deps.allProjects()) ?? [];
+  const closed = closedProjectIds(projects);
+  if (closed.size === 0) return ids;
+  const stranded = ids.filter((id) => {
+    const matches = matchProjects(projects, cwdOf(id), reach);
+    // No claimant at all is not this note's business: such a session gets a
+    // folder row or a loose one, both of which are on screen.
+    if (matches.length === 0) return false;
+    return matches.every((m) => closed.has(m.project.id));
+  });
+  if (stranded.length === 0) return ids;
+
+  const tree = buildProjectTree(projects);
+  const toReopen: ProjectRecord[] = [];
+  let walk: string | undefined = project.id;
+  const seen = new Set<string>();
+  while (walk !== undefined && !seen.has(walk)) {
+    seen.add(walk);
+    const node = tree.byId.get(walk);
+    if (!node) break;
+    if (node.project.hidden === true) toReopen.push(node.project);
+    walk = node.parentId ?? undefined;
+  }
+
+  const what =
+    stranded.length === 1
+      ? 'Restored the session'
+      : `Restored ${String(stranded.length)} sessions`;
+  const reopen = `Reopen "${project.name}"`;
+  const choice = await vscode.window.showInformationMessage(
+    `${what}, but "${project.name}" is closed — the row is off the tree ` +
+      'until the project comes back. The conversation is intact either way.',
+    ...(toReopen.length > 0 ? [reopen] : []),
+  );
+  if (choice !== reopen) return ids.filter((id) => !stranded.includes(id));
+  // Sequential, like every other multi-row write in this file: the store has
+  // its own mutation queue, and awaiting each keeps a failure attributable.
+  for (const target of toReopen) {
+    await deps.upsertProject(target.id, { hidden: false });
+  }
+  log('project: opened for a restore', project.id, project.name);
+  deps.refresh();
+  void deps.revealProject(project.id);
+  return ids.filter((id) => !stranded.includes(id));
+}
+
+/**
+ * THE ARCHIVE BROWSER: every session this project has archived, searchable by
+ * name, restorable several at a time.
+ *
+ * Archiving takes a row out of the tree, which makes the archive the one place
+ * a session can be without being anywhere you can look. Until this existed the
+ * only doors back were the Undo button on the toast — gone the moment you
+ * dismissed it — and one whole-machine picker labelled with hex ids. So the
+ * list you want is the archive of the thing you are already looking at, and it
+ * is on the project's own row. `restoreSession` stays as the everything-door,
+ * for the case where you do not remember which project it was.
+ *
+ * DRIVEN OFF THE RECORDS AND THE TRANSCRIPT INDEX, never the forest: an
+ * archived session usually has no node at all (`memberKeepIds` skips a deleted
+ * record, so `buildForest` is never handed one), which is exactly why the
+ * restore picker reads the editorial store too.
+ *
+ * `cwdOf` is not a nicety. A record with no `cwd` of its own matches no
+ * project, and on a real store 32 of 159 archived records are in that state —
+ * a fifth of every project's archive would simply be missing, with no way for
+ * the user to tell an empty list from an incomplete one. The transcript's own
+ * head names a directory for 28 of those 32.
+ *
+ * `canPickMany` rather than a picker that reopens: a checklist is ONE gesture,
+ * and reopening a picker four times is four. It is also the shape the stale
+ * archiver already uses, so the two bulk lists in this extension are read the
+ * same way.
+ */
+export async function archivedSessionsFlow(
+  deps: AccountCommandDeps,
+  projectId: string,
+): Promise<void> {
+  const project = deps.getProject(projectId);
+  if (!project) return;
+
+  const reach = safeCall('projectReach', () => deps.projectReach?.());
+  const factsOf = (id: string): TranscriptFacts =>
+    safeCall('transcriptFacts', () => deps.transcriptFacts?.(id)) ?? {};
+  const archived = archivedForProject(
+    deps.allRecords(),
+    deps.allProjects(),
+    project.id,
+    {
+      ...(reach === undefined ? {} : { extraDirs: reach }),
+      cwdOf: (id) => factsOf(id).cwd,
+    },
+  );
+  if (archived.length === 0) {
+    void vscode.window.showInformationMessage(
+      `Nothing archived in "${project.name}". Archiving a session takes its ` +
+        'row off the tree; this is where it comes back from.',
+    );
+    return;
+  }
+
+  const now = Date.now();
+  const rows = archived
+    .map((record) => {
+      const facts = factsOf(record.id);
+      const stamped = Date.parse(record.updatedAt ?? record.createdAt ?? '');
+      const when =
+        facts.lastActiveAt ?? (Number.isFinite(stamped) ? stamped : 0);
+      return { record, facts, when };
+    })
+    // Transcript activity beats record order, for the same reason the chat
+    // history sorts this way: the record only moves when WE write it, so
+    // ordering on it alone sorts by "when was this archived", not by "when did
+    // you last talk to it".
+    .sort((a, b) => b.when - a.when);
+
+  const picks: SessionPick[] = rows.map(({ record, facts, when }) => {
+    const name = archivedPickName(record, facts);
+    return {
+      label: name.text,
+      description: [
+        when > 0 ? ageLabel(now - when) : '',
+        shortId(record.id),
+        name.fallback ? 'first message' : '',
+      ]
+        .filter((s) => s !== '')
+        .join(' · '),
+      // The directory, which is how you tell two sessions with the same name
+      // apart, and the only thing `matchOnDetail` can search on.
+      detail: record.cwd ?? facts.cwd,
+      sessionId: record.id,
+    };
+  });
+
+  const chosen = await vscode.window.showQuickPick(picks, {
+    title: `Archived · ${project.name}`,
+    placeHolder: 'Tick the sessions to restore, then press Enter',
+    canPickMany: true,
+    matchOnDescription: true,
+    matchOnDetail: true,
+    ignoreFocusOut: true,
+  });
+  // undefined is Escape; an EMPTY array is a deliberate "actually, none of
+  // these". Neither is an error, and neither writes anything — the same rule
+  // the stale archiver's checklist follows.
+  if (!chosen || chosen.length === 0) return;
+
+  // Sequential, like every other multi-row write in this file: the store has
+  // its own mutation queue, and awaiting each keeps a failure attributable.
+  for (const pick of chosen) {
+    await deps.upsertRecord(pick.sessionId, { deleted: false });
+  }
+  log('restore:', chosen.map((c) => shortId(c.sessionId)).join(' '));
+  deps.refresh();
+  // Reveal only when there is one row to reveal: scrolling to the last of six
+  // restored rows would name one of them as the interesting one.
+  if (chosen.length === 1) void deps.revealSession(chosen[0].sessionId);
+  // The closed-project note runs FIRST and hands back the ids it did not
+  // account for: a row that is nowhere at all has nothing to do with how a
+  // filter is set, and two notes about one restore would leave the user
+  // deciding which of them to believe.
+  const unexplained = await noteRestoredIntoClosedProject(
+    deps,
+    project,
+    chosen.map((pick) => pick.sessionId),
+    (id) => deps.getRecord(id)?.cwd ?? factsOf(id).cwd,
+    reach,
+  );
+  noteRestoredWhileFiltered(deps, unexplained);
+}
+
 /** The first line of a prompt, trimmed to something a quick-pick row can hold.
  *  A pasted stack trace is a perfectly ordinary first message and its second
  *  line is never the useful one. */
@@ -4949,7 +5604,9 @@ function firstLine(text: string | undefined): string | undefined {
  *
  * THE INVARIANT: unhiding must never make the row disappear. Hide ended the
  * process, which makes it a closed session — and closed sessions are off by
- * default (`lineage.showArchived`), so merely clearing the flag would drop the
+ * default (`lineage.showArchived` — that setting is about level 2, a closed
+ * session read off disk, and has nothing to do with the Archive verb), so
+ * merely clearing the flag would drop the
  * row out of the tree, i.e. the precise opposite of what was asked. So a closed
  * session is reopened FIRST and the flag is cleared only once that succeeded; if
  * it cannot be reopened, the flag stays set and the greyed row stays visible.
@@ -5030,6 +5687,47 @@ function claimsDetachedProcess(record: EditorialRecord | undefined): boolean {
   );
 }
 
+/**
+ * The same question over the whole GENERATION CHAIN, which is the only
+ * spelling of it that is ever true of a re-keyed conversation.
+ *
+ * THE BUG THIS REPLACED, and it was live on a real machine: the claim is
+ * stamped on whichever id was parked, and `generations.INHERITED_RECORD_KEYS`
+ * deliberately does not carry `tmux`/`graceUntil` onto a successor, so a
+ * conversation that re-mints its id after being parked (a plain `--resume`, a
+ * compaction) leaves the claim on an OLDER member while its row is the tip.
+ * Every verb here read `claimsDetachedProcess(deps.getRecord(id))` — the tip
+ * only — and so concluded "nothing detached" about a wrap that was running;
+ * `deps.killDetached`, which has always searched the chain, would have found
+ * and ended it. Archive then wrote `deleted: true` over the live wrap: the row
+ * left the tree and a `claude` process ran on for 31 hours with nothing on
+ * screen counting it. That is precisely the state the levels design exists to
+ * make unrepresentable, and it is the 84-session incident in miniature.
+ *
+ * ONE probe for the decision and the act. The wiring's `killDetached` finds
+ * the holder itself; this asks the wiring for the same holder rather than
+ * re-deriving it here, because the two searches drifting apart is the whole
+ * defect and a second copy would let them drift again.
+ *
+ * An absent dep falls back to the TIP record rather than to "no claim". Every
+ * unit double and any older wiring has no chain to search, and reading the tip
+ * is exactly what those callers did before — a fallback of `false` would have
+ * turned "sometimes misses the kill" into "never kills at all" for them.
+ */
+function claimsDetachedProcessInChain(
+  deps: CommandDeps,
+  sessionId: string,
+): boolean {
+  try {
+    if (deps.detachedClaimHolder !== undefined) {
+      return deps.detachedClaimHolder(sessionId) !== undefined;
+    }
+  } catch (err) {
+    logError('commands.detachedClaimHolder', err);
+  }
+  return claimsDetachedProcess(deps.getRecord(sessionId));
+}
+
 /** Is this session's record bound to a LIVE window other than ours? The
  *  cross-window RESTORE-RACE guard (see CommandDeps.boundToLiveForeignWindow):
  *  another window's restore stamps `boundWindowId` at bind time but clears
@@ -5058,7 +5756,11 @@ async function closeFlow(
   const closedTerminal = deps.closeTerminal(sessionId);
   if (
     !closedTerminal &&
-    claimsDetachedProcess(deps.getRecord(sessionId)) &&
+    // CHAIN-WIDE, not the tip record: a parked conversation that has since
+    // re-minted its id carries its claim on an older generation, and asking
+    // the tip alone made this stamp `closed` while the wrap ran on. See
+    // claimsDetachedProcessInChain.
+    claimsDetachedProcessInChain(deps, sessionId) &&
     // The restore-race guard: a live foreign window's binding means the
     // "grace row" already has a tab THERE and its claim is only the stamp
     // that window has not yet cleared. Killing would end a session someone
@@ -5122,6 +5824,299 @@ async function closeFlow(
   }
 }
 
+// ------------------------------------------- close with a summary
+
+/** `lineage.close.summaryMode`, read through the dep.
+ *
+ *  An ABSENT dep reads as `ask-me`, not as the setting's own default. The
+ *  distinction matters: `DEFAULT_CLOSE_SUMMARY_MODE` is what someone gets who
+ *  has the setting and never touched it, whereas a missing dep means this
+ *  wiring cannot see the configuration at all — every unit double, and any
+ *  host that has not been taught the key — and such a wiring must not start
+ *  two-minute compactions on people's branches on the strength of a value it
+ *  never read. So the fallback is exactly what the verb did before. */
+function closeSummaryModeOf(deps: CommandDeps): CloseSummaryMode {
+  try {
+    return deps.closeSummaryMode?.() ?? 'ask-me';
+  } catch (err) {
+    logError('commands.closeSummaryMode', err);
+    return 'ask-me';
+  }
+}
+
+/**
+ * `ask-me` — the old behaviour, preserved exactly.
+ *
+ * Kept verbatim rather than reworded, because it is both a mode someone can
+ * choose and the fallback every refusal in `closeWithCompaction` hands to:
+ * a Codex session, a session with no terminal in this window, a wiring that
+ * cannot read a summary back. A person who reaches it by falling should get
+ * the same box as a person who chose it.
+ */
+async function closeWithTypedSummary(
+  deps: CommandDeps,
+  sessionId: string,
+): Promise<void> {
+  const label = labelFor(deps, sessionId);
+  // The summary box IS the confirmation — no second modal.
+  const raw = await vscode.window.showInputBox({
+    title: `Close "${label}" with a summary`,
+    prompt: 'What did this session accomplish? (recorded on the node)',
+    placeHolder: 'e.g. traced the drift to a stale cache key; fix in PR 412',
+    ignoreFocusOut: true,
+    validateInput: (value) =>
+      value.trim().length === 0 ? 'Enter a summary, or press Escape.' : undefined,
+  });
+  if (raw === undefined) return;
+  const summary = raw.trim();
+  if (!summary) return;
+  await closeFlow(deps, sessionId, { summary });
+}
+
+/**
+ * Wait for the compaction, behind the window's progress spinner when the host
+ * has one.
+ *
+ * There IS a spinner because the wait is long: manual compactions measured on
+ * this machine took 96 to 180 seconds, and a verb that does nothing visible
+ * for two minutes reads as broken, which is how a working feature gets
+ * reported as a bug. Cancelling is the same outcome as timing out — stop
+ * waiting — and neither closes anything, because the CLI is still compacting
+ * either way and Flock has no way to call that back.
+ *
+ * `ProgressLocation` is feature-detected rather than referenced, the same way
+ * workspaces.withIndicator does it: it is an enum the unit-test mock does not
+ * ship, and a two-minute wait must not depend on chrome being available.
+ */
+async function awaitSummaryWithProgress(
+  deps: CommandDeps,
+  sessionId: string,
+  sinceMs: number,
+  title: string,
+): Promise<string | undefined> {
+  const wait = deps.awaitCompactSummary;
+  if (wait === undefined) return undefined;
+  const run = (): Promise<string | undefined> =>
+    wait.call(deps, sessionId, sinceMs, COMPACT_SUMMARY_WAIT_MS);
+  const w: Partial<typeof vscode.window> = vscode.window;
+  const location = (vscode as Partial<typeof vscode>).ProgressLocation
+    ?.Notification;
+  if (typeof w.withProgress !== 'function' || location === undefined) {
+    return run();
+  }
+  let ran = false;
+  try {
+    return await Promise.resolve(
+      w.withProgress<string | undefined>(
+        { location, title, cancellable: true },
+        (_progress, token) => {
+          ran = true;
+          return Promise.race([
+            run(),
+            new Promise<undefined>((resolve) => {
+              token.onCancellationRequested(() => resolve(undefined));
+            }),
+          ]);
+        },
+      ),
+    );
+  } catch (err) {
+    // Only a host that cannot show the spinner falls back to running without
+    // one; a failure from the wait itself has to surface as itself.
+    if (ran) throw err;
+    logError('commands.withProgress', err);
+    return run();
+  }
+}
+
+/**
+ * The two compacting modes: drive `/compact`, read back what the CLI wrote,
+ * record it, optionally tell the parent, then close.
+ *
+ * SAY WHAT THIS IS. Flock cannot ask a model for a summary — it has no API
+ * client, and the only way it can speak to a running conversation is by typing
+ * into its terminal. So it types `/compact`, which the Claude CLI interprets as
+ * a command (the same property `forkAndCompact` rests on), and then reads the
+ * `isCompactSummary` record the CLI files in the transcript. The words are
+ * genuinely the model's; the driving is a keystroke. It is not a scrape of the
+ * last exchange, and nothing in the UI calls it something Flock generated.
+ *
+ * The order below is not arbitrary — every step is a refusal that has to come
+ * before the one that costs something:
+ *
+ *   1. CODEX declines by name. The whole mechanism is one Claude CLI property;
+ *      Codex would take `/compact` as ordinary user text and compact nothing.
+ *   2. NO READER, no compaction. A wiring without `awaitCompactSummary` cannot
+ *      see the answer, so it falls to the input box rather than typing
+ *      `/compact` into somebody's session and then shrugging.
+ *   3. NO TERMINAL HERE, nothing sent. `sendTextToSession` reaches only a
+ *      terminal bound in this window — a closed row, another window's session,
+ *      a foreign process and a parked wrap all fail here, and all of them are
+ *      ordinary rather than exotic.
+ *   4. Only then is the keystroke spent.
+ *
+ * A TIMEOUT CLOSES NOTHING, and that is the important one. The session is
+ * mid-model-call; closing its tab would abort the compaction and leave the
+ * branch neither compacted nor summarised. The warning says plainly that the
+ * compaction has already happened to that branch, because by then it has —
+ * this verb is destructive to the branch's own context, and that is only
+ * acceptable because the branch is being closed in the same breath.
+ */
+async function closeWithCompaction(
+  deps: AccountCommandDeps,
+  sessionId: string,
+  mode: CloseSummaryMode,
+): Promise<void> {
+  const label = labelFor(deps, sessionId);
+
+  if (sessionLaunchProvider(deps, sessionId) === 'codex') {
+    const CLOSE = 'Close Without a Summary';
+    const TYPE = 'Type a Summary…';
+    const answer = await vscode.window.showWarningMessage(
+      'Flock: this is a Codex session, and the Codex CLI has no compaction ' +
+        'command Flock can type into it.',
+      {
+        modal: true,
+        detail:
+          'Closing with a summary works by sending `/compact` and reading ' +
+          'back what the CLI writes, which only the Claude CLI does.',
+      },
+      CLOSE,
+      TYPE,
+    );
+    if (answer === CLOSE) await closeFlow(deps, sessionId);
+    else if (answer === TYPE) await closeWithTypedSummary(deps, sessionId);
+    return;
+  }
+
+  if (deps.awaitCompactSummary === undefined) {
+    log('close with summary: no summary reader in this wiring — asking instead');
+    await closeWithTypedSummary(deps, sessionId);
+    return;
+  }
+
+  // The TIP, because a resume or an earlier compaction may have re-minted the
+  // conversation's id and the terminal is bound under whichever generation is
+  // current.
+  const tip = deps.tipOf(sessionId);
+  const sinceMs = Date.now();
+  if (!deps.sendTextToSession(tip, COMPACT_PROMPT)) {
+    const host = hostOf(deps, tip);
+    const CLOSE = 'Close Without a Summary';
+    const TYPE = 'Type a Summary…';
+    const answer = await vscode.window.showWarningMessage(
+      host === 'foreign'
+        ? `${hostSentence(host, { label })} Flock cannot type \`/compact\` into it.`
+        : `Flock: "${label}" has no terminal in this window, so \`/compact\` ` +
+            'cannot be sent to it. Only a session open here can be compacted.',
+      CLOSE,
+      TYPE,
+    );
+    if (answer === CLOSE) await closeFlow(deps, sessionId);
+    else if (answer === TYPE) await closeWithTypedSummary(deps, sessionId);
+    return;
+  }
+
+  // Stamped BEFORE the wait, and read by the wait: a transcript may already
+  // hold summaries from earlier compactions, and one of those reported as this
+  // branch's conclusion would be a confident lie. `sinceMs` is captured just
+  // above the send for the same reason — a floor slightly early is harmless,
+  // a floor after the CLI's own timestamp would discard the answer.
+  await deps.upsertRecord(sessionId, { summaryRequestedAt: nowIso() });
+  log('close with summary: sent /compact to', shortId(tip));
+
+  const raw = await awaitSummaryWithProgress(
+    deps,
+    sessionId,
+    sinceMs,
+    `Flock: compacting "${label}" before closing it…`,
+  );
+
+  if (raw === undefined) {
+    const ANYWAY = 'Close Anyway';
+    const answer = await vscode.window.showWarningMessage(
+      `Flock: no summary came back for "${label}" — the compaction is still ` +
+        'running, or the CLI wrote none. Nothing has been closed.',
+      {
+        modal: true,
+        detail:
+          'The branch has been asked to compact, so its own context is ' +
+          'already squashed whether or not you close it now. Leaving it open ' +
+          'lets the compaction finish; closing now ends the turn it is in.',
+      },
+      ANYWAY,
+    );
+    if (answer === ANYWAY) await closeFlow(deps, deps.tipOf(sessionId));
+    return;
+  }
+
+  // RE-RESOLVE the tip. A compaction re-mints the session id in roughly a
+  // third of cases — a successor generation in a new transcript file — and
+  // closing the pre-compaction id would stamp `closed` on a superseded
+  // generation while its successor kept running.
+  const closedId = deps.tipOf(sessionId);
+  const summary = summaryForRecord(raw);
+
+  if (mode === 'compact-and-tell-parent') {
+    const parentId = deps.getForest().nodes.get(closedId)?.parentId ?? null;
+    if (parentId !== null) tellParentOfSummary(deps, parentId, label, raw);
+  }
+
+  // SOMETHING ELSE MAY HAVE CLOSED IT WHILE WE WAITED, and the wait is up to
+  // two minutes long: the idle-close sweep, a second Flock window, the user's
+  // own Close Now, or Archive. Closing it a second time re-stamped `closed`
+  // with the later timestamp — losing the real close time — nulled the binding
+  // again, called `closeTerminal` on a session that had already ended, and
+  // (for a session ARCHIVED during the wait) left a record reading
+  // `{ deleted: true, closed: <fresh> }`, an archived row that had just
+  // acquired a new close stamp. It also raised closeFlow's "not hosted by this
+  // window, so it is still running" warning about a session that was not.
+  //
+  // So the record is re-read at the end of the wait and the summary — the one
+  // thing the user actually asked for — is recorded on its own. `closed != null`
+  // rather than `!== undefined` because a resume writes an explicit `null` to
+  // clear the stamp, and that means OPEN.
+  const already = deps.getRecord(closedId);
+  if (already?.closed != null || already?.deleted === true) {
+    log('close with summary:', shortId(closedId), 'was already closed — summary only');
+    await deps.upsertRecord(closedId, { summary });
+    deps.refresh();
+    return;
+  }
+
+  await closeFlow(deps, closedId, { summary });
+}
+
+/**
+ * Type the branch's conclusion into its parent conversation.
+ *
+ * The same channel, the same limits and the same silence on failure as the
+ * fork note — see notifyParentOfFork, whose comment enumerates the four
+ * ordinary states in which a parent cannot be typed into. Not awaited by the
+ * close and never allowed to fail it: a branch whose summary was recorded and
+ * whose tab was closed did what was asked, and a sentence that did not land in
+ * a conversation elsewhere is not a reason to leave a session open.
+ */
+function tellParentOfSummary(
+  deps: CommandDeps,
+  parentId: string,
+  childLabel: string,
+  raw: string,
+): void {
+  try {
+    const parentTip = deps.tipOf(parentId);
+    if (!forkNoteDeliverable(hostOf(deps, parentTip))) {
+      log('close with summary: parent', shortId(parentTip), 'is not open here');
+      return;
+    }
+    if (!deps.sendTextToSession(parentTip, summaryForParentNote(raw, childLabel))) {
+      log('close with summary: parent', shortId(parentTip), 'refused the note');
+    }
+  } catch (err) {
+    logError('commands.tellParentOfSummary', err);
+  }
+}
+
 /**
  * CLOSE NOW — the user verb for "1→2 immediately", skipping every wait the
  * lifecycle grants: a grace countdown is cut short (the detached process and
@@ -5132,7 +6127,9 @@ async function closeFlow(
  */
 async function closeNowFlow(deps: CommandDeps, sessionId: string): Promise<void> {
   if (await refusedForeignClose(deps, sessionId)) return;
-  const detached = claimsDetachedProcess(deps.getRecord(sessionId));
+  // Chain-wide for the same reason closeFlow is: the claim sits on whichever
+  // generation was parked, which is not always the row's id.
+  const detached = claimsDetachedProcessInChain(deps, sessionId);
   const closedTerminal = deps.closeTerminal(sessionId);
   if (!closedTerminal && detached) {
     // A grace row: nothing bound anywhere, the process lives only in the
@@ -6011,6 +7008,33 @@ async function setProjectAccountFlow(
  * the process before it moves a byte and puts everything back if the move
  * fails. This function's own job ends at "the user said yes to this account".
  */
+/**
+ * One of two files claiming a session id, in the words a person can choose
+ * between: how big it is, and when it was last written.
+ *
+ * Absolute path included and deliberately not shortened. This sentence appears
+ * in front of a decision about which of two conversations survives in the id's
+ * namespace, and the only way to check the answer is to go and look at the file;
+ * a prettified `…/projects/-Users-…/ab12.jsonl` is exactly the string that
+ * cannot be pasted into a terminal.
+ *
+ * Sizes in whole KB/MB rather than bytes for the same reason: the question this
+ * answers is "is this the nine-line stub or the afternoon's work", and 2 KB
+ * against 11 MB answers it where 2,273 against 12,001,952 has to be counted.
+ */
+function describeCopy(file: string, bytes: number, mtimeMs: number): string {
+  const size =
+    bytes >= 1024 * 1024
+      ? `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+      : bytes >= 1024
+        ? `${Math.round(bytes / 1024)} KB`
+        : `${bytes} bytes`;
+  const when = Number.isFinite(mtimeMs)
+    ? new Date(mtimeMs).toLocaleString()
+    : 'an unknown time';
+  return `${size}, last written ${when} — ${file}`;
+}
+
 async function switchAccountFlow(
   deps: AccountCommandDeps,
   sessionIdArg: string,
@@ -6045,17 +7069,38 @@ async function switchAccountFlow(
   const profiles = accts.accounts();
   const current = pinnedProfile(accts.sessionProfileId(sessionId), profiles);
 
-  // WHICH CLI WROTE THIS. Checked before the transcript test, because
-  // `hasTranscript` only knows how to look for a CLAUDE transcript
-  // (`<configDir>/projects/<slug>/<id>.jsonl`) — so a Codex conversation with a
-  // hundred turns behind it would fail that test and be told it had never taken
-  // one, which is the most confusing sentence this verb could say.
+  // WHICH CLI WROTE THIS, and the whole decision that follows from it, through
+  // one function so that this picker, the row menu's context key and the
+  // at-the-limit notification cannot each answer it differently — which is
+  // exactly how they had drifted.
   //
+  // THE CONVERSATION'S CLI, NEVER THE PIN'S, and that is the fix rather than a
+  // detail. This used to ask `cliOfProfile(current)`, i.e. what account the
+  // session is pinned to; a Codex conversation started in a terminal has no pin
+  // at all, an absent pin reads as the default provider, and so it sailed
+  // through the gate and was told by the transcript test below that it "has not
+  // taken a turn yet" — the precise sentence this gate exists to prevent, since
+  // `hasTranscript` only knows how to look for a CLAUDE transcript
+  // (`<configDir>/projects/<slug>/<id>.jsonl`). `sessionLaunchProvider` was
+  // written for this question and is what `pinnedLaunch` already resolves
+  // launches with: the record first, then which history store holds the
+  // transcript. A pin is a claim a user can change with another verb; the CLI
+  // that wrote the bytes is a fact about the bytes, and it is the bytes this
+  // verb moves.
+  const conversationCli =
+    sessionLaunchProvider(deps, sessionId) === 'codex' ? 'codex' : 'claude';
+  const offer = offerSwitch({ cli: conversationCli, from: current, profiles });
+
   // Flock can move a conversation between two logins of the SAME CLI, and only
   // Claude's layout is one it knows how to move. Sessions on other CLIs get an
   // honest "not yet" rather than a refusal about the wrong thing.
-  if (cliOfProfile(current) !== 'claude') {
-    const cli = current ? (PROVIDERS[current.provider]?.label ?? 'that') : 'that';
+  if (offer.kind === 'wrong-cli') {
+    // Named from the CONVERSATION too, with the pinned account only as a
+    // fallback: an unpinned Codex session has no account to be named after, and
+    // "is a that conversation" is the sentence that produced.
+    const cli =
+      PROVIDERS[conversationCli]?.label ??
+      (current ? (PROVIDERS[current.provider]?.label ?? 'that') : 'that');
     void vscode.window.showWarningMessage(
       `Flock: "${label}" is a ${cli} conversation, and Flock only knows how to ` +
         'move Claude ones between accounts — it would have to find and relocate ' +
@@ -6074,6 +7119,24 @@ async function switchAccountFlow(
   // OWNERSHIP. The mechanism restarts a process, and restarting one this
   // window does not own is the same lie `closeFlow` refuses to tell: we would
   // move the bytes out from under a claude that is still writing them.
+  //
+  // BOTH kinds of "not this window's", and the second one was the hole.
+  // `hostOf` reports 'flock' for anything that is Flock's but not bound here,
+  // and that was allowed straight through: on a machine with tmux off, or on
+  // Windows where the wrap does not exist at all, nothing was stopped, the
+  // transcript was renamed under a live CLI, and the result still reported a
+  // clean in-place move.
+  //
+  // NOT a flat refusal of 'flock', though, because that one word covers two
+  // situations with opposite answers. A conversation parked into the private
+  // tmux server by a workspace switch is 'flock' and this window can respawn
+  // its pane exactly as if it were attached — the mechanism says so itself,
+  // and refusing it would both remove a move that works and print a sentence
+  // about another window that is not true. A conversation whose tab another VS
+  // Code window holds with no wrap is also 'flock', and there this window can
+  // stop nothing at all. `canRestartSession` is the wiring's answer to which
+  // one this is; an absent dep is a refusal, because a caller that cannot tell
+  // must not be the one deciding to restart somebody's process.
   const host = deps.hostOf?.(sessionId);
   if (host === 'foreign') {
     void vscode.window.showWarningMessage(
@@ -6083,11 +7146,24 @@ async function switchAccountFlow(
     );
     return;
   }
+  if (host === 'flock' && accts.canRestartSession?.(sessionId) !== true) {
+    void vscode.window.showWarningMessage(
+      `Flock: "${label}" is running under another Flock window, and this ` +
+        'window has no way to stop it — so its account cannot be changed from ' +
+        'here without renaming its transcript while it is still being written. ' +
+        'Switch to the window that has it and move it from there.',
+    );
+    return;
+  }
 
   // Only accounts this conversation could actually run on: same CLI, able to
-  // host, not the one it is already on. Building the list from the rule means
-  // the picker cannot offer something the mechanism would then refuse.
-  const choices = profiles.filter((p) => switchRefusal(current, p) === null);
+  // host, not the one it is already on — `offerSwitch` above, which is the
+  // same rule the row menu's context key counts and the at-the-limit
+  // notification filters on. Building the list from the rule means the picker
+  // cannot offer something the mechanism would then refuse; building all three
+  // from ONE function is what stops them disagreeing about who has somewhere
+  // to go.
+  const choices = offer.kind === 'ok' ? offer.targets : [];
   if (choices.length === 0) {
     void vscode.window.showInformationMessage(
       current
@@ -6138,19 +7214,34 @@ async function switchAccountFlow(
   }
   if (!target) return;
 
+  // TWO DIALOGS, because there are two costs and one of them is nothing.
+  //
+  // Two profiles can resolve to the same config directory — the default login
+  // and any provider with no config-dir variable both land on `~/.claude`, and
+  // the roster this extension seeds by default is exactly such a pair — so
+  // "move it there" can be a re-pin with no bytes and no restart behind it. The
+  // mechanism now short-circuits that case above its stop step; this asks it
+  // the same question so the sentence in front of the user is not a promise of
+  // a lost turn that nothing is going to take. An absent dep answers "it moves
+  // something", which overstates the cost rather than understating it.
+  const movesNothing = accts.switchMovesNothing?.(sessionId, target) === true;
   const MOVE = 'Switch Account';
   const confirm = await vscode.window.showWarningMessage(
     `Move "${label}" to ${target.label}?`,
     {
       modal: true,
-      detail:
-        'The conversation is kept — it is replayed from its transcript, which ' +
-        'moves with it. Claude Code has to be restarted to pick up the other ' +
-        'account, so a turn in progress is cut off and anything typed but not ' +
-        'sent is lost.\n\n' +
-        'The prompt cache does not move. The first turn on ' +
-        `${target.label} re-reads the whole conversation, which is slower and ` +
-        'takes a larger bite out of that account than a cached turn would.',
+      detail: movesNothing
+        ? `${target.label} keeps its history in the same directory this ` +
+          'conversation is already in, so this only changes which account the ' +
+          'row is billed to. Nothing is moved and nothing is restarted — the ' +
+          'session keeps running exactly as it is.'
+        : 'The conversation is kept — it is replayed from its transcript, which ' +
+          'moves with it. Claude Code has to be restarted to pick up the other ' +
+          'account, so a turn in progress is cut off and anything typed but not ' +
+          'sent is lost.\n\n' +
+          'The prompt cache does not move. The first turn on ' +
+          `${target.label} re-reads the whole conversation, which is slower and ` +
+          'takes a larger bite out of that account than a cached turn would.',
     },
     MOVE,
   );
@@ -6179,6 +7270,54 @@ async function switchAccountFlow(
   deps.refresh();
 
   if (!result.ok) {
+    // THE ONE REFUSAL WITH A WAY OUT. Two files claim this session id, so the
+    // move would have to overwrite one of somebody's conversations — and until
+    // one of them is out of the way, every future attempt refuses identically.
+    // Three ids on the author's machine are in exactly this state, which is how
+    // "Move to Account is inconsistent" turned out to mean "permanently
+    // impossible for these three".
+    //
+    // The offer names both files with their sizes and dates, because the user is
+    // the only one here who can tell a stray nine-line metadata stub from an
+    // afternoon's conversation, and it SETS ASIDE rather than deletes: the loser
+    // is renamed to `<id>.jsonl.superseded-<stamp>`, which no reader in Flock
+    // selects and one `mv` undoes. Confirming the set-aside is not confirming
+    // the move — the flow restarts from the top afterwards, modal and all,
+    // because a button on an error toast is not consent to restart a process.
+    const dup = result.duplicate;
+    if (dup !== undefined && accts.setAsideTranscript) {
+      const SET_ASIDE = 'Set the Other Copy Aside';
+      const pressed = await vscode.window.showErrorMessage(
+        `Flock: "${label}" was not moved — ${target.label} already holds a ` +
+          'transcript with this conversation\'s id, and Flock will not ' +
+          'overwrite one conversation with another.\n\n' +
+          `On ${target.label}: ${describeCopy(dup.otherPath, dup.otherBytes, dup.otherMtimeMs)}\n` +
+          `On ${current?.label ?? 'the default login'}: ` +
+          `${describeCopy(dup.thisPath, dup.thisBytes, dup.thisMtimeMs)}\n\n` +
+          `Setting the copy on ${target.label} aside renames it out of the ` +
+          'way — nothing is deleted — and then the move can go ahead.',
+        SET_ASIDE,
+      );
+      if (pressed === SET_ASIDE) {
+        const aside = await accts.setAsideTranscript(dup.otherPath);
+        deps.refresh();
+        if (!aside.ok) {
+          void vscode.window.showErrorMessage(
+            `Flock: that copy could not be set aside — ${
+              aside.error ?? 'the rename failed.'
+            } "${label}" is still on ${current?.label ?? 'the default login'}.`,
+          );
+          return;
+        }
+        void vscode.window.showInformationMessage(
+          `Flock: the other copy is now ${aside.path ?? 'renamed'}. Nothing was ` +
+            'deleted.',
+        );
+        await switchAccountFlow(deps, sessionId, target.id);
+        return;
+      }
+      return;
+    }
     void vscode.window.showErrorMessage(
       `Flock: "${label}" was not moved — ${
         result.error ?? 'the switch failed.'
@@ -6196,9 +7335,34 @@ async function switchAccountFlow(
     );
     return;
   }
+  // WHERE THE SESSION IS NOW, in the words each outcome actually deserves.
+  //
+  // This used to be one boolean rendered two ways, and both of the cases the
+  // boolean could not hold were rendered wrong. A move that produced no
+  // terminal arrived as `inPlace: false` and was announced as "(in a new
+  // terminal)", sending the user to look for a tab that does not exist; and a
+  // move where nothing could be stopped arrived as `inPlace: true` and was
+  // announced as a clean in-place switch, which is the one outcome that needs a
+  // warning rather than a status line. `running` is optional on the result, so
+  // a wiring that does not set it falls back to exactly the old two sentences.
+  const running =
+    result.running ?? (result.inPlace ? 'in-place' : 'relaunched');
+  if (running === 'unknown') {
+    void vscode.window.showWarningMessage(
+      `Flock: "${label}" is now on ${target.label}, but Flock could not find ` +
+        'the process that was running it, so it could not be restarted on the ' +
+        'new account. Close it wherever it is running and open it again from ' +
+        'here.',
+    );
+    return;
+  }
   vscode.window.setStatusBarMessage(
     `Flock: "${label}" → ${target.label}${
-      result.inPlace ? '' : ' (in a new terminal)'
+      running === 'in-place'
+        ? ''
+        : running === 'relaunched'
+          ? ' (in a new terminal)'
+          : ' — click the row to open it'
     }`,
     5000,
   );
@@ -6228,18 +7392,14 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   const disposables: vscode.Disposable[] = [];
 
   const register = (id: string, human: string, handler: Handler): void => {
+    // ONE catch and one error toast in front of every registered command, so no
+    // handler has to remember its own and none can quietly swallow a throw. The
+    // id and the human name are captured here rather than repeated in forty
+    // handlers, which is also what keeps the wording of a failure identical
+    // wherever it comes from. The alternative — each flow reporting itself —
+    // was tried and produced exactly the drift you would expect: some verbs
+    // logged, some toasted, and a few did neither.
     const guarded = async (...args: unknown[]): Promise<void> => {
-      // THE DEMO PROJECT'S ONE GATE, and it is here — in front of every command
-      // at once — rather than repeated in the forty flows a demo row's context
-      // menu can reach. A fabricated row carries a real-looking argument by
-      // design (that is what makes the menus draw), so the refusal has to happen
-      // before any flow reads it, and one place is the only way it cannot be
-      // forgotten in the forty-first.
-      const refusal = demoRefusal(...args.map(idsInArg).flat());
-      if (refusal !== '') {
-        void vscode.window.showInformationMessage(refusal);
-        return;
-      }
       try {
         await handler(...args);
       } catch (err) {
@@ -6493,6 +7653,22 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
    * the literal words "/compact" to the model and compact nothing. A fork that
    * silently skipped the half the user asked for is worse than a verb that
    * declines, so a Codex session gets the plain fork offered by name instead.
+   *
+   * WHAT LANDS ON DISK IS STILL THE WHOLE COPY, and it is worth saying because
+   * the name invites the opposite reading. The CLI writes the parent's chain
+   * into the child's transcript BEFORE the child's first turn runs, so a fork
+   * and compact costs exactly the same bytes a plain fork does; what `/compact`
+   * changes is the CONTEXT the child carries forward from there. Observed on
+   * child 023b71cc: 1,017 of the parent's 1,017 message records copied, the
+   * child's own first message the literal text `/compact`, and its boundary
+   * eleven lines later reporting `preTokens 567809 -> postTokens 6034`.
+   *
+   * And the compaction is a real model call over the whole inherited history,
+   * not a local trim. Across the 76 compactions on the machine this was written
+   * on it ran 59 to 243 seconds, median 128 — paid entirely by the child, which
+   * is the point of doing it here rather than in the parent.
+   *
+   * docs/forking-and-context.md section 5 has the on-disk shape in full.
    */
   register(
     COMMANDS.forkAndCompact,
@@ -6649,6 +7825,21 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     );
   });
 
+  /**
+   * CLOSE WITH SUMMARY — four behaviours behind one menu entry.
+   *
+   * It used to be one behaviour, and the wrong one: an input box asking the
+   * PERSON to type the summary of a conversation they had just been reading —
+   * the party with the least of it in their head, and no help from the one
+   * thing on screen that knew. What it should do, and now does by default, is
+   * what you would do by hand: compact the branch, keep the summary the CLI
+   * writes, and pass a short form of it up to the parent so that conversation
+   * knows what its branch concluded.
+   *
+   * `lineage.close.summaryMode` picks between the four. `ask-me` is the old box
+   * kept verbatim, so that anyone who liked it can have it back by name and so
+   * that every refusal below has somewhere honest to fall to.
+   */
   register(
     COMMANDS.closeWithSummary,
     'close with summary',
@@ -6657,22 +7848,28 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         liveOnly: false,
       });
       if (!id) return;
-      // Ahead of the box, not after it: see refusedForeignClose.
+      // Ahead of everything, not after it: see refusedForeignClose. A session
+      // running somewhere Flock cannot end is refused before a box is opened
+      // or a keystroke is sent, so no work is done that would be thrown away.
       if (await refusedForeignClose(deps, id)) return;
-      const label = labelFor(deps, id);
-      // The summary box IS the confirmation — no second modal.
-      const raw = await vscode.window.showInputBox({
-        title: `Close "${label}" with a summary`,
-        prompt: 'What did this session accomplish? (recorded on the node)',
-        placeHolder: 'e.g. traced the drift to a stale cache key; fix in PR 412',
-        ignoreFocusOut: true,
-        validateInput: (value) =>
-          value.trim().length === 0 ? 'Enter a summary, or press Escape.' : undefined,
-      });
-      if (raw === undefined) return;
-      const summary = raw.trim();
-      if (!summary) return;
-      await closeFlow(deps, id, { summary });
+      const mode = closeSummaryModeOf(deps);
+      if (mode === 'off') {
+        // Deliberately the same outcome AND the same sentence as Close
+        // Session: someone who set this value wants the menu entry to stop
+        // being a two-minute verb, not to become a differently-shaped one.
+        const label = labelFor(deps, id);
+        await closeFlow(deps, id);
+        vscode.window.setStatusBarMessage(
+          `Flock: closed "${label}" — its row stays in the tree, click it to resume`,
+          5000,
+        );
+        return;
+      }
+      if (mode === 'ask-me') {
+        await closeWithTypedSummary(deps, id);
+        return;
+      }
+      await closeWithCompaction(deps, id, mode);
     },
   );
 
@@ -6758,153 +7955,435 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     vscode.window.setStatusBarMessage(`Copied session id ${shortId(id)}…`, 2000);
   });
 
-  // ------------------------------------------------------ close / delete
+  // ----------------------------------------------------- close / archive
   //
   // Two verbs on a row, deliberately no third:
   //
-  //   CLOSE  ends the TAB. Because the terminal's process IS claude
-  //          (shellPath), closing the tab ends the run — but the ROW STAYS in
-  //          the tree as an inactive session: transcript on disk, resumable
-  //          with one click. Tab state is presentation, not membership.
-  //   DELETE removes the ROW and leaves any tab alone. Children are promoted
-  //          to the nearest visible ancestor so no lineage is lost. Fully
-  //          restorable — a view-level delete, nothing on disk is touched.
+  //   CLOSE   ends the TAB. Because the terminal's process IS claude
+  //           (shellPath), closing the tab ends the run — but the ROW STAYS in
+  //           the tree as an inactive session: transcript on disk, resumable
+  //           with one click. Tab state is presentation, not membership.
+  //   ARCHIVE removes the ROW. It ends the session first (see endForArchive)
+  //           and then takes the row away; children are promoted to the
+  //           nearest visible ancestor so no lineage is lost. Nothing on disk
+  //           is touched, so it is fully restorable.
+  //
+  // THE TWO ARE DELIBERATELY ASYMMETRIC IN COST, and that asymmetry is the
+  // feature. Close is one click with no dialog because it loses nothing you
+  // cannot get back by clicking the row again. Archive stops to ask, because a
+  // row you cannot see is a session you will not remember you have — and the
+  // dialog's job is to teach the way back, not to frighten anybody out of
+  // using it. The Undo button on the toast stays for the same reason: it is
+  // the fastest route home and it costs nothing. The modal is the friction;
+  // the toast is the escape hatch.
+  //
+  // The record field is still called `deleted`. The state file is on real
+  // users' disks and `state.sanitizeRecord` already carries migration rules
+  // for two retired fields — a third rename would have a live blast radius and
+  // buy nothing the words did not already buy. See EditorialRecord.deleted.
   //
   // An earlier hide verb (grey the row, sort it last) is retired: rows
   // persisting after close made "put away but keep" exactly what CLOSE does,
-  // and the remaining "get it out of the tree" is DELETE. Hidden records
+  // and the remaining "get it out of the tree" is ARCHIVE. Hidden records
   // written by older versions read as deleted (state.sanitizeRecord).
 
   /**
-   * A row about to be DELETED that still claims a live detached process
-   * (grace countdown, or an unsettled wrap name) gets that process KILLED
-   * first, through the wiring's tree-reaping funnel. `deleted: true` removes
-   * the row unconditionally (lineage.ts), and a grace row is the process's
-   * ONLY surface — its tab is gone by definition — so deleting it unkilled
-   * would reconstruct the exact unrepresentable state this branch removes:
-   * running, and shown nowhere. Pinned or not: an explicit user delete
-   * OUTRANKS the pin — the pin exempts a session from the automatic sweeps,
-   * not from the user saying "remove this".
+   * Can this window archive `sessionId` at all, or is something else running
+   * it?
    *
-   * A detached claim on a session whose terminal is bound HERE is a racing
-   * restore (the grace clears only after the launch resolves) — the tab is
-   * its surface and delete's contract is to never touch tabs, so the kill is
-   * skipped. Returns whether a process was actually ended, for the toast.
+   * Archive MEANS close-then-hide, so the one case it must refuse rather than
+   * force is a session somebody else is holding: killing that ends a
+   * conversation another window — or another app entirely — is looking at,
+   * which is the same guard `refusedForeignClose` and the lifecycle sweep
+   * already apply to Close. Removing the row without ending the process is not
+   * the alternative: that is precisely the running-and-shown-nowhere state
+   * this branch exists to make unrepresentable, and it is worse here than
+   * anywhere else because `pickSession` filters archived rows out of every
+   * verb — the user could not even close the thing they had just archived.
+   *
+   * Three refusals, one for each way "this window cannot end it" happens:
+   *
+   *   foreign      the process is live and nothing Flock ever recorded says it
+   *                was Flock's. We cannot end it, and never could.
+   *   otherWindow  another LIVE Flock window is bound to it. Usually a racing
+   *                restore: that window stamps `boundWindowId` at bind time
+   *                and clears the grace claim only once its launch resolves,
+   *                so for a few seconds the record reads as detached here
+   *                while the process already has a tab there.
+   *   unreachable  the process is OURS and live, and this window has neither a
+   *                tab for it nor a detached claim to kill through — a session
+   *                Flock launched whose tab has since gone (`boundWindowId`
+   *                nulled on exit, or naming a window that is no longer live),
+   *                resumed outside this window or waiting for a reload's
+   *                `reassociate` to rebind it. `hostOf` answers 'flock' for
+   *                exactly this shape.
+   *
+   * THE THIRD ARM IS THE FIX FOR A REAL LEAK. Without it archive found nothing
+   * to end (no terminal, no claim), said nothing in the dialog, and wrote
+   * `deleted: true` over a live process — and because `pickSession` filters
+   * archived rows out of every verb in this file, the user could not then close
+   * the thing they had just archived. Refusing is not the timid choice here; it
+   * is the only one that leaves the session reachable.
+   *
+   * It is spelled `hostOf === 'flock'` rather than the verifier's
+   * "live && host !== 'here'". The two agree on every real wiring — `hostOf`
+   * returns 'none' for anything the roster does not report, so 'flock' already
+   * MEANS live-and-ours-elsewhere — but the tighter spelling also declines to
+   * refuse when the `hostOf` dep is absent altogether, which answers 'none' and
+   * must keep unlocking every verb exactly as it did before ownership existed.
+   *
+   * `undefined` means this window may proceed.
    */
-  const endDetachedForDelete = async (sessionId: string): Promise<boolean> => {
-    if (!claimsDetachedProcess(deps.getRecord(sessionId))) return false;
-    if (hostOf(deps, sessionId) === 'here') return false;
-    // The bound-here skip above covers only OUR OWN restore race; the same
-    // race in another window looks identical from here except that the
-    // binding landed on a foreign windowId — the lifecycle sweep's guard,
-    // mirrored. Delete still removes the row (its contract), but the session
-    // that window just re-attached keeps running under its tab there.
-    if (boundToLiveForeignWindow(deps, sessionId)) return false;
-    return (await deps.killDetached?.(sessionId)) === true;
+  const archiveRefusal = (
+    sessionId: string,
+  ): 'foreign' | 'otherWindow' | 'unreachable' | undefined => {
+    if (hostOf(deps, sessionId) === 'foreign') return 'foreign';
+    if (boundToLiveForeignWindow(deps, sessionId)) return 'otherWindow';
+    if (
+      hostOf(deps, sessionId) === 'flock' &&
+      !claimsDetachedProcessInChain(deps, sessionId)
+    ) {
+      return 'unreachable';
+    }
+    return undefined;
   };
 
   /**
-   * Delete one or more rows, then offer one Undo for the lot.
+   * HOW archiving this row will end its process — the ONE plan both the dialog
+   * and the act read.
    *
-   * An Undo button rather than a confirmation modal, however many rows there
-   * are. The action is view-level and fully reversible — nothing on disk is
-   * touched, and a process is signalled only where the row was a live grace
-   * countdown (see endDetachedForDelete: a row must never outlive its
-   * process's last surface) — so a modal in front of every delete would cost
-   * more than the mistake does. But the way back has to be one click, not a
-   * command name the user has to know to go looking for, and it has to undo
-   * the WHOLE gesture: half a restored selection is a worse state than either
-   * end of it.
+   * WHY IT IS ONE FUNCTION. The dialog used to ask its own question
+   * (`archiveWillClose`) and the action asked another (`endForArchive`), and
+   * the two disagreed in both directions: the modal promised to close a session
+   * the action then declined to touch, and — worse — stayed silent about one it
+   * went on to kill. A dialog that undercounts is worse than no dialog, because
+   * it is the only place the honest asymmetry of this verb can be said. So the
+   * plan is computed once, before anything is written, and handed to the act.
+   *
+   * Two shapes end a process, and the reading is deliberately generous: a tab
+   * bound in this window (`hostOf === 'here'`), or a claim on a detached one —
+   * a grace countdown or an unsettled wrap name, ANYWHERE on the generation
+   * chain (see claimsDetachedProcessInChain; asking the tip alone is what let
+   * a re-keyed conversation's wrap outlive its row). Being wrong the generous
+   * way costs a sentence about a session that turned out already to have
+   * exited; being wrong the other way orphans a process.
+   *
+   * The `here` tier is checked FIRST and that ordering is load-bearing: a tab
+   * bound here outranks a detached claim, which is the stale-claim case a
+   * racing restore leaves behind — see endForArchive, which must not kill on it.
+   *
+   * Pure, so the planner cannot be the thing that acts: `deps.closeTerminal`
+   * DISPOSES the tab, so the plan reads `hostOf === 'here'` instead, which is
+   * the same fact (hostOf's `boundHere` arm wins outright — see hosts.ts) asked
+   * without side effects.
    */
-  const deleteSessionsFlow = async (ids: string[]): Promise<void> => {
+  type ArchiveEnd = 'terminal' | 'detached' | 'none';
+  const archiveEndPlan = (sessionId: string): ArchiveEnd => {
+    if (hostOf(deps, sessionId) === 'here') return 'terminal';
+    return claimsDetachedProcessInChain(deps, sessionId) ? 'detached' : 'none';
+  };
+
+  /**
+   * End the session this row is about to stop being the surface of.
+   *
+   * THE ORDER IS THE INVARIANT: the process must be gone before its row is.
+   * `deleted: true` removes the row unconditionally (lineage.ts), and for a
+   * grace row the row is the process's ONLY surface — its tab is gone by
+   * definition — so archiving it unkilled reconstructs the exact
+   * unrepresentable state this branch removes: running, and shown nowhere.
+   * The same was quietly true of a session with a TAB, which is the bug this
+   * function's earlier form had: `claimsDetachedProcess` is false for
+   * anything with a terminal, so the old code skipped it entirely and wrote
+   * the flag straight over a live process.
+   *
+   * Three tiers, cheapest first:
+   *
+   *   1. a terminal in THIS window   -> dispose it. The tab IS the process.
+   *   2. a detached claim            -> the wiring's tree-reaping kill.
+   *   3. neither                     -> nothing to end; the row was already
+   *                                     over.
+   *
+   * Pinned or not: an explicit user archive OUTRANKS the pin — the pin exempts
+   * a session from the automatic sweeps, not from the user saying "put this
+   * away".
+   *
+   * The one skip left is a detached claim on a session whose terminal is bound
+   * HERE and whose `closeTerminal` nevertheless found nothing to dispose. That
+   * is a racing restore, seen from the inside: the grace clears only after the
+   * launch resolves, so the claim is stale and the tab is the real surface.
+   * Killing on a stale claim would end a session the user just re-attached.
+   * That skip now lives in `archiveEndPlan` (which answers 'terminal' for a
+   * session hosted here, never 'detached'), so the dialog and the act make it
+   * together instead of the act making it alone and silently.
+   *
+   * Returns WHICH tier ended it, not merely whether: the toast counts any of
+   * them, but only the terminal tier tells the record something it does not
+   * already know. The detached kill funnel stamps the record closed on its way
+   * through; disposing a tab does not, so the caller writes that half itself,
+   * exactly as `closeFlow` does on the ordinary 1->2 transition.
+   */
+  const endForArchive = async (
+    sessionId: string,
+    plan: ArchiveEnd,
+  ): Promise<ArchiveEnd> => {
+    if (deps.closeTerminal(sessionId)) return 'terminal';
+    // The PLAN decides the kill, not a second reading of the record. The
+    // dispose above is still attempted first because it is cheap, honest and
+    // the tier the plan may not perform for itself; everything after it is the
+    // plan the dialog already promised.
+    if (plan !== 'detached') return 'none';
+    return (await deps.killDetached?.(sessionId)) === true
+      ? 'detached'
+      : 'none';
+  };
+
+  /**
+   * One archive gesture, however many rows: ask once, end what this window can
+   * end, take the rows away, offer one Undo for the lot.
+   *
+   * A MODAL, which this verb did not used to have. The old argument was that
+   * the action is view-level and fully reversible, so a dialog would cost more
+   * than the mistake does. That argument is retired: closing and putting away
+   * are different things, and only one of them should be possible by accident.
+   * The dialog is also the only place the honest asymmetry can be said —
+   * archiving now ENDS the session, and Undo restores the row but not the
+   * process.
+   *
+   * Everything the dialog says is measured BEFORE any write, because after the
+   * first `upsertRecord` the rows it is describing have already left the tree.
+   *
+   * The Undo button survives the modal rather than being replaced by it: the
+   * way back has to be one click, not a command name the user has to know to
+   * go looking for, and it has to undo the WHOLE gesture — half a restored
+   * selection is a worse state than either end of it.
+   */
+  const archiveSessionsFlow = async (ids: string[]): Promise<void> => {
     if (ids.length === 0) return;
-    // Names read BEFORE the writes, or the message would describe rows that
-    // have already left the tree.
-    const label = ids.length === 1 ? labelFor(deps, ids[0]) : '';
+
+    // Names and liveness read BEFORE the writes, or the message would describe
+    // rows that have already left the tree.
+    // Asked ONCE per id and remembered: `hostOf` reads the forest and the
+    // terminal registry, and the answer must not be able to change between the
+    // sentence that describes a row and the loop that acts on it.
+    const verdicts = new Map(ids.map((id) => [id, archiveRefusal(id)] as const));
+    const refused = ids.filter((id) => verdicts.get(id) !== undefined);
+    const targets = ids.filter((id) => verdicts.get(id) === undefined);
+    // ONE refusal, so name the host precisely: the three cases leave the user
+    // with different things to do — another Flock window can be gone to, a
+    // process outside Flock cannot be reached at all, and an unreachable one of
+    // ours has to be closed wherever it ended up — and a sentence that blurs
+    // them would be true and useless. Several, and the list of names is the
+    // useful half; spelling out a host per row would bury it.
+    const oneRefusal = (id: string): string => {
+      switch (verdicts.get(id)) {
+        case 'foreign':
+          return `${hostSentence('foreign', {
+            label: labelFor(deps, id),
+          })} Flock cannot close it, so it cannot archive it either.`;
+        case 'otherWindow':
+          return (
+            `"${labelFor(deps, id)}" is running in another Flock window. ` +
+            'Close it there first, and it can be archived after.'
+          );
+        default:
+          // 'unreachable': ours, live, and this window has no tab and no wrap
+          // to end it through. Naming the shape rather than a door, because
+          // there is no one door — the tab may be in a window that has since
+          // closed, or the conversation may have been resumed in a plain
+          // terminal. What the user can always do is close it where it is
+          // running, which is the same instruction the other-window arm gives.
+          return (
+            `"${labelFor(deps, id)}" is still running, but not in a tab this ` +
+            'window holds — so archiving it would hide a live process behind ' +
+            'no row at all. Close it where it is running, and it can be ' +
+            'archived after.'
+          );
+      }
+    };
+    const refusalSentence =
+      refused.length === 0
+        ? ''
+        : refused.length === 1
+          ? oneRefusal(refused[0])
+          : `${String(refused.length)} of these are running somewhere else ` +
+            `(${refused.map((id) => `"${labelFor(deps, id)}"`).join(', ')}) — ` +
+            'close them where they are running, and they can be archived ' +
+            'after.';
+    if (targets.length === 0) {
+      // Nothing left to ask about, so the refusal IS the message rather than
+      // the footnote of a dialog with an empty subject.
+      void vscode.window.showWarningMessage(`Flock: ${refusalSentence}`);
+      return;
+    }
+
+    const label = targets.length === 1 ? labelFor(deps, targets[0]) : '';
+    // The plan per target, computed ONCE here and handed to the loop below:
+    // the dialog must be counted with the function that acts, or it goes back
+    // to promising one thing and doing another. See archiveEndPlan.
+    const plans = new Map(targets.map((id) => [id, archiveEndPlan(id)] as const));
+    const willClose = targets.filter((id) => plans.get(id) !== 'none').length;
+    const one = targets.length === 1;
+    const CONFIRM = one
+      ? 'Archive Session'
+      : `Archive ${String(targets.length)} Sessions`;
+    const detail = [
+      willClose === 0
+        ? ''
+        : one
+          ? 'It is still running: archiving closes it first. A resume brings ' +
+            'the conversation back.'
+          : `${String(willClose)} of them ${willClose === 1 ? 'is' : 'are'} ` +
+            'still running: archiving closes ' +
+            `${willClose === 1 ? 'it' : 'them'} first. A resume brings the ` +
+            'conversation back.',
+      'The row leaves the tree. Nothing on disk is touched — the transcript ' +
+        'stays, and the conversation is still resumable.',
+      one
+        ? 'Forks of it move up to its parent.'
+        : 'Forks of them move up to their parents.',
+      refusalSentence === '' ? '' : `Skipping the rest: ${refusalSentence}`,
+      'Undo on the toast brings the row back, but not the process. The ' +
+        'durable way back is "Archived Sessions..." on the project\'s row, or ' +
+        '"Restore Archived Session...". Closing a session instead keeps its ' +
+        'row, and asks nothing.',
+    ]
+      .filter((t) => t !== '')
+      .join('\n\n');
+    const choice = await vscode.window.showWarningMessage(
+      one
+        ? `Archive "${label}"?`
+        : `Archive ${String(targets.length)} sessions?`,
+      { modal: true, detail },
+      CONFIRM,
+    );
+    if (choice !== CONFIRM) return;
+
     // Sequential, not Promise.all: every write goes through the store's own
     // mutation queue anyway, and awaiting each keeps a failure attributable.
-    // The kill lands BEFORE the deleted flag — the order is the invariant:
-    // the row is the detached process's last surface, so the process must be
-    // gone before the row is.
+    // The end lands BEFORE the deleted flag — see endForArchive.
     let ended = 0;
-    for (const id of ids) {
-      if (await endDetachedForDelete(id)) ended++;
-      // `stowedBySwitch: false` because delete is a user verb: a deleted-then-
-      // restored row must not come back armed for a switch-back resume.
-      await deps.upsertRecord(id, { deleted: true, stowedBySwitch: false });
+    for (const id of targets) {
+      const how = await endForArchive(id, plans.get(id) ?? 'none');
+      if (how !== 'none') ended++;
+      // `stowedBySwitch: false` because archive is a user verb: an archived-
+      // then-restored row must not come back armed for a switch-back resume.
+      //
+      // The `closed` stamp and the cleared binding are written only where THIS
+      // window disposed a tab, which is the one case nothing else records: the
+      // detached kill funnel already stamps the record on its way through, and
+      // a row that was already over has a close of its own to keep. Clearing
+      // only OUR binding matters for the same reason it does in closeFlow —
+      // nulling a binding another window owns would break its cross-window
+      // focus until it happened to rebind.
+      await deps.upsertRecord(id, {
+        deleted: true,
+        stowedBySwitch: false,
+        ...(how === 'terminal' ? { closed: nowIso(), boundWindowId: null } : {}),
+      });
+      // The at-rest repair, exactly as closeFlow runs it on the 1->2
+      // transition: the modal promised the conversation is still resumable, so
+      // the transcript is made provably resumable now rather than only when
+      // somebody clicks a row that is no longer there to click.
+      deps.repairResumeLeaf?.(id);
     }
     log(
-      'delete:',
-      ids.map(shortId).join(' '),
-      ...(ended > 0 ? [`(${String(ended)} detached process(es) ended first)`] : []),
+      'archive:',
+      targets.map(shortId).join(' '),
+      ...(ended > 0 ? [`(${String(ended)} session(s) ended first)`] : []),
     );
     deps.refresh();
 
     const UNDO = 'Undo';
-    const choice = await vscode.window.showInformationMessage(
-      (ids.length === 1
-        ? `Removed "${label}" from the tree. The transcript is untouched; ` +
-          'forks of it moved up to its parent.'
-        : `Removed ${ids.length} sessions from the tree. Their transcripts are ` +
-          'untouched; forks of them moved up to their parents.') +
-        // Honest about the one thing Undo cannot bring back: the detached
-        // process a grace row was covering. The conversation itself is one
-        // resume away, exactly like any other archived session.
+    const choice2 = await vscode.window.showInformationMessage(
+      (one
+        ? `Archived "${label}".`
+        : `Archived ${String(targets.length)} sessions.`) +
+        // Honest about the one thing Undo cannot bring back: the process. The
+        // conversation itself is one resume away, exactly like any other
+        // closed session.
         (ended > 0
-          ? ` ${String(ended)} detached process${ended === 1 ? ' was' : 'es were'} ` +
-            'ended first (a resume brings the conversation back).'
-          : ''),
+          ? ` ${String(ended)} ${ended === 1 ? 'was' : 'were'} closed first ` +
+            '(a resume brings the conversation back).'
+          : '') +
+        (one
+          ? ' The transcript is untouched; forks of it moved up to its parent.'
+          : ' Their transcripts are untouched; forks of them moved up to ' +
+            'their parents.') +
+        ' Undo, or "Archived Sessions..." on the project, brings the row back.',
       UNDO,
     );
-    if (choice !== UNDO) return;
-    for (const id of ids) await deps.upsertRecord(id, { deleted: false });
-    log('delete: undone for', ids.map(shortId).join(' '));
+    if (choice2 !== UNDO) return;
+    for (const id of targets) await deps.upsertRecord(id, { deleted: false });
+    log('archive: undone for', targets.map(shortId).join(' '));
     deps.refresh();
     // Reveal only when there is one row to reveal: scrolling to the last of
     // eight restored rows would name one of them as the interesting one.
-    if (ids.length === 1) void deps.revealSession(ids[0]);
+    if (targets.length === 1) void deps.revealSession(targets[0]);
   };
 
-  register(COMMANDS.deleteSession, 'delete session', async (arg?: unknown) => {
-    const id = await targetSession(deps, arg, 'Delete which session from the tree?', {
+  // The command ID still says `delete`; the title says "Archive Session". See
+  // COMMANDS.deleteSession — an id is a keybinding contract and is never seen,
+  // so the words changed and the ids did not.
+  register(COMMANDS.deleteSession, 'archive session', async (arg?: unknown) => {
+    const id = await targetSession(deps, arg, 'Archive which session?', {
       liveOnly: false,
     });
     if (!id) return;
-    await deleteSessionsFlow([id]);
+    await archiveSessionsFlow([id]);
   });
 
   // The multi-selection's own verb. A separate command from the one above
   // because the two say different things in a menu and a contributed command
   // has one title; their `when` clauses are complements of `lineage.multiSelect`
   // so exactly one is ever on a row.
-  register(COMMANDS.deleteSessions, 'delete sessions', async (...args: unknown[]) => {
+  register(COMMANDS.deleteSessions, 'archive sessions', async (...args: unknown[]) => {
     const ids = selectedSessionIds(deps, args);
     if (ids.length === 0) {
       // Reachable from the palette with nothing selected. Say so rather than
       // opening a picker: this verb means "the rows I have highlighted", and a
-      // list to choose from is what Delete Stale Sessions… already is.
+      // list to choose from is what Archive Stale Sessions… already is.
       void vscode.window.showInformationMessage(
         'Flock: select the sessions you want to remove first — shift-click ' +
           'or ctrl-click rows in the tree.',
       );
       return;
     }
-    await deleteSessionsFlow(ids);
+    await archiveSessionsFlow(ids);
   });
 
   register(COMMANDS.restoreSession, 'restore session', async (arg?: unknown) => {
     const direct = sessionIdFromArg(arg);
     const id =
       direct ??
-      (await pickFlaggedSession(deps, 'deleted', 'Restore which session?'));
+      (await pickFlaggedSession(
+        deps,
+        'deleted',
+        'Restore which archived session?',
+      ));
     if (!id) return;
     await deps.upsertRecord(id, { deleted: false });
     log('restore:', shortId(id));
     deps.refresh();
     void deps.revealSession(id);
+    noteRestoredWhileFiltered(deps, [id]);
   });
 
-  register(COMMANDS.deleteStale, 'delete stale sessions', async () => {
+  // The per-project half of the same door. Registered next to the whole-machine
+  // one so the pair is read together: this is scoped to the project the row
+  // belongs to, that one is scoped to everything.
+  register(COMMANDS.archivedSessions, 'archived sessions', async (arg?: unknown) => {
+    const id =
+      projectIdFromArg(arg) ??
+      (await pickProject(deps, 'Whose archived sessions do you want to see?', {
+        // A closed project's archive is still a thing you can want — the same
+        // reason the chat history includes them.
+        includeHidden: true,
+      }));
+    if (!id) return;
+    await archivedSessionsFlow(deps, id);
+  });
+
+  register(COMMANDS.deleteStale, 'archive stale sessions', async () => {
     const hours = deps.staleAfterHours();
     const candidates = staleCandidates(
       deps.getForest(),
@@ -6913,7 +8392,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     );
     if (candidates.length === 0) {
       void vscode.window.showInformationMessage(
-        'Flock: nothing in the tree to delete.',
+        'Flock: nothing in the tree to archive.',
       );
       return;
     }
@@ -6925,7 +8404,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       picked: c.stale,
     }));
     const chosen = await vscode.window.showQuickPick(items, {
-      title: `Delete stale sessions — pre-ticked at ${hours}h and older`,
+      title: `Archive stale sessions — pre-ticked at ${hours}h and older`,
       placeHolder: 'Tick every row to remove from the tree, then press Enter',
       canPickMany: true,
       matchOnDescription: true,
@@ -6935,42 +8414,83 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     // undefined is Escape (do nothing); an EMPTY array is a deliberate
     // "actually, none of these" — also nothing to do, but not an error.
     if (!chosen || chosen.length === 0) return;
+    // NO SECOND DIALOG HERE, deliberately, even though the single-row verb
+    // now has one: the tick-list IS the confirmation. A modal on top of a
+    // checklist somebody has just filled in is a second question about the
+    // same answer, and the friction archiving needs is friction against doing
+    // it by accident — which ticking twenty boxes is not.
+    //
     // Sequential, not Promise.all: every write goes through the store's own
     // mutation queue anyway, and awaiting each keeps the failure attributable.
-    // The multi-select IS the confirmation. A pick with a TAB keeps its
-    // process and its tab (delete never touches terminals) — but a pick
-    // counting down in the grace pool has no tab, so its row is the process's
-    // last surface and the kill must land before the flag does (see
-    // endDetachedForDelete).
+    // Each pick is ended before its flag is written, and one another window is
+    // holding is skipped rather than forced — see endForArchive and
+    // archiveRefusal for both arguments.
+    const skipped = chosen.filter(
+      (pick) => archiveRefusal(pick.sessionId) !== undefined,
+    );
+    const targets = chosen.filter(
+      (pick) => archiveRefusal(pick.sessionId) === undefined,
+    );
     let ended = 0;
-    for (const pick of chosen) {
-      if (await endDetachedForDelete(pick.sessionId)) ended++;
-      // Same user-verb marker clear as deleteSessionsFlow.
+    for (const pick of targets) {
+      // The plan is read immediately before the act here rather than up front:
+      // this flow has no dialog to keep honest (the tick-list is the
+      // confirmation), so there is no sentence for it to disagree with.
+      const how = await endForArchive(
+        pick.sessionId,
+        archiveEndPlan(pick.sessionId),
+      );
+      if (how !== 'none') ended++;
+      // Same user-verb marker clear, and the same close stamp on the one tier
+      // that needs it, as archiveSessionsFlow.
       await deps.upsertRecord(pick.sessionId, {
         deleted: true,
         stowedBySwitch: false,
+        ...(how === 'terminal' ? { closed: nowIso(), boundWindowId: null } : {}),
       });
+      deps.repairResumeLeaf?.(pick.sessionId);
     }
     log(
-      'delete stale:',
-      String(chosen.length),
-      'session(s) removed',
-      ...(ended > 0 ? [`(${String(ended)} detached process(es) ended first)`] : []),
+      'archive stale:',
+      String(targets.length),
+      'session(s) archived',
+      ...(ended > 0 ? [`(${String(ended)} session(s) ended first)`] : []),
+      ...(skipped.length > 0
+        ? [`(${String(skipped.length)} skipped — running elsewhere)`]
+        : []),
     );
     deps.refresh();
+    if (targets.length === 0) {
+      void vscode.window.showWarningMessage(
+        'Flock: every one of those is running somewhere else — close them ' +
+          'there first, and they can be archived after.',
+      );
+      return;
+    }
     const UNDO = 'Undo';
     const choice = await vscode.window.showInformationMessage(
-      `Removed ${chosen.length} stale session${chosen.length === 1 ? '' : 's'} ` +
-        'from the tree. Transcripts are untouched — Restore Deleted Session ' +
-        'brings any of them back.',
+      `Archived ${targets.length} stale session${targets.length === 1 ? '' : 's'}.` +
+        (ended > 0
+          ? ` ${String(ended)} ${ended === 1 ? 'was' : 'were'} closed first ` +
+            '(a resume brings the conversation back).'
+          : '') +
+        (skipped.length > 0
+          ? ` ${String(skipped.length)} skipped — running somewhere else.`
+          : '') +
+        ' Transcripts are untouched — "Archived Sessions..." on the project, ' +
+        'or "Restore Archived Session...", brings any of them back.',
       UNDO,
     );
     if (choice !== UNDO) return;
-    for (const pick of chosen) {
+    for (const pick of targets) {
       await deps.upsertRecord(pick.sessionId, { deleted: false });
     }
-    log('delete stale: undone');
+    log('archive stale: undone');
     deps.refresh();
+    noteRestoredWhileFiltered(
+      deps,
+      targets.map((pick) => pick.sessionId),
+    );
   });
 
 
@@ -6996,6 +8516,78 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     if (!cwd) return;
     await deps.openProject(cwd, true);
   });
+
+  /**
+   * GO TO THE WORKSPACE FOR THIS SESSION — Axel's level-2 verb, on every live
+   * and closed session row in both surfaces.
+   *
+   * `sessionWorkspaceTarget` decides WHERE (worktree, then lane, then the
+   * project's claim); this decides WHICH WINDOW gets it, in three tiers.
+   *
+   * It deliberately does NOT begin the way `routeForeign` does, with
+   * `focusWindowFor(sessionId)`. That tier asks where the PROCESS has a tab,
+   * and for the common case — your own session, running in your own window —
+   * the answer is this window, so the verb would appear to do nothing at all.
+   * This verb is about a DIRECTORY, and only the directory tiers apply to it.
+   *
+   * 1. THIS WINDOW ALREADY HAS IT. The self-check has to come first because
+   *    `focusWindowForDir` excludes this window on purpose (a caller asking to
+   *    route elsewhere has already decided "here" is wrong), so without it the
+   *    verb would open a duplicate window on the folder the user is standing
+   *    in. It reads `windowFolders` — this window's real roots in every model —
+   *    and not the folder-mode fence, which is undefined in the two models this
+   *    verb was written for. The row is revealed instead, which is the honest
+   *    answer to "go there": you are there.
+   * 2. A LIVE WINDOW COVERS IT — raised through the published focus handle,
+   *    revealing the session on arrival. Axel asked for a new window, and this
+   *    is the one place that is overruled: a second window on a directory
+   *    another window already has open is the shape that produced the
+   *    84-session incident's cousins, two roosts for one piece of work.
+   * 3. OTHERWISE A NEW WINDOW, which is the ordinary outcome.
+   *
+   * WHAT HAPPENS TO THE SESSION: nothing. It keeps its tab and its process
+   * here. The new window draws its row (the cwd is inside the folder that was
+   * opened, so the grouping fence passes) and can resume it once it has been
+   * closed — a resume while it is still running here is refused by the
+   * second-writer backstop, correctly, because `--resume` reuses the session id
+   * and two processes appending to one transcript is the thing that backstop
+   * exists to prevent. That refusal is the one surprise this verb can lead to,
+   * and it is documented where it can be read before the click (docs/reference
+   * .md's Open Workspace for This Session) rather than toasted on every open —
+   * a warning shown to the ninety per cent who were not going to resume is the
+   * kind of chrome that teaches people to dismiss messages unread.
+   */
+  register(
+    COMMANDS.openSessionWorkspace,
+    "open the session's workspace",
+    async (arg?: unknown) => {
+      const id = sessionIdFromArg(arg);
+      if (id === undefined) return;
+      const target = await sessionWorkspaceTarget(deps, id);
+      if (target === '') {
+        void vscode.window.showInformationMessage(
+          'Flock: this conversation has no directory on record, so there is ' +
+            'no workspace to open for it.',
+        );
+        return;
+      }
+      if (windowCovers(deps.windowFolders?.(), target)) {
+        await deps.revealSession(id);
+        try {
+          vscode.window.setStatusBarMessage(
+            `Flock: this window is already open on ${target}`,
+            4000,
+          );
+        } catch (err) {
+          logError('commands.openSessionWorkspace.status', err);
+        }
+        return;
+      }
+      if ((await deps.focusWindowForDir?.(target, id)) === true) return;
+      log('openSessionWorkspace:', id, '->', target);
+      await deps.openProject(target, true);
+    },
+  );
 
   register(COMMANDS.newProject, 'new project', async () => {
     await newProjectFlow(deps);
@@ -7994,7 +9586,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   register(COMMANDS.showOnlyActiveSessions, 'show only active sessions', async () => {
     await deps.setOnlyActiveSessions(true);
     vscode.window.setStatusBarMessage(
-      'Flock: showing only active sessions — closed ones are filtered out, not deleted',
+      'Flock: showing only active sessions — closed ones are filtered out, not archived',
       4000,
     );
   });
@@ -8037,11 +9629,13 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   // decided HERE is what each half says afterwards, and the two halves say it
   // differently on purpose.
   //
-  // ON turns on the one setting in Flock that reaches the network and the one
-  // that puts fabricated rows in the tree, so it uses a MESSAGE: a status-bar
-  // flash is missable, and "why is Flock running gh" is a question that should
-  // never have to be answered by reading the source. It is not a confirmation —
-  // running the command is the person's act — it is a receipt.
+  // ON turns on the one setting in Flock that reaches the network, so it uses a
+  // MESSAGE: a status-bar flash is missable, and "why is Flock running gh" is a
+  // question that should never have to be answered by reading the source. The
+  // network is the fact of the four a person cannot discover by looking at
+  // their sidebar; the other three announce themselves the moment the tree
+  // redraws. It is not a confirmation — running the command is the person's act
+  // — it is a receipt.
   //
   // OFF took nothing away that a person did not put there, so it flashes and
   // goes, like every other switch in this file.
@@ -8052,9 +9646,10 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     void vscode.window.showInformationMessage(
       'Flock: branches and worktrees on — branch rows with New/Remove Worktree, ' +
         'a branch line under each session (so every session row is two lines ' +
-        'tall), and the two previews. Pull-request chips are on too, which is ' +
-        'the one thing here that reaches the network: `gh pr list` now runs per ' +
-        'repository. "Flock: Hide Branches and Worktrees" puts all six back.',
+        'tall), and the directory-model preview. Pull-request chips are on too, ' +
+        'which is the one thing here that reaches the network: `gh pr list` now ' +
+        'runs per repository. "Flock: Hide Branches and Worktrees" puts all four ' +
+        'back.',
     );
   });
 
@@ -8062,7 +9657,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     if (!deps.setBranchAndWorktreeFeatures) return;
     await deps.setBranchAndWorktreeFeatures(false);
     vscode.window.setStatusBarMessage(
-      'Flock: branches and worktrees off — no branch rows, no branch line, no gh, no demo project',
+      'Flock: branches and worktrees off — no branch rows, no branch line, no gh',
       5000,
     );
   });
@@ -8071,6 +9666,42 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
 
   register(COMMANDS.recommendedSetup, 'recommended setup', async () => {
     await recommendedSetupFlow(deps);
+  });
+
+  // THE WINDOW MODEL, on its own, without the checklist around it. The
+  // recommended setup asks this once, at the moment somebody meets the
+  // product; this is the verb for the other moment — when they have been
+  // living in one model for a month and want a different one. Reaching that
+  // through a settings dropdown means knowing the key is called `lineage.mode`
+  // and that `project` is spelled that way even though it means "auto-switch",
+  // which is knowledge the product should not require.
+  //
+  // Says what it did, and says the model by its LABEL rather than its value:
+  // the receipt has to be readable by the same person the picker was.
+  register(COMMANDS.chooseWindowModel, 'choose window model', async () => {
+    const world = await deps.recommendedWorld?.();
+    if (!world) {
+      void vscode.window.showInformationMessage(
+        'Flock: the window model picker is not available in this window.',
+      );
+      return;
+    }
+    const choice = await chooseWindowModel(world);
+    if (choice === undefined) return;
+    const unwritable = (await deps.writeSettings?.(choice.settings)) ?? [
+      ...choice.settings.map((setting) => setting.key),
+    ];
+    if (unwritable.length > 0) {
+      void vscode.window.showWarningMessage(
+        `Flock: could not write ${unwritable.join(', ')}. The window model is unchanged.`,
+      );
+      return;
+    }
+    deps.refresh();
+    vscode.window.setStatusBarMessage(
+      `Flock: this window is now “${choice.label}”`,
+      5000,
+    );
   });
 
   // --------------------------------------------------- the Accounts section
@@ -8130,6 +9761,11 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       description: 'What to turn on, and why — you tick what you want',
       command: COMMANDS.recommendedSetup,
     });
+    items.push({
+      label: '$(window) Choose Window Model...',
+      description: 'One folder per project, Flock only, or auto-switch',
+      command: COMMANDS.chooseWindowModel,
+    });
 
     group('Sessions');
     if (state === undefined || !state.onlyActive) {
@@ -8174,7 +9810,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         command: COMMANDS.markAllNotificationsRead,
       },
       {
-        label: '$(history) Restore Deleted Session...',
+        label: '$(history) Restore Archived Session...',
         command: COMMANDS.restoreSession,
       },
       {
@@ -8183,7 +9819,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         command: COMMANDS.importSessions,
       },
       {
-        label: '$(trash) Delete Stale Sessions...',
+        label: '$(archive) Archive Stale Sessions...',
         command: COMMANDS.deleteStale,
       },
     );
@@ -8293,12 +9929,22 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     // by name in the gap before the context lands (and keybindings always
     // can), so the verb refuses for itself — and says what to do instead,
     // because a silent no here reads as a bug.
+    //
+    // `=== 'folder'` and not `!projectSwitchingOn(...)`, deliberately: the
+    // FLOCK-ONLY model keeps this verb. Switching on purpose is available at
+    // both models that are not one-folder-per-project — what the Flock-only
+    // window does not do is switch by ITSELF, and it is that difference, not
+    // the verb, that separates it from auto-switch. Narrowing this to
+    // `projectSwitchingOn` would silently take the verb away from every user
+    // migrated here from `(mode: project, workspaces.enabled: false)`, who has
+    // had it all along.
     if (deps.lineageMode?.() === 'folder') {
       void vscode.window.showInformationMessage(
-        'Flock: this window is in folder mode — it always shows the folder ' +
-          'you opened, and other projects open in their own windows. To ' +
-          'switch projects inside one window, set `lineage.mode` to ' +
-          '"project".',
+        'Flock: this window is in the “one folder per project” model — it ' +
+          'always shows the folder you opened, and other projects open in ' +
+          'their own windows. To switch projects inside one window, run ' +
+          '“Flock: Choose Window Model…” and pick Flock only or Auto-switch ' +
+          '(`lineage.mode`).',
       );
       return;
     }
@@ -8370,22 +10016,47 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     }
     if (deps.explorerAnchored()) {
       void vscode.window.showInformationMessage(
-        'Flock: the Explorer already follows the active project in this ' +
-          'window.',
+        'Flock: this window is already set up to follow the session you are ' +
+          'in.',
       );
+      return;
+    }
+    // A CONVERTED WINDOW ONLY FOLLOWS IN THE AUTO-SWITCH MODEL, so converting
+    // one that is not in that model buys a permanent anchor row and a reload
+    // and nothing else — and the verb's own title now promises otherwise. The
+    // refusal names the fix rather than writing it: `lineage.mode` is one
+    // setting with three answers and ONE verb that writes it (see
+    // `chooseWindowModel`), and a second writer is a second answer to "which
+    // model is this window in". Undefined — an older wiring, a unit double —
+    // reads as "no opinion" and goes ahead, for the reason `resolveMode` gives
+    // about absent opinions.
+    const modelNow = deps.lineageMode?.();
+    if (modelNow !== undefined && modelNow !== 'project') {
+      const pick = 'Choose Window Model…';
+      const answer = await vscode.window.showInformationMessage(
+        'Flock: only the Auto-switch model follows the session you are in — ' +
+          'converting this window would cost a reload and change nothing. ' +
+          'Pick that model first, then run this again.',
+        pick,
+      );
+      if (answer === pick) {
+        await vscode.commands.executeCommand(COMMANDS.chooseWindowModel);
+      }
       return;
     }
     const go = 'Convert and Reload';
     const answer = await vscode.window.showWarningMessage(
-      'Make the Explorer follow the active project?',
+      'Make this window follow the session you are in?',
       {
         modal: true,
         detail:
           'This window becomes a Flock workspace, which takes one reload ' +
-          'now. After that, switching projects swaps the Explorer instantly ' +
-          "— the project's main directory on top, any extra connected " +
-          'directories as their own roots below it — without reloading and ' +
-          'without losing a session.',
+          'now. After that the Explorer roots itself at the directory of ' +
+          "whichever session you are working in — inside that session's own " +
+          'git worktree — and Source Control shows that worktree, moving ' +
+          'with you and without reloading again. It follows only in the ' +
+          'Auto-switch window model; in the other two the tree stays where ' +
+          'you put it.',
       },
       go,
     );
@@ -8418,14 +10089,13 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       if (!stop || !deps.explorerAnchored) return;
       if (!deps.explorerAnchored()) {
         void vscode.window.showInformationMessage(
-          'Flock: the Explorer does not follow the active project in this ' +
-            'window.',
+          'Flock: this window does not follow the session you are in.',
         );
         return;
       }
       const go = 'Reopen as a Folder';
       const answer = await vscode.window.showWarningMessage(
-        'Stop following the active project in the Explorer?',
+        'Stop following the session you are in?',
         {
           modal: true,
           detail:

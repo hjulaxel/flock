@@ -367,7 +367,10 @@ describe('whereAmI: the window and the keyboard disagree', () => {
     expect(loose.text).toBe('$(layers) App');
     expect(loose.lane).toBe('');
     expect(loose.branch).toBe('');
-    expect(loose.beyondTheFolder).toBe(false);
+    // `detached` goes with them: the three unrendered facts are one answer, and
+    // half of it leaking would put a "detached HEAD" caption in the Explorer's
+    // Project view under a project that does not own the checkout.
+    expect(loose.detached).toBe(false);
   });
 
   it('drops the DIRECTORY segment when a branch is coming', () => {

@@ -82,6 +82,39 @@ export interface ProjectViewDeps {
   /** The directory the folder tree is rooted at under `'directory'` scope.
    *  Optional; absent falls back to the project's main directory. */
   currentDir?(): string | undefined;
+  /**
+   * Can this window switch projects IN PLACE — i.e. would `switchWorkspace`
+   * actually do something if this view's rows fired it?
+   *
+   * Two rows here do fire it, and in the one-folder-per-project model the verb
+   * refuses: the window IS its folder, and rearranging it is the thing that
+   * model exists not to do. The view can still be on screen there — it is
+   * contributed on `lineage.explorerFollow`, which says nothing about the
+   * window model, and the active project id lives in per-window
+   * `workspaceState` that nothing clears when the model changes — so a window
+   * that once auto-switched keeps drawing a project header whose click is a
+   * refusal toast.
+   *
+   * The fix is to stop making the row LOOK clickable, not to make the refusal
+   * friendlier — the same argument `hereItem` below makes about itself: a row
+   * that navigates nowhere is a control that appears to do nothing, and one
+   * that answers back is worse than one that never invited the click.
+   *
+   * DELIBERATELY THE WEAKER OF THE TWO MODE GATES, and this is the mistake
+   * worth not making: the caller must hand in "is this window able to switch"
+   * (the mode is not `folder`), NOT `modes.projectSwitchingOn` ("does it switch
+   * by itself"). The Flock-only model keeps the switch verb on purpose — it
+   * simply never fires by itself and never advertises itself in the status bar
+   * — so gating on the stronger predicate would take a click that works away
+   * from every window the legacy `workspaces.enabled: false` pair migrated. A
+   * row is silenced here only where the verb behind it says no.
+   *
+   * Optional, and absent reads as TRUE — the behaviour every caller had before
+   * the gate existed, so a unit double that says nothing about the model gets
+   * the rows it always got, and a wiring that forgets to pass it fails visibly
+   * (a refusal) rather than silently (a header that stopped working).
+   */
+  switching?(): boolean;
   /** Where the conversation in front is — the decision src/whereami.ts already
    *  made for the status bar, handed here rather than re-derived, so the two
    *  surfaces cannot disagree about which lane you are in. Optional: absent
@@ -204,25 +237,39 @@ export class ProjectViewProvider
       case 'here':
         return this.hereItem(row);
       case 'none':
-        return this.actionItem(
-          'No active project',
-          'Choose one…',
-          'layers',
-          COMMANDS.switchWorkspace,
-          'Pick the project this window is scoped to. The Explorer below ' +
-            'will show its directories.',
-        );
+        // A CAPTION when nothing can be switched — see `switching` on the deps.
+        // "Choose one…" beside a command that would refuse is an invitation to
+        // a door that is locked; the row still says what the window's state IS,
+        // because that half was never the problem.
+        return this.canSwitch()
+          ? this.actionItem(
+              'No active project',
+              'Choose one…',
+              'layers',
+              COMMANDS.switchWorkspace,
+              'Pick the project this window is scoped to. The Explorer below ' +
+                'will show its directories.',
+            )
+          : this.captionItem(
+              'No active project',
+              'layers',
+              'This window does not switch projects in place. Open a ' +
+                'project — or a session\'s workspace — in its own window ' +
+                'instead.',
+            );
       case 'setup':
       default:
         return this.actionItem(
-          'Explorer is not following a project',
+          'This window is not following you',
           'Set up…',
           'gear',
           COMMANDS.followInExplorer,
           'This window is a plain folder, so the Explorer cannot be ' +
             'repointed without reloading it. Setting up converts the window ' +
-            'to a Flock workspace once; after that, switching projects ' +
-            'swaps the file tree instantly.',
+            'to a Flock workspace once; after that the file tree roots ' +
+            "itself at the session you are working in — its subproject's " +
+            "directory, inside that session's own git worktree — and Source " +
+            'Control shows that worktree.',
         );
     }
   }
@@ -241,12 +288,56 @@ export class ProjectViewProvider
       count === undefined
         ? undefined
         : `${count} session${count === 1 ? '' : 's'}`;
-    item.tooltip = 'Active project — click to switch.';
-    item.command = {
-      command: COMMANDS.switchWorkspace,
-      title: 'Switch Workspace',
-    };
+    // The click, and the half of the tooltip that promises it, exist only where
+    // the switch does. Everything else about the row — the name, the count, the
+    // directories under it — is just as true in a window that never switches,
+    // which is why the row stays rather than being hidden with the verb.
+    if (this.canSwitch()) {
+      item.tooltip = 'Active project — click to switch.';
+      item.command = {
+        command: COMMANDS.switchWorkspace,
+        title: 'Switch Workspace',
+      };
+    } else {
+      item.tooltip =
+        'The project this window is scoped to. This window does not switch ' +
+        'projects in place — open another one in its own window.';
+    }
     return item;
+  }
+
+  /**
+   * A row that says something and goes nowhere: `actionItem`'s shape minus the
+   * command and the "do this" description. Used where a verb has been gated
+   * away, so the row keeps its answer and loses only its promise.
+   */
+  private captionItem(
+    label: string,
+    icon: string,
+    tooltip: string,
+  ): vscode.TreeItem {
+    const item = new vscode.TreeItem(
+      label,
+      vscode.TreeItemCollapsibleState.None,
+    );
+    item.iconPath = new vscode.ThemeIcon(icon);
+    item.tooltip = tooltip;
+    return item;
+  }
+
+  /** The switch gate, read defensively — absent means yes (the behaviour before
+   *  the gate existed) and so does a supplier that throws, because a view that
+   *  hid its own verbs on an exception would be harder to diagnose than one
+   *  whose verb refuses with a sentence. */
+  private canSwitch(): boolean {
+    const fn = this.deps.switching;
+    if (!fn) return true;
+    try {
+      return fn.call(this.deps) !== false;
+    } catch (err) {
+      logError('projectview.switching', err);
+      return true;
+    }
   }
 
   /**

@@ -2075,6 +2075,47 @@ describe('state: accounts', () => {
     expect(reader.getAccounts()).toEqual([]);
   });
 
+  it("a removed account's config directory stays readable, so its conversations do not vanish", async () => {
+    // Removing an account does not remove the conversations that were MOVED
+    // onto it. Every reader that finds a transcript walks the live roster's
+    // config dirs, so a tombstone that dropped `configDir` took every such
+    // conversation off the tree with it — rows without transcripts, resume and
+    // fork refusing — while the removal dialog promised that sessions already
+    // running on it are not touched.
+    const dir = tempDir();
+    const store = makeStore(dir);
+    await store.load();
+    await store.upsertAccount('work', {
+      label: 'Work',
+      provider: 'claude',
+      configDir: '/tmp/profiles/work',
+    });
+    await store.deleteAccount('work');
+
+    // Still not an account anywhere a picker or a launch can see it.
+    expect(store.getAccounts()).toEqual([]);
+    expect(store.getAccount('work')).toBeUndefined();
+    // But the directory is still readable, and survives the round trip through
+    // sanitizeAccount that used to drop it.
+    expect(store.retiredClaudeConfigDirs()).toEqual(['/tmp/profiles/work']);
+    const reader = makeStore(dir);
+    await reader.load();
+    expect(reader.retiredClaudeConfigDirs()).toEqual(['/tmp/profiles/work']);
+    expect(reader.getAccounts()).toEqual([]);
+  });
+
+  it('does not offer a removed CODEX account as a claude directory to read', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.upsertAccount('cdx', {
+      label: 'Codex',
+      provider: 'codex',
+      configDir: '/tmp/profiles/cdx',
+    });
+    await store.deleteAccount('cdx');
+    expect(store.retiredClaudeConfigDirs()).toEqual([]);
+  });
+
   it('accountIds sees the tombstones the readers hide — a new account must not claim a removed one\'s id', async () => {
     const store = makeStore(tempDir());
     await store.load();

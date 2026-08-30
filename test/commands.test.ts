@@ -19,22 +19,27 @@ import {
   configureProjectFlow,
   defaultForkTitle,
   defaultSessionTitle,
+  forkForAgent,
+  forkStemFor,
   detachedTmuxName,
   nextFreeName,
   projectIdFromArg,
   registerCommands,
+  archivedSessionsFlow,
   chatHistoryFlow,
   closeProjectFlow,
   reopenProject,
   resumeFlow,
   selectedSessionIds,
   sessionIdFromArg,
+  sessionWorkspaceTarget,
   staleCandidates,
   stripForkCounter,
+  tabTitleFrom,
 } from '../src/commands';
 import type { AccountCommandDeps } from '../src/commands';
-import type { AccountDeps } from '../src/accountsView';
-import { validateProjectName } from '../src/projects';
+import type { AccountDeps, SwitchAccountResult } from '../src/accountsView';
+import { isWithin, validateProjectName } from '../src/projects';
 import {
   COMMANDS,
   MAX_PROJECT_NAME_LEN,
@@ -48,6 +53,7 @@ import {
   window as mockWindow,
 } from './mocks/vscode';
 import * as vscodeMock from './mocks/vscode';
+import type { CloseSummaryMode } from '../src/types';
 import type {
   AccountProfile,
   BackgroundJob,
@@ -61,6 +67,7 @@ import type {
   SessionNode,
   SubprojectRecord,
   UnlistedSession,
+  Worktree,
 } from '../src/types';
 
 const VALID = 'ff2c0a73-26c4-46f1-bb6e-fe331fcb0ecf';
@@ -152,6 +159,39 @@ describe('sessionIdFromArg', () => {
     expect(sessionIdFromArg(undefined)).toBeUndefined();
     expect(sessionIdFromArg(null)).toBeUndefined();
     expect(sessionIdFromArg(42)).toBeUndefined();
+  });
+});
+
+// A terminal tab is named from the ROW's name — including on the resume path,
+// which is exactly how a closed row becomes a tab. Two shapes the row builds
+// for an unnamed session are refused here, because the CLI's own
+// `claude · 1a2b3c4d` default is a better tab title than either.
+describe('tabTitleFrom', () => {
+  const ID = '1a2b3c4d-0000-4000-8000-00000000000a';
+
+  it('takes a real name', () => {
+    expect(tabTitleFrom(ID, 'api refactor', undefined)).toBe('api refactor');
+  });
+
+  it('refuses the short-id shapes the forest builds for an unnamed session', () => {
+    expect(tabTitleFrom(ID, '1a2b3c4d', undefined)).toBeUndefined();
+    expect(tabTitleFrom(ID, '1a2b3c4d (gone)', undefined)).toBeUndefined();
+  });
+
+  // The third shape: the QUOTATION an archived row falls back to when the
+  // transcript offers no title. The caller strips it (keyed on
+  // SessionNode.labelIsFallback, never on a leading quote character — a user is
+  // allowed to name a session with one), which reaches this function as an
+  // absent label.
+  it('falls through to the record title when the label was withheld', () => {
+    expect(tabTitleFrom(ID, undefined, 'editorial title')).toBe(
+      'editorial title',
+    );
+    expect(tabTitleFrom(ID, undefined, undefined)).toBeUndefined();
+    // ...and a quotation handed in verbatim is NOT sniffed for here: that is
+    // the caller's job, and this function must keep honouring a name someone
+    // really did type in quotes.
+    expect(tabTitleFrom(ID, '“cd ..”', undefined)).toBe('“cd ..”');
   });
 });
 
@@ -1115,6 +1155,339 @@ describe('chatHistoryFlow', () => {
   });
 });
 
+// ------------------------------------------ the per-project archive browser
+//
+// Archiving takes a row out of the tree, which makes the archive the one place
+// a session can be without being anywhere you can look. These pin what the
+// browser lists (this project's, not everything), what it CALLS things (the
+// shared name chain, with a quoted opening prompt marked as a quotation rather
+// than passed off as a title), and that ticking rows restores exactly those.
+
+describe('archivedSessionsFlow', () => {
+  const A = uuid(21);
+  const B = uuid(22);
+  const C = uuid(23);
+
+  afterEach(() => {
+    delete (mockWindow as QuickPickHost).showQuickPick;
+    delete (mockWindow as QuickPickHost).showInformationMessage;
+  });
+
+  const gone = (
+    id: string,
+    over: Partial<EditorialRecord> = {},
+  ): EditorialRecord => ({
+    id,
+    deleted: true,
+    cwd: '/Users/a/code/magma',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    ...over,
+  });
+
+  interface PickState {
+    shown: Array<{ label: string; description?: string; detail?: string; sessionId: string }>;
+    opts: { title?: string; canPickMany?: boolean } | undefined;
+    told: string[];
+  }
+
+  /** Ticks the rows at `indexes`; `undefined` is Escape. */
+  function scriptChecklist(indexes: number[] | undefined): PickState {
+    const state: PickState = { shown: [], opts: undefined, told: [] };
+    (mockWindow as QuickPickHost).showQuickPick = async (items, opts) => {
+      state.shown = items as PickState['shown'];
+      state.opts = opts as PickState['opts'];
+      return indexes === undefined
+        ? undefined
+        : indexes.map((i) => state.shown[i]);
+    };
+    (mockWindow as QuickPickHost).showInformationMessage = async (message) => {
+      state.told.push(message);
+      return undefined;
+    };
+    return state;
+  }
+
+  it('says where things come back from when the project has archived nothing', () => {
+    const state = scriptChecklist([0]);
+    const { deps, calls } = chatDeps(projectOf(), { records: {} });
+    return archivedSessionsFlow(deps, 'p1').then(() => {
+      expect(state.told[0]).toContain('Nothing archived in "magma-os"');
+      expect(state.shown).toEqual([]);
+      expect(calls.records).toEqual([]);
+    });
+  });
+
+  it("lists this project's archived sessions and nothing else", async () => {
+    const state = scriptChecklist(undefined);
+    const { deps } = chatDeps(projectOf(), {
+      records: {
+        [A]: gone(A),
+        // Another project's directory, a session that is only CLOSED, and a
+        // chat — none of the three is this project's archive.
+        [B]: gone(B, { cwd: '/elsewhere' }),
+        [C]: gone(C, { deleted: false }),
+        [VALID]: gone(VALID, { chat: true }),
+      },
+    });
+    await archivedSessionsFlow(deps, 'p1');
+    expect(state.shown.map((r) => r.sessionId)).toEqual([A]);
+    // A checklist, not a one-shot picker: restoring four things should be one
+    // gesture rather than four trips through the same list.
+    expect(state.opts?.canPickMany).toBe(true);
+    expect(state.opts?.title).toBe('Archived · magma-os');
+  });
+
+  it('names a row with the best name it has, and marks a quoted one', async () => {
+    const state = scriptChecklist(undefined);
+    const D = uuid(24);
+    const { deps } = chatDeps(projectOf(), {
+      records: {
+        [A]: gone(A, { title: 'the auth fix', updatedAt: '2026-04-04T00:00:00.000Z' }),
+        [B]: gone(B, { updatedAt: '2026-04-03T00:00:00.000Z' }),
+        [C]: gone(C, { updatedAt: '2026-04-02T00:00:00.000Z' }),
+        [D]: gone(D, { updatedAt: '2026-04-01T00:00:00.000Z' }),
+      },
+    });
+    deps.transcriptFacts = (id) =>
+      id === B
+        ? { label: 'renamed at the CLI' }
+        : id === C
+          ? { aiTitle: 'Locate AWS configuration file' }
+          : id === D
+            ? { firstPrompt: 'why is the roster polling twice' }
+            : {};
+    await archivedSessionsFlow(deps, 'p1');
+
+    expect(state.shown.map((r) => r.label)).toEqual([
+      'the auth fix',
+      'renamed at the CLI',
+      'Locate AWS configuration file',
+      '“why is the roster polling twice”',
+    ]);
+    // ONLY the quotation is marked. A generated title is still a title OF the
+    // conversation; the opening words are not a name anybody chose, and the
+    // marker is what says so.
+    expect(
+      state.shown.map((r) => (r.description ?? '').includes('first message')),
+    ).toEqual([false, false, false, true]);
+  });
+
+  it("shows the directory, falling back to the transcript's when the record has none", async () => {
+    const state = scriptChecklist(undefined);
+    const { deps } = chatDeps(projectOf(), {
+      records: {
+        [A]: gone(A, { cwd: '/Users/a/code/magma/api' }),
+        [B]: gone(B, { cwd: undefined }),
+      },
+    });
+    deps.transcriptFacts = (id) =>
+      id === B ? { cwd: '/Users/a/code/magma/web' } : {};
+    await archivedSessionsFlow(deps, 'p1');
+    const byId = new Map(state.shown.map((r) => [r.sessionId, r]));
+    expect(byId.get(A)?.detail).toBe('/Users/a/code/magma/api');
+    // The 32-of-159 case: without this the row would not be in the list at all.
+    expect(byId.get(B)?.detail).toBe('/Users/a/code/magma/web');
+  });
+
+  it('restores every ticked row in one gesture, and reveals only a single one', async () => {
+    scriptChecklist([0, 2]);
+    const { deps, calls } = chatDeps(projectOf(), {
+      records: {
+        [A]: gone(A, { updatedAt: '2026-04-03T00:00:00.000Z' }),
+        [B]: gone(B, { updatedAt: '2026-04-02T00:00:00.000Z' }),
+        [C]: gone(C, { updatedAt: '2026-04-01T00:00:00.000Z' }),
+      },
+    });
+    await archivedSessionsFlow(deps, 'p1');
+    expect(calls.records).toEqual([
+      { id: A, patch: { deleted: false } },
+      { id: C, patch: { deleted: false } },
+    ]);
+    // Scrolling to the last of two would name one of them as the interesting
+    // one, so nothing is revealed unless there is exactly one answer.
+    expect(calls.reveals).toEqual([]);
+    expect(calls.order).toContain('refresh');
+  });
+
+  it('reveals the row when exactly one was restored', async () => {
+    scriptChecklist([0]);
+    const { deps, calls } = chatDeps(projectOf(), { records: { [A]: gone(A) } });
+    await archivedSessionsFlow(deps, 'p1');
+    expect(calls.reveals).toEqual([A]);
+  });
+
+  it('restores nothing on Escape, and nothing on an empty tick', async () => {
+    for (const answer of [undefined, []] as (number[] | undefined)[]) {
+      scriptChecklist(answer);
+      const { deps, calls } = chatDeps(projectOf(), {
+        records: { [A]: gone(A) },
+      });
+      await archivedSessionsFlow(deps, 'p1');
+      // A deliberate "actually, none of these" is not an error.
+      expect(calls.records).toEqual([]);
+    }
+  });
+
+  it('files a worktree session under the project through the reach resolver', async () => {
+    const state = scriptChecklist(undefined);
+    const { deps } = chatDeps(projectOf(), {
+      records: { [A]: gone(A, { cwd: '/Users/a/wt/feature' }) },
+    });
+    await archivedSessionsFlow(deps, 'p1');
+    expect(state.shown).toEqual([]);
+
+    const state2 = scriptChecklist(undefined);
+    const { deps: deps2 } = chatDeps(projectOf(), {
+      records: { [A]: gone(A, { cwd: '/Users/a/wt/feature' }) },
+    });
+    deps2.projectReach = () => (p) =>
+      p.id === 'p1' ? ['/Users/a/wt/feature'] : [];
+    await archivedSessionsFlow(deps2, 'p1');
+    expect(state2.shown.map((r) => r.sessionId)).toEqual([A]);
+  });
+
+  it('says so when a restored row is still hidden by the active-only filter', async () => {
+    // A restore into a filtered tree looks exactly like a restore that did
+    // nothing. menuState already knew; nothing had ever asked it.
+    const notes: string[] = [];
+    (mockWindow as StatusHost).setStatusBarMessage = (text) => {
+      notes.push(text);
+    };
+    scriptChecklist([0]);
+    const { deps } = chatDeps(projectOf(), { records: { [A]: gone(A) } });
+    deps.menuState = () => ({
+      hooksInstalled: false,
+      onlyActive: true,
+      accountsSection: false,
+    });
+    await archivedSessionsFlow(deps, 'p1');
+    delete (mockWindow as StatusHost).setStatusBarMessage;
+    expect(notes.join(' ')).toContain('Show Only Active Sessions');
+  });
+
+  it('says which closed project is hiding the restored row, and offers it back', async () => {
+    // The archive browser is deliberately reachable for a CLOSED project — the
+    // palette entry passes includeHidden so "where did that session go" has an
+    // answer. But the restore then landed on no surface at all: the grouping
+    // files the row under the closed project and drops it, the record is no
+    // longer `deleted` so the browser it came from skips it too, and the only
+    // note in the flow spoke about the active-only filter. Success was reported
+    // and nothing on screen changed.
+    const told: Array<{ message: string; items: string[] }> = [];
+    scriptChecklist([0]);
+    (mockWindow as QuickPickHost).showInformationMessage = async (
+      message,
+      ...items
+    ) => {
+      told.push({ message: String(message), items: items.map(String) });
+      return items[0];
+    };
+    const { deps, calls } = chatDeps(projectOf({ hidden: true }), {
+      records: { [A]: gone(A) },
+    });
+    await archivedSessionsFlow(deps, 'p1');
+
+    expect(told).toHaveLength(1);
+    expect(told[0].message).toContain('"magma-os" is closed');
+    expect(told[0].items).toEqual(['Reopen "magma-os"']);
+    // And the button did the one thing it says it does.
+    expect(calls.projectPatches).toEqual([
+      { id: 'p1', patch: { hidden: false } },
+    ]);
+  });
+
+  it('reopens the closed PARENT too, because that is what put the row away', async () => {
+    // Closing a project closes its subtree (projects.closedProjectIds), so
+    // clearing the flag on the subproject alone would leave the row exactly as
+    // absent and the button would be a lie about what it did.
+    scriptChecklist([0]);
+    (mockWindow as QuickPickHost).showInformationMessage = async (
+      _message,
+      ...items
+    ) => items[0];
+    const parent = projectOf({
+      id: 'p0',
+      name: 'code',
+      rootDir: '/Users/a/code',
+      dirs: [],
+      hidden: true,
+    });
+    const child = projectOf({ parentId: 'p0' });
+    const { deps, calls } = chatDeps(child, {
+      records: { [A]: gone(A) },
+      projects: [parent, child],
+    });
+    await archivedSessionsFlow(deps, 'p1');
+
+    // p1 itself is not hidden — it is closed by inheritance — so p0 is the one
+    // record that has to change.
+    expect(calls.projectPatches).toEqual([
+      { id: 'p0', patch: { hidden: false } },
+    ]);
+  });
+
+  it('says nothing when another project claiming the directory is open', async () => {
+    // Claims are non-exclusive: a directory two projects list draws its row
+    // under both, so the row is on screen and there is nothing to explain.
+    const told: string[] = [];
+    scriptChecklist([0]);
+    (mockWindow as QuickPickHost).showInformationMessage = async (message) => {
+      told.push(String(message));
+      return undefined;
+    };
+    const closedOne = projectOf({ hidden: true });
+    const openOne = projectOf({
+      id: 'p2',
+      name: 'magma-too',
+      rootDir: '/Users/a/code/magma',
+      dirs: [],
+    });
+    const { deps, calls } = chatDeps(closedOne, {
+      records: { [A]: gone(A) },
+      projects: [closedOne, openOne],
+    });
+    await archivedSessionsFlow(deps, 'p1');
+
+    expect(told).toEqual([]);
+    expect(calls.projectPatches).toEqual([]);
+  });
+
+  it('says nothing about a closed project when nothing is closed', async () => {
+    const told: string[] = [];
+    scriptChecklist([0]);
+    (mockWindow as QuickPickHost).showInformationMessage = async (message) => {
+      told.push(String(message));
+      return undefined;
+    };
+    const { deps } = chatDeps(projectOf(), { records: { [A]: gone(A) } });
+    await archivedSessionsFlow(deps, 'p1');
+    expect(told).toEqual([]);
+  });
+
+  it('says nothing when the restored session is still RUNNING — its row is right there', async () => {
+    // An archived-but-live record is a real state (this machine had two of
+    // them), and `onlyActive` hides rows that are OVER — never a live one. The
+    // note used to ask only how the filter was set, so it told the user to turn
+    // a filter off to reveal a row revealSession had just scrolled to.
+    const notes: string[] = [];
+    (mockWindow as StatusHost).setStatusBarMessage = (text) => {
+      notes.push(text);
+    };
+    scriptChecklist([0]);
+    const { deps } = chatDeps(projectOf(), { records: { [A]: gone(A) } });
+    deps.menuState = () => ({
+      hooksInstalled: false,
+      onlyActive: true,
+      accountsSection: false,
+    });
+    deps.getForest = () => forestOf([node(A, { status: 'busy' })]);
+    await archivedSessionsFlow(deps, 'p1');
+    delete (mockWindow as StatusHost).setStatusBarMessage;
+    expect(notes).toEqual([]);
+  });
+});
+
 // ------------------------------------------------- close / open a project
 
 describe('closeProjectFlow', () => {
@@ -1218,7 +1591,13 @@ describe('reopenProject', () => {
  */
 type QuickPickHost = {
   showQuickPick?: (items: unknown, opts?: unknown) => Promise<unknown>;
-  showInformationMessage?: (message: string) => Promise<unknown>;
+  // The items are the buttons: the archive browser's closed-project note
+  // offers "Reopen …" and acts on the answer, so a test has to be able to
+  // press it.
+  showInformationMessage?: (
+    message: string,
+    ...items: string[]
+  ) => Promise<unknown>;
 };
 type CommandHost = {
   executeCommand?: (id: string, ...rest: unknown[]) => Promise<unknown>;
@@ -2658,6 +3037,113 @@ describe('fork inherits the PARENT pin, never the routing choice of the day', ()
   });
 });
 
+// ------------------- forking a row named only by a quotation of its first prompt
+//
+// A closed session with no title of any kind is labelled with its opening words
+// in typographic quotes (archive.transcriptFallbackName), and the quotes are what
+// tell the reader it is not a name anybody chose. `tabTitleFor` already refuses
+// that string on the resume path — a quotation on a terminal tab, stripped of the
+// row that framed it, is worse than `claude · 1a2b3c4d`. The FORK paths bypassed
+// that guard and, worse, wrote the quotation into the child's `record.title`,
+// which is where every later tab name and workspace restore reads from: the
+// guard was then defeated for good rather than for one launch.
+//
+// What replaces it is NOT the short id `labelFor` falls back to. A bare hex row
+// name is the thing the archived-naming work exists to remove, so a fork of such
+// a row is named after its CHECKOUT — `defaultSessionTitle`, the same name a
+// brand-new root in that directory is offered. See forkStemFor.
+
+describe('a fork is never named after its parent’s quoted first prompt', () => {
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+  });
+
+  const PARENT = uuid(1);
+  const QUOTED = '\u201cI want to post this on linkedIn, help me write it\u201d';
+
+  const quotedParent = (over: Partial<SessionNode> = {}): SessionNode =>
+    node(PARENT, {
+      cwd: '/code/app',
+      archived: true,
+      status: 'exited',
+      label: QUOTED,
+      labelIsFallback: true,
+      ...over,
+    });
+
+  it('unit: the stem falls through the quotation to the checkout, not to a hex id', () => {
+    const { deps } = chatDeps(undefined);
+    const withParent: CommandDeps = {
+      ...deps,
+      getForest: () => forestOf([quotedParent()]),
+    };
+    expect(forkStemFor(withParent, PARENT)).toBe('app');
+    // A row that HAS a name keeps it, quotes or not — a user may legitimately
+    // name a session with a quotation mark.
+    const named: CommandDeps = {
+      ...deps,
+      getForest: () => forestOf([quotedParent({ labelIsFallback: undefined })]),
+    };
+    expect(forkStemFor(named, PARENT)).toBe(QUOTED);
+  });
+
+  it('the CLICK path: neither the terminal tab nor the stored title carries it', async () => {
+    const { deps, calls } = chatDeps(undefined, {
+      hasTranscript: () => true,
+      beginInlineRename: () => true,
+    });
+    const withParent: AccountCommandDeps = {
+      ...deps,
+      getForest: () => forestOf([quotedParent()]),
+      launchSession: async (opts) => {
+        calls.order.push('launchSession');
+        calls.launches.push(opts);
+        return {
+          nodeId: opts.sessionId,
+          sessionId: opts.sessionId,
+          terminalName: 'claude',
+          createdAt: 0,
+        };
+      },
+    };
+    const harness = withRegisteredCommands(withParent);
+    await harness.run(COMMANDS.forkSession, PARENT);
+
+    expect(calls.launches).toHaveLength(1);
+    const launched = calls.launches[0];
+    // The checkout's name plus the fork counter — what a new root here gets.
+    expect(launched.title).toBe('app 2');
+    expect(launched.title).not.toContain('\u201c');
+    // And the RECORD, which is where the next resume and workspaces.ts read the
+    // tab name from. Fixing only the launch leaves the quotation to come back.
+    const titled = calls.records.filter((r) => r.patch.title !== undefined);
+    expect(titled).toHaveLength(1);
+    expect(titled[0].patch.title).toBe('app 2');
+    // Not the hex id either: `labelFor`'s fallback would have said '00000001 2'.
+    expect(titled[0].patch.title).not.toContain('0000000');
+  });
+
+  it('the AGENT path names it the same way', async () => {
+    const { deps, calls } = chatDeps(undefined, { hasTranscript: () => true });
+    const withParent: AccountCommandDeps = {
+      ...deps,
+      getForest: () => forestOf([quotedParent()]),
+      launchSession: async (opts) => {
+        calls.launches.push(opts);
+        return {
+          nodeId: opts.sessionId,
+          sessionId: opts.sessionId,
+          terminalName: 'claude',
+          createdAt: 0,
+        };
+      },
+    };
+    const outcome = await forkForAgent(withParent, PARENT, { count: 1 });
+    expect(outcome.titles).toEqual(['app 2']);
+    expect(calls.launches[0].title).toBe('app 2');
+  });
+});
+
 /**
  * Forking an UNSTARTED branch — the row that shows a full conversation and has
  * written nothing.
@@ -3408,6 +3894,34 @@ describe('adoptBackgroundJob', () => {
     expect(calls.reveals).toContain(CHILD);
   });
 
+  // The third of the three fork-naming sites — see the quoted-first-prompt block
+  // above for why the quotation must not reach a tab or a record. Reaching this
+  // state takes an ARCHIVED parent that still owns a live background job, which
+  // is contrived; the call is shared anyway, because "how a fork is named" is not
+  // allowed two answers.
+  it('never names it after the parent’s quoted first prompt', async () => {
+    const { deps, calls } = adoptDeps({
+      getForest: () =>
+        forestOf([
+          node(PARENT, {
+            cwd: '/code/app',
+            archived: true,
+            status: 'exited',
+            label: '\u201cwrite me a linkedIn post\u201d',
+            labelIsFallback: true,
+          }),
+          node(CHILD, { roster: { sessionId: CHILD, pid: 0 } }),
+        ]),
+    });
+
+    expect(await adoptBackgroundJob(deps, CHILD, job())).toBe(true);
+    expect(calls.launches[0].title).toBe('app 2');
+    expect(calls.records).toContainEqual({
+      id: CHILD,
+      patch: { title: 'app 2' },
+    });
+  });
+
   it('keeps a title the user already gave the row', async () => {
     const { deps, calls } = adoptDeps({
       getRecord: (id) =>
@@ -3591,7 +4105,7 @@ describe('close refuses a session running outside Flock', () => {
   });
 });
 
-// ------------------------------------------- close/delete on a GRACE row
+// --------------------------------- close/archive over a RUNNING session
 //
 // A grace row is a RUNNING process whose only surface is the tree row — its
 // tab is gone by definition. Two verbs used to be able to make that process
@@ -3600,8 +4114,18 @@ describe('close refuses a session running outside Flock', () => {
 // killing anything (running + shown nowhere — the exact unrepresentable state
 // the levels exist to remove, permanent when the record was pinned). Both now
 // route the process through the wiring's tree-reaping `killDetached` FIRST.
+//
+// ARCHIVE'S HALF OF THIS WAS ONLY HALF FIXED, and the rest of it is pinned
+// below. `claimsDetachedProcess` is false for a session that has a TAB, so the
+// old flow skipped it and wrote `deleted: true` straight over a live process:
+// the row left the tree, the process carried on, and because `pickSession`
+// filters archived rows out of every verb the user could not even close the
+// thing they had just archived. Archive now means close-then-hide — and the
+// one case it refuses rather than forces is a session somebody else is
+// running, because killing that ends a conversation another window is looking
+// at.
 
-describe('close and delete on a grace row kill the detached process first', () => {
+describe('archive ends a running session before it takes the row away', () => {
   afterEach(() => {
     delete (mockCommands as { registerCommand?: unknown }).registerCommand;
     delete (mockWindow as { showWarningMessage?: unknown }).showWarningMessage;
@@ -3621,11 +4145,28 @@ describe('close and delete on a grace row kill the detached process first', () =
     order: string[];
     patches: Array<{ id: string; patch: Partial<EditorialRecord> }>;
     warnings: string[];
+    /** The MODAL confirmations only, message and detail together, so a test
+     *  can assert on what the dialog promised without matching against every
+     *  non-modal warning the flows also raise. */
+    modals: string[];
+    closedHere: string[];
     run: (command: string, arg?: unknown) => Promise<void>;
   }
 
+  /** An OLDER generation of the same conversation. The detached claim is
+   *  written onto whichever id was parked and is deliberately not inherited by
+   *  a successor (generations.INHERITED_RECORD_KEYS), so this is where a
+   *  re-keyed session's `graceUntil`/`tmux` actually lives. */
+  const OLDER = uuid(2);
+
   function graceHarness(over: {
     record?: Partial<EditorialRecord>;
+    /** The claim, on OLDER rather than on the row's own id — the shape a
+     *  parked conversation that has since re-minted its id really has. Wires
+     *  `detachedClaimHolder` exactly as extension.ts does (a chain search) and
+     *  leaves `getRecord(SESSION)` claiming nothing, which is what the tip
+     *  record really says. */
+    chainClaim?: Partial<EditorialRecord>;
     killResult?: boolean;
     host?: 'here' | 'flock' | 'foreign' | 'none';
     forest?: SessionForest;
@@ -3633,17 +4174,32 @@ describe('close and delete on a grace row kill the detached process first', () =
      *  a LIVE window that is not this one. Absent = dep unwired (old
      *  wirings), which must read as false. */
     foreignLive?: boolean;
+    /** This window holds a terminal for the session — the tab-hosted case the
+     *  archive verb has to close before it takes the row away. */
+    hasTerminal?: boolean;
+    /** Answer the archive confirmation with Cancel instead of its button. */
+    decline?: boolean;
   }): GraceHarness {
     const order: string[] = [];
     const patches: Array<{ id: string; patch: Partial<EditorialRecord> }> = [];
     const warnings: string[] = [];
+    const modals: string[] = [];
+    const closedHere: string[] = [];
     (
       mockWindow as {
-        showWarningMessage?: (m: unknown) => Promise<unknown>;
+        showWarningMessage?: (m: unknown, ...rest: unknown[]) => Promise<unknown>;
       }
-    ).showWarningMessage = async (message) => {
+    ).showWarningMessage = async (message, ...rest) => {
       warnings.push(String(message));
-      return undefined;
+      const opts = rest[0] as { modal?: boolean; detail?: string } | undefined;
+      const isModal =
+        typeof opts === 'object' && opts !== null && opts.modal === true;
+      if (!isModal) return undefined;
+      modals.push(`${String(message)}\n${opts?.detail ?? ''}`);
+      // The confirm button is the last argument, exactly as the workbench
+      // renders it. Declining answers `undefined`, which is what Cancel and
+      // Escape both produce.
+      return over.decline === true ? undefined : rest[rest.length - 1];
     };
     // The delete flows end on an information toast with an Undo button;
     // returning undefined is "no Undo". The stale picker's QuickPick is
@@ -3663,26 +4219,59 @@ describe('close and delete on a grace row kill the detached process first', () =
       getRecord: (id) =>
         id === SESSION && over.record !== undefined
           ? { id, createdAt: GRACE, updatedAt: GRACE, ...over.record }
-          : undefined,
+          : id === OLDER && over.chainClaim !== undefined
+            ? { id, createdAt: GRACE, updatedAt: GRACE, ...over.chainClaim }
+            : undefined,
       upsertRecord: async (id, patch) => {
         for (const key of Object.keys(patch)) order.push(`upsert:${key}`);
         patches.push({ id, patch });
       },
-      closeTerminal: () => false, // a grace row has no terminal anywhere
+      // A grace row has no terminal anywhere; `hasTerminal` opts into the
+      // other case the archive verb has to handle — a session still open in a
+      // tab in THIS window.
+      closeTerminal: (id) => {
+        if (over.hasTerminal !== true) return false;
+        order.push('closeTerminal');
+        closedHere.push(id);
+        return true;
+      },
       killDetached: async () => {
         order.push('killDetached');
         return over.killResult ?? true;
       },
+      ...(over.chainClaim === undefined
+        ? {}
+        : {
+            // The wiring's own probe, mirrored: search the CHAIN for the
+            // generation that carries the claim (extension.detachedClaimHolder).
+            detachedClaimHolder: (id: string) =>
+              id === SESSION || id === OLDER
+                ? [SESSION, OLDER].find((alias) => {
+                    const r = alias === SESSION ? over.record : over.chainClaim;
+                    return (
+                      r?.graceUntil != null ||
+                      (typeof r?.tmux === 'string' && r.tmux !== '')
+                    );
+                  })
+                : undefined,
+          }),
       ...(hostAnswer === undefined ? {} : { hostOf: () => hostAnswer }),
       ...(over.foreignLive === undefined
         ? {}
         : { boundToLiveForeignWindow: () => over.foreignLive === true }),
     };
     const harness = withRegisteredCommands(withGrace);
-    return { order, patches, warnings, run: (c, a) => harness.run(c, a ?? SESSION) };
+    return {
+      order,
+      patches,
+      warnings,
+      modals,
+      closedHere,
+      run: (c, a) => harness.run(c, a ?? SESSION),
+    };
   }
 
-  it('DELETE kills the graced wrap BEFORE writing deleted', async () => {
+  it('ARCHIVE kills the graced wrap BEFORE writing deleted', async () => {
     const h = graceHarness({ record: { graceUntil: GRACE, tmux: 'lineage-x' } });
     await h.run(COMMANDS.deleteSession);
     // The write also clears the switch's stow marker — delete is a user verb.
@@ -3697,7 +4286,67 @@ describe('close and delete on a grace row kill the detached process first', () =
     });
   });
 
-  it('an explicit DELETE outranks the pin — pinned graced rows are killed too', async () => {
+  // ---- the claim on an OLDER generation id
+  //
+  // THE LEAK THIS BLOCK PINS, and it was found running on a real machine: a
+  // `claude` process 31 hours old, its row long gone. The claim is stamped on
+  // whichever id was parked; a conversation that re-mints its id afterwards (a
+  // plain resume, a compaction) does NOT carry `tmux`/`graceUntil` onto the
+  // successor, so the claim sits on a middle member while the ROW is the tip.
+  // Every verb below read the TIP record, concluded "nothing detached", and
+  // skipped the kill `killDetached` would happily have performed — because it
+  // searched the chain all along. Archive then wrote `deleted: true` over the
+  // live wrap: row gone, process running, nothing counting it.
+
+  it('ARCHIVE kills a wrap whose claim sits on an OLDER generation id', async () => {
+    const h = graceHarness({
+      record: {},
+      chainClaim: { graceUntil: GRACE, tmux: 'lineage-x' },
+    });
+    await h.run(COMMANDS.deleteSession);
+    expect(h.order).toEqual([
+      'killDetached',
+      'upsert:deleted',
+      'upsert:stowedBySwitch',
+    ]);
+  });
+
+  it('the dialog counts the older generation\'s wrap too', async () => {
+    // The modal must be counted with the function that acts. It used to ask its
+    // own tip-only question, so for this shape it promised nothing and then
+    // (before the fix above) delivered nothing either — the user was never told
+    // a running session was about to lose its row.
+    const h = graceHarness({
+      record: {},
+      chainClaim: { graceUntil: GRACE, tmux: 'lineage-x' },
+    });
+    await h.run(COMMANDS.deleteSession);
+    expect(h.modals[0]).toContain('still running');
+  });
+
+  it('CLOSE routes an older generation\'s wrap through killDetached', async () => {
+    // Same undercount, Close verb: it stamped `closed` on the row while the
+    // wrap ran on, which is the record lying about the process.
+    const h = graceHarness({
+      record: {},
+      chainClaim: { graceUntil: GRACE, tmux: 'lineage-x' },
+    });
+    await h.run(COMMANDS.closeSession);
+    expect(h.order).toEqual(['killDetached', 'upsert:stowedBySwitch']);
+    expect(h.warnings).toEqual([]);
+  });
+
+  it('CLOSE NOW routes an older generation\'s wrap through killDetached', async () => {
+    const h = graceHarness({
+      record: {},
+      chainClaim: { graceUntil: GRACE, tmux: 'lineage-x' },
+    });
+    await h.run(COMMANDS.closeSessionNow);
+    expect(h.order[0]).toBe('killDetached');
+    expect(h.patches.some((p) => typeof p.patch.closed === 'string')).toBe(false);
+  });
+
+  it('an explicit ARCHIVE outranks the pin — pinned graced rows are killed too', async () => {
     // The permanent variant of the leak: pinned + graced + deleted was a
     // process that ran FOREVER with no row and no reaper (the sweep skips
     // pinned records before any grace handling). The pin exempts a session
@@ -3709,13 +4358,13 @@ describe('close and delete on a grace row kill the detached process first', () =
     expect(h.order[0]).toBe('killDetached');
   });
 
-  it('DELETE on a plain archived row signals nothing', async () => {
+  it('ARCHIVE on a row that is already over signals nothing', async () => {
     const h = graceHarness({ record: { closed: GRACE } });
     await h.run(COMMANDS.deleteSession);
     expect(h.order).toEqual(['upsert:deleted', 'upsert:stowedBySwitch']);
   });
 
-  it('DELETE spares a detached claim whose terminal is bound HERE', async () => {
+  it('ARCHIVE spares a STALE detached claim whose terminal is bound HERE', async () => {
     // A restore clears the grace only after its launch resolves, so a bound
     // tab can briefly coexist with the claim. The tab is the surface then,
     // and delete's contract is to never touch tabs — killing would end the
@@ -3728,19 +4377,127 @@ describe('close and delete on a grace row kill the detached process first', () =
     expect(h.order).toEqual(['upsert:deleted', 'upsert:stowedBySwitch']);
   });
 
-  it('DELETE spares a claim bound to a LIVE foreign window — the cross-window restore race', async () => {
+  it('ARCHIVE refuses a claim bound to a LIVE foreign window — the cross-window restore race', async () => {
     // Window B's restore stamps boundWindowId at bind time but clears the
     // grace claim only after its launch resolves, so for a few seconds this
-    // record reads as detached HERE while the process has a tab THERE. The
-    // bound-here skip cannot see that; the sweep's live-foreign-window guard
-    // (mirrored into the delete flow) is what does. The row still goes —
-    // delete's contract — but nothing is signalled.
+    // record reads as detached HERE while the process has a tab THERE.
+    //
+    // This USED to remove the row anyway and signal nothing, on the argument
+    // that removing a row is archive's contract. That argument died with the
+    // verb's meaning: archive now closes what it archives, and the only two
+    // things it could do here are kill a session somebody else just
+    // re-attached, or hide a running process behind no row at all. Both are
+    // worse than saying so, so it says so and writes nothing.
     const h = graceHarness({
       record: { graceUntil: GRACE, tmux: 'lineage-x' },
       foreignLive: true,
     });
     await h.run(COMMANDS.deleteSession);
-    expect(h.order).toEqual(['upsert:deleted', 'upsert:stowedBySwitch']);
+    expect(h.order).toEqual([]);
+    expect(h.patches).toEqual([]);
+    expect(h.modals).toEqual([]);
+    // Named precisely, because a session another Flock window is holding is
+    // something the user can go and close; the wording has to say which door.
+    expect(h.warnings.join(' ')).toContain('running in another Flock window');
+  });
+
+  it('ARCHIVE refuses a live session of OURS that this window cannot end', async () => {
+    // The third way "somebody else has it" happens, and the one that used to
+    // fall through every guard: a session Flock launched whose tab has gone
+    // (`boundWindowId` nulled on exit, or naming a window that is no longer
+    // live) and which is live again outside this window — resumed in a plain
+    // terminal, or waiting for a reload's reassociate to rebind it. hostOf
+    // answers 'flock', so neither the foreign nor the other-window arm fired;
+    // there was no terminal to dispose and no claim to kill through, so
+    // archive ended nothing, said nothing, and wrote `deleted: true` over a
+    // live process. Because pickSession filters archived rows out of every
+    // verb in commands.ts, the user could not even close it afterwards.
+    const h = graceHarness({ record: { launchedByUs: true }, host: 'flock' });
+    await h.run(COMMANDS.deleteSession);
+    expect(h.order).toEqual([]);
+    expect(h.patches).toEqual([]);
+    expect(h.modals).toEqual([]);
+    expect(h.warnings.join(' ')).toContain('not in a tab this window holds');
+  });
+
+  it('...but archives an ordinary PARKED session of ours, which it can end', async () => {
+    // The control for the refusal above: 'flock' is also what a session parked
+    // into the private tmux server answers, and that one this window CAN end —
+    // through the detached funnel. A refusal here would have broken the
+    // commonest archive there is.
+    const h = graceHarness({
+      record: { graceUntil: GRACE, tmux: 'lineage-x' },
+      host: 'flock',
+    });
+    await h.run(COMMANDS.deleteSession);
+    expect(h.order).toEqual([
+      'killDetached',
+      'upsert:deleted',
+      'upsert:stowedBySwitch',
+    ]);
+  });
+
+  it('ARCHIVE refuses a session running OUTSIDE Flock', async () => {
+    // The other way "somebody else has it" happens. Flock never started this
+    // process and cannot end it, so the choice is the same one as above and
+    // the answer is the same: refuse, and say which session and why.
+    const h = graceHarness({ record: { closed: GRACE }, host: 'foreign' });
+    await h.run(COMMANDS.deleteSession);
+    expect(h.patches).toEqual([]);
+    expect(h.warnings.join(' ')).toContain('running outside Flock');
+    expect(h.warnings.join(' ')).toContain('cannot archive it');
+  });
+
+  it('ARCHIVE closes a TAB-hosted session before writing deleted', async () => {
+    // The bug this block exists for. A session with a terminal claims no
+    // detached process, so the old flow ended nothing and removed its row —
+    // running, and shown nowhere. The terminal is disposed first now, in the
+    // same before-the-flag order the grace row has always had.
+    const h = graceHarness({ record: {}, hasTerminal: true });
+    await h.run(COMMANDS.deleteSession);
+    // The record also learns what closeFlow would have told it on an ordinary
+    // close — this window ended the run, and its binding is gone — because
+    // this is the one tier nothing else records. The detached kill funnel
+    // stamps the record on its own way through.
+    expect(h.order).toEqual([
+      'closeTerminal',
+      'upsert:deleted',
+      'upsert:stowedBySwitch',
+      'upsert:closed',
+      'upsert:boundWindowId',
+    ]);
+    expect(h.closedHere).toEqual([SESSION]);
+    expect(h.patches[0]?.patch.boundWindowId).toBe(null);
+    expect(typeof h.patches[0]?.patch.closed).toBe('string');
+  });
+
+  it('ARCHIVE asks first, and a declined dialog writes nothing', async () => {
+    const h = graceHarness({
+      record: { graceUntil: GRACE, tmux: 'lineage-x' },
+      decline: true,
+    });
+    await h.run(COMMANDS.deleteSession);
+    expect(h.modals).toHaveLength(1);
+    expect(h.order).toEqual([]);
+    expect(h.patches).toEqual([]);
+  });
+
+  it('the dialog names the session it is about to close, and the way back', async () => {
+    // The one thing Undo cannot bring back is the process, and the only place
+    // that can honestly be said is before the click.
+    const h = graceHarness({ record: { graceUntil: GRACE, tmux: 'lineage-x' } });
+    await h.run(COMMANDS.deleteSession);
+    expect(h.modals[0]).toContain('still running');
+    expect(h.modals[0]).toContain('A resume brings the conversation back');
+    expect(h.modals[0]).toContain('Undo on the toast brings the row back');
+    expect(h.modals[0]).toContain('Archived Sessions...');
+  });
+
+  it('the dialog says nothing about closing a session that is already over', async () => {
+    const h = graceHarness({ record: { closed: GRACE } });
+    await h.run(COMMANDS.deleteSession);
+    expect(h.modals[0]).not.toContain('still running');
+    expect(h.modals[0]).toContain('The row leaves the tree');
   });
 
   it('CLOSE on a claim a live foreign window owns falls back to stamp-and-warn', async () => {
@@ -3757,7 +4514,7 @@ describe('close and delete on a grace row kill the detached process first', () =
     expect(h.warnings.some((w) => w.includes('still'))).toBe(true);
   });
 
-  it('the Delete Stale picker kills graced picks first, same order', async () => {
+  it('the Archive Stale picker ends graced picks first, same order', async () => {
     (
       mockWindow as {
         showQuickPick?: (items: unknown[]) => Promise<unknown[]>;
@@ -4605,7 +5362,7 @@ describe('Show / Hide Branches and Worktrees', () => {
     return { written, messages, status, run: (command) => harness.run(command) };
   }
 
-  it('writes the six on, and back off again, from one call each', async () => {
+  it('writes the four on, and back off again, from one call each', async () => {
     const h = switchHarness();
     await h.run(COMMANDS.showBranchesAndWorktrees);
     await h.run(COMMANDS.hideBranchesAndWorktrees);
@@ -4616,15 +5373,16 @@ describe('Show / Hide Branches and Worktrees', () => {
 
   it('says out loud that it turned the network one on', async () => {
     // The receipt is the whole reason ON uses a message where every other
-    // toggle flashes the status bar: `gh pr list` and the fabricated demo
-    // project are things Flock otherwise never does unasked, and a person who
-    // typed "show branches" has not read the settings for either.
+    // toggle flashes the status bar: `gh pr list` reaches the network, which is
+    // a thing Flock otherwise never does unasked, and a person who typed "show
+    // branches" has not read the settings for it. The other three announce
+    // themselves the moment the tree redraws; the network does not.
     const h = switchHarness();
     await h.run(COMMANDS.showBranchesAndWorktrees);
     expect(h.messages).toHaveLength(1);
     expect(h.messages[0]).toContain('gh pr list');
     expect(h.messages[0]).toContain('two lines');
-    // And it names the way back, since six settings is not something anybody
+    // And it names the way back, since four settings is not something anybody
     // will undo by hand.
     expect(h.messages[0]).toContain('Hide Branches and Worktrees');
     expect(h.status).toEqual([]);
@@ -5090,6 +5848,8 @@ describe('the add / import flows', () => {
     soloSession: false,
     launchMode: 'flock',
     claudeExtensionInstalled: false,
+    mode: undefined,
+    workspacesEnabled: true,
   };
 
   describe('addSessionToProjectFlow', () => {
@@ -5270,6 +6030,7 @@ describe('the add / import flows', () => {
     const PROJECT = 'Make your first project';
     const BRANCHES = 'Show branch and worktree rows';
     const SURFACE = 'Choose where sessions open';
+    const WINDOW_MODEL = 'Choose what a window is';
 
     beforeEach(() => {
       // newProjectFlow names the project it just made, and falls back to this
@@ -5292,17 +6053,17 @@ describe('the add / import flows', () => {
       expect(calls.settings).toEqual([]);
     });
 
-    it('still asks the surface question on a machine with nothing else to do, and the receipt carries the notes', async () => {
+    it('still asks the two taste questions on a machine with nothing else to do, and the receipt carries the notes', async () => {
       // The old "everything recommended is already set up" outcome is gone on
-      // purpose: the surface step has no "already done", so even a settled
-      // machine is offered the checklist — with exactly that one row on it —
+      // purpose: neither taste step has an "already done", so even a settled
+      // machine is offered the checklist — with exactly those two rows on it —
       // and the notes ride the receipt.
       const { deps, calls } = poolDeps({
         world: { ...settledWorld, tmuxBinary: null },
       });
       const asked = scriptPicks([SURFACE], 'Editor tabs (current)');
       await recommendedSetupFlow(deps);
-      expect(asked.offered[0]).toEqual([SURFACE]);
+      expect(asked.offered[0]).toEqual([SURFACE, WINDOW_MODEL]);
       // Choosing an option — even the current one — writes it, explicitly.
       expect(calls.settings).toEqual([
         { key: 'terminalLocation', value: 'editor' },
@@ -5321,8 +6082,84 @@ describe('the add / import flows', () => {
       const asked = scriptPicks(undefined);
       await recommendedSetupFlow(deps);
       expect(asked.many).toEqual([true]);
-      expect(asked.offered[0]).toEqual([SURFACE, HOOKS, BRANCHES]);
-      expect(asked.picked[0]).toEqual([SURFACE, HOOKS]);
+      expect(asked.offered[0]).toEqual([SURFACE, WINDOW_MODEL, HOOKS, BRANCHES]);
+      expect(asked.picked[0]).toEqual([SURFACE, WINDOW_MODEL, HOOKS]);
+    });
+
+    it('opens the three window models, cursor on the one you are in', async () => {
+      // The taste contract again: the tick opens the question, the OPTION
+      // writes. `folder` alone here, because that is the whole of what the
+      // Flock-only and one-folder-per-project answers move.
+      const { deps, calls } = poolDeps({
+        world: { ...settledWorld, mode: 'root' },
+      });
+      const asked = scriptPicks([WINDOW_MODEL], 'One folder per project');
+      await recommendedSetupFlow(deps);
+      expect(asked.offered[1]).toEqual([
+        'One folder per project',
+        'Flock only (current)',
+        'Auto-switch',
+      ]);
+      expect(calls.settings).toEqual([{ key: 'mode', value: 'folder' }]);
+    });
+
+    it('untangles the legacy pair when auto-switch is chosen', async () => {
+      // A user carrying `workspaces.enabled: false` is shown as Flock only —
+      // which is what their window has always been — and choosing Auto-switch
+      // has to write BOTH keys, or `resolveMode` would fold them straight back
+      // with nothing on screen to explain it.
+      const { deps, calls } = poolDeps({
+        world: { ...settledWorld, mode: 'project', workspacesEnabled: false },
+      });
+      const asked = scriptPicks([WINDOW_MODEL], 'Auto-switch');
+      await recommendedSetupFlow(deps);
+      expect(asked.offered[1]).toContain('Flock only (current)');
+      expect(calls.settings).toEqual([
+        { key: 'mode', value: 'project' },
+        { key: 'workspaces.enabled', value: true },
+      ]);
+    });
+
+    it('writes nothing for a ticked window-model step whose picker was cancelled', async () => {
+      const { deps, calls } = poolDeps({ world: settledWorld });
+      scriptPicks([WINDOW_MODEL], undefined);
+      await recommendedSetupFlow(deps);
+      expect(calls.settings).toEqual([]);
+      expect(saidInfo.join(' ')).toContain('nothing was changed');
+    });
+
+    it('is also a verb of its own, with a receipt naming the model', async () => {
+      // The checklist asks this once, when somebody meets the product. The
+      // standalone command is for the other moment — a month in, wanting a
+      // different model — and it is the one that matters more, because the
+      // route it replaces is knowing that the key is called `lineage.mode` and
+      // that `project` is spelled that way while meaning "auto-switch".
+      const said: string[] = [];
+      (
+        mockWindow as { setStatusBarMessage?: (t: string, ms?: number) => void }
+      ).setStatusBarMessage = (text) => {
+        said.push(text);
+      };
+      try {
+        const { deps, calls } = poolDeps({ world: settledWorld });
+        const asked = scriptPicks('Flock only');
+        const harness = withRegisteredCommands(deps);
+        await harness.run(COMMANDS.chooseWindowModel);
+        expect(asked.offered[0]).toEqual([
+          'One folder per project (current)',
+          'Flock only',
+          'Auto-switch',
+        ]);
+        expect(calls.settings).toEqual([{ key: 'mode', value: 'root' }]);
+        // By its LABEL, not its value: the receipt has to be readable by the
+        // same person the picker was.
+        expect(said.join(' ')).toContain('Flock only');
+        expect(calls.refreshes).toBeGreaterThan(0);
+      } finally {
+        delete (mockWindow as { setStatusBarMessage?: unknown })
+          .setStatusBarMessage;
+        delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+      }
     });
 
     it('writes nothing for a ticked surface step whose picker was cancelled', async () => {
@@ -5627,7 +6464,12 @@ describe('folder mode: the switch verb refuses', () => {
       projectId: 'p1',
     });
     expect(switched).toEqual([]);
-    expect(told[0]).toContain('folder mode');
+    // The message names the MODEL the way the picker does, points at the verb
+    // that changes it, and still names the key for anybody who prefers the
+    // settings file. It stopped saying "folder mode" because there are three
+    // models now and only one of them is refusing.
+    expect(told[0]).toContain('one folder per project');
+    expect(told[0]).toContain('Choose Window Model');
     expect(told[0]).toContain('lineage.mode');
   });
 
@@ -5646,5 +6488,1170 @@ describe('folder mode: the switch verb refuses', () => {
       projectId: 'p1',
     });
     expect(switched).toEqual(['p1']);
+  });
+
+  it('switches in the Flock-only model too — it keeps the verb on purpose', async () => {
+    // The migration's promise. `(mode: project, workspaces.enabled: false)`
+    // resolves to `flock`, and that pair has always been able to switch on
+    // purpose — it just never switched by itself. Narrowing this refusal to
+    // `projectSwitchingOn` would take a working verb away from exactly the
+    // population the fold was written to leave alone.
+    const told: string[] = [];
+    (
+      mockWindow as { showInformationMessage?: (m: unknown) => Promise<unknown> }
+    ).showInformationMessage = async (message) => {
+      told.push(String(message));
+      return undefined;
+    };
+    const switched: Array<string | null> = [];
+    const { deps } = chatDeps(projectOf());
+    const harness = withRegisteredCommands({
+      ...deps,
+      lineageMode: () => 'root',
+      switchWorkspace: async (projectId: string | null) => {
+        switched.push(projectId);
+      },
+    });
+    await harness.run(COMMANDS.switchWorkspace, {
+      type: 'project',
+      projectId: 'p1',
+    });
+    expect(switched).toEqual(['p1']);
+    expect(told).toEqual([]);
+  });
+});
+
+// ------------------------------------------ converting a window to follow
+//
+// `lineage.followInExplorer` costs a RELOAD and buys a permanently visible
+// anchor row, and what it buys back — a window that follows the session you are
+// in — only exists in the auto-switch model. Converting a window that is not in
+// that model is therefore the one outcome this verb must refuse, and the
+// refusal has to name the fix rather than write it: `lineage.mode` has exactly
+// one writer, and a second would be a second answer to "which model is this".
+
+describe('followInExplorer: it refuses to convert a window that would not follow', () => {
+  function convertDeps(mode: 'folder' | 'root' | 'project' | undefined) {
+    const told: string[] = [];
+    (
+      mockWindow as { showInformationMessage?: (m: unknown) => Promise<unknown> }
+    ).showInformationMessage = async (message) => {
+      told.push(String(message));
+      return undefined;
+    };
+    (
+      mockWindow as { showWarningMessage?: (m: unknown) => Promise<unknown> }
+    ).showWarningMessage = async (message) => {
+      told.push(`WARN:${String(message)}`);
+      return undefined;
+    };
+    const converted: number[] = [];
+    const { deps } = chatDeps(projectOf());
+    const harness = withRegisteredCommands({
+      ...deps,
+      lineageMode: mode === undefined ? undefined : () => mode,
+      explorerAnchored: () => false,
+      followInExplorer: async () => {
+        converted.push(1);
+      },
+    });
+    return { harness, told, converted };
+  }
+
+  it.each([['folder'], ['root']] as const)(
+    'says so, and points at the model picker, in %s',
+    async (mode) => {
+      const { harness, told, converted } = convertDeps(mode);
+      await harness.run(COMMANDS.followInExplorer);
+      expect(converted).toEqual([]);
+      expect(told[0]).toContain('Auto-switch');
+      expect(told[0]).toContain('reload');
+    },
+  );
+
+  it('offers the modal as before in auto-switch', async () => {
+    const { harness, told, converted } = convertDeps('project');
+    await harness.run(COMMANDS.followInExplorer);
+    // The modal is declined by the double, so nothing converts — what is
+    // asserted is that the REFUSAL above did not fire and the question was
+    // actually asked.
+    expect(converted).toEqual([]);
+    expect(told[0]).toContain('WARN:');
+    expect(told[0]).toContain('follow the session you are in');
+  });
+
+  it('goes ahead when the wiring has no opinion about the model', async () => {
+    // Absent reads as "no opinion", the way `resolveMode` treats an undefined
+    // `workspaces.enabled`: a caller that cannot answer must not veto.
+    const { harness, told } = convertDeps(undefined);
+    await harness.run(COMMANDS.followInExplorer);
+    expect(told[0]).toContain('WARN:');
+  });
+});
+
+// ---------------------------------------------------- go to the workspace
+//
+// Axel's level-2 verb: "we should be able to go to the workspace for that
+// session, to open a new window". The resolver below is the whole of WHERE, and
+// it is asserted separately from the verb because the ladder is the part that
+// is easy to get subtly wrong — every rung has to CONTAIN the session's cwd, or
+// the window that opens has no row for the session and cannot resume it.
+
+describe('sessionWorkspaceTarget: the worktree, then the lane, then the claim', () => {
+  const SESSION = uuid(7);
+
+  function resolverDeps(over: {
+    cwd?: string;
+    projects?: ProjectRecord[];
+    lane?: SubprojectRecord;
+    laneId?: string;
+    worktrees?: (dir: string) => Promise<readonly Worktree[]>;
+  }): CommandDeps {
+    const projects = over.projects ?? [];
+    const { deps } = chatDeps(projects[0], { projects });
+    return {
+      ...deps,
+      getForest: () =>
+        forestOf(
+          over.cwd === undefined
+            ? [node(SESSION)]
+            : [node(SESSION, { cwd: over.cwd })],
+        ),
+      getSessionLane: () => over.laneId,
+      getSubproject: (id: string) =>
+        over.lane && over.lane.id === id ? over.lane : undefined,
+      ...(over.worktrees === undefined ? {} : { worktreesFor: over.worktrees }),
+    } as CommandDeps;
+  }
+
+  const app = (): ProjectRecord =>
+    projectOf({ id: 'p1', name: 'App', rootDir: '/code/app', dirs: [] });
+
+  const lane = (over: Partial<SubprojectRecord> = {}): SubprojectRecord => ({
+    id: 'lane-1',
+    projectId: 'p1',
+    name: 'Server rewrite',
+    dir: '/code/app',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    ...over,
+  });
+
+  it('prefers the session\'s own CHECKOUT to the project\'s root', async () => {
+    // The case `openTargetFor` alone gets wrong, and the reason the worktree is
+    // tier one: the project claims `/code/app`, but this conversation is
+    // running in a linked worktree, and a window on the project's root would
+    // show the main checkout's branch in Source Control — the wrong branch, on
+    // the wrong files, for the session it was opened for.
+    const probed: string[] = [];
+    const deps = resolverDeps({
+      cwd: '/code/app-feat-x/src',
+      projects: [app()],
+      worktrees: async (dir) => {
+        probed.push(dir);
+        return [
+          { dir: '/code/app', branch: 'main', head: 'a', detached: false },
+          {
+            dir: '/code/app-feat-x',
+            branch: 'feat/x',
+            head: 'b',
+            detached: false,
+          },
+        ];
+      },
+    });
+    expect(await sessionWorkspaceTarget(deps, SESSION)).toBe('/code/app-feat-x');
+    expect(probed).toEqual(['/code/app-feat-x/src']);
+  });
+
+  it('falls to the LANE when there is no checkout to name', async () => {
+    // A lane in a plain directory — no git anywhere near it. The lane is the
+    // editorial answer to "which piece of work", and it beats the project root
+    // for the same reason the worktree does: it is narrower and still true.
+    const deps = resolverDeps({
+      cwd: '/code/app/services/api/src',
+      projects: [app()],
+      laneId: 'lane-1',
+      lane: lane({ dir: '/code/app/services/api' }),
+    });
+    expect(await sessionWorkspaceTarget(deps, SESSION)).toBe(
+      '/code/app/services/api',
+    );
+  });
+
+  it('SKIPS a lane whose directory does not contain the session', async () => {
+    // `SubprojectRecord.dir` is editorial and is explicitly allowed to point
+    // outside the project's own directories; a pinned lane can also be
+    // redirected to a checkout that has nothing to do with this conversation.
+    // Trusting it would open a window whose fences exclude the very session it
+    // was opened for — no row, and no resume.
+    const deps = resolverDeps({
+      cwd: '/code/app/src',
+      projects: [app()],
+      laneId: 'lane-1',
+      lane: lane({ dir: '/elsewhere/entirely' }),
+    });
+    expect(await sessionWorkspaceTarget(deps, SESSION)).toBe('/code/app');
+  });
+
+  it('falls to the project\'s claim, and then to the cwd itself', async () => {
+    const claimed = resolverDeps({ cwd: '/code/app/src/x', projects: [app()] });
+    expect(await sessionWorkspaceTarget(claimed, SESSION)).toBe('/code/app');
+    // No project claims it: the directory the conversation is actually in is
+    // still a true answer, and a window on it is still better than a refusal.
+    const loose = resolverDeps({ cwd: '/tmp/scratch', projects: [app()] });
+    expect(await sessionWorkspaceTarget(loose, SESSION)).toBe('/tmp/scratch');
+  });
+
+  it('answers with nothing at all when the row records no directory', async () => {
+    const deps = resolverDeps({ projects: [app()] });
+    expect(await sessionWorkspaceTarget(deps, SESSION)).toBe('');
+  });
+
+  it('survives a worktree probe that throws', async () => {
+    // The probe shells out. A repository that has just been deleted, a git that
+    // is not on PATH — the verb still has two rungs below this one, and a
+    // failure to answer "which checkout" is not a reason to refuse to open a
+    // window at all.
+    const deps = resolverDeps({
+      cwd: '/code/app/src',
+      projects: [app()],
+      worktrees: async () => {
+        throw new Error('not a git repository');
+      },
+    });
+    expect(await sessionWorkspaceTarget(deps, SESSION)).toBe('/code/app');
+  });
+
+  it('never answers with a directory that does not CONTAIN the session', async () => {
+    // The invariant every tier exists to satisfy, asserted as itself rather
+    // than inferred from the cases above: the new window's launch fence and its
+    // grouping fence are both containment tests against this directory.
+    const cases: Array<{ cwd: string; deps: CommandDeps }> = [
+      { cwd: '/code/app-feat-x/src', deps: resolverDeps({
+        cwd: '/code/app-feat-x/src',
+        projects: [app()],
+        worktrees: async () => [
+          { dir: '/code/app', branch: 'main', head: 'a', detached: false },
+          { dir: '/code/app-feat-x', branch: 'feat/x', head: 'b', detached: false },
+        ],
+      }) },
+      { cwd: '/code/app/src', deps: resolverDeps({
+        cwd: '/code/app/src',
+        projects: [app()],
+        laneId: 'lane-1',
+        lane: lane({ dir: '/elsewhere/entirely' }),
+      }) },
+      { cwd: '/tmp/scratch', deps: resolverDeps({ cwd: '/tmp/scratch' }) },
+    ];
+    for (const c of cases) {
+      const target = await sessionWorkspaceTarget(c.deps, SESSION);
+      expect(target).not.toBe('');
+      expect(isWithin(target, c.cwd), `${target} must contain ${c.cwd}`).toBe(
+        true,
+      );
+    }
+  });
+});
+
+describe('Open Workspace for This Session picks the window', () => {
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockWindow as { showInformationMessage?: unknown })
+      .showInformationMessage;
+    delete (mockWindow as { setStatusBarMessage?: unknown }).setStatusBarMessage;
+  });
+
+  const SESSION = uuid(7);
+
+  function verbHarness(over: {
+    cwd?: string;
+    windowFolders?: string[];
+    focusWindowForDir?: (dir: string, id?: string) => Promise<boolean>;
+  }): {
+    told: string[];
+    opened: Array<[string, boolean]>;
+    calls: ChatCalls;
+    run: (command: string, arg: unknown) => Promise<void>;
+  } {
+    const told: string[] = [];
+    const opened: Array<[string, boolean]> = [];
+    (
+      mockWindow as { showInformationMessage?: (m: unknown) => Promise<unknown> }
+    ).showInformationMessage = async (message) => {
+      told.push(String(message));
+      return undefined;
+    };
+    (mockWindow as { setStatusBarMessage?: (m: unknown) => void })
+      .setStatusBarMessage = (message) => {
+      told.push(String(message));
+    };
+    const project = projectOf({
+      id: 'p1',
+      name: 'App',
+      rootDir: '/code/app',
+      dirs: [],
+    });
+    const { deps, calls } = chatDeps(project, { projects: [project] });
+    const harness = withRegisteredCommands({
+      ...deps,
+      getForest: () =>
+        forestOf(
+          over.cwd === undefined
+            ? [node(SESSION)]
+            : [node(SESSION, { cwd: over.cwd })],
+        ),
+      ...(over.windowFolders === undefined
+        ? {}
+        : { windowFolders: () => over.windowFolders as string[] }),
+      ...(over.focusWindowForDir === undefined
+        ? {}
+        : { focusWindowForDir: over.focusWindowForDir }),
+      openProject: async (fsPath: string, newWindow: boolean) => {
+        opened.push([fsPath, newWindow]);
+      },
+    } as never);
+    return { told, opened, calls, run: (c, a) => harness.run(c, a) };
+  }
+
+  it('opens a NEW window on the session\'s directory', async () => {
+    const h = verbHarness({ cwd: '/code/app/src' });
+    await h.run(COMMANDS.openSessionWorkspace, { type: 'session', id: SESSION });
+    expect(h.opened).toEqual([['/code/app', true]]);
+  });
+
+  it('reveals the row instead when THIS window already has that folder', async () => {
+    // `focusWindowForDir` excludes this window on purpose, so without a
+    // self-check the verb would open a second window on the folder the user is
+    // standing in — two roosts for one piece of work.
+    const h = verbHarness({
+      cwd: '/code/app/src',
+      windowFolders: ['/code/app'],
+      focusWindowForDir: async () => true,
+    });
+    await h.run(COMMANDS.openSessionWorkspace, { type: 'session', id: SESSION });
+    expect(h.opened).toEqual([]);
+    expect(h.calls.reveals).toEqual([SESSION]);
+    expect(h.told.join(' ')).toContain('already open on /code/app');
+  });
+
+  it('reads the window\'s real folders, not the folder-mode fence', async () => {
+    // The check has to fire in the two models where `scopeDirs()` is undefined
+    // by construction — which are exactly the models this verb was written for.
+    // A window that publishes no folders makes no claim and gets a new window.
+    const h = verbHarness({
+      cwd: '/code/app/src',
+      windowFolders: ['/code/other'],
+    });
+    await h.run(COMMANDS.openSessionWorkspace, { type: 'session', id: SESSION });
+    expect(h.opened).toEqual([['/code/app', true]]);
+  });
+
+  it('raises a live window that covers the directory rather than opening a second', async () => {
+    const routed: Array<[string, string | undefined]> = [];
+    const h = verbHarness({
+      cwd: '/code/app/src',
+      focusWindowForDir: async (dir, id) => {
+        routed.push([dir, id]);
+        return true;
+      },
+    });
+    await h.run(COMMANDS.openSessionWorkspace, { type: 'session', id: SESSION });
+    expect(routed).toEqual([['/code/app', SESSION]]);
+    expect(h.opened).toEqual([]);
+  });
+
+  it('says so rather than guessing when the row has no directory', async () => {
+    const h = verbHarness({});
+    await h.run(COMMANDS.openSessionWorkspace, { type: 'session', id: SESSION });
+    expect(h.opened).toEqual([]);
+    expect(h.told.join(' ')).toContain('no directory on record');
+  });
+});
+
+// ------------------------------- telling a parent conversation what happened
+//
+// Two features on one transport. Flock has NO session-to-session messaging —
+// the in-session verbs channel runs one way, session → extension, and the only
+// text that ever went the other way is a fork's opening prompt, delivered once
+// at birth. Both the fork note and the close-with-summary note ride
+// `sendTextToSession`, which types into a terminal bound in THIS window and
+// reaches nothing else. These pin the two things that follow from that: what
+// is sent, and the far more common case of nothing being sent at all.
+
+describe('a fork tells its parent, when asked to', () => {
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockWindow as { showWarningMessage?: unknown }).showWarningMessage;
+  });
+
+  const PARENT = uuid(1);
+
+  interface NoteHarness {
+    sends: Array<[string, string]>;
+    launches: LaunchOptions[];
+    warnings: string[];
+    deps: AccountCommandDeps;
+    run: (command: string, ...args: unknown[]) => Promise<void>;
+  }
+
+  function noteHarness(
+    over: {
+      notifyParentOnFork?: () => boolean;
+      sendTextToSession?: (id: string, text: string) => boolean;
+      host?: 'here' | 'flock' | 'foreign' | 'none';
+    } = {},
+  ): NoteHarness {
+    const sends: Array<[string, string]> = [];
+    const launches: LaunchOptions[] = [];
+    const warnings: string[] = [];
+    (
+      mockWindow as { showWarningMessage?: (m: unknown) => Promise<unknown> }
+    ).showWarningMessage = async (message: unknown) => {
+      warnings.push(String(message));
+      return undefined;
+    };
+    // A LIVE record map: `labelFor` reads the store, and in the real wiring the
+    // child's title is already written there by the time the note is composed.
+    // A frozen fixture would quietly make every note say a hex id.
+    const records: Record<string, EditorialRecord> = {
+      [PARENT]: {
+        id: PARENT,
+        parentId: null,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      },
+    };
+    const { accounts } = fakeAccountDeps([], { sessionProfileId: () => undefined });
+    const { deps } = chatDeps(undefined, {
+      records,
+      hasTranscript: () => true,
+      beginInlineRename: () => true,
+    });
+    const withNote: AccountCommandDeps = {
+      ...deps,
+      getForest: () => forestOf([node(PARENT, { cwd: '/code/api', label: 'auth' })]),
+      getRecord: (id) => records[id],
+      upsertRecord: async (id, patch) => {
+        records[id] = {
+          ...(records[id] ?? {
+            id,
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+          }),
+          ...patch,
+        } as EditorialRecord;
+      },
+      hostOf: () => over.host ?? 'here',
+      sendTextToSession: (id, text) => {
+        sends.push([id, text]);
+        return over.sendTextToSession ? over.sendTextToSession(id, text) : true;
+      },
+      launchSession: async (opts) => {
+        launches.push(opts);
+        return {
+          nodeId: opts.sessionId,
+          sessionId: opts.sessionId,
+          terminalName: 'claude',
+          createdAt: 0,
+        };
+      },
+      ...(over.notifyParentOnFork
+        ? { notifyParentOnFork: over.notifyParentOnFork }
+        : {}),
+      accounts,
+    };
+    const harness = withRegisteredCommands(withNote);
+    return { sends, launches, warnings, deps: withNote, run: harness.run };
+  }
+
+  it('types exactly one single line into the parent when the setting is on', async () => {
+    const h = noteHarness({ notifyParentOnFork: () => true });
+    await h.run(COMMANDS.forkSession, PARENT);
+    expect(h.sends).toHaveLength(1);
+    const [target, text] = h.sends[0];
+    expect(target).toBe(PARENT);
+    // sendText appends the newline itself; an embedded one submits early and
+    // drops the rest of the sentence into the parent as a second turn.
+    expect(text).not.toContain('\n');
+    expect(text).toContain('auth 2');
+  });
+
+  it('sends nothing at all with the setting off, or with no dep at all', async () => {
+    for (const over of [{ notifyParentOnFork: () => false }, {}]) {
+      const h = noteHarness(over);
+      await h.run(COMMANDS.forkSession, PARENT);
+      expect(h.sends).toEqual([]);
+    }
+  });
+
+  it('sends nothing when the parent is not hosted in this window', async () => {
+    // The ordinary cases, not the exotic ones: a closed parent, one in another
+    // Flock window, one running outside Flock, one parked by a switch. Nothing
+    // is queued and nothing is retried in any of them.
+    for (const host of ['flock', 'foreign', 'none'] as const) {
+      const h = noteHarness({ notifyParentOnFork: () => true, host });
+      await h.run(COMMANDS.forkSession, PARENT);
+      expect(h.sends).toEqual([]);
+      expect(h.launches).toHaveLength(1);
+    }
+  });
+
+  it('never fails the fork when the note does not land', async () => {
+    const h = noteHarness({
+      notifyParentOnFork: () => true,
+      sendTextToSession: () => false,
+    });
+    await h.run(COMMANDS.forkSession, PARENT);
+    expect(h.launches).toHaveLength(1);
+    expect(h.warnings).toEqual([]);
+  });
+
+  it('the AGENT-verbs fork types nothing into the parent', async () => {
+    // The most important one in the set. There the fork was requested BY the
+    // parent conversation, and the verbs CLI already reports the new branches
+    // into that same turn — a second copy typed into its terminal would both
+    // duplicate the sentence and land keystrokes mid-turn.
+    const h = noteHarness({ notifyParentOnFork: () => true });
+    const outcome = await forkForAgent(h.deps, PARENT, { count: 2 });
+    expect(outcome.forked).toHaveLength(2);
+    expect(h.sends).toEqual([]);
+  });
+
+  it('fork-and-compact notifies too, and still launches with /compact', async () => {
+    const h = noteHarness({ notifyParentOnFork: () => true });
+    await h.run(COMMANDS.forkAndCompact, PARENT);
+    expect(h.launches[0].prompt).toBe('/compact');
+    expect(h.sends).toHaveLength(1);
+    expect(h.sends[0][1]).toContain('auth 2');
+  });
+
+  it('never announces /compact as the branch purpose', async () => {
+    // `/compact` is machinery Flock injects, not a person saying what a branch
+    // is for, and forkPurposeOf's rule is "the user's own words". The note used
+    // to read `It is for: /compact.`, presenting the compaction command to the
+    // parent's model as the branch's stated intention. It must fall through to
+    // the same short sentence a plain unnamed fork gets.
+    const h = noteHarness({ notifyParentOnFork: () => true });
+    await h.run(COMMANDS.forkAndCompact, PARENT);
+    expect(h.sends).toHaveLength(1);
+    expect(h.sends[0][1]).not.toContain('/compact');
+    expect(h.sends[0][1]).not.toContain('It is for:');
+    // The name still gets there — the note is not silenced, only the purpose.
+    expect(h.sends[0][1]).toContain('auth 2');
+  });
+});
+
+describe('close with summary drives /compact and reads back what the CLI wrote', () => {
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockWindow as { showWarningMessage?: unknown }).showWarningMessage;
+    delete (mockWindow as { showInputBox?: unknown }).showInputBox;
+    delete (mockWindow as { setStatusBarMessage?: unknown }).setStatusBarMessage;
+  });
+
+  const PARENT = uuid(1);
+  const CHILD = uuid(2);
+  const SUCCESSOR = uuid(3);
+
+  interface SummaryHarness {
+    sends: Array<[string, string]>;
+    patches: Array<{ id: string; patch: Partial<EditorialRecord> }>;
+    closedTerminals: string[];
+    warnings: string[];
+    waits: Array<[string, number, number]>;
+    /** The store itself, so a test can act as ANOTHER actor: the compaction
+     *  wait is up to two minutes long, and the idle sweep, a second window or
+     *  the user's own Close Now can close the session inside it. */
+    records: Record<string, EditorialRecord>;
+    run: (command: string, ...args: unknown[]) => Promise<void>;
+  }
+
+  function summaryHarness(
+    over: {
+      mode?: CloseSummaryMode | undefined;
+      summary?: string | undefined;
+      reader?: boolean;
+      sendTextToSession?: (id: string, text: string) => boolean;
+      provider?: 'codex';
+      answer?: string;
+      tipOf?: (id: string) => string;
+      /** Fired inside the wait — i.e. while the CLI is compacting, which is
+       *  when a session id really does get re-minted. */
+      onWait?: () => void;
+    } = {},
+  ): SummaryHarness {
+    const sends: Array<[string, string]> = [];
+    const patches: Array<{ id: string; patch: Partial<EditorialRecord> }> = [];
+    const closedTerminals: string[] = [];
+    const warnings: string[] = [];
+    const waits: Array<[string, number, number]> = [];
+    (
+      mockWindow as {
+        showWarningMessage?: (m: unknown, ...rest: unknown[]) => Promise<unknown>;
+      }
+    ).showWarningMessage = async (message) => {
+      warnings.push(String(message));
+      return over.answer;
+    };
+    (
+      mockWindow as { setStatusBarMessage?: (m: string, ms?: number) => void }
+    ).setStatusBarMessage = () => {};
+
+    const records: Record<string, EditorialRecord> = {
+      [PARENT]: { id: PARENT, parentId: null },
+      [CHILD]: {
+        id: CHILD,
+        parentId: PARENT,
+        ...(over.provider ? { provider: over.provider } : {}),
+      },
+    } as Record<string, EditorialRecord>;
+    const { accounts } = fakeAccountDeps([], { sessionProfileId: () => undefined });
+    const { deps } = chatDeps(undefined, { records });
+    const withSummary: AccountCommandDeps = {
+      ...deps,
+      getForest: () =>
+        forestOf([
+          node(PARENT, { label: 'auth' }),
+          node(CHILD, { parentId: PARENT, label: 'redis cache' }),
+          node(SUCCESSOR, { parentId: PARENT, label: 'redis cache' }),
+        ]),
+      getRecord: (id) => records[id],
+      upsertRecord: async (id, patch) => {
+        patches.push({ id, patch });
+        records[id] = { ...(records[id] as EditorialRecord), ...patch };
+      },
+      closeTerminal: (id) => {
+        closedTerminals.push(id);
+        return true;
+      },
+      hostOf: () => 'here',
+      ...(over.tipOf ? { tipOf: over.tipOf } : {}),
+      sendTextToSession: (id, text) => {
+        sends.push([id, text]);
+        return over.sendTextToSession ? over.sendTextToSession(id, text) : true;
+      },
+      ...(over.mode !== undefined
+        ? { closeSummaryMode: (): CloseSummaryMode => over.mode as CloseSummaryMode }
+        : {}),
+      ...(over.reader === false
+        ? {}
+        : {
+            awaitCompactSummary: async (id, sinceMs, timeoutMs) => {
+              waits.push([id, sinceMs, timeoutMs]);
+              over.onWait?.();
+              return over.summary;
+            },
+          }),
+      accounts,
+    };
+    const harness = withRegisteredCommands(withSummary);
+    return {
+      sends,
+      patches,
+      closedTerminals,
+      warnings,
+      waits,
+      records,
+      run: harness.run,
+    };
+  }
+
+  it('sends /compact, records a bounded summary, tells the parent, and closes', async () => {
+    const h = summaryHarness({
+      mode: 'compact-and-tell-parent',
+      summary: 'Traced the drift to a stale cache key; fix in PR 412.',
+    });
+    const before = Date.now();
+    await h.run(COMMANDS.closeWithSummary, CHILD);
+
+    // The keystroke, then the wait, then the parent's note.
+    expect(h.sends[0]).toEqual([CHILD, '/compact']);
+    expect(h.waits).toHaveLength(1);
+    expect(h.waits[0][0]).toBe(CHILD);
+    // The floor exists so that a compaction summary from last week cannot be
+    // reported as this branch's conclusion.
+    expect(h.waits[0][1]).toBeGreaterThanOrEqual(before);
+    expect(h.patches.some((p) => p.patch.summaryRequestedAt !== undefined)).toBe(
+      true,
+    );
+    const summaryPatch = h.patches.find((p) => p.patch.summary !== undefined);
+    expect(summaryPatch?.id).toBe(CHILD);
+    expect(summaryPatch?.patch.summary).toContain('stale cache key');
+    expect(summaryPatch?.patch.closed).toBeTruthy();
+    expect(h.closedTerminals).toEqual([CHILD]);
+
+    const note = h.sends[1];
+    expect(note[0]).toBe(PARENT);
+    expect(note[1]).not.toContain('\n');
+    expect(note[1]).toContain('redis cache');
+  });
+
+  it('does not re-close a session another actor closed during the wait', async () => {
+    // The wait is up to two minutes. Anything can close the session inside it:
+    // the idle-close sweep, a second Flock window, the user's own Close Now.
+    // Closing it again re-stamped `closed` with the later time — losing the
+    // real one — nulled the binding, disposed a terminal that had already gone
+    // and warned that the session was "still running". The summary is the only
+    // thing the user asked for, so the summary is the only thing written.
+    const CLOSED_AT = '2026-08-28T00:00:00.000Z';
+    const h = summaryHarness({
+      mode: 'compact-only',
+      summary: 'done',
+      onWait: () => {
+        h.records[CHILD] = { ...h.records[CHILD], closed: CLOSED_AT };
+      },
+    });
+    await h.run(COMMANDS.closeWithSummary, CHILD);
+    expect(h.records[CHILD].closed).toBe(CLOSED_AT);
+    expect(h.records[CHILD].summary).toContain('done');
+    expect(h.closedTerminals).toEqual([]);
+  });
+
+  it('records the summary on a session ARCHIVED during the wait, and nothing else', async () => {
+    // The same race with the archive verb, where a second close is worse than
+    // untidy: the record ended up `{ deleted: true, closed: <fresh> }` — an
+    // archived row that had just acquired a new close stamp.
+    const h = summaryHarness({
+      mode: 'compact-only',
+      summary: 'done',
+      onWait: () => {
+        h.records[CHILD] = { ...h.records[CHILD], deleted: true };
+      },
+    });
+    await h.run(COMMANDS.closeWithSummary, CHILD);
+    expect(h.records[CHILD].closed).toBeUndefined();
+    expect(h.records[CHILD].deleted).toBe(true);
+    expect(h.records[CHILD].summary).toContain('done');
+    expect(h.closedTerminals).toEqual([]);
+  });
+
+  it('closes the id the conversation is on AFTER the compaction, not before', async () => {
+    // A compaction re-mints the session id in roughly a third of real cases.
+    // Closing the pre-compaction id would stamp `closed` on a superseded
+    // generation while its successor kept running.
+    let compacted = false;
+    const h = summaryHarness({
+      mode: 'compact-only',
+      summary: 'done',
+      // The re-key lands DURING the compaction, which is when it really
+      // happens — so the send goes to the old id and the close must not.
+      onWait: () => {
+        compacted = true;
+      },
+      tipOf: (id) => (id === CHILD && compacted ? SUCCESSOR : id),
+    });
+    await h.run(COMMANDS.closeWithSummary, CHILD);
+    expect(h.sends).toEqual([[CHILD, '/compact']]);
+    expect(h.closedTerminals).toEqual([SUCCESSOR]);
+  });
+
+  it('compact-only tells nobody', async () => {
+    const h = summaryHarness({ mode: 'compact-only', summary: 'done' });
+    await h.run(COMMANDS.closeWithSummary, CHILD);
+    expect(h.sends).toEqual([[CHILD, '/compact']]);
+  });
+
+  it('a compaction that never answers closes NOTHING', async () => {
+    // The session is mid-model-call: closing its tab would abort the
+    // compaction and leave the branch neither compacted nor summarised.
+    const h = summaryHarness({
+      mode: 'compact-and-tell-parent',
+      summary: undefined,
+    });
+    await h.run(COMMANDS.closeWithSummary, CHILD);
+    expect(h.closedTerminals).toEqual([]);
+    expect(h.patches.some((p) => p.patch.closed !== undefined)).toBe(false);
+    expect(h.warnings.join(' ')).toContain('no summary came back');
+  });
+
+  it('refuses before typing anything when the session has no terminal here', async () => {
+    const h = summaryHarness({
+      mode: 'compact-and-tell-parent',
+      sendTextToSession: () => false,
+    });
+    await h.run(COMMANDS.closeWithSummary, CHILD);
+    expect(h.waits).toEqual([]);
+    expect(h.closedTerminals).toEqual([]);
+    expect(h.warnings.join(' ')).toContain('no terminal in this window');
+  });
+
+  it('declines by name on Codex, and sends nothing when the offer is refused', async () => {
+    const h = summaryHarness({
+      mode: 'compact-and-tell-parent',
+      provider: 'codex',
+      summary: 'unused',
+    });
+    await h.run(COMMANDS.closeWithSummary, CHILD);
+    expect(h.sends).toEqual([]);
+    expect(h.closedTerminals).toEqual([]);
+    expect(h.warnings.join(' ')).toContain('Codex');
+  });
+
+  it('falls back to the input box when the wiring cannot read a summary back', async () => {
+    (mockWindow as { showInputBox?: () => Promise<string> }).showInputBox =
+      async () => 'typed by hand';
+    const h = summaryHarness({ mode: 'compact-and-tell-parent', reader: false });
+    await h.run(COMMANDS.closeWithSummary, CHILD);
+    expect(h.sends).toEqual([]);
+    expect(
+      h.patches.find((p) => p.patch.summary !== undefined)?.patch.summary,
+    ).toBe('typed by hand');
+  });
+
+  it('ask-me is exactly the old input box, and so is an absent dep', async () => {
+    (mockWindow as { showInputBox?: () => Promise<string> }).showInputBox =
+      async () => 'typed by hand';
+    for (const mode of ['ask-me', undefined] as const) {
+      const h = summaryHarness({ mode, summary: 'never read' });
+      await h.run(COMMANDS.closeWithSummary, CHILD);
+      expect(h.sends).toEqual([]);
+      expect(h.waits).toEqual([]);
+      expect(
+        h.patches.find((p) => p.patch.summary !== undefined)?.patch.summary,
+      ).toBe('typed by hand');
+    }
+  });
+
+  it('off closes with no summary and no keystroke', async () => {
+    const h = summaryHarness({ mode: 'off', summary: 'never read' });
+    await h.run(COMMANDS.closeWithSummary, CHILD);
+    expect(h.sends).toEqual([]);
+    expect(h.waits).toEqual([]);
+    expect(h.closedTerminals).toEqual([CHILD]);
+    expect(
+      h.patches.find((p) => p.patch.summary !== undefined),
+    ).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------- Move to Account…, the flow
+//
+// `switchAccountFlow` had no test at all, which is how its three layers came
+// to disagree: the menu counted one thing, the picker filtered on another and
+// the at-the-limit notification on a third. These pin the two refusals that
+// were wrong, both of them ahead of anything that touches a process.
+
+describe('switchAccountFlow refuses by what a conversation IS, before it moves anything', () => {
+  const SESSION = uuid(1);
+
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockWindow as { showWarningMessage?: unknown }).showWarningMessage;
+    delete (mockWindow as { showInformationMessage?: unknown })
+      .showInformationMessage;
+    delete (mockWindow as { setStatusBarMessage?: unknown }).setStatusBarMessage;
+    delete (mockWindow as { withProgress?: unknown }).withProgress;
+    delete (mockWindow as { showErrorMessage?: unknown }).showErrorMessage;
+    delete (vscodeMock as { ProgressLocation?: unknown }).ProgressLocation;
+  });
+
+  function switchHarness(over: {
+    sessionProvider?: (id: string) => string | undefined;
+    hostOf?: () => 'here' | 'flock' | 'foreign' | 'none';
+    profiles?: AccountProfile[];
+    sessionProfileId?: () => string | undefined;
+    canRestartSession?: () => boolean;
+    confirm?: string;
+    /** Answers `AccountDeps.switchMovesNothing`, the dialog's question. */
+    movesNothing?: boolean;
+    /** One result per call, so a refusal followed by a retry can be scripted. */
+    results?: SwitchAccountResult[];
+    /** What the user clicks on the error toast, by literal label. */
+    pressError?: string;
+    /** What `setAsideTranscript` reports. */
+    aside?: { ok: boolean; path?: string; error?: string };
+  }): {
+    run: (id: string, ...args: unknown[]) => Promise<void>;
+    warnings: string[];
+    /** The modal `detail` of every dialog, in order — the sentence that makes a
+     *  promise about what the switch costs. */
+    details: string[];
+    errors: string[];
+    infos: string[];
+    switched: number;
+    setAside: string[];
+    transcriptAsked: number;
+  } {
+    const warnings: string[] = [];
+    const details: string[] = [];
+    const errors: string[] = [];
+    const infos: string[] = [];
+    const setAside: string[] = [];
+    const state = { switched: 0, transcriptAsked: 0 };
+    (
+      mockWindow as {
+        showWarningMessage?: (m: unknown, ...rest: unknown[]) => Promise<unknown>;
+      }
+    ).showWarningMessage = async (message, ...rest) => {
+      warnings.push(String(message));
+      const opts = rest[0];
+      if (
+        typeof opts === 'object' &&
+        opts !== null &&
+        typeof (opts as { detail?: unknown }).detail === 'string'
+      ) {
+        details.push((opts as { detail: string }).detail);
+      }
+      return over.confirm;
+    };
+    (
+      mockWindow as {
+        showInformationMessage?: (m: unknown) => Promise<unknown>;
+      }
+    ).showInformationMessage = async (message) => {
+      infos.push(String(message));
+      return undefined;
+    };
+    (
+      mockWindow as { setStatusBarMessage?: (m: string, ms?: number) => void }
+    ).setStatusBarMessage = () => {};
+    // The move runs inside a progress notification; the mock's window has no
+    // such host, so it is scripted to just run the task.
+    (
+      mockWindow as {
+        withProgress?: (opts: unknown, task: () => Promise<unknown>) => Promise<unknown>;
+      }
+    ).withProgress = async (_opts, task) => task();
+    (
+      vscodeMock as { ProgressLocation?: Record<string, number> }
+    ).ProgressLocation = { Notification: 15 };
+    (
+      mockWindow as { showErrorMessage?: (m: unknown) => Promise<unknown> }
+    ).showErrorMessage = async (message) => {
+      warnings.push(String(message));
+      errors.push(String(message));
+      return over.pressError;
+    };
+
+    const { accounts } = fakeAccountDeps(
+      over.profiles ?? [
+        accountProfile('work', { configDir: '/work/.claude' }),
+        accountProfile('personal', { configDir: '/personal/.claude' }),
+      ],
+      {
+        sessionProfileId: over.sessionProfileId ?? (() => undefined),
+        ...(over.canRestartSession
+          ? { canRestartSession: over.canRestartSession }
+          : {}),
+        switchSessionAccount: async () => {
+          state.switched += 1;
+          const scripted = over.results?.[state.switched - 1];
+          return (
+            scripted ?? {
+              ok: true,
+              inPlace: true,
+              running: 'in-place' as const,
+              skipped: [],
+            }
+          );
+        },
+        ...(over.movesNothing !== undefined
+          ? { switchMovesNothing: () => over.movesNothing === true }
+          : {}),
+        ...(over.aside !== undefined
+          ? {
+              setAsideTranscript: async (file: string) => {
+                setAside.push(file);
+                return over.aside as {
+                  ok: boolean;
+                  path?: string;
+                  error?: string;
+                };
+              },
+            }
+          : {}),
+      },
+    );
+    const { deps } = chatDeps(undefined, {
+      hasTranscript: () => {
+        state.transcriptAsked += 1;
+        return true;
+      },
+    });
+    const withAccounts: AccountCommandDeps = {
+      ...deps,
+      getForest: () => forestOf([node(SESSION, { label: 'auth', cwd: '/code' })]),
+      hostOf: over.hostOf ?? (() => 'here'),
+      ...(over.sessionProvider
+        ? { sessionProvider: over.sessionProvider as never }
+        : {}),
+      accounts,
+    };
+    const harness = withRegisteredCommands(withAccounts);
+    return {
+      run: harness.run,
+      warnings,
+      details,
+      errors,
+      infos,
+      setAside,
+      get switched(): number {
+        return state.switched;
+      },
+      get transcriptAsked(): number {
+        return state.transcriptAsked;
+      },
+    };
+  }
+
+  it('refuses an UNPINNED Codex conversation, and never tells it it has taken no turns', async () => {
+    // The gate used to read the PIN. A Codex session started in a terminal has
+    // no pin at all, an absent pin resolves to the default provider, and so it
+    // sailed through and met `hasTranscript` — which only knows how to look for
+    // a Claude transcript — and was told it "has not taken a turn yet". That is
+    // the exact sentence this gate exists to prevent.
+    const h = switchHarness({ sessionProvider: () => 'codex' });
+    await h.run(COMMANDS.switchSessionAccount, SESSION);
+
+    expect(h.warnings.join(' ')).toContain('Codex');
+    expect(h.warnings.join(' ')).not.toContain('has not taken a turn');
+    expect(h.transcriptAsked).toBe(0);
+    expect(h.switched).toBe(0);
+  });
+
+  it('refuses a session ANOTHER Flock window is running', async () => {
+    // Only 'foreign' was refused. A session held by another Flock window with
+    // no tmux wrap — tmux off, or Windows, where the tier does not exist — had
+    // nothing stopped, its transcript renamed under a live CLI, and the result
+    // still reported a clean in-place move.
+    // With no way to reach it: no tmux name resolves, so `canRestartSession`
+    // says no — and an ABSENT dep says no too, because a wiring that cannot
+    // tell must not be the one deciding to restart somebody's process.
+    for (const over of [
+      { hostOf: () => 'flock' as const },
+      { hostOf: () => 'flock' as const, canRestartSession: () => false },
+    ]) {
+      const h = switchHarness(over);
+      await h.run(COMMANDS.switchSessionAccount, SESSION);
+      expect(h.warnings.join(' ')).toContain('another Flock window');
+      expect(h.switched).toBe(0);
+    }
+  });
+
+  it('does NOT refuse one this window parked into tmux, which it can respawn', async () => {
+    // 'flock' is one word for two situations with opposite answers. A
+    // conversation parked by a workspace switch is Flock's, not bound here, and
+    // perfectly restartable from this window — refusing it would remove a move
+    // that works and print a sentence about another window that is not true.
+    const h = switchHarness({
+      hostOf: () => 'flock',
+      canRestartSession: () => true,
+      // Named account, so the picker is skipped; the modal is then confirmed.
+      confirm: 'Switch Account',
+    });
+    await h.run(COMMANDS.switchSessionAccount, SESSION, 'personal');
+    expect(h.warnings.join(' ')).not.toContain('another Flock window');
+    expect(h.switched).toBe(1);
+  });
+
+  it('still refuses one running outside Flock, in its own words', async () => {
+    const h = switchHarness({ hostOf: () => 'foreign' });
+    await h.run(COMMANDS.switchSessionAccount, SESSION);
+    expect(h.warnings.join(' ')).toContain('running outside Flock');
+    expect(h.switched).toBe(0);
+  });
+
+  it('does not promise a lost turn for a move that moves nothing', async () => {
+    // Two profiles can resolve to one config directory, so "move it there" can
+    // be a re-pin with no bytes and no restart behind it. The dialog was
+    // promising a cut-off turn and a cold prompt cache for a change of label.
+    const h = switchHarness({
+      hostOf: () => 'here',
+      movesNothing: true,
+      confirm: 'Switch Account',
+    });
+    await h.run(COMMANDS.switchSessionAccount, SESSION, 'personal');
+    expect(h.switched).toBe(1);
+    expect(h.details.join(' ')).toContain('Nothing is moved and nothing is restarted');
+    expect(h.details.join(' ')).not.toContain('cut off');
+  });
+
+  it('still promises the restart when the move really moves something', async () => {
+    const h = switchHarness({
+      hostOf: () => 'here',
+      movesNothing: false,
+      confirm: 'Switch Account',
+    });
+    await h.run(COMMANDS.switchSessionAccount, SESSION, 'personal');
+    expect(h.details.join(' ')).toContain('turn in progress is cut off');
+    expect(h.details.join(' ')).not.toContain('Nothing is moved');
+  });
+
+  it('offers a way out of the duplicate refusal, names both files, and retries', async () => {
+    // The refusal that was a permanent dead end: two files claim one session id,
+    // so the move will not overwrite either, and every future attempt refuses
+    // identically. Three ids on the author's machine are in exactly this state.
+    const duplicate = {
+      otherPath: '/personal/.claude/projects/-code/x.jsonl',
+      otherBytes: 2273,
+      otherMtimeMs: Date.UTC(2026, 0, 2),
+      thisPath: '/work/.claude/projects/-code/x.jsonl',
+      thisBytes: 12_001_952,
+      thisMtimeMs: Date.UTC(2026, 0, 3),
+    };
+    const h = switchHarness({
+      hostOf: () => 'here',
+      confirm: 'Switch Account',
+      pressError: 'Set the Other Copy Aside',
+      aside: { ok: true, path: `${duplicate.otherPath}.superseded-2026` },
+      results: [
+        { ok: false, inPlace: false, skipped: [], error: 'blocked', duplicate },
+        { ok: true, inPlace: true, running: 'in-place', skipped: [] },
+      ],
+    });
+    await h.run(COMMANDS.switchSessionAccount, SESSION, 'personal');
+
+    // Both copies described, with sizes a person can tell apart at a glance.
+    const offer = h.errors.join(' ');
+    expect(offer).toContain(duplicate.otherPath);
+    expect(offer).toContain(duplicate.thisPath);
+    expect(offer).toContain('2 KB');
+    expect(offer).toContain('11.4 MB');
+    expect(offer).toContain('nothing is deleted');
+    // The blocking copy — never the conversation being moved — is set aside…
+    expect(h.setAside).toEqual([duplicate.otherPath]);
+    // …and the flow starts over, modal included, rather than moving on a
+    // button press: a button on an error toast is not consent to restart a
+    // process.
+    expect(h.switched).toBe(2);
+  });
+
+  it('leaves both files alone when the offer is dismissed', async () => {
+    const duplicate = {
+      otherPath: '/personal/x.jsonl',
+      otherBytes: 10,
+      otherMtimeMs: Date.UTC(2026, 0, 2),
+      thisPath: '/work/x.jsonl',
+      thisBytes: 20,
+      thisMtimeMs: Date.UTC(2026, 0, 3),
+    };
+    const h = switchHarness({
+      hostOf: () => 'here',
+      confirm: 'Switch Account',
+      aside: { ok: true },
+      results: [
+        { ok: false, inPlace: false, skipped: [], error: 'blocked', duplicate },
+      ],
+    });
+    await h.run(COMMANDS.switchSessionAccount, SESSION, 'personal');
+    expect(h.setAside).toEqual([]);
+    expect(h.switched).toBe(1);
+  });
+
+  it('says there is nowhere to go on the roster this extension seeds by default', async () => {
+    // One Claude login plus one Codex login — what `seedDefaultProfiles` mints
+    // wherever ~/.codex/auth.json exists. The picker was always empty here,
+    // while the row menu drew the verb on every session.
+    const h = switchHarness({
+      profiles: [
+        accountProfile('claude-default'),
+        accountProfile('codex-default', { provider: 'codex' }),
+      ],
+      sessionProfileId: () => 'claude-default',
+    });
+    await h.run(COMMANDS.switchSessionAccount, SESSION);
+    expect(h.infos.join(' ')).toContain('no other account');
+    expect(h.switched).toBe(0);
   });
 });

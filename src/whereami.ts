@@ -82,11 +82,6 @@ export interface WhereAmIInput {
    *  from src/git.ts's probe. Empty (not a repository, probe not landed) means
    *  the line simply says nothing about git — never an error. */
   worktrees: readonly Worktree[];
-  /** The last line of the hover: what a click does. Supplied by the caller
-   *  because the answer is the caller's, not this module's — project mode
-   *  switches, folder mode has no switch to offer and jumps to the row instead.
-   *  Absent means the hover ends with the facts. */
-  clickHint?: string;
 }
 
 export interface WhereAmI {
@@ -108,19 +103,6 @@ export interface WhereAmI {
    *  because it is the one case a caller may want to style (and the one case
    *  worth a log line), not because the text depends on reading it. */
   foreign: boolean;
-  /**
-   * The line says something the WINDOW does not already say — a lane, a branch
-   * worth naming, or a project other than this one's.
-   *
-   * What folder mode reads. A folder-mode window IS the folder it opened, so
-   * repeating its name in the status bar is a row of chrome that tells nobody
-   * anything, and the shipped behaviour (no item at all) is right for that case.
-   * The lane and the branch are a different matter: they are facts about the
-   * conversation in front, they change as you move between lanes, and no other
-   * surface in that window says them. So the item appears in folder mode exactly
-   * when this is true, and stays away the rest of the time.
-   */
-  beyondTheFolder: boolean;
   /**
    * THE SAME FACTS, unrendered — for the second surface that shows them.
    *
@@ -231,7 +213,6 @@ export function whereAmI(input: WhereAmIInput): WhereAmI {
         'Click to pick one — its tabs, its sessions and its folders come with it.',
       switchTo: null,
       foreign: false,
-      beyondTheFolder: true,
       lane: '',
       branch: '',
       detached: false,
@@ -260,11 +241,10 @@ export function whereAmI(input: WhereAmIInput): WhereAmI {
           `front belongs to ${there.project.name}.`,
         `Directory: ${there.dir}`,
         '',
-        input.clickHint ?? `Click to switch this window to ${there.project.name}.`,
+        `Click to switch this window to ${there.project.name}.`,
       ].join('\n'),
       switchTo: there.project.id,
       foreign: true,
-      beyondTheFolder: true,
       // Nothing about a project this window is not showing: the lane and the
       // branch belong to a place the surfaces below are not looking at, and
       // drawing them into THIS project's rows would file them under the wrong
@@ -341,18 +321,13 @@ export function whereAmI(input: WhereAmIInput): WhereAmI {
   if (input.sessionId === null) {
     lines.push('', 'No conversation in front — this is the window\'s project.');
   }
-  const hint = input.clickHint ?? 'Click to switch project.';
-  if (hint !== '') lines.push('', hint);
+  lines.push('', 'Click to switch project.');
 
   return {
     text: parts.join(' '),
     tooltip: lines.join('\n'),
     switchTo: null,
     foreign: false,
-    // The lane and the branch are facts about the CONVERSATION; the project name
-    // is a fact about the window. Only the first kind earns a status-bar item in
-    // a window that is already its own folder.
-    beyondTheFolder: where !== '' || git.show,
     lane: lane?.name ?? '',
     branch: git.show && !git.detached ? git.branch : '',
     detached: git.show && git.detached,

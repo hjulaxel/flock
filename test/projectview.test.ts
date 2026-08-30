@@ -351,6 +351,57 @@ describe('projectview: provider', () => {
     );
   });
 
+  // THE GATE. The view is contributed on `lineage.explorerFollow`, which says
+  // nothing about the window model, and the active project id lives in
+  // per-window state that nothing clears when the model changes — so a window
+  // that once auto-switched keeps drawing this header afterwards. Both of its
+  // clickable rows fire `switchWorkspace`, which refuses in the
+  // one-folder-per-project model: without the gate the header's click is a
+  // toast explaining why nothing happened. The gate is "can this window switch
+  // at all", never "does it switch by itself" — the Flock-only model keeps the
+  // verb, and silencing a click that works would be the worse bug.
+  it('stops looking clickable when this window cannot switch in place', () => {
+    const provider = new ProjectViewProvider(deps({ switching: () => false }));
+    const item = provider.getTreeItem(provider.getChildren()[0]!);
+    expect(item.command).toBeUndefined();
+    expect(String(item.tooltip)).not.toContain('click to switch');
+    // The row keeps its ANSWER — the name and the count are just as true in a
+    // window that never switches. Only the promise goes.
+    expect(item.label).toBe('Magma Web');
+
+    const none = new ProjectViewProvider(
+      deps({ switching: () => false, activeProject: () => undefined }),
+    );
+    const noneItem = none.getTreeItem(none.getChildren()[0]!);
+    expect(noneItem.command).toBeUndefined();
+    expect(noneItem.description).toBeUndefined();
+  });
+
+  it('keeps the click where switching is real, and where nobody said', () => {
+    // Absent reads as YES: the behaviour every caller had before the gate, so a
+    // wiring that forgets to pass it fails visibly rather than by quietly
+    // removing a working verb.
+    const on = new ProjectViewProvider(deps({ switching: () => true }));
+    expect(commandOf(on, on.getChildren()[0]!)).toBe(COMMANDS.switchWorkspace);
+    const silent = new ProjectViewProvider(deps());
+    expect(commandOf(silent, silent.getChildren()[0]!)).toBe(
+      COMMANDS.switchWorkspace,
+    );
+    // And a supplier that throws is treated as silence, not as a no: a view
+    // that hid its own verbs on an exception would be harder to diagnose than
+    // one whose verb refuses with a sentence.
+    const broken = new ProjectViewProvider(
+      deps({
+        switching: () => {
+          throw new Error('config read failed');
+        },
+      }),
+    );
+    expect(commandOf(broken, broken.getChildren()[0]!)).toBe(
+      COMMANDS.switchWorkspace,
+    );
+  });
+
   it('falls back to the setup row when the host itself throws', () => {
     // A view that renders nothing is indistinguishable from a broken one; the
     // setup row at least names a verb.

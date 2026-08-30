@@ -8,6 +8,147 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Added
 
+- **Close with Summary now compacts the branch and keeps what the compaction
+  said — and can pass a short form of it up to the parent.** What it used to do
+  was open an input box and ask *you* to type the summary: of a conversation you
+  had just been reading, with no help from the one thing on screen that already
+  knew what it had concluded. What it does now is what you would do by hand.
+  Say precisely what that means, because the distinction is the whole point.
+  Flock cannot ask a model for a summary — it has no API client, and the only
+  way it can speak to a conversation that is already running is by typing into
+  its terminal. So it **sends `/compact`**, which the Claude CLI interprets as a
+  command (the same property Fork and Compact has always rested on), and then
+  **reads back the summary the CLI wrote** into the transcript. The words are
+  genuinely the model's; the driving is a keystroke. It is not a scrape of the
+  last exchange, and nothing calls it something Flock generated.
+  It costs what it costs, and every cost is refused loudly rather than absorbed
+  quietly. A compaction takes one to three minutes, so there is a progress
+  notification with a Cancel button. It squashes the branch's own context, which
+  is only acceptable because the branch is being closed in the same breath — so
+  if the compaction never answers, **nothing is closed at all**, and the dialog
+  says that the branch has been compacted either way. It is Claude-only, and a
+  Codex session is offered the plain close and the old input box by name. It
+  needs the session's tab open in this window, and a closed row, another
+  window's session, a foreign process or a session parked by a workspace switch
+  is refused *before* a keystroke is spent — and, since the row already knows
+  which of those it is, the menu entry is no longer drawn on a row where the
+  answer could only ever be that refusal. `lineage.close.summaryMode` chooses
+  between `compact-and-tell-parent` (the new default), `compact-only`, `ask-me`
+  — the old box, kept by name so anyone who preferred it can find it — and
+  `off`.
+- **A fork can tell its parent that it happened**, behind
+  `lineage.fork.notifyParent`, off by default. One sentence typed into the
+  parent conversation naming the new branch and, when the fork was given an
+  opening prompt, what it is for.
+  This is **new construction, not an existing mechanism being switched on**, and
+  it would be dishonest to imply otherwise. Flock has no session-to-session
+  messaging and never has had: the in-session verbs channel runs one way,
+  session → Flock, and carries exactly one verb; the only text that has ever
+  gone the other way is a fork's opening prompt, delivered once when the branch
+  starts. Branches do not talk to each other. What this rides is the single
+  channel that can reach a conversation already running — Flock typing into its
+  terminal, the same thing the wrap prompt does — and that channel reaches
+  **only a session bound in this window**. A parent that is closed, hosted by
+  another VS Code window, running outside Flock, or parked detached by a switch
+  cannot be typed into, and in all four cases the note is simply not sent:
+  nothing is queued, nothing is retried, one line goes to the output channel.
+  Those are the ordinary cases, which is why the setting is off by default and
+  why the description says all of this rather than promising delivery. It is
+  never sent when Claude itself asked for the fork — the verbs CLI already
+  reports the new branches into that same turn, and a second copy would land
+  keystrokes in the middle of it. `docs/reference.md` gains a section stating
+  the whole boundary in one place.
+
+- **The auto-switch window now follows the SESSION — its subproject's directory
+  in the Explorer, its git worktree in Source Control.** This is the model's
+  whole promise and only half of it was true. The Explorer followed the active
+  PROJECT, and it asked for the directory the wrong way round: the project's
+  claim on a session is the directory the project *reaches* it through, which
+  for a session inside a linked worktree is the worktree root. So a conversation
+  running in `~/mono-feat-x/api/src` rooted the file tree at `~/mono-feat-x` —
+  the whole monorepo — while the sidebar, asking its own question through
+  `canonicalCheckoutPath`, filed the very same session under the `api` lane. Two
+  rules for one question is this design's own definition of a bug, and the fix
+  is a third place both can read from: `src/follow.ts` decides once, purely, and
+  the Explorer, Source Control, the switch, the reload heal and the Project
+  view's directory mark all take that one answer. The tree now roots at
+  `~/mono-feat-x/api`: the lane you named, translated into the checkout you are
+  actually typing in. Every rung of the ladder must *contain* the session, which
+  is what makes falling down it safe — a candidate that does not hold the
+  session is describing somewhere else, and a file tree rooted there is a tree
+  you are not editing.
+  Source Control is genuinely new. It rides the same folder splice — VS Code's
+  built-in git extension opens a repository for every workspace folder that
+  appears — so the mechanism that already moved the file tree moves the SCM view
+  with it, and a linked worktree arrives as its own repository on its own
+  branch. `src/sourceControl.ts` is the belt to those braces: one guarded
+  `openRepository` call for the case a directory sits below its repository root,
+  written to be a silent no-op whenever the splice already did the job, and to
+  degrade to "no following, everything else unchanged" when the git API is
+  missing, disabled or older than expected. What that second path is for has not
+  been proven by a controlled run from outside a workbench, and
+  `docs/reference.md` says so plainly, gives the one-minute experiment that
+  settles it against this repository's own `.claude/worktrees/`, and names the
+  remedy (`git.openRepositoryInParentFolders: "always"`) as the user's to set
+  rather than Flock's to write.
+  Two states deliberately stay silent. No conversation in front — you clicked
+  into a file, the window just opened — moves nothing, because a file tree that
+  blanks itself in that moment is the worst thing this feature could do. And a
+  cold git probe leaves Source Control alone rather than pointing it at a guess;
+  the probe lands a moment later and the view repaints, the same trade the
+  branch chips already make.
+  No new setting and no new window model. An earlier draft proposed a fourth
+  `lineage.mode` value for "follows the session", and it was rejected for the
+  reason the three-model consolidation exists: two values both meaning "the
+  window follows something" is exactly the truth table that work removed.
+  Following the session is not a different model from auto-switch — it is what
+  auto-switch *means* once it is done properly. The two verbs are renamed to say
+  so (**Flock: Follow the Session I Am In**, **Flock: Stop Following — Reopen as
+  a Plain Window**), keeping their command ids, because a user's keybinding on
+  `lineage.followInExplorer` must not break over a change of wording. And the
+  convert verb now refuses in the two models that would not follow, pointing at
+  **Flock: Choose Window Model…** rather than writing the model itself — a
+  reload and a permanent anchor row in exchange for nothing is not a thing to
+  let somebody buy by accident, and `lineage.mode` keeps its single writer.
+
+- **What a window is, is now one setting with three answers you can name.**
+  The three ways people actually work — one folder per project, Flock only, and
+  the window that follows you — were two values of `lineage.mode` and a corner of
+  a truth table.
+  `mode: project` with the older `lineage.workspaces.enabled: false` already
+  produced a window with no auto-switch, no status-bar button and no scope
+  fence: Flock-only in everything but a name, reachable only by somebody who
+  knew to combine two keys and could work out what the combination did. A level
+  you have to compute is a level nobody chooses. `lineage.mode` now takes
+  `folder` | `root` | `project`, labelled **One folder per project** / **Root
+  (Flock only)** / **Auto-switch** in the settings dropdown, and the old pair
+  folds into the second value once, on read. The middle value is spelled the way
+  Axel says it out loud — *"if we are in the root mode, so to say, then we open
+  it"* — rather than `flock`, which was this round's first guess and which he
+  overruled.
+  `docs/settings.md` lays the three side by side with a row for **what each one
+  costs**, because each is genuinely better than the other two at something: one
+  folder per project needs nothing and costs a window per project; Flock only
+  costs you the window you open per piece of work and a sidebar with nothing
+  narrowing it; auto-switch is the most convenient and the hardest to keep
+  straight, and it wants tmux and one reload before the file tree follows too.
+  The default stays `folder` — it is the only one of the three that is right for
+  a window whose folder Flock did not choose, and a default may not require a
+  reload to take effect.
+- **Flock: Choose Window Model… — a three-way choice you can find.** The models
+  were only ever reachable through a dropdown among forty-odd settings rows,
+  whose values read `folder` / `root` / `project` rather than in words anybody
+  uses. There is now a picker: the three by their labels, each with what it
+  costs written beside it, the cursor already on the model this window is
+  actually in. It is in the gear menu and the command palette, and it is a step
+  of **Recommended Setup** — always offered, like *Choose where sessions open*
+  and for the same reason, since a choice has no "already done" and the default
+  being an answer is not the same as the person having been asked. Choosing
+  **Auto-switch** also writes `lineage.workspaces.enabled: true`, which is the
+  only way that deprecated key ever gets untangled on a real machine — and it
+  happens because somebody asked, which is the only way this extension writes to
+  a settings file at all.
+
 - **The window says where you are, not just which project it was switched
   to.** One status-bar line, read off the conversation in FRONT rather than off
   the last switch: `Magma Score › ingest` with the branch when the branch is
@@ -30,16 +171,47 @@ All notable changes to Flock are recorded here. The format follows
   a feature branch is what a repository looks like while somebody works in it,
   and that is the fact the line exists to carry; `main` on a checkout that has
   never left `main` is a segment that spends the space and says nothing.
-  **Folder mode gets the half that applies to it.** The item used to be hidden
-  there outright, and the reason was sound — a window that IS its folder has no
-  workspace to name, and a click that opens a refusal is worse than no item. The
-  lane and the branch are a different kind of fact, so the line appears in folder
-  mode exactly when it has one of them to report, and its click jumps to the
-  session's row: a verb that always works.
+  **It belongs to the window that rearranges itself, and to no other.** An
+  earlier draft of this feature also drew the item outside auto-switch whenever
+  the line had a lane or a non-trunk branch to report, with a click that jumped
+  to the session's row. That was cut before it shipped. A window that IS its
+  folder has no workspace to name; the lane and the branch are worth saying, but
+  the Explorer's **Project** view already says them untruncated, and one fact
+  rendered twice is one rendering too many to keep honest; and the condition was
+  true for most real sessions — any lane, any linked worktree, any branch that is
+  not a trunk name — so what it produced in practice was chrome that appeared and
+  disappeared as you moved between branches, in the two models whose whole promise
+  is that nothing moves unless you move it. `modes.projectSwitchingOn` is now the
+  item's single gate, which is what the manifest, `docs/settings.md` and the
+  design document have all said all along.
 - **Switch to a project from its own row.** `Switch Workspace` joins the project
   row's context menu in both trees, in project mode only. The switcher was
   reachable from the status bar and the palette, and not from the row you were
   already looking at.
+- **Open Workspace for This Session — go to a session's files from its row.**
+  There was no way to open a window on one conversation's directory. The only
+  "open it elsewhere" verbs started from a project row or a branch row, so the
+  answer to "I want *that* session's files and *that* session's Source Control"
+  was to work out which directory it was in and open it yourself. It is now a
+  right-click on any session row, live or closed, in both sidebars.
+  It resolves the directory in three rungs and the order is the point: the
+  session's own **worktree** first, because for anybody running one agent per
+  worktree that is the only answer that gets both the files and the branch right;
+  then its **subproject's** directory, when that directory actually contains the
+  session (a subproject's directory is editorial and may point somewhere else
+  entirely, so one that does not is skipped rather than trusted); then the
+  directory its **project** claims, falling back to the session's own. Every rung
+  contains the session's working directory, and that is load-bearing rather than
+  tidy: a window fences both what it may launch and what it may draw a row for to
+  the folders it opened, so a window opened on a directory that did not contain
+  the session would have neither a row for it nor the ability to resume it.
+  It opens a new window — except when one already covers the directory, this one
+  included, in which case that window is raised and the row revealed there. Axel
+  asked for a new window and that is the ordinary outcome; two windows on one
+  directory is two roosts for one piece of work, which is the shape the
+  84-detached-sessions incident was made of. The session itself does not move: it
+  keeps its tab and its process where it is, and a resume in the new window works
+  once it has been closed here.
 - **Move to Subproject… — the missing half of named subprojects.** A
   subproject's stamp was written at LAUNCH and nowhere else, so the only way into
   one was to start a session from its `+`: every conversation that predated the
@@ -122,7 +294,636 @@ All notable changes to Flock are recorded here. The format follows
   gets the walkthrough opened for it a moment after activation — one
   guaranteed front door, decided once per install and never re-asked.
 
+- **Every project row has an "Archived Sessions…" list.** Axel: *"there should
+  be some way to, in a project, see the archived sessions, search among the
+  names, and restore."* Archiving takes a row out of the tree, which until now
+  made the archive the one place a session could be without being anywhere you
+  could look: the only doors back were the Undo button on the toast — gone the
+  moment you dismissed it — and one whole-machine picker that labelled most of
+  its rows with an eight-character hex id. The new verb sits on the project's
+  own row in both sidebars, lists what that project archived newest-first with
+  the name, the age and the directory, searches over all three, and restores as
+  many as you tick in one press of Enter. It is deliberately built on the same
+  name chain the tree row uses, so a row and its archive entry can never
+  disagree about what a session is called, and on the same worktree-aware
+  membership rule the sidebar groups by, so a session that ran in a linked
+  worktree is filed under the project that owns the repository. Where a record
+  carries no working directory of its own — measured on a real store, 32 of 159
+  archived records — the transcript's own head supplies one; without that a
+  fifth of every project's archive would have been silently missing, and an
+  incomplete list looks exactly like an empty one. The four records that have
+  no directory anywhere belong to no project and stay behind **Restore Archived
+  Session…**, which remains the everything-door.
+
+- **`docs/forking-and-context.md` — what forking actually does to a
+  conversation, measured rather than described.** The question it answers was
+  asked in these words: *"I want you to explain clearly to me how context is
+  used when we are using Flock to fork the sessions."* The short answer turns
+  out to be one that the word "fork" actively works against: **a fork
+  duplicates the conversation, it never reduces it.** The Claude CLI answers
+  `--fork-session --resume <parent> --session-id <child>` by writing the
+  parent's whole chain into the *child's* transcript — same message uuids,
+  `parentUuid` relinked, the camel `sessionId` rewritten to the child and the
+  snake `session_id` left naming the parent — and the child then continues from
+  there. One measured pair on this machine: 371 of the parent's 379 message
+  records, 7.7 MB of a 13.5 MB child file. So forking is how you stop paying for
+  a bad *direction*; it is not how you stop paying for a long conversation, and
+  the document says which verb is.
+  Everything in it is either a file and line in this repository or a transcript
+  it was read out of, and the sections that are reasoned rather than observed
+  say so in their own words. It covers the plain fork, what the resume-leaf
+  repair is for and how much of the parent's last turn a child therefore
+  inherits (of 278 transcripts here, exactly **5** end with a leaf that cannot
+  reach the tail, losing one or two records apiece — down from the 23 of 282
+  measured when that bug was found, because the CLI now records its leaf *past*
+  the end of the turn), fork-and-compact (the full copy still lands on disk;
+  what changes is the context, bought with one full-history model call that the
+  child pays, 59 to 243 seconds across 76 observed compactions), resuming a
+  closed session, and the agent-verbs path where Claude forks itself mid-turn.
+  **It also corrects a belief, which is the reason it says so first rather than
+  in a footnote: there is no sibling-to-sibling communication in Flock and there
+  never has been.** Branches do not talk to each other. What exists is a fork's
+  opening prompt, delivered once at birth, and the one-way agent-verbs request
+  channel — and, new in this release, the fork note and the close summary, which
+  ride Flock typing into a terminal and reach only a session bound in this
+  window. Building the parent-notification feature on a mechanism that did not
+  exist would have promised delivery it cannot make, so the document draws that
+  boundary before it describes what was built inside it.
+  The comments in `src/resumeLeaf.ts`, `src/generations.ts`, `src/archive.ts`
+  and `src/transcript.ts` are corrected against the same evidence. Two of them
+  were quietly wrong in a way worth naming: `generations.ts` verified its
+  fork-marker premise on 13 *native* `/fork` transcripts, which are the only
+  kind that writes `forkedFrom` at all — **0 of the 153 forks Flock has made on
+  this machine carry one**, across claude 2.1.207 to 2.1.248 — and its
+  conclusion survives for a reason it had not written down; and
+  `resumeLeaf.ts`'s cited measurement was four CLI minor versions stale. The
+  selection code it quotes was re-read out of the installed 2.1.250 binary and
+  is unchanged.
+
+### Changed
+
+- **Delete is now Archive, and it closes the session before it hides the row.**
+  Axel: *"there is a big difference between closing and deleting something…
+  we should rename delete session, it should be called something like archive,
+  and we should actually be able to restore those archived sessions since they
+  are still on disk… it should be more of a hassle than just closing it."*
+  Four commands changed their titles — **Archive Session**, **Archive Selected
+  Sessions**, **Restore Archived Session…**, **Archive Stale Sessions…** — and
+  none of them changed its command id, so a keybinding on `lineage.deleteSession`
+  keeps working; the ids are a public contract nobody ever reads, and breaking
+  them to chase a word would have been the expensive half of the rename for
+  none of the benefit. The user-facing words for the three states are now
+  **Open**, **Closed** and **Archived**; the record field is still called
+  `deleted`, because the state file is on real users' disks and a third
+  migration rule would have had a live blast radius in exchange for a name only
+  the source reads.
+  Archiving now asks once, in a dialog that says how many sessions it is about
+  to close, that the transcript stays and the conversation is still resumable,
+  that forks move up to their parent, and that Undo brings back the row but not
+  the process. That dialog is new: this verb used to argue, in a comment, that a
+  modal would cost more than the mistake does. The argument is retired, and the
+  asymmetry is now the point — closing is one click and asks nothing, archiving
+  stops to ask, because a row you cannot see is a session you will not remember
+  you have. **Archive Stale Sessions…** deliberately keeps its single question:
+  the checklist you just filled in *was* the confirmation, and a modal on top of
+  it is a second question about the same answer.
+
+- **A closed session is one row again — its name and its age, and nothing
+  else.** Turning on **Show Closed Sessions Too** used to fill the sidebar with
+  the worst rows in the tree. Each archived row carried a scrape of its
+  transcript's tail beside the age, and under `lineage.git.branchDisplay:
+  inline` it also carried its branch — a name in the native tree's description,
+  a whole second LINE in the inline sidebar, so a history of finished work cost
+  twice the vertical space of the work you are doing. Axel put it plainly: *"I
+  can't see the name of the session when I toggle on show all sessions. I see
+  like the last prompt … that's not a nice experience, very bad experience."*
+  Three things now come off the row and land in its hover, which already carried
+  every one of them at greater length: the last exchange, the close-with-summary
+  text, and the branch. A closed row draws no branch line in either surface,
+  whatever the setting says, and it is *transparent* to the rule that a branch is
+  named only where it says something new — so the first live descendant in the
+  same checkout speaks up instead of the whole subtree going quiet about a
+  worktree nothing above it ever named. The goal every one of these choices was
+  judged against is Axel's: leaving **Show Closed Sessions Too** on permanently
+  has to be comfortable.
+  The hover now carries the summary **and** the last exchange, where it used to
+  read `summary ?? lastExchange` and show whichever came first. That coalescing
+  was survivable while the row carried one of them; once both moved to the hover
+  it meant recording a summary silently deleted the session's final words from
+  the only surface that still had them. They are different facts — what somebody
+  decided the branch amounted to, and what the conversation actually last said —
+  so they get a line each, summary first, because that one was written for
+  exactly this purpose. Axel's rule when the question was put to him: *"as long
+  as both are available to the user, that's fine."*
+
+- **The detach-grace countdown moved from the row to the hover.** A tmux-wrapped
+  session whose tab a workspace switch closed keeps running detached, and the
+  design made that safe by demanding the row say so *with a countdown*. Shown
+  the hover, Axel decided the countdown had stopped earning its place on the
+  line: *"the automatic closing, it's kind of nice, it shouldn't be displayed in
+  the UI in any way … oh wait, now I actually see there is a hover state here,
+  'closing', yeah that's good then, that's enough then."* What the constraint
+  actually buys is the impossibility of a running process with nothing on
+  screen, and the ROW is what buys it — the countdown text was the price the
+  spec happened to name. So the row stays, keeps Close Now and Keep Awake, keeps
+  its place in the running-count badge, and now says `detached: tab closed,
+  process kept for instant re-attach — closing in 9m, closes at …` on hover, in
+  one sentence both surfaces share. The cost is real and worth stating: a
+  detached-running row now looks exactly like a live idle one, and only the
+  hover tells them apart. `design/levels-and-modes.md` has been corrected rather
+  than left promising a countdown that is no longer there.
+
+- **A window that follows you stops advertising folders it is only visiting.**
+  An auto-switch window publishes its workspace folders to the machine-wide
+  window roster so other windows can route work to it — but its roots now change
+  every time your attention does, while a `WindowRecord` is republished at most
+  once every six hours. That combination makes the window the advertised host
+  for whatever directory it happened to be rooted at when it activated, and
+  sends other windows' sessions to a roost that moved minutes later: the
+  84-detached-sessions incident arriving by a different road. Such a window now
+  publishes no folders at all, which is the honest shape for it — it is not the
+  window *for* any directory, it is the window that follows you. The consequence
+  is intended: it is never `windowForDir`'s answer, so a verb that would route
+  there opens a new window instead. Routing only; nothing about scoping changes,
+  since the folder-mode fence reads the live folder list and auto-switch is
+  unfenced anyway.
+
+- **The Explorer's reload heal is auto-switch only.** It also ran in the
+  Flock-only model, on the grounds that that model has no fence for a re-splice
+  to drag. But Flock-only is *defined* by nothing rearranging itself without
+  being asked, and a file tree that re-roots on its own at every window reload is
+  exactly that. Its switch verb still moves the tree when somebody runs it; the
+  tree simply stays where they left it in between. The dedicated Explorer
+  focus listener went away entirely in the same pass — the follow is now driven
+  from the one place where the "where am I" answer is already computed, so the
+  status line, the Project view, the file tree and Source Control are four
+  renderings of one decision made on one tick, and there is no second
+  subscription to keep positioned by hand relative to the auto-switch.
+
+- **`lineage.workspaces.enabled` is deprecated, still honoured, and read in
+  exactly one place.** It was never the master switch its own description
+  implied: it gated the focus-follows auto-switch and the workspace status-bar
+  item, and nothing else — not the switch verb, not the project row's menu, not
+  the palette entry, and not one of `workspaces.ts`'s save, clear or restore
+  paths, all of which asked the mode instead. That overstatement is exactly what
+  made the third window model invisible. It now has one reader, `resolveMode`,
+  which folds it together with `lineage.mode` and hands the rest of the extension
+  a single value. **Nothing on anybody's disk was rewritten.** The fold is a
+  rule, not an edit: an activation that quietly edits a `settings.json` nobody
+  asked it to touch is a worse citizen than one that keeps reading an old key,
+  and Settings Sync would have carried that edit to machines running builds that
+  have never heard of the value `root`.
+
+  The migration moves nobody. Unset or `folder` stays **One folder per
+  project**, whatever the old key says. `project` with the key unset or `true`
+  stays **Auto-switch**. `project` with the key `false` becomes **Flock only** —
+  which is what that pair has always actually meant. One thing does move, and it
+  is small: for that last group, the `$(layers)` button in the Explorer's
+  **Project** view title is gone. It is persistent chrome, and at the Flock-only
+  level it would be a second, quieter copy of the status-bar button that model is
+  defined by not having. The verb is still on the project row, in the palette,
+  and on any keybinding it was given.
+- **The Explorer's Project header stops offering a switch that would refuse.**
+  The header row and its "No active project — Choose one…" row both fire
+  `Switch Workspace`, and that verb refuses in the one-folder-per-project model.
+  The view can be on screen there: it is contributed on whether the Explorer
+  follow is set up, which says nothing about the window model, and the active
+  project id lives in per-window state that nothing clears when the model
+  changes — so a window that once auto-switched kept drawing a clickable header
+  whose click was a toast explaining why nothing happened. In that model both
+  rows are now captions: they still say which project the window is scoped to,
+  and they no longer promise a journey. The fix is to stop making a row look
+  clickable rather than to make its refusal friendlier, which is the same
+  argument the view's own "you are here" row has always made about itself.
+  The Flock-only model keeps both clicks, deliberately: it has the switch verb,
+  it simply never fires it for you. A row is silenced only where the verb behind
+  it says no.
+- **The tmux nudge no longer asks whether the workspace switcher is on.** It
+  stayed silent whenever `lineage.workspaces.enabled` was false, on the stated
+  grounds that workspace parking was "the only feature the detach tier serves".
+  That had not been true for some time: solo mode parks sessions in every window
+  model, and the detach grace runs at every level, so a machine with the switcher
+  off still detaches sessions and still loses whatever they were in the middle of
+  when tmux is missing. The gate is gone. One consequence, said plainly because
+  somebody will meet it: a person who had the switcher off can now get the
+  once-per-install nudge they were not getting yesterday. It is dismissible, and
+  it is the right advice for them.
+- **The Explorer stops following in one-folder-per-project windows.** The follow
+  listener and the reload heal asked whether the window was anchored and whether
+  `lineage.explorer.followProject` was on, and never asked which model the window
+  was in. But `workspaceManager.activeProjectId()` lives in `workspaceState`, so
+  a window that was once auto-switching still carries a project id after being
+  set to folder mode — and under `directory` scope a re-splice replaces the
+  folder tail with exactly one root. Folder mode's fence *is* its live folder
+  list, so that background re-splice dragged the fence with it and rows the
+  person was looking at disappeared, with nothing on screen to explain why. The
+  Flock-only model keeps the follow deliberately: it has no fence to drag, and an
+  active project id can only exist there because somebody ran the switch verb on
+  purpose.
+
+### Removed
+
+- **The Flock demo project is gone, and so is `lineage.preview.demoProject`.**
+  It fabricated a project called *Flock (demo)* — three directories, two
+  repositories, a branch in every state a row can draw — so the
+  directory-and-branch layout could be judged without owning a repository
+  shaped the right way. It was fenced off about as carefully as a made-up thing
+  can be: every id carried a prefix that `isSessionId` rejects, no directory on
+  it existed, it was built from a constant rather than read from the store, it
+  was appended downstream of every rule that decides what a session belongs to,
+  and one gate in front of every registered command refused any verb that
+  touched it. The fence held. It was also beside the point, because the setting
+  was not actually off: **Flock: Show Branches and Worktrees** wrote it ON as
+  part of the branch bundle, so people who had never heard of the preview found
+  a project they had never made sitting in a sidebar full of their own work. A
+  fabricated project in a real tree is a bug however well it is contained, and
+  the containment was never the thing that was wrong. For looking at the layout,
+  `lineage.preview.directoryModel` over your own repositories is what is left —
+  and it has the advantage of answering the question people actually ask, which
+  is whether the layout is right for *their* monorepo. The branch bundle is now
+  four settings rather than five.
+
+  If `"lineage.preview.demoProject": true` is already sitting in your
+  `settings.json`, it now does nothing: VS Code keeps keys it does not
+  recognise, and Flock no longer reads this one — nor can anything write it
+  again, since the settings writer refuses keys the extension does not
+  contribute. But **Flock: Hide Branches and Worktrees** no longer clears it
+  either, because that verb walks the bundle's own table and the demo has left
+  it. So the line will sit there inertly until you delete it by hand. Flock does
+  not delete it for you: there is no precedent in this extension for writing to
+  somebody's `settings.json` without their own act, and a silent mutation on
+  activation would be a larger surprise than a dead key.
+
 ### Fixed
+
+- **Fork and Compact told the parent that the new branch was "for `/compact`".**
+  With the fork note turned on, a branch announces itself to the conversation it
+  came from, and it quotes what the branch is *for* — the opening prompt,
+  because that is the only thing on a fork a person actually typed about its
+  purpose. Fork and Compact's opening prompt is not that: it is `/compact`,
+  machinery Flock injects on your behalf, and handing it through presented the
+  compaction command to the parent's model as the branch's stated intention.
+  Such a fork now gets the same short sentence a plain unnamed fork gets. The
+  exclusion is that one string and not "anything beginning with a slash": a real
+  fork prompt can open with a path, or with a slash command that genuinely is
+  the point of the branch.
+- **A long name or summary could be truncated through the middle of an emoji.**
+  Both the sentence typed into a parent conversation and the summary written
+  onto a closed session's record are capped, and the cut was counted in
+  UTF-16 units without checking where it landed — so a name of more than eighty
+  units, or a summary of more than a thousand, could end on half a character.
+  The visible half was a replacement glyph, typed into somebody's conversation
+  and persisted onto the record and the row's hover. The cut now falls on a
+  character boundary, one unit short of the budget rather than one character
+  into the middle of something.
+- **Restoring a session into a project you had closed put it nowhere and said
+  nothing.** The archive browser is reachable for a closed project on purpose —
+  "where did that session go" needs an answer even when the project is put away
+  — but the restore then landed on no surface at all: the tree files the row
+  under the closed project and then drops it, the archive it came from no longer
+  lists it either, and the only note the flow had spoke about a different filter.
+  The verb reported success and the screen showed nothing changing. It now names
+  the project that is hiding the row and offers to reopen it, which reopens the
+  closed parent as well when it was a parent that put the whole subtree away.
+- **A project sharing a directory with another one had an empty archive.** Two
+  projects are allowed to list the same directory, and a session there draws a
+  row under both — but its *archive* was filed under only one of them, picked by
+  an alphabetical tie-break. So one of the two said "Nothing archived" about a
+  session whose row it had drawn a moment earlier, and renaming the other
+  project silently moved the whole archive across. Both the archive and the chat
+  history now list a session under every project that claims its directory, the
+  way the rows always have. Nesting is unaffected: a project rooted deeper still
+  takes those sessions outright.
+- **A fork of a closed row that had no name of its own was named after the
+  conversation's opening words — on its terminal tab, and for good.** A closed
+  session with no title anywhere now shows its first prompt in quotation marks
+  instead of eight hex digits, and the quotes are what say "nobody chose this".
+  A terminal tab has no quotes and no row around it, so that string never
+  reaches one: the resume path already refused it. Fork did not. Forking such a
+  row put `“I want to post this on linkedIn, help me write it” 2` on a tab
+  beside your real ones and, worse, wrote it into the new session's record as a
+  chosen title — which is where every later tab name and workspace restore reads
+  from, so the refusal was defeated permanently rather than for one launch. A
+  fork of a row like that is now named after the **checkout it opens in** — `app
+  2`, the same name a brand-new session in that directory is offered. Not the
+  short id: a bare hex name is precisely what the naming work in this release
+  exists to remove, and reintroducing it through the fork verb would have been
+  undoing that by another road. The same rule now applies to the two other
+  places a fork gets named, the agent-requested fork and the adoption of a
+  native `/fork` background job.
+- **Closing a session took the branch name out of the native tree altogether.**
+  With `lineage.git.branchDisplay` set to `inline`, a live row says which
+  checkout it is on and a closed row does not — that is the one-row compaction
+  that makes leaving "Show Closed Sessions Too" on all day comfortable, and the
+  inline sidebar pays for it by keeping the fact in the row's hover. The native
+  tree's hover had never carried a branch line at all, so on that surface the
+  compaction removed the only place the branch was ever named and closing a
+  session lost the fact. Both hovers now say `branch: …`, on live and closed
+  rows alike, next to the working directory — which is not the same answer: a
+  worktree directory is usually named after the task, and a plain checkout that
+  has changed branches is the same path either way.
+- **With sessions grouped by branch, the native tree said the branch name
+  twice.** Under `lineage.groupSessionsByBranch` a session hangs off a branch
+  row that already names the checkout, one line up and in bigger type, and the
+  session's own description repeated it. It is now silent there, for the same
+  reason a fork that stayed in its parent's checkout is silent — but only where
+  it is genuinely a repetition. A fork living in a *different* worktree nests
+  under its parent, so the row above it names the wrong checkout, and that row
+  keeps its branch name. (The inline sidebar suppresses the branch on every row
+  while grouping is on, including that one, and so loses the fact on the one row
+  where it matters; that surface is the one to relax next.)
+- **Move to Account was a permanent dead end for any conversation whose id
+  existed in two accounts — and Flock was reading the wrong one of the two.**
+  Three real conversations on the author's own machine were in this state, so
+  none of this is theoretical. The module that moves a transcript between
+  accounts states an invariant at the top of the file — exactly one
+  `<id>.jsonl` on the machine at a time — and then checked only the single path
+  it was about to write, which is a much narrower question. A copy of the id
+  filed under a different project slug in the destination account was therefore
+  no obstacle at all: the rename landed beside it and one account ended up
+  holding two files named after one conversation. Different slugs are not
+  exotic — the slug encodes the working directory, so resuming a conversation
+  from a git worktree of its own repo produces a second one. The guard now asks
+  the whole destination account.
+  Once two copies existed, everything downstream picked between them by
+  **account order**, which is to say by an accident of how the roster happened
+  to sort. On this machine that meant a nine-line stub of hook records beat a
+  12 MB conversation, and two archived rows were being drawn from the stub —
+  no working directory to show in the archive browser, no opening prompt to
+  take a name from, and a resume that would have found none of the
+  conversation. Both the transcript resolver and the transcript index now
+  prefer the copy that was **written most recently**, and fall back to the
+  larger only when the two were written in the same instant. Newest rather than
+  biggest on purpose: size is a proxy for "has more conversation in it" and it
+  gets the one case that matters backwards, since a transcript the CLI rewrote
+  shorter is still the file a resume would continue.
+  The refusal also used to arrive **after** the CLI had been killed and
+  restarted, so a user spent a turn in flight to be told about a path — and
+  then spent another the next time, because nothing about the situation had
+  changed. The collision is now found before anything is stopped, and the
+  refusal comes with a way out: it names both files with their sizes and dates
+  and offers to **set the blocking copy aside**, which renames it to
+  `<id>.jsonl.superseded-<stamp>` — a name no reader in Flock selects and one
+  `mv` undoes. Nothing is deleted, because when two files claim one id, one of
+  them is somebody's conversation and no heuristic in here is good enough to
+  bet it on.
+- **A move that put a conversation back after a refusal put it back on the
+  wrong account.** The account a conversation is pinned to is a claim; the
+  directory its transcript is actually in is a fact, and the mover deliberately
+  looks past the claim to find the file. The restore path did not: it rebuilt
+  the environment from the pin, so a conversation found in one account and
+  pinned to another came back up with `CLAUDE_CONFIG_DIR` naming a directory
+  that does not contain it, and `claude --resume` found nothing at all. It now
+  restores into the directory the transcript was found in, and is byte-for-byte
+  the old behaviour whenever the pin was right.
+- **A move that moves nothing no longer kills and restarts Claude Code.** Two
+  accounts can resolve to the same configuration directory — the default login
+  and any provider without a config-directory variable both land on `~/.claude`,
+  and the pair this extension seeds on a fresh machine is exactly that shape —
+  so "move it there" can be a re-pin with no bytes behind it. The mover already
+  knew, and said so one step too late: the process was stopped before the
+  question was asked, so a change of label cost the turn in flight that the
+  confirmation dialog warns about. That case is now decided before anything is
+  stopped, and the dialog says what will actually happen instead of promising a
+  cost nothing is going to take. The environments are compared and not just the
+  directories, because two accounts can share a directory and still
+  authenticate differently, and there the restart is the entire point.
+
+- **Archive and Close missed the running process of a conversation that had
+  re-minted its id — the row went away and the `claude` ran on.** This is the
+  84-session incident in miniature, and it was live on the machine this was
+  found on: three sessions in the private tmux server, unattached, one of them a
+  `claude` 31 hours old holding 112 MB, every one of them behind a record that
+  said `deleted: true` and still carried the wrap's name. The mechanism is a
+  disagreement about *where* a claim lives. Parking a conversation stamps the
+  grace deadline and the tmux name on whichever id was parked, and a successor
+  generation deliberately does not inherit them — a `--resume` or a compaction
+  mints a new id, so the claim stays on an older member of the chain while the
+  ROW is the tip. Every close-shaped verb asked the tip's record alone and
+  concluded there was nothing detached to end, while the kill itself has always
+  searched the whole chain and would have found it. So the verbs now ask the
+  wiring the same chain-wide question the kill asks — one probe, used by Archive,
+  by the archive dialog, by Close and by Close Now, rather than four readings of
+  a record that drift apart. Two copies of one question is what the bug was; a
+  fifth reading is how it would come back.
+
+- **The archive dialog and the archive itself now count the same closes.** The
+  dialog asked one question about what was about to be ended and the action
+  asked another, and they disagreed in both directions: the modal promised to
+  close a session the action then declined to touch, and — worse — said nothing
+  at all about one it went on to kill. A dialog that undercounts is worse than no
+  dialog, because the honest asymmetry between Close and Archive is the only
+  thing it exists to say. There is now one pure planner, computed before
+  anything is written and handed to the act, so the sentence you are asked to
+  agree to is produced by the code that does the work.
+
+- **A running process with no row of its own now gets one, instead of only a
+  number.** The container badge counts every live process this machine is paying
+  for, which is the levels invariant expressed as a number — the incident this
+  design answers was 84 detached sessions that no surface anywhere counted. But
+  an archived record whose process the roster still reports has no row at all:
+  the badge said 6 with four rows on screen here, and one of the two missing
+  sessions had been in that state for four days. The tempting fix is to stop
+  counting it, and it is the wrong one — that deletes the only on-screen
+  evidence of exactly the leak the two entries above describe. So the rescue is a
+  row: a live session the rendered tree never draws joins the collapsed **Still
+  running** group at the bottom, in both view styles, where it can be seen and
+  closed. Same scope fence as the badge, so the number and the rows agree.
+
+- **Close with Summary no longer re-closes a session something else closed while
+  it was compacting.** The compaction takes one to three minutes, and in that
+  window the idle sweep, another Flock window, or your own Close Now can end the
+  same session. The summary then arrived and the close ran regardless: the
+  original close time was overwritten with a stamp up to two minutes later, a
+  tab that no longer existed was asked to dispose itself, and a session archived
+  during the wait acquired a fresh close stamp on top of its archived record. The
+  record is now re-read when the compaction lands, and a session that is already
+  over is given the words it earned and nothing else — no second close stamp, no
+  disposal, no warning about a session that was not running.
+
+- **"Restore" stopped telling you to turn off a filter to see a row that was
+  already on screen.** The note exists for a real case — restoring a closed
+  session while **Show Only Active Sessions** is on puts its row back into a tree
+  that is not showing closed rows — but it asked only how the filter was set,
+  never whether the row it had just restored was one the filter hides. Restoring
+  an archived session that is still RUNNING gets its row back immediately, and
+  being told to turn off a filter for a row the tree has just scrolled to is
+  advice about nothing. It now speaks only for the rows that are genuinely
+  hidden.
+
+- **A window opened on part of a project showed no sessions at all — the badge
+  counted them and the tree drew nothing.** This is the commonest window there
+  is: folder mode is the default, and the folder a window opens on is very often
+  a subdirectory of a project (`~/app/api`) or one of its linked worktrees
+  rather than the project root. The fence that had just been taught to keep
+  other projects' rows out of such a window asked whether the project's
+  directory was *inside* the folder the window had open, which is the wrong way
+  round — the project's directory **contains** that folder, and a worktree
+  checkout beside the repository is not inside it either. So the project row was
+  fenced out; and because sessions are filed into buckets belonging to the rows
+  that survived, every session in the folder the window was actually looking at
+  had nowhere to go and was dropped without being counted anywhere. The sidebar
+  was empty while the container badge said one session was running.
+  A window opened on part of a project is that project's window: containment now
+  counts in either direction, and a project's worktree reach — which is already
+  what decides that a session in `~/app-feat-x` belongs to the project at
+  `~/app` — is read by the fence out of the same list that files the sessions,
+  so the two can no longer disagree. Underneath, the filing loop no longer
+  believes it has placed a session when the bucket it aimed at does not exist:
+  an unplaceable session is counted and, while it is still running, keeps its
+  row under "Still running". That last part is unreachable with the fence
+  corrected, and it stays in anyway, because the next fence should fail loudly
+  rather than silently.
+
+- **"Move to Account…" was offered where it could not work, and worked where
+  it should have refused.** Axel: *"the switch, like 'move session to a new
+  account', is also very inconsistent."* It was, in four separate ways, and
+  they had one shape in common: the verb was built out of layers that each
+  asked a slightly different question, and the answers had stopped lining up.
+  The one you actually saw is the menu. The entry was drawn whenever two
+  accounts could *host* a session, and `codex` joined that list the day the
+  launcher learned to run it — while the picker behind the entry only ever
+  accepted accounts on the same CLI. So on the roster Flock seeds by itself,
+  one Claude login plus a Codex one, the verb sat on every session row and the
+  picker was always empty. The menu now asks the same question the picker
+  does, out of the same function, and the row itself says which CLI wrote the
+  conversation so a Codex row is not offered a move Flock has never known how
+  to make.
+  The one you could not see was worse. Moving a wrapped conversation restarts
+  it in its tmux pane, and a respawn can only *set* environment variables,
+  never remove them — so moving a session back to the default login, whose
+  environment names no config directory at all, left the previous account's
+  `CLAUDE_CONFIG_DIR` sitting in the pane, and the resumed `claude --resume`
+  went looking in the account the transcript had just left. The switch now
+  clears what the destination does not set, before the respawn rather than
+  after it, because the new process takes its environment at the moment it
+  spawns. The same leak had a second door: Flock's private tmux server keeps
+  the environment of the first client that forks it, so the first wrapped
+  session started on a custom account put that account's config directory into
+  the server's global environment and every later session inherited it, with
+  no verb used at all. The tmux conf now removes those names globally; a
+  session that passes its own still wins. A server already running keeps the
+  conf it started with, so that half takes effect when it next exits — which,
+  with `exit-empty`, is when its last session goes.
+  Two refusals were missing and one was arriving too late. A session running
+  under *another Flock window* was allowed straight through: with tmux off, or
+  on Windows where the wrap does not exist, nothing was stopped, the transcript
+  was renamed under a live CLI, and the result still reported a clean in-place
+  move. It is refused now — but only where the refusal is true. "Flock's, but
+  not this window's" covers two situations with opposite answers: a
+  conversation parked into the private tmux server by a workspace switch can
+  be respawned from here perfectly well and still moves, while one whose tab
+  another window holds with no wrap around it cannot be stopped from here at
+  all, and that is the one that is now named and refused. A Codex conversation started in a
+  terminal has no account pin, and the CLI gate read the pin — so it passed,
+  and was then told by the transcript check that it "has not taken a turn
+  yet", which was the one sentence that gate existed to prevent; the gate now
+  reads the conversation. And a conversation whose pin had come apart from its
+  file — which the environment leak above actively produced — was stopped and
+  restarted *before* being told there was nothing in the account it was pinned
+  to. Flock now finds the transcript first, in any account on the machine, so
+  a refusal costs nothing and a pin that is merely wrong no longer strands a
+  conversation that is sitting one directory over.
+  Three smaller things fell out of the same pass. The result now distinguishes
+  "it is in a new terminal" from "there is no terminal" and from "we could not
+  find the process", instead of reporting the last two as the first and the
+  second — a switch that produced no terminal used to send you looking for a
+  tab that was not there. A move between two custom accounts seeds the
+  destination from the account being left as well as from the machine's own
+  configuration, so a folder only the source account had ever trusted does not
+  greet the resumed conversation with a trust dialog. And removing an account
+  no longer hides the conversations inside it: the tombstone keeps the
+  directory, which stays readable, so a session moved onto an account that was
+  later deleted still finds its transcript — the removal dialog has been
+  promising exactly that.
+  One menu-slot fix, because it is the same complaint: **Move to Account…** and
+  **Move to Lane** were both contributed at `1_actions@3`, and **Close Now** and
+  **Close Session** both at `2_close@1`, which leaves the order two verbs come
+  out in to contribution accident. Each has its own slot now, and a test walks
+  every row shape a menu can be opened on — session, project, subproject, branch
+  and the two headers — to make sure no two entries land in one slot on one row,
+  while leaving the seventeen places where different KINDS of row correctly share
+  one.
+
+- **Closing or archiving a session in the middle of a tree moved the forks
+  under it.** Axel: *"the trees get weird when you do stuff to them — like when
+  you close one in the middle, that's pretty weird."* He was right, and it was
+  worth finding out precisely what was weird: the pass that decides WHICH rows
+  survive is sound — 4000 randomised forests, checked against an independently
+  written model, produced no duplicate row, no lost session, no row at the
+  wrong depth and no orphan. What was wrong was WHERE the survivors land.
+  Promotion — the rule that keeps a live fork on screen when the row above it
+  goes away — was a splice: the fork inherited the slot its now-invisible
+  parent held, so the position of a running session was decided by the sort key
+  of a row nobody can see. Archive a session with a fork under it and the fork
+  visibly moved down past a sibling, though nothing about it had changed; with
+  **Show Only Active Sessions** on there was not even a row left on screen to
+  explain the move. The visible list is now re-keyed with the same comparator
+  the sibling list uses, so a promoted fork merges back in among the siblings it
+  now genuinely stands with. Nothing structural changed — lineage, edges and
+  the parent chain are untouched; this is the picture agreeing with the
+  structure rather than a second opinion about it.
+  Second half of the same bug: the sibling comparator demoted *archived* rows
+  below the live ones but said nothing about **ghosts** — the inferred
+  *(gone)* ancestors Flock mints when a fork names a parent it cannot produce a
+  row for. A ghost has no roster entry, therefore no start time, therefore fell
+  through to the "unknown time sorts last" branch and landed as the last LIVE
+  sibling: above every genuinely closed session, which is exactly backwards for
+  a row that is by construction the ancestor of something already finished. And
+  it was that missing arm which put the ghost of a just-archived session in the
+  slot the promoted fork then inherited. Both the comparator and the two
+  renderers now ask one shared `sessionIsOver` predicate, so "is this
+  conversation over" cannot be answered two ways in one tick.
+
+- **Archiving a session that was still running left the process alive with no
+  row anywhere.** The verb only ever ended a session whose row was a grace
+  countdown, because that was the case somebody had thought about: a detached
+  process whose tab is gone by definition, so its row is its last surface. A
+  session with a TAB claims no detached process, so the check said no and the
+  flag was written straight over a live `claude` — the row left the tree, the
+  process carried on writing its transcript, the container badge went on
+  counting it, and because every verb's picker skips archived rows the user
+  could not even close the thing they had just archived. Restore was the only
+  door back. That is the running-and-shown-nowhere state this whole design
+  exists to make unrepresentable, fixed for one shape of row and missed for the
+  other. Archive now means close-then-hide: the tab is disposed, or the
+  detached process is reaped, and only then does the row go — the same
+  before-the-flag order the grace row already had. What it refuses rather than
+  forces is every shape of "this window cannot end it": a session another live
+  Flock window is running (usually a racing restore, where that window has
+  already bound the tab but not yet cleared the grace claim), a `claude` outside
+  Flock entirely, and — the third arm, added after the first fix was found to
+  leave a hole — a session that is **ours** and live but has neither a tab here
+  nor a detached claim to kill through, which is what a conversation Flock
+  launched looks like once its tab has gone and it is running somewhere this
+  window cannot see. Killing the first two would end a conversation someone is
+  looking at; writing the flag over the third orphaned it exactly as the bug
+  above did, silently, with the dialog saying nothing. So it names what it is
+  skipping, and writes nothing.
+
+- **A closed session that nobody named showed a hex id instead of a name.** The
+  archived label chain ended at the eight-character short id, and on a real
+  machine it ended there constantly: of the 278 transcripts under
+  `~/.claude/projects` here, 198 — 71.2% — rendered as a bare code. Next to that
+  code sat the transcript-tail scrape, which is why the row read as its own last
+  prompt rather than as a session. The chain now has two more steps, both read
+  from the bounded transcript head `src/archive.ts` was already reading. First
+  the CLI's own generated title (its `ai-title` record): present in 154 of those
+  278 files inside the existing window, shown as an ordinary name because it is
+  a genuine title of that conversation and the thing it replaces is a hex id,
+  and safe to take first-wins because 144 files re-emit it — up to 138 times —
+  and not one ever contradicts itself. Then the conversation's opening prompt, in
+  typographic quotes: a QUOTATION, never a title, filtered so that tool results,
+  injected preambles, sub-agent turns, compaction continuations and
+  `<bash-input>` echoes cannot become a name, and refused outright as a terminal
+  tab title, where `“cd ..”` would be worse than the CLI's own `claude ·
+  1a2b3c4d`. The fall-through to a hex id drops from 71.2% to 6.8%, and a cold
+  scan of all 278 transcripts costs 6 ms more (61 → 67 ms) because the head
+  bytes were already being read. The `(mtimeMs, size)` cache is untouched: the
+  new facts come from the same bytes as the old ones, and the existing
+  live-at-scan rule already forces the one re-read that matters — the first scan
+  after a running session stops, which is exactly when its generated title
+  becomes readable.
 
 - **Worktree membership is now asked the same way everywhere.** A session running
   in a linked checkout — `~/app-feat-x`, a worktree of the repository at
@@ -171,8 +972,49 @@ All notable changes to Flock are recorded here. The format follows
   too.** The verb was contributed to the native tree's menu only, and the
   default `lineage.viewStyle` is `inline` — so on a default install the row
   menu never offered it and the only way to a move was the Command Palette.
-  The inline view now carries the same entry, gated the same way: any session
-  row, whenever a second account could run it.
+  The inline view now carries the same entry, in the same slot and behind the
+  same gate as the native one — which is a narrower gate than it was when this
+  line was first written, and the entry above says why.
+
+- **Every project row was drawing two verbs in one slot.** **Add Session to
+  Project** and **New Worktree** were both contributed at `0_open@4`, in both
+  sidebars, so with the branch rows on the order they came out in was decided by
+  which entry happened to be listed first in the manifest rather than by anybody.
+  This is the same defect as the Move to Account / Move to Lane collision above
+  and it had been shipping for longer; it survived the guard that caught that one
+  because the guard modelled SESSION rows only. That was reasonable when it was
+  written — a session row was where the bug had been found — and it went stale
+  the moment this round started adding verbs to project rows. The guard now walks
+  every row shape a context menu can open on: session, project, subproject,
+  branch, and the two header rows, each built from the same function the two
+  sidebars build them with rather than from a list of tokens someone typed out.
+  New Worktree moves to `0_open@5` and **Archived Sessions…** to `0_open@6`,
+  which keeps the project menu reading in the order it always did.
+
+- **The two triples had one set of words between them, and now have two.** This
+  release renamed the session lifecycle's third state to *Archived* and named the
+  three window models at the same time, and three separate pieces of work each
+  arrived wanting to write their own note explaining which "three" was which.
+  There is now exactly one, at the top of `design/levels-and-modes.md`, and it
+  says both halves plainly: the **levels 1 / 2 / 3** that document argues about
+  are the session lifecycle, whose user-facing words are **Open**, **Closed** and
+  **Archived**; the **window models** are a different triple entirely —
+  `folder` / `root` / `project`, labelled *One folder per project* / *Root (Flock only)*
+  / *Auto-switch* — and they are never numbered in anything a person reads,
+  because somebody who has learned that level 3 means Archived would read "level 3
+  window" as a window that had been put away. The documents were then swept
+  against it, which turned up four places that had been quietly saying the old
+  thing: a level-2 row was still called an *archived row* in the reference and in
+  two settings descriptions, where after this release that word means the row is
+  gone from the tree; the reference still said a close-with-summary is *recorded
+  on the row*, which is exactly the thing that came off the row in this release
+  and moved to the hover; the Workspaces chapter still opened by describing
+  auto-switch as what a window does *by default*, which stopped being true when
+  the default became one folder per project; and the count of settings that ship
+  off had gone from seventeen to sixteen with the demo project's removal and back
+  to seventeen with `lineage.fork.notifyParent`, without the second half being
+  written down. The settings and command counts were recomputed from the manifest
+  rather than from each other: **48 settings, 93 commands.**
 
 ## [0.1.6] — 2026-08-18
 
