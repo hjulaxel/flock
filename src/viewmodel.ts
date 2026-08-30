@@ -429,6 +429,9 @@ export function sessionBranchLine(
   /** The worktree this line names. Never drawn — read back by the view when a
    *  click on the line resolves to a verb, exactly as BranchChip.dir is. */
   dir = '',
+  /** Visible root sessions of the project in this same checkout. Only 2 and
+   *  up survives onto the line — see SessionBranchLine.shared. */
+  shared = 0,
 ): SessionBranchLine {
   const sync = formatBranchSync(status);
   // THE REQUEST IS THE DETAILED LEVEL'S, and that includes the shape and colour
@@ -453,6 +456,9 @@ export function sessionBranchLine(
     ...(typeof status?.upstream === 'string' && status.upstream !== ''
       ? { link: true as const }
       : {}),
+    // The shared-floor token — in `common`, i.e. mode-independent, because the
+    // warning is about the checkout, not about the detail level.
+    ...(shared >= 2 ? { shared } : {}),
   };
   if (detail !== 'detailed') {
     // Absent rather than '' when there is nothing to say, so the line reserves
@@ -908,6 +914,12 @@ export interface SessionBranchLine {
    *  extension reads the directory out of the model it posted rather than
    *  letting the page name a path. */
   dir?: string;
+  /** 2 and up: how many visible ROOT sessions of the project run in this same
+   *  checkout — the shared-floor warning, drawn as `shared ×2`. Roots only,
+   *  because a fork staying in its root's checkout is the designed shape, not
+   *  the hazard. Absent below two: the quiet case costs no width, the rule
+   *  every optional token on this line follows. */
+  shared?: number;
   /** The pull request, at the DETAILED level only. `state` and `checks` travel
    *  as words for the same reason they do on a chip: they are class names on the
    *  far side, and the client picks a colour from them rather than a phrase. */
@@ -1951,6 +1963,14 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
       // ViewRow.branch.
       if (branchScope.colored) row.branchColor = branch.colorIndex;
       row.tooltip += `\nbranch: ${branch.name}`;
+      // The shared-floor warning, in sentences, in BOTH display modes — colour
+      // mode has no line to carry the token, so the hover is its only surface.
+      if (branch.rootIds.length >= 2) {
+        row.tooltip +=
+          `\n${branch.rootIds.length} sessions share the checkout at ` +
+          `${branch.dir} — a git checkout there changes the branch under ` +
+          'all of them. New Worktree… gives each its own.';
+      }
       // The second line, on the rows where it says something the row above did
       // not. `parentBranchAt` is the whole of that test: -1 for a root, so every
       // root speaks, and equal for a fork that stayed in its parent's checkout,
@@ -1992,6 +2012,7 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
           pr,
           sessionBranchDetail,
           branch.dir,
+          branch.rootIds.length,
         );
         // The project the line's links resolve against. Set HERE and only here —
         // on a session row it means "the project whose branch this line names",

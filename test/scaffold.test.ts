@@ -88,7 +88,7 @@ describe('scaffold: the shared types contract', () => {
     // (src/state.ts); a bump on its own stamps an old-shaped file as the new
     // version without materialising the maps that version promises, and the
     // reader then finds them missing on a file it believes is current.
-    expect(STATE_SCHEMA_VERSION).toBe(8);
+    expect(STATE_SCHEMA_VERSION).toBe(9);
   });
 
   it('declares every contributed command id under the lineage. prefix', () => {

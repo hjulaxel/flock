@@ -41,10 +41,15 @@ chats, and much more.
 - **Session age.** The time on a row is how long since you last prompted that
   session.
 
-- **Worktrees keep their sessions.** Running one agent per `git worktree` is how
-  parallel work actually gets done. A session started in a linked checkout of a
-  project's repository is filed under that project wherever the checkout sits on
-  disk, with nothing to configure.
+- **A worktree per session, by default.** Running one agent per `git worktree`
+  is how parallel work actually gets done, so the `+` does it for you: every
+  root session starts in a fresh checkout on a branch minted from its own name
+  (`flock 3` → `flock-3`), and no two sessions can switch branches under each
+  other again. `lineage.git.newSessionInWorktree` turns the old in-place `+`
+  back on; either way a session in a linked checkout is filed under the project
+  that owns the repository, wherever the checkout sits on disk. When the work
+  has landed, **Remove Worktree** offers to retire the minted branch with it —
+  and only a minted, fully-merged one.
 
 - **Branch rows, if you turn them on.** `lineage.git.branches` — **off** — gives
   each of a project's checkouts a colour-coded row, with **New Worktree…**,
@@ -206,6 +211,10 @@ Nothing about it is unfinished: it reads real worktrees, `git worktree add` and
 rules are covered by the same tests they always were. Turn the setting on to get
 all of it back, including its menus.
 
+One part is **not** parked: the `+` cutting a worktree per root session
+(`lineage.git.newSessionInWorktree`) ships on and needs none of the rows —
+see the worktrees bullet above.
+
 The feature is four settings by now, so there is one verb for all of them:
 **Flock: Show Branches and Worktrees** in the command palette turns on the rows,
 the pull-request chips and the directory-model preview in one go, and
@@ -262,7 +271,7 @@ this release.
 
 ## Documentation
 
-- **[Settings](docs/settings.md)** — all 50, with defaults.
+- **[Settings](docs/settings.md)** — all 51, with defaults.
 - **[Reference](docs/reference.md)** — how it works, projects, subprojects,
   notifications, workspaces, close vs archive, naming, the sidebar rendering
   modes, and what you get alongside the Claude Code extension.

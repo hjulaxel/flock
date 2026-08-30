@@ -1226,6 +1226,20 @@ body {
   margin-right: 6px;
 }
 
+/* The shared-floor token, `shared ×2`, right of the name it warns about.
+ * Amber, and specifically the tree's own attention hue (the working dot's),
+ * so it reads as caution without adding a colour to the vocabulary; red would
+ * claim a failure and sharing is not one — it is the state in which one
+ * `git checkout` moves every session standing there. */
+.branch-shared {
+  flex: 0 0 auto;
+  color: var(--lineage-running, var(--vscode-charts-yellow));
+  opacity: 0.9;
+  font-size: 0.9em;
+  white-space: nowrap;
+  margin-left: 6px;
+}
+
 /* The pull request, `#42 ✓`, right of the sync token.
  *
  * ORDER-DEPENDENT, and this is the only place in this file where a cascade does

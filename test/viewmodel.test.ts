@@ -1873,6 +1873,28 @@ describe('buildViewModel: branch rows', () => {
 // wrong — a line on every row is a tree twice as tall for no new information.
 
 describe('sessionBranchLine', () => {
+  it('carries the shared-floor count at two and up, and stays quiet below', () => {
+    // 0 and 1 are the designed shapes — a worktree of one root, or no roots
+    // probed yet — and must cost no width. 2 is the state the token exists
+    // for: the one where a `git checkout` moves somebody else's session.
+    expect(
+      sessionBranchLine('main', status(), undefined, 'standard', '/c/app', 2)
+        .shared,
+    ).toBe(2);
+    expect(
+      sessionBranchLine('main', status(), undefined, 'standard', '/c/app', 1)
+        .shared,
+    ).toBeUndefined();
+    expect(
+      sessionBranchLine('main', status(), undefined, 'standard').shared,
+    ).toBeUndefined();
+    // Mode-independent: the warning is about the checkout, not the level.
+    expect(
+      sessionBranchLine('main', status(), undefined, 'detailed', '/c/app', 3)
+        .shared,
+    ).toBe(3);
+  });
+
   const status = (over: Partial<BranchStatus> = {}): BranchStatus => ({
     upstream: 'origin/feat/x',
     ahead: 0,

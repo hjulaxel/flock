@@ -8,6 +8,23 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Added
 
+- **Remove Worktree decides the branch's fate, out loud.** A ref the `+`
+  minted whose every commit is on the main branch earns a second button —
+  **Remove and Delete Branch**, both commands quoted. Everything else keeps
+  the ref and the dialog says why. The delete is `git branch -d`, never `-D`:
+  git re-checks merged-ness at the moment of deletion, so a stale probe can
+  cost a refused button, never commits. Which refs Flock minted is recorded in
+  state (schema v8, additive) — refs minted by other tools are never offered.
+- **Deleting the last session in a minted worktree offers the cleanup.** One
+  non-modal toast after the Undo window: Clean Up… routes into Remove
+  Worktree, same dialogs, no shortcut. Delete only — a closed session still
+  needs its directory to resume.
+- **`shared ×2`, the shared-floor token.** A session whose checkout hosts two
+  or more root sessions says so on its branch line, in amber, with the hover
+  spelling out why it matters and the way out. Quiet below two.
+- **`lineage.git.branchPrefix`** — what minted branch names start with
+  (`axel/` → `axel/flock-3`, the Claude Squad convention). Blank by default.
+
 - **`/exit` leaves you at a shell instead of closing the tab —
   `lineage.exitToShell`, on by default.** A session's tab holds exactly one
   process, so exiting used to take the tab with it. That is the wrong ending for
@@ -73,6 +90,16 @@ All notable changes to Flock are recorded here. The format follows
   open five and leave you the last one.
 
 ### Changed
+
+- **The `+` cuts a worktree per root session, and it is the default.** One
+  session, one checkout: the branch is minted from the session's name
+  (`flock 3` → `flock-3`, behind the new `lineage.git.branchPrefix` when set),
+  `git worktree add -b` runs with no dialog — it creates a directory and a
+  fresh ref and touches nothing that exists — and the status bar names both.
+  No two sessions can switch branches under each other again. Turn
+  `lineage.git.newSessionInWorktree` off for the old in-place `+`; forks stay
+  in their root's checkout either way, and a project with no repository falls
+  back to a plain session. Works without `lineage.git.branches`.
 
 - **The branch chips now wear Source Control's own branch colours.** They used
   to be a pick of the theme's `charts.*`, which was the right instinct — the
