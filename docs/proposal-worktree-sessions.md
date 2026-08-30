@@ -1,9 +1,11 @@
 # Proposal — Worktree sessions: one session, one checkout
 
-**Status: proposal, 2026-08-14. Nothing in this document is implemented.**
+**Status: implemented in 0.1.8, 2026-08-30, with one exception — §5.1's
+`shared ×N` token was built, then withdrawn: first to a hover, then removed
+entirely in 0.1.9. See the note at the end of that section for why.**
 Written after the research pass on how the field (Claude Squad, workmux, dmux,
-both cmuxes) binds sessions to branches. STATUS.md is at M26; this proposes
-M27–M29.
+both cmuxes) binds sessions to branches. STATUS.md was at M26 when this was
+written; this proposed M27–M29.
 
 ---
 
@@ -232,6 +234,16 @@ Hover, both display modes (in `color` mode this is the only surface):
 
 > 2 sessions share the checkout at ~/code/flock. A `git checkout` there
 > changes the branch under all of them. New Worktree… gives each its own.
+
+**WITHDRAWN. This section is the one part of the proposal that shipped and was
+then taken back out** — the token in 0.1.8, the hover with it in 0.1.9. Both
+were true and neither was news: how many sessions you start in one directory is
+a choice you made, so the token spent width on every row of that checkout, and
+the hover sentence spent the reader's attention, to report a decision back to
+the person who took it. The rest of §5 stands. What the milestone was actually
+for — a session getting its own checkout, and Remove Worktree counting who is
+standing in one before it removes anything — is untouched, and both still
+count `BranchInfo.rootIds` to do it.
 
 The token draws only at ×2 and above — one session in the main worktree is the
 normal quiet case and gets nothing.

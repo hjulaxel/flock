@@ -370,16 +370,25 @@ export function branchStatusLines(status: BranchStatus | undefined): string[] {
  * The STATE is not in the text. It is a class on the chip (see webtree.css) —
  * open, draft, merged, closed are four colours, and spelling them out would cost
  * the row more width than the branch name has to spare. The hover says the word.
+ *
+ * A MERGED request gets no mark at all. Its checks ran and it landed, so the
+ * glyph would be reporting on a question nobody is still asking — and the two
+ * things that DO say it merged are already on the row twice over: the purple
+ * merge mark leading the branch, and the chip's own purple. This is the one
+ * place the checks are dropped rather than shown, and it is dropped for every
+ * surface at once, which is the reason it lives in here and not at a call site.
  */
 export function formatPullRequestChip(pr: PullRequest): string {
   const mark =
-    pr.checks === 'pass'
-      ? ' ✓'
-      : pr.checks === 'fail'
-        ? ' ✕'
-        : pr.checks === 'pending'
-          ? ' •'
-          : '';
+    pr.state === 'merged'
+      ? ''
+      : pr.checks === 'pass'
+        ? ' ✓'
+        : pr.checks === 'fail'
+          ? ' ✕'
+          : pr.checks === 'pending'
+            ? ' •'
+            : '';
   return `#${pr.number}${mark}`;
 }
 
@@ -393,8 +402,7 @@ export function formatPullRequestChip(pr: PullRequest): string {
  *
  *   standard   ⎇ feat/search-ranking *    ↑4
  *   detailed   ⇡ feat/search-ranking *    ↑4      #128 ✓
- *              ⑃ fix/csv-import                   #124 merged
- *              ⎇ spike/preview-cache *   local
+ *              ⑃ fix/csv-import                   #124
  *
  * The `*` sits against the NAME rather than at the end of the arrows, because it
  * is a fact about this checkout and not a third number about its upstream — see
@@ -407,12 +415,20 @@ export function formatPullRequestChip(pr: PullRequest): string {
  * the SCM view already speak, so the line reads without being learned, and it
  * reaches nothing but the local status cache — which is why it is the default.
  *
- * `detailed` adds exactly two words to it, and both are states the arrows render
- * as BLANK: `local` for a branch that tracks nothing (never pushed, so ahead and
- * behind are meaningless rather than zero), and `merged`, which is the one fact
- * that says a worktree can now be removed. `merged` is a WORD and not the chip's
- * colour, because the point of moving the branch off the session's name is that
- * a row should not need colour to be read.
+ * `detailed` adds the PULL REQUEST and nothing else. It used to add two words
+ * as well, and both are gone for the same reason: the line was spending width
+ * to say what the row already said.
+ *
+ * `local` sat where the arrows would be on a branch that tracks nothing. But
+ * "never pushed" is the state every branch starts in — it is what you get by
+ * not having done anything yet — and a token on every such row announced the
+ * default. The distinction it carried, never-pushed against in-sync (both draw
+ * no arrows), survives where it can afford words: the hover already says `no
+ * upstream branch` in as many, from branchStatusLines, on the same row.
+ *
+ * `merged` sat after the request's number. The merge is on the row three times
+ * without it — the purple merge mark leading the branch, the chip's purple, and
+ * the word in the hover — and the fourth was the one that cost a column.
  *
  * Note what is deliberately absent at both levels: a "can this be merged" mark.
  * GitHub computes `mergeable` asynchronously and answers UNKNOWN on a first
@@ -429,9 +445,6 @@ export function sessionBranchLine(
   /** The worktree this line names. Never drawn — read back by the view when a
    *  click on the line resolves to a verb, exactly as BranchChip.dir is. */
   dir = '',
-  /** Visible root sessions of the project in this same checkout. Only 2 and
-   *  up survives onto the line — see SessionBranchLine.shared. */
-  shared = 0,
 ): SessionBranchLine {
   const sync = formatBranchSync(status);
   // THE REQUEST IS THE DETAILED LEVEL'S, and that includes the shape and colour
@@ -456,42 +469,32 @@ export function sessionBranchLine(
     ...(typeof status?.upstream === 'string' && status.upstream !== ''
       ? { link: true as const }
       : {}),
-    // The shared-floor token — in `common`, i.e. mode-independent, because the
-    // warning is about the checkout, not about the detail level.
-    ...(shared >= 2 ? { shared } : {}),
   };
-  if (detail !== 'detailed') {
-    // Absent rather than '' when there is nothing to say, so the line reserves
-    // no width for a column it is not using — the rule `sync` follows on a
-    // branch row.
-    return { name, ...common, ...(sync === '' ? {} : { sync }) };
-  }
-  // `local` FIRST, because it qualifies everything after it: it is the reason
-  // there are no arrows, not another fact alongside them. `upstream === ''` is
-  // the probe's way of saying the branch tracks nothing — an unprobed branch has
-  // no status at all and gets no word, since "never pushed" and "not looked at
-  // yet" are different claims and only one of them is ours to make.
-  const detailed =
-    status !== undefined && status.upstream === ''
-      ? ['local', sync].filter((s) => s !== '').join(' ')
-      : sync;
+  // ONE return for both levels, which is what the levels now differ by: the
+  // REQUEST, and nothing else. They used to differ in the upstream column too —
+  // `detailed` prefixed `local` there — and that is what made this two returns.
+  // With the word gone the arrows are the arrows at either level, and a second
+  // exit would be two spellings of one line waiting to disagree.
   return {
     name,
     ...common,
-    ...(detailed === '' ? {} : { sync: detailed }),
-    ...(pr === undefined
+    // Absent rather than '' when there is nothing to say, so the line reserves
+    // no width for a column it is not using — the rule `sync` follows on a
+    // branch row.
+    ...(sync === '' ? {} : { sync }),
+    // `state`, not `pr`: it is already the detail level's answer about the
+    // request, and reading it here is what keeps the chip and the mark leading
+    // the line from ever being drawn one without the other.
+    ...(state === undefined
       ? {}
       : {
+          // The chip decides its own text, merged included — one formatter for
+          // this line, the branch chips and the native tree's description, so
+          // the three cannot drift.
           pr: {
-            // A merged request has no checks worth a glyph — they ran, it
-            // landed — so the word takes the glyph's place rather than sitting
-            // beside it.
-            label:
-              pr.state === 'merged'
-                ? `#${pr.number} merged`
-                : formatPullRequestChip(pr),
-            state: pr.state,
-            checks: pr.checks,
+            label: formatPullRequestChip(state),
+            state: state.state,
+            checks: state.checks,
           },
         }),
   };
@@ -902,7 +905,7 @@ export interface SessionBranchLine {
    *  or absent, never `false`: an absent field costs no width, which is the rule
    *  every optional token on this line follows. */
   dirty?: true;
-  /** Where the checkout stands: `↑4 ↓3`, and `local …` at the detailed level.
+  /** Where the checkout stands: `↑4 ↓3`, the same at either detail level.
    *  Absent — not '' — when there is nothing to report. */
   sync?: string;
   /** The branch exists on a remote, so its name is a LINK to the branch's page
@@ -914,12 +917,6 @@ export interface SessionBranchLine {
    *  extension reads the directory out of the model it posted rather than
    *  letting the page name a path. */
   dir?: string;
-  /** 2 and up: how many visible ROOT sessions of the project run in this same
-   *  checkout — the shared-floor warning, drawn as `shared ×2`. Roots only,
-   *  because a fork staying in its root's checkout is the designed shape, not
-   *  the hazard. Absent below two: the quiet case costs no width, the rule
-   *  every optional token on this line follows. */
-  shared?: number;
   /** The pull request, at the DETAILED level only. `state` and `checks` travel
    *  as words for the same reason they do on a chip: they are class names on the
    *  far side, and the client picks a colour from them rather than a phrase. */
@@ -1963,14 +1960,6 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
       // ViewRow.branch.
       if (branchScope.colored) row.branchColor = branch.colorIndex;
       row.tooltip += `\nbranch: ${branch.name}`;
-      // The shared-floor warning, in sentences, in BOTH display modes — colour
-      // mode has no line to carry the token, so the hover is its only surface.
-      if (branch.rootIds.length >= 2) {
-        row.tooltip +=
-          `\n${branch.rootIds.length} sessions share the checkout at ` +
-          `${branch.dir} — a git checkout there changes the branch under ` +
-          'all of them. New Worktree… gives each its own.';
-      }
       // The second line, on the rows where it says something the row above did
       // not. `parentBranchAt` is the whole of that test: -1 for a root, so every
       // root speaks, and equal for a fork that stayed in its parent's checkout,
@@ -2012,7 +2001,6 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
           pr,
           sessionBranchDetail,
           branch.dir,
-          branch.rootIds.length,
         );
         // The project the line's links resolve against. Set HERE and only here —
         // on a session row it means "the project whose branch this line names",

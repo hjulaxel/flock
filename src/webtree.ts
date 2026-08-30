@@ -85,6 +85,14 @@ export const BACKGROUND_DROP_KEY = 'background';
 const REVEAL_WAIT_MS = 1500;
 const REVEAL_POLL_MS = 25;
 
+/** The most a 'clipboardWrite' may carry. A copy or a cut out of a rename box
+ *  can only ever be a slice of a name, so this is far above anything the verb
+ *  can legitimately produce — it is here because the message crosses from a
+ *  page, and a page's strings are bounded on arrival whatever they claim to be
+ *  about. Deliberately not MAX_TITLE_LEN: that is the client's rule about what
+ *  a NAME may be, and a selection is not yet a name. */
+const MAX_CLIPBOARD_WRITE = 4096;
+
 /** Resolve after `ms`. Module-local rather than a shared util because this is
  *  the only place in the file that waits on the clock. */
 function delay(ms: number): Promise<void> {
@@ -370,6 +378,10 @@ interface ClientMessage {
   /** Which chip on a branch row was clicked. An index, never a path — see the
    *  'branch' case in onMessage. */
   index?: unknown;
+  /** What a rename box wants put on the clipboard, on a 'clipboardWrite'. The
+   *  user's own selection out of a box they are typing in — nothing is read off
+   *  the model or the disk to fill it. */
+  text?: unknown;
 }
 
 function nonce(): string {
@@ -1374,6 +1386,61 @@ ${branchPaletteCss()}  }
 
         case 'renameCancelled': {
           this.deps.renameCancelled();
+          return;
+        }
+
+        // ------------------------------------------------------- the clipboard
+        //
+        // cmd+V inside the rename box, and its two neighbours. The box is in a
+        // webview, and a webview's iframe is a document apart from the
+        // workbench: the workbench's paste command does not reach into it, and
+        // the iframe's own clipboard is behind a permission the page cannot
+        // grant itself. The keystroke therefore landed on nothing at all — you
+        // could type a name into that box but not paste one, which is the wrong
+        // way round for a box whose whole job is a string from somewhere else.
+        //
+        // `vscode.env.clipboard` is on this side of the boundary and has none of
+        // that problem. So the client names the gesture and this serves it, the
+        // same division every other message here keeps. The right-click route
+        // was fixed earlier and separately (the box's own data-vscode-context,
+        // and a menu that no longer counts as clicking away); this is the half
+        // that gesture could never cover.
+        case 'clipboardRead': {
+          // Read HERE and posted back, rather than the client being handed a
+          // clipboard object it could read whenever it liked: the clipboard is
+          // only ever crossed when a keystroke in an open rename box asks for
+          // it, and the client has no way to ask outside that.
+          let text = '';
+          try {
+            text = await vscode.env.clipboard.readText();
+          } catch (err) {
+            // A host with no clipboard (and the test double, whose `env` is
+            // deliberately bare) is a paste that does nothing — the same
+            // outcome as an empty clipboard, and not worth a dialog over.
+            logError('webtree.clipboardRead', err);
+            return;
+          }
+          if (text === '') return;
+          try {
+            await this.view?.webview.postMessage({ type: 'clipboard', text });
+          } catch (err) {
+            logError('webtree.clipboardRead.post', err);
+          }
+          return;
+        }
+
+        case 'clipboardWrite': {
+          // Copy and cut. The payload is the user's own selection out of the
+          // box they are editing, so there is nothing to resolve and nothing to
+          // look up — but it is still a string from the page, so it is type-
+          // checked and length-capped like every other one that arrives here.
+          const text = typeof msg.text === 'string' ? msg.text : '';
+          if (text === '' || text.length > MAX_CLIPBOARD_WRITE) return;
+          try {
+            await vscode.env.clipboard.writeText(text);
+          } catch (err) {
+            logError('webtree.clipboardWrite', err);
+          }
           return;
         }
 

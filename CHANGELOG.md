@@ -4,6 +4,49 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **You can paste a name into the rename box.** By keyboard now — `cmd`/`ctrl`
+  + `V`, and `C` and `X` beside it — where before only the right-click menu
+  worked, and the keystroke everybody actually reaches for did nothing at all.
+  The reason it did nothing is worth stating, because it is not a missing
+  handler: the row is a webview, and a webview's iframe is a document apart from
+  the workbench. The workbench's own paste command does not reach into it, and
+  the iframe cannot grant itself clipboard access. So the key arrived, matched
+  nothing on either side of the boundary, and was swallowed — by the one field
+  in Flock whose whole job is to hold a string from somewhere else. The
+  extension host has the clipboard and none of that problem, so the box names
+  the gesture and the extension serves it. A pasted newline becomes a space
+  instead of being dropped along with everything after it, which is what an
+  `<input>` does with a multi-line paste and the one outcome nobody can see
+  happen.
+
+### Changed
+
+- **A shared checkout no longer says anything at all.** 0.1.8 moved `shared ×2`
+  off the row and into the hover; this takes the hover sentence too, and the
+  count that fed it. The fact was true and nobody needed telling: how many
+  sessions you start in one directory is a choice you made, and both places it
+  lived were the sidebar reporting your own decision back to you. What the
+  feature is actually for survives untouched — New Worktree… gives a session its
+  own checkout, and Remove Worktree still counts the sessions standing in one
+  before it removes anything.
+- **`local` is gone from the branch line.** It sat where the arrows would be on
+  a branch that tracks nothing, which is the state every branch starts in — so
+  the token announced the default, on every row of every branch nobody had
+  pushed yet. The distinction it carried (never-pushed against in-sync, which
+  both draw no arrows) survives where it can afford words: the row's hover
+  already says `no upstream branch`, and has all along.
+- **A merged pull request is a colour, not a word.** The chip said
+  `#124 merged`; it now says `#124` and leaves the state to the purple it is
+  already drawn in — beside a purple merge mark already leading the line, and
+  above a hover that already says the word. It drops the check glyph on a merged
+  request too, on every surface at once: those checks ran and it landed, so a ✓
+  answers a question nobody is still asking and a ✕ reads as a problem on a
+  branch that has none.
+
 ## [0.1.8] — 2026-08-30
 
 ### Added

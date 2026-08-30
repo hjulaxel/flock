@@ -776,6 +776,19 @@ describe('formatPullRequestChip', () => {
     expect(formatPullRequestChip(pr({ checks: 'none' }))).toBe('#42');
   });
 
+  it('gives a merged request no glyph, whatever its checks say', () => {
+    // The checks ran and it landed. A ✓ there answers a question nobody is
+    // still asking, and a ✕ reads as a problem on a branch that has none — so
+    // the state's own colour carries it, on every surface at once, which is
+    // why this lives in the formatter and not at a call site.
+    expect(formatPullRequestChip(pr({ state: 'merged', checks: 'pass' }))).toBe('#42');
+    expect(formatPullRequestChip(pr({ state: 'merged', checks: 'fail' }))).toBe('#42');
+    expect(formatPullRequestChip(pr({ state: 'merged', checks: 'none' }))).toBe('#42');
+    // Closed-unmerged keeps its glyph: it did NOT land, so why it did not is
+    // still a live question, and the checks are part of the answer.
+    expect(formatPullRequestChip(pr({ state: 'closed', checks: 'fail' }))).toBe('#42 ✕');
+  });
+
   it('leaves the state out of the text', () => {
     // Four colours cost no width; four words would cost more than the branch name
     // has to spare. The hover says the word.
