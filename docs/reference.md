@@ -554,13 +554,20 @@ The red dot is an **unread marker**. It appears when a session completes a turn
 focus that session. Red rather than green because it is the one row asking for
 you — green is what everything else on screen uses to mean "nothing to do here".
 It rolls up onto the project row, so a collapsed project still shows there is
-something to come back to. The numeric badge on the view container counts
-something else: how many sessions are **running on this machine** — open tabs
-plus any session still running under a detach grace, in every window — so a number you did not expect is
-a process you did not know about. When a running session's row would be
-filtered out of this window (another folder's work in folder mode, a closed
-project's), it renders in a collapsed **Running elsewhere** group at the bottom
-instead: the badge never counts a process you cannot see and act on.
+something to come back to — and the roll-up asks exactly the question the rows
+below it do, so a project dot always has a lit row under it: a session that is
+closed, or busy again, or muted, lights nothing.
+
+The numeric badge on the view container counts something else: how many
+sessions are **running on this machine** — open tabs plus any session still
+running under a detach grace, in every window — so a number you did not expect
+is a process you did not know about. It is **off by default**
+(`lineage.runningBadge`), because a number that changes every few seconds on the
+icon you navigate by is motion with nothing to do about it. With it on, a
+running session whose row would be filtered out of this window (another
+folder's work in folder mode, a closed project's) renders in a collapsed
+**Running elsewhere** group at the bottom instead: the badge never counts a
+process you cannot see and act on.
 
 A **purple** mark is not an alarm at all: it is a compaction — a hollow ring
 while one runs, a filled dot once it has settled with nothing behind it. It
@@ -582,6 +589,17 @@ session. That is per *finish*, not per session: the next turn that session
 completes puts it straight back. Silencing a session for good is Mute, which is
 a different verb on purpose — a one-click × that could permanently hide a
 session's notifications would be the most destructive control in the popup.
+
+A session whose work has **fanned out** — a workflow, a Task, sub-agents of any
+kind — carries a small **run-all** mark beside its name while that is
+happening. The dot cannot say it: from the outside a session with nine agents
+under it and one thinking about a typo are the same word, `busy`, so they were
+the same amber dot. The mark is read from the transcript the sidebar already
+reads on every tick (an `isSidechain` line no more than 90 seconds behind the
+session's own last line), which is why it costs nothing and why it says only
+that the work fanned out — not how many agents, or which kind. It goes out with
+the turn that raised it. The native tree draws no mark and says the same thing
+in the hover.
 
 A silenced session never dots, never rings the bell, never toasts, and carries a
 **struck-through bell** beside its name, so a session that has gone quiet

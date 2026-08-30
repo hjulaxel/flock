@@ -740,6 +740,35 @@ describe('buildViewModel: row content', () => {
       ]);
     });
 
+    it('marks a session whose work has fanned out', () => {
+      // A MARK, not a fifth dot colour: the session is already amber and the
+      // amber is right — it IS running. What the dot cannot say is that nine
+      // things are running inside it rather than one.
+      expect(marksOf({ status: 'busy', subagents: true })).toEqual([
+        { icon: 'run-all', title: 'Sub-agents working' },
+      ]);
+    });
+
+    it('carries both marks at once, fan-out first', () => {
+      // Either alone must not shift the other's position, which is why they
+      // are a list built in a fixed order rather than two assignments.
+      expect(
+        marksOf({ status: 'busy', subagents: true, notifyMuted: true }),
+      ).toEqual([
+        { icon: 'run-all', title: 'Sub-agents working' },
+        { icon: 'bell-slash', title: 'Notifications hidden' },
+      ]);
+    });
+
+    it('says the fan-out in the hover too — the native tree draws no mark', () => {
+      const row = buildViewModel(
+        input(forestOf([node(A, { status: 'busy', subagents: true })]), {
+          loose: [A],
+        }),
+      )[0];
+      expect(row.tooltip).toContain('sub-agents working under this session');
+    });
+
     it('leaves an ordinary row without the field at all', () => {
       // Absent, not empty: a row with nothing to mark must cost no width, and
       // the client only appends the box for rows that carry one.

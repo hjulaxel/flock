@@ -274,6 +274,10 @@ import type {
 import { LimitsService, formatUsageSummary } from './limits';
 import { StateStore } from './state';
 import { registerDecorations } from './decorations';
+// One pure function, for the project roll-up dot: the native tree's dot and
+// the inline sidebar's must answer the same question, and statusTone is where
+// that question is defined. See projectsWithUnseen below.
+import { statusTone } from './viewmodel';
 import { registerTree } from './tree';
 import type { TreeController } from './tree';
 import { registerWebtree } from './webtree';
@@ -1444,6 +1448,29 @@ export async function activate(
         onlyActive: boolCfg(CONFIG_KEYS.onlyActiveSessions, false),
       },
     });
+    // THE FOURTH COMPLETION SIGNAL, and the only one that cannot lose a race:
+    // a generation that has acquired a successor has finished compacting,
+    // because minting that successor is what a compaction DOES. See
+    // compaction.settleSuperseded for the ten-minute stuck ring it exists to
+    // take down.
+    //
+    // AFTER buildForest, not beside the prune above, and the reason is the
+    // second argument. "Is that conversation still working?" decides whether
+    // this rests a purple dot or simply ends the phase, and the only clean
+    // answer to it is `node.status` — the roster's raw `state`/`status` pair
+    // has not been through normalizeStatus or the frozen-busy correction yet,
+    // so reading it here would call a session busy that the tree itself is
+    // about to draw as idle. The cost is that the settle lands on the NEXT
+    // rebuild, one poll interval later; the ring it is taking down had been
+    // standing for minutes.
+    compaction.settleSuperseded(
+      (id) => chainIndex.tipOf(id),
+      (tipId) =>
+        chainAliases(tipId).some(
+          (id) => forest.nodes.get(id)?.status === 'busy',
+        ),
+      compactionNow,
+    );
     unseenProjectsCache = null;
     fireForestChanged();
     detectTurnTransitions();
@@ -2300,15 +2327,45 @@ export async function activate(
       // the hooks above by up to one poll interval, and the only path at all
       // when hooks are off.
       const aliases = chainAliases(node.id);
-      if (prev === 'busy' && node.status !== 'busy') {
-        compaction.noteFinish(aliases, Date.now());
+      // Was this quiet the END OF A COMPACTION rather than the end of a turn?
+      // Asked BEFORE the settle below, because the settle is what makes the
+      // answer stop being readable — and asked as "does this conversation
+      // carry any live phase at all", so it is still true when a hook beat the
+      // poller to the finish by less than one interval and the ring is already
+      // a resting dot.
+      //
+      // A resting dot cannot survive into a REAL turn's ending and so cannot
+      // suppress its toast: going busy is the only way back to something worth
+      // announcing, and both paths out of quiet — the UserPromptSubmit hook
+      // and the quiet→busy edge below — clear a settled phase on the way.
+      //
+      // Only computed on the edge that reads it: this loop runs over every
+      // node on every poll.
+      const quieting = prev === 'busy' && node.status !== 'busy';
+      const wasCompaction =
+        quieting &&
+        (compaction.isCompacting(aliases) ||
+          compaction.phaseOf(aliases, Date.now(), false) !== undefined);
+      if (quieting) {
+        // `busy: false` is not a guess here — the edge we are standing on IS
+        // the roster leaving `busy`.
+        compaction.noteFinish(aliases, Date.now(), false);
       } else if (prev !== undefined && prev !== 'busy' && node.status === 'busy') {
         compaction.clearSettled(aliases);
       }
       if (node.hidden) continue;
       // The turn ended: it was working, now it is not.
       if (prev === 'busy' && (node.status === 'waiting' || node.status === 'idle')) {
-        noteSessionDone(node.id);
+        // ...UNLESS what just ended was a compaction. A compaction is neither
+        // work you asked for nor a question for you (the whole argument for
+        // giving it a mark of its own — see src/compaction.ts), so calling it
+        // a finished turn was wrong twice over: it toasted "X finished its
+        // turn" at a conversation nobody had asked anything of, and it left
+        // the row unseen-done, which is the red attention dot. The purple mark
+        // hid that red dot while it lasted and the red one surfaced when it
+        // expired — a session lighting up for attention an hour after a
+        // compaction it did on its own.
+        if (!wasCompaction) noteSessionDone(node.id);
         continue;
       }
       // A session found already waiting (window opened onto it, idle →
@@ -2457,7 +2514,14 @@ export async function activate(
       // One resolver for the whole loop — see projectReachNow.
       const reach = projectReachNow();
       for (const node of forest.nodes.values()) {
-        if (node.unseen !== true || node.hidden) continue;
+        // THE SAME QUESTION THE ROW'S OWN DOT ANSWERS, asked with the same
+        // function — see viewmodel.subtreeHasUnseen, which is this loop's twin
+        // for the inline sidebar and carries the argument in full. A
+        // hand-written `unseen === true && !hidden` disagreed with statusTone
+        // in three directions (a session that is OVER, one that is BUSY again,
+        // one WAITING with unseen tracking off), and every disagreement showed
+        // up as a project row whose dot contradicted the rows beneath it.
+        if (statusTone(node) !== 'done') continue;
         // EVERY claimant, not one: a twice-claimed session renders under both
         // project rows (see matchProjects), so the dot has to light both — a
         // row showing the session while its sibling carries the green mark
@@ -2601,6 +2665,13 @@ export async function activate(
     // that writes the CSS (sanitizeBranchColor).
     branchColors: () =>
       cfg().get<unknown[]>(CONFIG_KEYS.branchColors, [])?.map(String) ?? [],
+    // `lineage.runningBadge` — the count on the activity-bar icon, off by
+    // default. Read live (both halves), so the number appears and disappears on
+    // the next tick rather than on a window reload — including when
+    // `lineage.viewStyle` moves between the two sidebars, which is what the
+    // surface half is comparing against. See TreeDeps.runningBadge.
+    runningBadge: (surface) =>
+      boolCfg(CONFIG_KEYS.runningBadge, false) && viewStyle() === surface,
     // `lineage.git.branches` — the whole branch block, off by default. Read per
     // render like every other setting here, so the rows appear and disappear on
     // the next tick rather than on a window reload.
@@ -2874,11 +2945,30 @@ export async function activate(
       const aliases = chainAliases(e.sessionId);
       if (e.event === 'PreCompact') {
         compaction.noteStart(e.sessionId, Date.now());
-      } else if (
-        e.event === 'Stop' ||
-        (e.event === 'SessionStart' && e.source === 'compact')
-      ) {
-        compaction.noteFinish(aliases, Date.now());
+      } else if (e.event === 'Stop') {
+        // `busy: false` is what `Stop` MEANS — the turn ended — and it is the
+        // argument that decides whether this rests a purple dot or simply ends
+        // the phase. See noteFinish.
+        compaction.noteFinish(aliases, Date.now(), false);
+        //
+        // SESSIONSTART `source: 'compact'` USED TO END THE PHASE HERE TOO, and
+        // it no longer does. It is still the earliest and most exact statement
+        // that a compaction finished — but finishing is only half of what this
+        // has to decide, and it cannot answer the other half. "Is the
+        // conversation still working?" would have to come from the roster, and
+        // the roster reports a COMPACTING session as plainly `busy`: that
+        // confound is the whole reason src/compaction.ts exists. So the probe
+        // says "busy" for the `/compact` typed at an idle session as readily as
+        // for the auto-compact that fires mid-turn, and the one case the purple
+        // dot exists for would have been the one that never got it.
+        //
+        // Nothing is lost by dropping it. When the conversation really is quiet
+        // afterwards, the roster's own busy→quiet edge and this `Stop` are both
+        // immediate and both know it. When the turn carries on, there is no
+        // quiet edge to have — and `settleSuperseded`, running on the next
+        // rebuild, reads a status taken AFTER the compaction rather than during
+        // it, which is the only reading of "still working" that means anything
+        // here.
       } else if (e.event === 'UserPromptSubmit') {
         // A new prompt IS the "other command behind it" the resting dot
         // promises there is none of, and it arrives a poll interval before the
@@ -6081,6 +6171,9 @@ export async function activate(
     // Notifications
     markSeen: (sessionId) => markSeen(sessionId),
     notificationsEnabled: () => notificationsOn(),
+    // `lineage.soloSession`, read live — the multi-open verb refuses while it
+    // is on, because solo mode would park each session as the next one opened.
+    soloSessionEnabled: () => boolCfg(CONFIG_KEYS.soloSession, false),
 
     // Telling a parent conversation what happened to it. Both settings are
     // read on every call, like every other one here, so a change takes effect

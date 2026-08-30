@@ -409,6 +409,160 @@ export function sessionIdFromArg(arg: unknown): string | undefined {
 }
 
 /**
+ * WHICH OF THE SELECTED ROWS "OPEN THEM" CAN ACTUALLY OPEN, in three piles.
+ *
+ * The whole of the multi-open decision, pulled out of the flow so it can be
+ * asked questions without a workbench — the same shape src/compaction.ts and
+ * src/chatAutoClose.ts are in, and for the same reason: the flow around it is
+ * dialogs and a launch loop, and neither is where the bugs live.
+ *
+ * `targets` is what will be opened, IN THE ORDER THE ROWS WERE GIVEN, because
+ * a person who selected five rows top to bottom will notice if the tabs do not
+ * arrive that way.
+ *
+ * `live` and `ghosts` are the two refusals, kept apart rather than merged into
+ * one "skipped" count because they leave the user with different things to do.
+ * A live session is somebody's running process — possibly in another window,
+ * possibly outside Flock — and resuming it would put a SECOND claude on a
+ * transcript the first is appending to, which is the worst thing this file can
+ * do. A ghost is an ancestor inferred from a child's recorded edge: no
+ * process, no transcript of its own, nothing that could be reopened at all.
+ *
+ * A live session THIS WINDOW ALREADY HAS A TAB FOR is in neither pile. It is
+ * revealed instead (that is what `focusHere` does and reports), because the
+ * honest reading of "open it" for a row already open is "show it to me" — and
+ * that costs nothing, so it needs no warning and no confirmation.
+ *
+ * A row the forest has never heard of is a TARGET, not a refusal: an id with
+ * no node is the ordinary shape of a session read off disk, which is exactly
+ * what this verb is for.
+ */
+export function partitionForOpen(
+  ids: readonly string[],
+  /** The row for an id, if the tree has one. */
+  nodeOf: (id: string) => SessionNode | undefined,
+  /** Reveal an already-open session in THIS window; true when it did. */
+  focusHere: (id: string) => boolean,
+): { targets: string[]; live: string[]; ghosts: string[] } {
+  const targets: string[] = [];
+  const live: string[] = [];
+  const ghosts: string[] = [];
+  const seen = new Set<string>();
+  for (const id of ids) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    let node: SessionNode | undefined;
+    try {
+      node = nodeOf(id);
+    } catch {
+      node = undefined; // a forest that cannot be read is not a refusal
+    }
+    if (node?.ghost === true) {
+      ghosts.push(id);
+      continue;
+    }
+    if (node !== undefined && !sessionIsOver(node)) {
+      let shown = false;
+      try {
+        shown = focusHere(id);
+      } catch {
+        shown = false;
+      }
+      if (!shown) live.push(id);
+      continue;
+    }
+    targets.push(id);
+  }
+  return { targets, live, ghosts };
+}
+
+/**
+ * WHICH OF THE SELECTED ROWS "CLOSE THEM" CAN ACTUALLY CLOSE, in three piles.
+ *
+ * The twin of `partitionForOpen`, and pulled out for the same reason: the flow
+ * around it is a loop and a status line, and neither is where the bugs live.
+ *
+ * `targets` is what will be closed, in the order given. `foreign` is the one
+ * refusal that matters — a session running somewhere Flock cannot reach, which
+ * the singular verb meets with a whole dialog offering to fork it instead. Five
+ * of those dialogs before the first tab closes is not a report, it is an
+ * obstacle, so they are counted here and summarised in one sentence.
+ *
+ * `over` is not a refusal at all. A row that is already closed has nothing to
+ * close, and saying so of a session the user can plainly see is grey would be
+ * pedantry — it is counted only so the summary can tell the difference between
+ * "four of your five were already closed" and "nothing happened".
+ */
+export function partitionForClose(
+  ids: readonly string[],
+  /** The row for an id, if the tree has one. */
+  nodeOf: (id: string) => SessionNode | undefined,
+  /** Can Flock end this one from here? `canEndSession(hostOf(...))`. */
+  canEnd: (id: string) => boolean,
+): { targets: string[]; foreign: string[]; over: string[] } {
+  const targets: string[] = [];
+  const foreign: string[] = [];
+  const over: string[] = [];
+  const seen = new Set<string>();
+  for (const id of ids) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    let node: SessionNode | undefined;
+    try {
+      node = nodeOf(id);
+    } catch {
+      node = undefined;
+    }
+    if (node !== undefined && sessionIsOver(node)) {
+      over.push(id);
+      continue;
+    }
+    let reachable = false;
+    try {
+      reachable = canEnd(id);
+    } catch {
+      reachable = false;
+    }
+    if (!reachable) {
+      foreign.push(id);
+      continue;
+    }
+    targets.push(id);
+  }
+  return { targets, foreign, over };
+}
+
+/**
+ * The one sentence that names what "open them" could not open, or '' when it
+ * could open everything.
+ *
+ * Three shapes rather than one count, because the two refusals mean different
+ * things and a merged number would be true and useless — the same argument
+ * archiveSessionsFlow's `oneRefusal` makes. Only the mixed case gives up and
+ * counts.
+ */
+export function skippedForOpenSentence(
+  liveCount: number,
+  ghostCount: number,
+): string {
+  if (liveCount === 0 && ghostCount === 0) return '';
+  if (ghostCount === 0) {
+    return `${String(liveCount)} of them ${
+      liveCount === 1 ? 'is' : 'are'
+    } still running and cannot be reopened.`;
+  }
+  if (liveCount === 0) {
+    return `${String(ghostCount)} of them ${
+      ghostCount === 1 ? 'has' : 'have'
+    } no transcript on disk to reopen.`;
+  }
+  return (
+    `${String(liveCount + ghostCount)} of them cannot be reopened — some are ` +
+    'still running, some have no transcript on disk.'
+  );
+}
+
+/**
  * Every session a multi-row verb was invoked on, in display order.
  *
  * Three shapes reach it, because the same command is on three surfaces:
@@ -5264,12 +5418,14 @@ export async function chatHistoryFlow(
     sessionId: record.id,
   }));
 
+  // No `ignoreFocusOut`: a list you opened and can click away from, holding
+  // nothing typed and nothing ticked. See showNotificationsSimple for the
+  // argument in full.
   const chosen = await vscode.window.showQuickPick(picks, {
     title: `Chats · ${project.name}`,
     placeHolder: 'Reopen which chat?',
     matchOnDescription: true,
     matchOnDetail: true,
-    ignoreFocusOut: true,
   });
   if (!chosen?.sessionId) return;
 
@@ -7570,6 +7726,155 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     await resumeFlow(deps, id);
   });
 
+  /**
+   * OPEN EVERY CLOSED SESSION IN THE SELECTION, one after another.
+   *
+   * The plural of Open Session Here, and the same
+   * one-command-per-arity shape as archive's pair (see COMMANDS.resumeSessions
+   * and the note above `deleteSessions`): a contributed command has one title,
+   * so the singular entry on one of five highlighted rows would open one row
+   * and read as though it had opened five.
+   *
+   * IT ASKS FIRST, WHICH THE SINGULAR DOES NOT, because the cost is the thing
+   * that scales. One click here is N `claude` processes and N terminal tabs —
+   * a few hundred megabytes each — and "I meant to open the two at the bottom"
+   * is a gesture away from "I had eleven rows selected". The dialog says the
+   * number and the shape of the cost, and nothing has happened until it is
+   * answered.
+   *
+   * SEQUENTIAL, NOT PARALLEL. Every write in this file is (see
+   * archiveSessionsFlow's note): the store serialises writes, and each resume
+   * records a launch. But the stronger reason here is the terminals — N shells
+   * spawning at once is a thundering herd on a cold machine, and the tabs
+   * would land in nondeterministic order, which is the one thing a person who
+   * just selected rows top-to-bottom will notice.
+   *
+   * THE PARTITION IS DONE BEFORE ANYTHING LAUNCHES, and every row that cannot
+   * be opened is named rather than silently dropped. `resumeFlow` refuses a
+   * live session and a ghost with a dialog of its own, which is right for one
+   * click and wrong for eleven: five modal warnings before the first tab
+   * appears is not a report, it is an obstacle. So the rows that would have
+   * produced one are filtered out here and summarised in a single sentence.
+   */
+  const resumeSessionsFlow = async (ids: string[]): Promise<void> => {
+    if (ids.length === 0) return;
+
+    // The partition is computed ONCE, before anything opens: a launch changes
+    // what the next read would say, and the message has to describe the set
+    // the user was actually looking at. See partitionForOpen — the whole
+    // decision, and the only part of this worth a unit test.
+    const { targets, live, ghosts } = partitionForOpen(
+      ids,
+      (id) =>
+        deps.getForest().nodes.get(id) ??
+        deps.getForest().nodes.get(deps.tipOf(id)),
+      (id) => deps.focusSession(id),
+    );
+    const skipped = [...live, ...ghosts];
+    const skippedSentence = skippedForOpenSentence(live.length, ghosts.length);
+
+    if (targets.length === 0) {
+      void vscode.window.showInformationMessage(
+        skippedSentence === ''
+          ? 'Flock: nothing in that selection is a closed session.'
+          : `Flock: nothing there to open. ${skippedSentence}`,
+      );
+      return;
+    }
+
+    // ONE closed row in the selection is the singular verb by another name.
+    // Skip the dialog: the cost the dialog exists to name is one process, and
+    // that is what clicking Open Session Here already buys without being
+    // asked.
+    if (targets.length > 1) {
+      // SOLO MODE MAKES THIS VERB A CONTRADICTION, so it says so instead of
+      // performing it. `lineage.soloSession` parks every other session tab
+      // each time one opens — so opening five in a row would open five and
+      // leave one, having parked the four the user just asked for. Refusing
+      // beats doing four fifths of nothing.
+      if (deps.soloSessionEnabled?.() === true) {
+        const SETTING = 'Open Settings';
+        const choice = await vscode.window.showWarningMessage(
+          `Flock: "one session tab at a time" (lineage.soloSession) is on, so ` +
+            `opening ${String(targets.length)} sessions would open each one ` +
+            'and immediately park the one before it — you would be left with ' +
+            'the last. Turn the setting off to open them side by side.',
+          SETTING,
+        );
+        if (choice === SETTING) {
+          await vscode.commands.executeCommand(
+            'workbench.action.openSettings',
+            'lineage.soloSession',
+          );
+        }
+        return;
+      }
+
+      const CONFIRM = `Open ${String(targets.length)} Sessions`;
+      const detail = [
+        'Each one opens its own terminal tab and its own claude process — ' +
+          'several hundred megabytes apiece.',
+        skippedSentence,
+      ]
+        .filter((line) => line !== '')
+        .join(' ');
+      const choice = await vscode.window.showWarningMessage(
+        `Open ${String(targets.length)} closed sessions here?`,
+        { modal: true, detail },
+        CONFIRM,
+      );
+      if (choice !== CONFIRM) return;
+    }
+
+    let opened = 0;
+    const refused: string[] = [];
+    for (const id of targets) {
+      try {
+        if (await resumeFlow(deps, id)) opened++;
+        else refused.push(id);
+      } catch (err) {
+        // One session that will not open must not strand the rest: this is a
+        // batch, and the row that threw is named in the summary below.
+        logError('commands.resumeSessions', err);
+        refused.push(id);
+      }
+    }
+
+    log('resume:', String(opened), 'of', String(targets.length), 'selected');
+
+    // THE SUMMARY IS THE ONLY REPORT, and it is only worth showing when
+    // something did not go as asked. `resumeFlow` says its own piece about
+    // every refusal it makes (a live writer, a foreign folder, a ghost), so a
+    // cheerful "opened 5 of 5" on top of that would be noise — the five tabs
+    // are the notification.
+    if (refused.length === 0 && skipped.length === 0) return;
+    const parts = [
+      `Flock: opened ${String(opened)} of ${String(targets.length)}.`,
+      refused.length === 0
+        ? ''
+        : `${String(refused.length)} did not open (${refused
+            .map((id) => `"${labelFor(deps, id)}"`)
+            .join(', ')}).`,
+      skippedSentence,
+    ].filter((line) => line !== '');
+    void vscode.window.showInformationMessage(parts.join(' '));
+  };
+
+  register(COMMANDS.resumeSessions, 'resume sessions', async (...args: unknown[]) => {
+    const ids = selectedSessionIds(deps, args);
+    if (ids.length === 0) {
+      // Reachable from the palette with nothing selected. Say so rather than
+      // opening a picker: this verb means "the rows I have highlighted", and
+      // choosing one from a list is what Open Session Here already is.
+      void vscode.window.showInformationMessage(
+        'Flock: select the closed sessions you want to open first — ' +
+          'shift-click or ctrl-click rows in the tree.',
+      );
+      return;
+    }
+    await resumeSessionsFlow(ids);
+  });
+
   // ---------------------------------------------------------------- new
 
   // The `+` in the view title, and it asks NOTHING that a window can answer for
@@ -7823,6 +8128,87 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       `Flock: closed "${label}" — its row stays in the tree, click it to resume`,
       5000,
     );
+  });
+
+  /**
+   * CLOSE EVERY SELECTED SESSION, one after another.
+   *
+   * IT ASKS NOTHING, and that is the singular verb's rule kept rather than an
+   * exception made for the plural. Closing leaves every row where it is, one
+   * click from resuming at its last saved turn — so five closes are five
+   * clicks from undone for exactly the reason one is one. (Archive confirms,
+   * and should: it takes the rows OUT of the tree, and being more of a hassle
+   * than closing is the whole point of that verb.)
+   *
+   * Sequential, like every other multi-row write in this file: the store
+   * serialises its writes, and each close stamps a record.
+   *
+   * The refusals are gathered up first — see partitionForClose. The singular
+   * verb answers a session Flock cannot reach with a dialog offering to fork
+   * it, which is right for one click and wrong for five, so the batch counts
+   * them instead and says so in one line at the end.
+   */
+  const closeSessionsFlow = async (ids: string[]): Promise<void> => {
+    if (ids.length === 0) return;
+
+    const { targets, foreign, over } = partitionForClose(
+      ids,
+      (id) => deps.getForest().nodes.get(id),
+      (id) => canEndSession(hostOf(deps, id)),
+    );
+
+    // Names read BEFORE the writes, or the message would describe rows that
+    // have already changed underneath it.
+    const labels = new Map(targets.map((id) => [id, labelFor(deps, id)] as const));
+
+    if (targets.length === 0) {
+      void vscode.window.showInformationMessage(
+        foreign.length > 0
+          ? `Flock: nothing there to close. ${String(foreign.length)} ` +
+            `${foreign.length === 1 ? 'is' : 'are'} running somewhere Flock ` +
+            'cannot reach — close them where they are running.'
+          : 'Flock: those sessions are already closed.',
+      );
+      return;
+    }
+
+    for (const id of targets) {
+      try {
+        await closeFlow(deps, id);
+      } catch (err) {
+        // One session that will not close must not strand the rest.
+        logError('commands.closeSessions', err);
+      }
+    }
+    log('close:', String(targets.length), 'selected');
+
+    const one = targets.length === 1;
+    const said = one
+      ? `Flock: closed "${labels.get(targets[0]) ?? ''}" — its row stays in ` +
+        'the tree, click it to resume'
+      : `Flock: closed ${String(targets.length)} sessions — their rows stay ` +
+        'in the tree, click one to resume';
+    const footnote =
+      foreign.length > 0
+        ? ` (${String(foreign.length)} left running somewhere Flock cannot reach)`
+        : over.length > 0
+          ? ` (${String(over.length)} already closed)`
+          : '';
+    vscode.window.setStatusBarMessage(`${said}${footnote}`, 5000);
+  };
+
+  register(COMMANDS.closeSessions, 'close sessions', async (...args: unknown[]) => {
+    const ids = selectedSessionIds(deps, args);
+    if (ids.length === 0) {
+      // Reachable from the palette with nothing selected — the singular verb
+      // is the one with a picker.
+      void vscode.window.showInformationMessage(
+        'Flock: select the sessions you want to close first — shift-click ' +
+          'or ctrl-click rows in the tree.',
+      );
+      return;
+    }
+    await closeSessionsFlow(ids);
   });
 
   /**
@@ -8719,12 +9105,14 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       action: 'project',
       payload: p.id,
     }));
+    // No `ignoreFocusOut`: a list you opened and can click away from,
+    // holding nothing typed and nothing ticked. See showNotificationsSimple
+    // for the argument in full.
     const chosen = await vscode.window.showQuickPick(items, {
       title: 'Closed projects',
       placeHolder: 'Open which project?',
       matchOnDescription: true,
       matchOnDetail: true,
-      ignoreFocusOut: true,
     });
     if (!chosen?.payload) return;
     const project = deps.getProject(chosen.payload);
@@ -9238,12 +9626,14 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         payload: f.path,
       })),
     ];
+    // No `ignoreFocusOut`: a list you opened and can click away from,
+    // holding nothing typed and nothing ticked. See showNotificationsSimple
+    // for the argument in full.
     const chosen = await vscode.window.showQuickPick(items, {
       title: 'Put away — closed projects and hidden folders',
       placeHolder: 'Bring which one back?',
       matchOnDescription: true,
       matchOnDetail: true,
-      ignoreFocusOut: true,
     });
     if (!chosen?.payload) return;
     if (chosen.action === 'project') {
@@ -9379,7 +9769,16 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
           : 'Everything has been seen',
       matchOnDescription: true,
       matchOnDetail: true,
-      ignoreFocusOut: true,
+      // A MENU CLOSES WHEN YOU CLICK AWAY FROM IT. `ignoreFocusOut: true`
+      // means it does not: the only way out is Escape, and a list you opened
+      // by clicking the bell — read, decided against, and clicked away from —
+      // sat there over the tree until you found the keyboard.
+      //
+      // The flag earns its keep on a picker that is holding WORK: something
+      // typed, a set of rows ticked, a step of a flow with more steps behind
+      // it, where a stray click costs you the lot. This holds nothing. It is a
+      // list of what finished, and re-opening it is one click on the same bell
+      // you opened it with.
     });
     if (!chosen || chosen.sessionId === '') return;
     if (chosen.markAll === true) {
@@ -9428,7 +9827,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         : 'Everything has been seen';
     quickPick.matchOnDescription = true;
     quickPick.matchOnDetail = true;
-    quickPick.ignoreFocusOut = true;
+    // NO `ignoreFocusOut`, DELIBERATELY — see the note on showNotificationsSimple.
     quickPick.items = picks;
 
     // Resolves when the popup is finished with, whichever way it ended. The
@@ -9980,12 +10379,14 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         action: 'leave',
       });
     }
+    // No `ignoreFocusOut`: a list you opened and can click away from,
+    // holding nothing typed and nothing ticked. See showNotificationsSimple
+    // for the argument in full.
     const chosen = await vscode.window.showQuickPick(items, {
       title: 'Switch Workspace',
       placeHolder:
         'Only the chosen project\'s tabs stay open; the current layout is saved first',
       matchOnDescription: true,
-      ignoreFocusOut: true,
     });
     if (!chosen) return;
     if (chosen.action === 'leave') {

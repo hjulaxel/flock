@@ -21,6 +21,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  BRANCH_COLOR_COUNT,
   buildDirectoryBranches,
   computeGrouping,
   directoryBranchVisibility,
@@ -350,7 +351,9 @@ describe('buildDirectoryBranches', () => {
       rootIds: [],
       cwdOf: () => undefined,
     });
-    expect(out.every((b) => b.colorIndex >= 0 && b.colorIndex < 6)).toBe(true);
+    expect(
+      out.every((b) => b.colorIndex >= 0 && b.colorIndex < BRANCH_COLOR_COUNT),
+    ).toBe(true);
   });
 });
 

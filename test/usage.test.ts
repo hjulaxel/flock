@@ -50,6 +50,16 @@ function toolResult(timestamp: string): unknown {
   };
 }
 
+/** A line written by a SUB-AGENT: same shapes, `isSidechain: true`. */
+function sidechain(timestamp: string): unknown {
+  return {
+    type: 'assistant',
+    isSidechain: true,
+    timestamp,
+    message: { role: 'assistant', content: [{ type: 'text', text: 'agent' }] },
+  };
+}
+
 function assistant(timestamp: string, usage: Record<string, number>): unknown {
   return {
     type: 'assistant',
@@ -132,6 +142,57 @@ describe('contextTokensOf: the size of the conversation', () => {
       contextTokensOf({ input_tokens: 10, cache_read_input_tokens: 'lots' }),
     ).toBe(10);
     expect(contextTokensOf({})).toBe(0);
+  });
+});
+
+describe('readTailStats: the fan-out clock', () => {
+  it('stamps sidechainAt from the newest sub-agent line', () => {
+    // The one signal on the outside of a session that says work has fanned
+    // out. From the roster a session with nine agents under it and one
+    // thinking about a typo are the same word: `busy`.
+    const file = write('sub.jsonl', [
+      prompt(T1, 'fan out'),
+      sidechain(T2),
+      assistant(T3, { input_tokens: 1 }),
+    ]);
+    const stats = readTailStats(file);
+    expect(stats.sidechainAt).toBe(Date.parse(T2));
+    // ...and the idle clock still counts it, as it always did: a sub-agent
+    // writing IS the session working.
+    expect(stats.lastRecordAt).toBe(Date.parse(T3));
+  });
+
+  it('leaves it unset for a session that has never used one', () => {
+    // Absent, not zero: the reader compares it against lastRecordAt, and a
+    // present-but-meaningless number would answer that comparison.
+    const file = write('none.jsonl', [
+      prompt(T1),
+      assistant(T2, { input_tokens: 1 }),
+    ]);
+    expect(readTailStats(file).sidechainAt).toBeUndefined();
+  });
+
+  it('reads both clocks off the SAME lines, so they stay comparable', () => {
+    // When the freshest record in the file IS the sub-agent's, the two stamps
+    // are equal — which is what `subagentsWorking` reads as "happening now".
+    const file = write('live.jsonl', [prompt(T1), sidechain(T3)]);
+    const stats = readTailStats(file);
+    expect(stats.sidechainAt).toBe(Date.parse(T3));
+    expect(stats.lastRecordAt).toBe(Date.parse(T3));
+  });
+
+  it('does not let a sub-agent speak for the conversation', () => {
+    // The pre-existing rule, pinned here because this change added a THIRD
+    // reader of isSidechain to the same loop: a sub-agent's words are not the
+    // session's conclusion, and its turn is not a user prompt.
+    const file = write('quiet.jsonl', [
+      prompt(T1, 'the real prompt'),
+      assistant(T2, { input_tokens: 1 }),
+      sidechain(T3),
+    ]);
+    const stats = readTailStats(file);
+    expect(stats.lastExchange).toBe('hi');
+    expect(stats.lastPromptAt).toBe(Date.parse(T1));
   });
 });
 

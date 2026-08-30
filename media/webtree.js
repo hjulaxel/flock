@@ -1240,7 +1240,16 @@
     // trying not to do. Right-clicking one of four selected sessions to reach
     // "Archive Selected Sessions" has to leave all four selected, which is how
     // every file manager behaves.
-    el.addEventListener('contextmenu', () => {
+    el.addEventListener('contextmenu', (e) => {
+      // A RIGHT-CLICK INSIDE THE RENAME BOX IS NOT A RIGHT-CLICK ON THE ROW,
+      // and this handler used to be what stopped you pasting a name in.
+      // `root.focus()` below blurs the input, blur COMMITS the edit (Explorer
+      // parity — see the rename editor), and committing re-renders the row —
+      // so the box was gone before the menu it was opening could appear, and
+      // Cut/Copy/Paste never had anything to act on. Bail before any of that,
+      // and the input's own data-vscode-context gets the editing menu it asks
+      // for.
+      if (editing && e.target === editing.input) return;
       if (!selection.has(row.key)) {
         selectOnly(row.key);
         reportSelection();
@@ -1383,6 +1392,31 @@
     input.type = 'text';
     input.value = row.label;
     input.setAttribute('aria-label', 'New name');
+    // CUT, COPY AND PASTE, which this box did not have.
+    //
+    // `data-vscode-context` is inherited from the nearest ancestor that
+    // carries it, and every row carries one — with
+    // `preventDefaultContextMenuItems: true`, which is right for a row (the
+    // workbench's stock Copy/Reload has no business on a session) and exactly
+    // wrong for a text input sitting inside one. Right-clicking the name you
+    // were editing opened the ROW's menu — Fork, Close, Archive — with no
+    // editing verbs anywhere on it, so the one gesture everybody reaches for
+    // to paste a name in did the wrong thing entirely.
+    //
+    // The input therefore declares its own context and overrides all three
+    // keys: `preventDefaultContextMenuItems: false` puts the workbench's
+    // editing menu back, and blanking `webviewSection`/`viewItem` is what
+    // keeps Flock's own entries off it — they match on those, and a child
+    // context MERGES over its ancestor's rather than replacing it, so a key
+    // left unset here would still be the row's.
+    input.setAttribute(
+      'data-vscode-context',
+      JSON.stringify({
+        webviewSection: 'rename',
+        viewItem: '',
+        preventDefaultContextMenuItems: false,
+      }),
+    );
     name.replaceWith(input);
 
     let validation = null;
@@ -1453,8 +1487,31 @@
         e.stopPropagation();
       }
     });
+    // THE MENU MUST NOT COUNT AS CLICKING AWAY. The workbench draws its
+    // context menu as an overlay OUTSIDE the webview's iframe, so opening one
+    // blurs whatever had focus inside it — and this blur COMMITS, which would
+    // tear down the very box the menu exists to paste into. The window is
+    // deliberately short and measured from the right-click itself: a blur that
+    // arrives a second later is a real click somewhere else, and gets the
+    // Explorer behaviour below.
+    //
+    // The keyboard is taken back on the next tick so the paste has somewhere
+    // to land — asynchronously, because doing it inside the blur handler is a
+    // focus change during a focus change and browsers may drop it.
+    let menuAt = 0;
+    input.addEventListener('contextmenu', () => {
+      menuAt = Date.now();
+    });
     // Clicking away commits, which is what the Explorer does.
-    input.addEventListener('blur', () => finish(true));
+    input.addEventListener('blur', () => {
+      if (Date.now() - menuAt < 1000) {
+        setTimeout(() => {
+          if (!done) input.focus();
+        }, 0);
+        return;
+      }
+      finish(true);
+    });
 
     // `cancel` is finish(false) — the Escape path — so that anything which has
     // to end an edit it did not start (a model update that removes the row)

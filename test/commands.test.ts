@@ -30,7 +30,10 @@ import {
   closeProjectFlow,
   reopenProject,
   resumeFlow,
+  partitionForClose,
+  partitionForOpen,
   selectedSessionIds,
+  skippedForOpenSentence,
   sessionIdFromArg,
   sessionWorkspaceTarget,
   staleCandidates,
@@ -279,6 +282,240 @@ describe('selectedSessionIds', () => {
         [{ type: 'group', key: '/tmp', cwd: '/tmp', label: 't', rootIds: [] }],
       ]),
     ).toEqual([]);
+  });
+});
+
+// Opening several closed sessions at once: which of the selected rows the verb
+// can actually open, and what it says about the ones it cannot.
+describe('partitionForOpen (the multi-open decision)', () => {
+  const A = uuid(1);
+  const B = uuid(2);
+  const C = uuid(3);
+  const D = uuid(4);
+
+  /** A forest reader over a fixed list, plus "nothing is open in this window"
+   *  unless `openHere` names it. */
+  const from = (
+    nodes: SessionNode[],
+    openHere: readonly string[] = [],
+  ): {
+    nodeOf: (id: string) => SessionNode | undefined;
+    focusHere: (id: string) => boolean;
+  } => ({
+    nodeOf: (id) => nodes.find((n) => n.id === id),
+    focusHere: (id) => openHere.includes(id),
+  });
+
+  it('opens the closed ones and keeps the order they were given in', () => {
+    // The tabs must arrive in the order the rows were selected: a person who
+    // shift-clicked top to bottom will notice if they do not.
+    const { nodeOf, focusHere } = from([
+      node(A, { archived: true }),
+      node(B, { status: 'exited' }),
+      node(C, { archived: true }),
+    ]);
+    expect(partitionForOpen([C, A, B], nodeOf, focusHere).targets).toEqual([
+      C,
+      A,
+      B,
+    ]);
+  });
+
+  it('refuses a session that is still running', () => {
+    // Resuming it would put a SECOND claude on a transcript the first is
+    // appending to — the worst thing commands.ts can do.
+    const { nodeOf, focusHere } = from([
+      node(A, { status: 'busy' }),
+      node(B, { archived: true }),
+    ]);
+    const out = partitionForOpen([A, B], nodeOf, focusHere);
+    expect(out.targets).toEqual([B]);
+    expect(out.live).toEqual([A]);
+  });
+
+  it('reveals a running session this window already has, rather than refusing it', () => {
+    // "Open it" for a row already open means "show it to me", and that is free
+    // — so it is neither a target nor a refusal.
+    const shown: string[] = [];
+    const nodes = [node(A, { status: 'busy' }), node(B, { archived: true })];
+    const out = partitionForOpen(
+      [A, B],
+      (id) => nodes.find((n) => n.id === id),
+      (id) => {
+        shown.push(id);
+        return id === A;
+      },
+    );
+    expect(out.targets).toEqual([B]);
+    expect(out.live).toEqual([]);
+    expect(shown).toEqual([A]);
+  });
+
+  it('refuses a ghost — there is no transcript to reopen', () => {
+    const { nodeOf, focusHere } = from([
+      node(A, { ghost: true }),
+      node(B, { archived: true }),
+    ]);
+    const out = partitionForOpen([A, B], nodeOf, focusHere);
+    expect(out.targets).toEqual([B]);
+    expect(out.ghosts).toEqual([A]);
+  });
+
+  it('treats a row the forest has never heard of as openable', () => {
+    // An id with no node is the ordinary shape of a session read off disk,
+    // which is exactly what this verb is for.
+    const { nodeOf, focusHere } = from([]);
+    expect(partitionForOpen([A], nodeOf, focusHere).targets).toEqual([A]);
+  });
+
+  it('never names the same session twice', () => {
+    const { nodeOf, focusHere } = from([node(A, { archived: true })]);
+    expect(partitionForOpen([A, A], nodeOf, focusHere).targets).toEqual([A]);
+  });
+
+  it('survives a forest or a focus probe that throws', () => {
+    const nodes = [node(A, { status: 'busy' })];
+    expect(
+      partitionForOpen(
+        [A],
+        () => {
+          throw new Error('no forest');
+        },
+        () => false,
+      ).targets,
+    ).toEqual([A]);
+    // A focus that throws is "not shown", so the row is a refusal, not a
+    // silent drop.
+    const out = partitionForOpen(
+      [A],
+      (id) => nodes.find((n) => n.id === id),
+      () => {
+        throw new Error('no window');
+      },
+    );
+    expect(out.live).toEqual([A]);
+  });
+
+  it('sorts a mixed selection into all three piles at once', () => {
+    const { nodeOf, focusHere } = from([
+      node(A, { archived: true }),
+      node(B, { status: 'waiting' }),
+      node(C, { ghost: true }),
+      node(D, { status: 'exited' }),
+    ]);
+    const out = partitionForOpen([A, B, C, D], nodeOf, focusHere);
+    expect(out.targets).toEqual([A, D]);
+    expect(out.live).toEqual([B]);
+    expect(out.ghosts).toEqual([C]);
+  });
+});
+
+// Closing several selected sessions at once: which rows the verb can reach.
+describe('partitionForClose (the multi-close decision)', () => {
+  const A = uuid(1);
+  const B = uuid(2);
+  const C = uuid(3);
+
+  const from = (
+    nodes: SessionNode[],
+    reachable: readonly string[],
+  ): {
+    nodeOf: (id: string) => SessionNode | undefined;
+    canEnd: (id: string) => boolean;
+  } => ({
+    nodeOf: (id) => nodes.find((n) => n.id === id),
+    canEnd: (id) => reachable.includes(id),
+  });
+
+  it('closes the live rows Flock can reach, in the order given', () => {
+    const { nodeOf, canEnd } = from(
+      [node(A, { status: 'busy' }), node(B, { status: 'waiting' })],
+      [A, B],
+    );
+    expect(partitionForClose([B, A], nodeOf, canEnd).targets).toEqual([B, A]);
+  });
+
+  it('sets aside a session running somewhere Flock cannot reach', () => {
+    // The singular verb meets this with a whole dialog offering to fork it
+    // instead; five of those before the first tab closes is an obstacle, not a
+    // report, so the batch counts them.
+    const { nodeOf, canEnd } = from(
+      [node(A, { status: 'busy' }), node(B, { status: 'busy' })],
+      [B],
+    );
+    const out = partitionForClose([A, B], nodeOf, canEnd);
+    expect(out.targets).toEqual([B]);
+    expect(out.foreign).toEqual([A]);
+  });
+
+  it('counts an already-closed row separately — it is not a refusal', () => {
+    for (const over of [
+      { archived: true },
+      { status: 'exited' as const },
+      { ghost: true },
+    ]) {
+      const { nodeOf, canEnd } = from([node(A, over)], [A]);
+      const out = partitionForClose([A], nodeOf, canEnd);
+      expect(out.targets).toEqual([]);
+      expect(out.over).toEqual([A]);
+      expect(out.foreign).toEqual([]);
+    }
+  });
+
+  it('never names the same session twice', () => {
+    const { nodeOf, canEnd } = from([node(A, { status: 'busy' })], [A]);
+    expect(partitionForClose([A, A], nodeOf, canEnd).targets).toEqual([A]);
+  });
+
+  it('survives a forest or a reachability probe that throws', () => {
+    // A probe that throws is "cannot reach", so the row is set aside rather
+    // than closed on a guess — the safe direction for a verb that ends
+    // processes.
+    const out = partitionForClose(
+      [A],
+      () => {
+        throw new Error('no forest');
+      },
+      () => {
+        throw new Error('no registry');
+      },
+    );
+    expect(out.targets).toEqual([]);
+    expect(out.foreign).toEqual([A]);
+  });
+
+  it('sorts a mixed selection into all three piles at once', () => {
+    const { nodeOf, canEnd } = from(
+      [
+        node(A, { status: 'busy' }),
+        node(B, { status: 'busy' }),
+        node(C, { archived: true }),
+      ],
+      [A],
+    );
+    const out = partitionForClose([A, B, C], nodeOf, canEnd);
+    expect(out.targets).toEqual([A]);
+    expect(out.foreign).toEqual([B]);
+    expect(out.over).toEqual([C]);
+  });
+});
+
+describe('skippedForOpenSentence', () => {
+  it('says nothing when nothing was skipped', () => {
+    expect(skippedForOpenSentence(0, 0)).toBe('');
+  });
+
+  it('names the two refusals separately — they leave you different work', () => {
+    expect(skippedForOpenSentence(1, 0)).toContain('is still running');
+    expect(skippedForOpenSentence(3, 0)).toContain('are still running');
+    expect(skippedForOpenSentence(0, 1)).toContain('has no transcript');
+    expect(skippedForOpenSentence(0, 2)).toContain('have no transcript');
+  });
+
+  it('gives up and counts only when the selection mixed both', () => {
+    const both = skippedForOpenSentence(2, 3);
+    expect(both).toContain('5 of them');
+    expect(both).toContain('some are still running');
   });
 });
 
