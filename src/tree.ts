@@ -1946,7 +1946,17 @@ export function registerTree(deps: TreeDeps): TreeController {
       // RENDERED tree, not the raw forest — see
       // LineageTreeProvider.runningCount(). Not counted at all while the
       // badge is off: 0 falls through to `undefined` below, which clears it.
-      const count = RUNNING_BADGE_ENABLED ? provider.runningCount() : 0;
+      //
+      // TWO GATES, and the second one names this surface. `lineage.runningBadge`
+      // is the user's switch (off by default); `'native'` is this view saying
+      // which of the two sidebars it is, because the workbench sums the badges
+      // of EVERY view in a container — including the one its `when` clause is
+      // currently hiding — onto the single activity-bar icon. See
+      // TreeDeps.runningBadge for the doubled count that came of not asking.
+      const count =
+        RUNNING_BADGE_ENABLED && deps.runningBadge?.('native') === true
+          ? provider.runningCount()
+          : 0;
       view.badge =
         typeof count === 'number' && count > 0
           ? {

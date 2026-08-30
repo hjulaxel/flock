@@ -44,9 +44,15 @@ const UNKNOWN_GROUP_LABEL = '(no directory)';
  *  exactly this many `--lineage-branch-N` variables; a project with more
  *  branches wraps round, because a repeated hue is a smaller lie than a hue
  *  with no definition behind it (which would render as inherited grey and read
- *  as "no branch"). Six is what the stock `charts.*` theme colours give us
- *  while staying distinguishable at 11px. */
-export const BRANCH_COLOR_COUNT = 6;
+ *  as "no branch").
+ *
+ *  FIVE, because that is how many the built-in Source Control Graph cycles
+ *  through — `scmGraph.foreground1..5`, which is what
+ *  webtree.DEFAULT_BRANCH_PALETTE now IS. It was six while the palette was our
+ *  own pick from `charts.*`; a sixth now would be a colour the SCM view never
+ *  shows, which is the whole thing the alignment is against. See that palette
+ *  for what aligning does and does not buy. */
+export const BRANCH_COLOR_COUNT = 5;
 
 /** What a detached HEAD is called on a chip. Parenthesised so it cannot be
  *  mistaken for a branch someone actually named. */

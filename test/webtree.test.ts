@@ -1235,14 +1235,41 @@ describe('branchPalette', () => {
     ).toHaveLength(BRANCH_COLOR_COUNT);
   });
 
+  it('is the Source Control Graph palette, in its order', () => {
+    // A branch is one thing: it must not be one colour here and another in the
+    // SCM view eight pixels to the left. These are theme colour IDs, so a
+    // theme that restyles the graph restyles these chips with it.
+    const palette = branchPalette();
+    for (let i = 0; i < BRANCH_COLOR_COUNT; i++) {
+      expect(palette[i]).toContain(`--vscode-scmGraph-foreground${String(i + 1)}`);
+    }
+    // And there are exactly as many as the graph cycles through — a sixth
+    // would be a colour the SCM view never shows.
+    expect(BRANCH_COLOR_COUNT).toBe(5);
+  });
+
+  it('falls back to the old charts.* hues on an editor without the graph', () => {
+    // scmGraph.* arrived with the Source Control Graph. An undefined var()
+    // resolves to inherit — every branch the same grey — so each slot names
+    // the nearest hue from the palette this one replaced.
+    const palette = branchPalette();
+    expect(palette[0]).toContain('--vscode-charts-orange');
+    expect(palette[3]).toContain('--vscode-charts-green');
+    // ...and a last resort behind that, so nothing can reach `inherit`.
+    for (const value of palette) {
+      expect(value).toContain('--vscode-foreground');
+    }
+  });
+
   it('defaults to muted theme colours and spends no red', () => {
     const palette = branchPalette();
-    // Softened toward the editor foreground rather than used raw — six signal
-    // colours down a sidebar out-shout the status dot.
+    // Softened toward the editor foreground rather than used raw. This is the
+    // one place the two views are MEANT to differ: the graph paints on an
+    // empty canvas, these chips sit in a column beside the status dots.
     expect(palette[0]).toContain('color-mix');
-    expect(palette[0]).toContain('--vscode-charts-blue');
     // Red belongs to the attention dot (lineage.done). A branch wearing it
     // would turn the one mark that means "come back to this" into decoration.
+    // (scmGraph.foreground2 is magenta, #DC267F — not red.)
     expect(palette.join('|')).not.toContain('charts-red');
     expect(palette.join('|')).not.toContain('ansiRed');
   });

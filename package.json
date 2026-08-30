@@ -318,6 +318,11 @@
         "icon": "$(archive)"
       },
       {
+        "command": "lineage.resumeSessions",
+        "title": "Open Selected Sessions",
+        "category": "Flock"
+      },
+      {
         "command": "lineage.deleteSessions",
         "title": "Archive Selected Sessions",
         "category": "Flock",
@@ -875,7 +880,12 @@
         {
           "command": "lineage.resumeSession",
           "group": "1_actions@0",
-          "when": "view == lineageSessions && viewItem =~ /;archived;/"
+          "when": "view == lineageSessions && viewItem =~ /;archived;/ && !lineage.multiSelect"
+        },
+        {
+          "command": "lineage.resumeSessions",
+          "group": "1_actions@0",
+          "when": "view == lineageSessions && viewItem =~ /;archived;/ && lineage.multiSelect"
         },
         {
           "command": "lineage.deleteSession",
@@ -1237,7 +1247,12 @@
         },
         {
           "command": "lineage.resumeSession",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;archived;/",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;archived;/ && !lineage.multiSelect",
+          "group": "0_open@0"
+        },
+        {
+          "command": "lineage.resumeSessions",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;archived;/ && lineage.multiSelect",
           "group": "0_open@0"
         },
         {
@@ -1864,6 +1879,11 @@
           "default": "inline",
           "markdownDescription": "How the Sessions view is drawn. `inline` renames on the row like the Explorer; `native` uses the built-in tree widget. Takes effect on the next window reload."
         },
+        "lineage.runningBadge": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Show the number of **running** sessions as a badge on the Flock icon in the activity bar.\n\nOff by default. The count is real and worth being able to see \u2014 \"no running process without a visible row\" is only an invariant you can trust if the processes are counted somewhere \u2014 but it changes every few seconds, and a number moving in the corner of your eye with nothing to do about it is not the same as information. The tree already says everything it does, in rows you can click."
+        },
         "lineage.showTokens": {
           "type": "boolean",
           "default": false,
@@ -1880,7 +1900,7 @@
             "type": "string"
           },
           "default": [],
-          "markdownDescription": "Read only by `#lineage.git.branchDisplay#`'s `color` mode; `inline` tints nothing. Colours for the branch chips, in order — index 0 is the first branch under a project (usually `main`). Each entry is either a hex colour (`#7aa2f7`) or a VS Code theme colour id (`charts.blue`, `terminal.ansiCyan`). A short list fills the rest from the built-in muted palette; anything that is not one of those two shapes is ignored. Empty = the built-in palette, which softens the theme's own `charts.*` colours toward the editor foreground."
+          "markdownDescription": "Read only by `#lineage.git.branchDisplay#`'s `color` mode; `inline` tints nothing. Colours for the branch chips, in order — index 0 is the first branch under a project (usually `main`). Each entry is either a hex colour (`#7aa2f7`) or a VS Code theme colour id (`charts.blue`, `terminal.ansiCyan`). A short list fills the rest from the built-in muted palette; anything that is not one of those two shapes is ignored. Empty = the built-in palette, which is the **Source Control Graph's own branch colours** (`scmGraph.foreground1`\u20135), softened toward the editor foreground so the chips do not out-shout the status dots \u2014 so a branch reads as the same colour here and in the SCM view, and a theme that restyles the graph restyles these too."
         },
         "lineage.git.pullRequests": {
           "type": "boolean",

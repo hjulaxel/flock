@@ -29,9 +29,30 @@
 //         This is why src/hooks.ts grew a fifth event (PLUGIN_VERSION 4).
 //   out — three signals, whichever lands first, because the tree must not
 //         depend on hooks for anything (see the header of src/hooks.ts):
-//         SessionStart `source: 'compact'` (the successor generation being
-//         minted — instant and exact), the Stop hook (the turn ended), or the
-//         roster transition out of `busy` that the poller sees anyway.
+//         the Stop hook (the turn ended), the roster transition out of `busy`
+//         that the poller sees anyway, and — when neither can happen, because
+//         the turn carried straight on — the successor simply EXISTING in the
+//         chain (`settleSuperseded`).
+//
+//         THE THIRD IS THE ONE THAT CANNOT LOSE A RACE, and it was added
+//         because the other two both name the SUCCESSOR's id while the
+//         PreCompact named its predecessor: they only meet over the chain
+//         index, which is rebuilt on the poll. See `settleSuperseded` for the
+//         ten-minute stuck ring that came of assuming they always would.
+//
+//         SessionStart `source: 'compact'` used to be a fourth, and is
+//         deliberately not one any more. It is the earliest and most exact
+//         statement that a compaction finished — but see `noteFinish`'s `busy`
+//         argument: finishing is only half of what has to be decided, and at
+//         that instant the roster still reports the compaction's own `busy`,
+//         so the other half could only be answered wrongly.
+//
+// AND ONE THING THAT ENDS A COMPACTION WITHOUT RESTING A DOT. If the turn is
+// still running when the compaction finishes — the ordinary shape of
+// auto-compact, which fires mid-turn and hands straight back to the model —
+// the phase is dropped rather than settled: "compacted, and nothing behind it"
+// is not something you can say about a session that is visibly working. See
+// `noteFinish`'s `busy` parameter.
 //
 // WHEN THE PURPLE DOT GOES AWAY. "Compacted" is a note, not an alarm: it says
 // the conversation is freshly compacted and nothing has been asked of it
@@ -67,8 +88,8 @@ export type { CompactionPhase };
  * Generous on purpose: compacting a very long conversation is a real model
  * call over the whole transcript, and on a slow link it is minutes, not
  * seconds. The number is a stuck-state ceiling, not a timeout — the ordinary
- * exit is one of the three completion signals, all of which are far faster
- * than this.
+ * exit is one of the completion signals in the header, all of which are far
+ * faster than this.
  */
 export const COMPACTING_STALE_MS = 10 * 60_000;
 
@@ -116,11 +137,10 @@ export class CompactionTracker {
 
   /**
    * The compaction finished. Only ever acts on a session already known to be
-   * compacting — the three completion signals (SessionStart `source:
-   * 'compact'`, the Stop hook, the roster leaving `busy`) all fire constantly
-   * for reasons that have nothing to do with compaction, and a `finishedAt`
-   * written without a `startedAt` would put a purple dot on every session that
-   * ever ended a turn.
+   * compacting — the completion signals (the Stop hook, the roster leaving
+   * `busy`) both fire constantly for reasons that have nothing to do with
+   * compaction, and a `finishedAt` written without a `startedAt` would put a
+   * purple dot on every session that ever ended a turn.
    *
    * The list is the conversation's chain: the completion signal names the
    * SUCCESSOR generation while the PreCompact named its predecessor, so the
@@ -128,15 +148,116 @@ export class CompactionTracker {
    * — the id the caller considers current — and the rest are dropped, so a
    * conversation never carries two entries.
    */
-  noteFinish(sessionIds: readonly string[], now: number): boolean {
+  noteFinish(
+    sessionIds: readonly string[],
+    now: number,
+    /**
+     * Is the conversation STILL WORKING at the moment this compaction ended?
+     *
+     * When it is, the phase is dropped outright rather than settling into a
+     * resting dot — and that is not a nicety, it is what makes the resting dot
+     * mean anything. "Compacted, and nothing behind it" is FALSE the instant a
+     * turn is running behind it, and the commonest compaction of all runs
+     * mid-turn: auto-compact fires when the context fills, the successor is
+     * minted, and the same turn carries straight on for another few minutes.
+     * Resting a dot there put a purple mark on the row that survived the whole
+     * rest of the turn and was still standing when the turn ENDED — so the one
+     * moment the row genuinely had something to say ("finished, and waiting on
+     * you") it said "compacted" instead, in purple, for up to an hour.
+     *
+     * The two callers that know the turn is over — the Stop hook and the
+     * roster's own busy→quiet edge — pass `false` and get the dot. The two
+     * that can land mid-turn (the successor being minted, and the supersession
+     * sweep) pass the status they can actually see.
+     */
+    busy: boolean,
+  ): boolean {
     if (!Number.isFinite(now)) return false;
     const started = this.startOf(sessionIds);
     if (started === undefined) return false;
     for (const id of sessionIds) this.entries.delete(id);
+    if (busy) return true; // finished, and something is already behind it
     const head = sessionIds[0];
     if (head === undefined) return false;
     this.entries.set(head, { startedAt: started, finishedAt: now });
     return true;
+  }
+
+  /** Is this conversation mid-compaction right now? The ring, asked as a
+   *  question rather than drawn — `detectTurnTransitions` needs to know that a
+   *  busy→quiet edge belongs to a compaction BEFORE it settles it. */
+  isCompacting(sessionIds: readonly string[]): boolean {
+    return this.startOf(sessionIds) !== undefined;
+  }
+
+  /**
+   * Settle every ring whose generation has been SUPERSEDED — the hook-free
+   * answer to "did that compaction ever end?", and the one signal that cannot
+   * lose a race.
+   *
+   * A COMPACTION RE-MINTS THE SESSION ID; that is what a compaction successor
+   * IS. So a generation that has acquired a successor has, by definition,
+   * finished compacting — the successor is the compaction's own output, and
+   * its existence is the completion signal. No hook, no roster edge, no
+   * transcript record: just the chain, read on the rebuild that has already
+   * built it.
+   *
+   * WHY IT IS NEEDED even though two completion signals already exist. Both
+   * name the SUCCESSOR's id while the PreCompact named its predecessor, so
+   * both depend on the chain index having already learnt the pairing — and the
+   * index is rebuilt on the poll, while a hook arrives the instant the CLI
+   * writes it. A hook that beats its own chain fact finds no open ring and
+   * returns false; and if the turn then carries on (the mid-turn auto-compact
+   * again) the roster never produces a busy→quiet edge to try again with. The
+   * ring stood — outranking the amber the row should have been drawing,
+   * because `statusTone` gives a compaction precedence over the status
+   * underneath it — until COMPACTING_STALE_MS finally expired it ten minutes
+   * later. This closes that window to one poll.
+   *
+   * `now` is when we NOTICED, not when the compaction ended, and the two can
+   * differ by a poll interval. That is the honest number to rest a dot from:
+   * it is the first moment the fact was knowable here, and erring later means
+   * the dot is never shown for longer than it was earned.
+   */
+  settleSuperseded(
+    /** The current tip of the chain `id` belongs to; `id` itself when it is
+     *  the tip, or when the chain is not known. */
+    tipOf: (id: string) => string,
+    /** Is the conversation at that tip working right now? Passed through to
+     *  `noteFinish` — a compaction that ended mid-turn rests no dot. */
+    busyAt: (tipId: string) => boolean,
+    now: number,
+  ): void {
+    if (!Number.isFinite(now)) return;
+    for (const [id, entry] of [...this.entries]) {
+      if (entry.startedAt === undefined || entry.finishedAt !== undefined) {
+        continue;
+      }
+      let tip: string;
+      try {
+        tip = tipOf(id);
+      } catch {
+        continue; // a chain index mid-rebuild is not worth a thrown rebuild
+      }
+      if (tip === id || tip === '') continue; // still the current generation
+      // A SECOND COMPACTION ALREADY RUNNING ON THE SUCCESSOR OUTRANKS THIS.
+      // Re-seating onto the tip would overwrite a newer, live ring with an
+      // older, finished one — the row would go from "compacting" back to
+      // "compacted" while a compaction was visibly underway.
+      if (this.entries.get(tip)?.startedAt !== undefined) {
+        this.entries.delete(id);
+        continue;
+      }
+      this.entries.delete(id);
+      let busy = false;
+      try {
+        busy = busyAt(tip);
+      } catch {
+        busy = false;
+      }
+      if (busy) continue; // finished, and the turn carried on: no resting dot
+      this.entries.set(tip, { startedAt: entry.startedAt, finishedAt: now });
+    }
   }
 
   /** The session is over. Clears the conversation outright, `compacting`

@@ -250,6 +250,47 @@ describe('the dot bubbles up to the project row', () => {
     expect(subtreeHasUnseen(muted, [A])).toBe(false);
   });
 
+  // THE ROLL-UP AND THE ROW BELOW IT ANSWER THE SAME QUESTION. Each of these
+  // is a shape where the old hand-written "unseen-done" disagreed with
+  // statusTone, and the disagreement is exactly what a project row's dot must
+  // never be able to do: claim something is lit underneath it when nothing is,
+  // or stay dark over a row that IS lit.
+  it('a session that is OVER never rolls a dot up, however unseen', () => {
+    for (const over of [
+      { archived: true },
+      { status: 'exited' as const },
+      { ghost: true },
+    ]) {
+      const ended = forestOf([node(A, { status: 'idle', unseen: true, ...over })]);
+      // The row itself draws nothing — statusTone is 'closed'.
+      expect(statusTone(ended.nodes.get(A)!)).not.toBe('done');
+      // ...so neither may the project above it.
+      expect(subtreeHasUnseen(ended, [A])).toBe(false);
+    }
+  });
+
+  it('a BUSY session does not roll red up over its own amber dot', () => {
+    const working = forestOf([node(A, { status: 'busy', unseen: true })]);
+    expect(statusTone(working.nodes.get(A)!)).toBe('running');
+    expect(subtreeHasUnseen(working, [A])).toBe(false);
+  });
+
+  it('a waiting row with no unseen tracking lights its project too', () => {
+    // unseen === undefined: an older record, or tracking off. statusTone reads
+    // waiting as the ask and draws 'done', so the roll-up has to agree.
+    const waiting = forestOf([node(A, { status: 'waiting', attention: 'waiting' })]);
+    expect(statusTone(waiting.nodes.get(A)!)).toBe('done');
+    expect(subtreeHasUnseen(waiting, [A])).toBe(true);
+  });
+
+  it('a COMPACTING session keeps its purple and rolls nothing up', () => {
+    const mid = forestOf([
+      node(A, { status: 'idle', unseen: true, compaction: 'compacting' }),
+    ]);
+    expect(statusTone(mid.nodes.get(A)!)).toBe('compacting');
+    expect(subtreeHasUnseen(mid, [A])).toBe(false);
+  });
+
   it('the project row carries the attention dot', () => {
     const rows = buildViewModel(vmInput(forest, grouping));
     const projectRow = rows.find((r) => r.kind === 'project');

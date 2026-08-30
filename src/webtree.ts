@@ -154,40 +154,56 @@ const BRANCH_LINK_ACTIONS: Record<string, keyof typeof COMMANDS | undefined> = {
 };
 
 /**
- * The default branch palette: theme colours, softened.
+ * The default branch palette: SOURCE CONTROL'S OWN BRANCH COLOURS, softened.
  *
- * Built from the workbench's own `charts.*` rather than six hex values of our
- * own, because those are defined by every theme, chosen BY the theme author to
- * be distinguishable from each other and legible on the editor's surfaces, and
- * already what this extension's status dots draw from. Hard-coding would mean
- * picking values that look deliberate on Dark Modern and muddy on Solarized
- * Light.
+ * THE PALETTE IS `scmGraph.foreground1..5` — the five colours the built-in
+ * Source Control Graph paints its branch lanes and ref labels with, and the
+ * only branch colours a VS Code user already has. A branch is one thing, so it
+ * should not be one colour in the Flock sidebar and a different one in the SCM
+ * view eight pixels to the left; and because these are theme colour IDs rather
+ * than values, a theme that restyles the graph restyles these chips with it,
+ * for free and forever. (This used to be `charts.*`, which was the right
+ * instinct — the theme's own distinguishable set — aimed at the wrong set.)
  *
- * But raw `charts.*` are SIGNAL colours — sized for a chart series on a plain
- * background, and six of them down a sidebar shout louder than the status dot,
- * which is the one mark this tree is actually read for. Each is therefore mixed
- * back toward the editor's own foreground (see mutedColor), which desaturates
- * it toward the colour the surrounding text is already painted in: the hue
- * survives, the shout does not.
+ * WHAT ALIGNMENT CAN AND CANNOT MEAN HERE. The same palette, in the same
+ * order: that is what is on offer, and it is what makes the two views
+ * recognisably the same colours. What is NOT on offer is "this branch is the
+ * same colour in both views" — the graph assigns a colour per LANE, recomputed
+ * per history item as the graph is laid out, and nothing in its API exposes
+ * that mapping. Flock assigns per branch by position (projects.colorIndex).
+ * Two branches will therefore sometimes swap which of the five they wear.
  *
- * NO RED. It is the one hue the tree has already spent — `lineage.done`, the
- * finished-and-unlooked-at dot — and a branch chip in the same red would make
- * the attention mark a decoration. Cyan takes the sixth slot instead.
+ * FIVE, not six, and that is the alignment too: `BRANCH_COLOR_COUNT` is now
+ * exactly the length of the set the graph cycles. A sixth colour of our own
+ * would be a colour the SCM view never shows.
+ *
+ * STILL SOFTENED, deliberately, and this is the one place the two views are
+ * meant to differ. The graph paints on an empty canvas; these chips sit in a
+ * column beside the status dots — amber running, red attention, purple
+ * compaction — which are the marks this tree is actually read for. Each colour
+ * is mixed back toward the editor's own foreground (see mutedColor): the hue
+ * survives, the shout does not. Anyone who wants them raw has
+ * `lineage.branchColors`, which is positional and per slot.
+ *
+ * NO RED, as before, and the new palette keeps it: `scmGraph.foreground2` is
+ * magenta (#DC267F), not red. Red is spent on `lineage.done`, the
+ * finished-and-unlooked-at dot, and a branch chip wearing it would turn the
+ * one mark that means "come back to this" into decoration.
  *
  * Each entry is `[theme colour id, fallback id]`. The fallback is not
- * decorative: a theme may leave `charts.*` undefined, and `var()` with nothing
- * behind it resolves to inherit — i.e. every branch silently the same grey.
- * Falling through to the terminal's ANSI colours (defined by essentially every
- * theme, for the same "these must be tellable apart" reason) means the chips
- * degrade to legible before they degrade to identical.
+ * decorative, and it matters more here than it did: `scmGraph.*` arrived with
+ * the Source Control Graph, so an older editor may not define it at all, and
+ * `var()` with nothing behind it resolves to inherit — i.e. every branch
+ * silently the same grey. Each falls back to the nearest hue from the
+ * `charts.*` set this palette used to be, so on an editor without the graph
+ * the chips degrade to the old look rather than to identical.
  */
 const DEFAULT_BRANCH_PALETTE: readonly (readonly [string, string])[] = [
-  ['charts-blue', 'terminal-ansiBlue'],
-  ['charts-purple', 'terminal-ansiMagenta'],
-  ['charts-green', 'terminal-ansiGreen'],
-  ['charts-orange', 'terminal-ansiYellow'],
-  ['terminal-ansiCyan', 'charts-lines'],
-  ['charts-yellow', 'terminal-ansiYellow'],
+  ['scmGraph-foreground1', 'charts-orange'],
+  ['scmGraph-foreground2', 'charts-purple'],
+  ['scmGraph-foreground3', 'charts-yellow'],
+  ['scmGraph-foreground4', 'charts-green'],
+  ['scmGraph-foreground5', 'terminal-ansiMagenta'],
 ];
 
 /** How far a palette colour is pulled toward the editor foreground. 72% of the
@@ -935,7 +951,15 @@ ${branchPaletteCss()}  }
       // The RUNNING count — the levels invariant as a number (see
       // RUNNING_BADGE_ENABLED in types.ts for why attention lost this slot).
       // While off, 0 clears the badge via the `undefined` arm below.
-      const count = RUNNING_BADGE_ENABLED ? this.runningCount() : 0;
+      //
+      // Two gates, the second naming this surface — see the twin of this line
+      // in tree.ts, and TreeDeps.runningBadge for why a view has to say which
+      // one it is (both are registered at once, and the container ADDS their
+      // badges together).
+      const count =
+        RUNNING_BADGE_ENABLED && this.deps.runningBadge?.('inline') === true
+          ? this.runningCount()
+          : 0;
       view.badge =
         count > 0
           ? {

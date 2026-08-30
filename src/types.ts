@@ -109,10 +109,12 @@ export const CLOSED_DOT = '○';
  *  dots, the bell and `lineage.hasUnseen` all still carry it, and
  *  `attentionCountOf` stays live and tested.
  *
- *  Flip to `false` to clear the badge — both surfaces (native tree and inline
- *  webview) read this at the one line where they write `view.badge`, and both
- *  write `undefined` while it is off, so the badge clears rather than
- *  freezing at its last value. */
+ *  THE BUILD-TIME CEILING, not the switch. `lineage.runningBadge` is the
+ *  switch and it is OFF by default; this constant is what would take the
+ *  feature out of both surfaces entirely. Flip it to `false` and neither
+ *  surface writes a badge whatever the setting says — both read it at the one
+ *  line where they write `view.badge`, and both write `undefined` while it is
+ *  off, so the badge clears rather than freezing at its last value. */
 export const RUNNING_BADGE_ENABLED = true;
 export const CONTEXT_HOOKS_INSTALLED = 'lineage.hooksInstalled';
 /** True while any rendered session is done-and-not-looked-at. Drives the bell
@@ -916,6 +918,19 @@ export const COMMANDS = {
   installAgentVerbs: 'lineage.installAgentVerbs',
   removeAgentVerbs: 'lineage.removeAgentVerbs',
   resumeSession: 'lineage.resumeSession',
+  /**
+   * The multi-selection's own Open, the same pair-of-commands shape as
+   * `deleteSession` / `deleteSessions`: a contributed command has ONE title,
+   * so "Open Session Here" on one of five highlighted rows would open one and
+   * read as though it had opened five. The two `when` clauses are complements
+   * of `lineage.multiSelect`, so exactly one is ever on a row.
+   *
+   * It is the plural of a verb that COSTS SOMETHING, which is why it asks
+   * first: every session it opens is a `claude` process and a terminal tab of
+   * its own, and five of those is most of a laptop's memory. See
+   * resumeSessionsFlow.
+   */
+  resumeSessions: 'lineage.resumeSessions',
   // Projects and visibility
   newProject: 'lineage.newProject',
   configureProject: 'lineage.configureProject',
@@ -1482,6 +1497,20 @@ export const CONFIG_KEYS = {
   gitNewSessionInWorktree: 'git.newSessionInWorktree',
   /** Override the branch palette used by `branchDisplay: color`. Empty = the
    *  built-in muted one. Read only in that mode: inline mode tints nothing. */
+  /** `lineage.runningBadge` — draw the running-session COUNT on the activity
+   *  bar icon. OFF by default.
+   *
+   *  The count is real and the argument for it stands (see
+   *  RUNNING_BADGE_ENABLED above: "no running process without a visible row"
+   *  is only an invariant you can trust if the processes are counted
+   *  somewhere). What it is not is something to look at all day. A number that
+   *  changes every few seconds on the icon you navigate by is motion in the
+   *  corner of the eye with nothing to do about it, and the tree itself
+   *  already says everything the number does, in rows you can click.
+   *
+   *  So it stays built, tested and one setting away, and the default is
+   *  quiet. */
+  runningBadge: 'runningBadge',
   branchColors: 'branchColors',
   /** Nest a project's sessions UNDER the branch they are running on, instead
    *  of listing the branches and then the sessions as two flat blocks. OFF by
@@ -3230,6 +3259,27 @@ export interface TreeDeps {
    *  page (see sanitizeBranchColor — the value lands in an inline style block).
    *  Absent or empty means the built-in muted palette. */
   branchColors?(): readonly string[];
+  /**
+   * `lineage.runningBadge`, asked BY the surface that wants to draw it: should
+   * THIS view put the running count on the activity-bar container?
+   *
+   * THE ARGUMENT IS `surface`, AND IT IS THE BUG FIX. Both views are
+   * registered unconditionally and only their `when` clauses decide which one
+   * the workbench shows (see the note above registerTree's call site) — but a
+   * `view.badge` write does not care whether its view is on screen, and the
+   * workbench SUMS every badge in a container onto the one icon and joins
+   * their tooltips with a comma. Two surfaces each writing the same honest
+   * count is what produced a `8` on a machine with four sessions, reading
+   * "4 sessions running, 4 sessions running" in the hover.
+   *
+   * So the count is not the thing that is conditional here — the SURFACE is.
+   * Each view names itself and is answered no unless it is the one
+   * `lineage.viewStyle` is currently drawing.
+   *
+   * Absent (an older wiring, a unit double) means no badge, which is also the
+   * setting's default.
+   */
+  runningBadge?(surface: 'native' | 'inline'): boolean;
   // ---- branch grouping ------------------------------------------------
   /** `lineage.git.branches` — the branch block's master switch, and the ONE
    *  gate every branch-shaped row passes through. Absent reads as OFF, which is
@@ -3994,6 +4044,13 @@ export interface CommandDeps {
   markSeen(sessionId: string): Promise<void>;
   /** `lineage.notifications.enabled` (the global default). */
   notificationsEnabled(): boolean;
+  /** `lineage.soloSession` — "one session tab at a time". Read by exactly one
+   *  verb, `resumeSessions`, which the mode turns into a contradiction: solo
+   *  parks every other session tab each time one opens, so opening five in a
+   *  row would open five and leave one. Optional, and an absent dep reads as
+   *  FALSE — every unit double, and any wiring that has not been taught it,
+   *  opens the batch exactly as a wiring with the setting off would. */
+  soloSessionEnabled?(): boolean;
   // ---- telling a parent what its branches did ------------------------------
   /**
    * `lineage.fork.notifyParent`. Optional, and an absent dep reads as FALSE —

@@ -554,13 +554,20 @@ The red dot is an **unread marker**. It appears when a session completes a turn
 focus that session. Red rather than green because it is the one row asking for
 you — green is what everything else on screen uses to mean "nothing to do here".
 It rolls up onto the project row, so a collapsed project still shows there is
-something to come back to. The numeric badge on the view container counts
-something else: how many sessions are **running on this machine** — open tabs
-plus any session still running under a detach grace, in every window — so a number you did not expect is
-a process you did not know about. When a running session's row would be
-filtered out of this window (another folder's work in folder mode, a closed
-project's), it renders in a collapsed **Running elsewhere** group at the bottom
-instead: the badge never counts a process you cannot see and act on.
+something to come back to — and the roll-up asks exactly the question the rows
+below it do, so a project dot always has a lit row under it: a session that is
+closed, or busy again, or muted, lights nothing.
+
+The numeric badge on the view container counts something else: how many
+sessions are **running on this machine** — open tabs plus any session still
+running under a detach grace, in every window — so a number you did not expect
+is a process you did not know about. It is **off by default**
+(`lineage.runningBadge`), because a number that changes every few seconds on the
+icon you navigate by is motion with nothing to do about it. With it on, a
+running session whose row would be filtered out of this window (another
+folder's work in folder mode, a closed project's) renders in a collapsed
+**Running elsewhere** group at the bottom instead: the badge never counts a
+process you cannot see and act on.
 
 The **bell** — leftmost in the view title — lists the latest finished sessions,
 unseen above a divider, then history, each with its project and how long ago it

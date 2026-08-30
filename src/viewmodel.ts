@@ -588,22 +588,34 @@ export function statusTone(node: SessionNode): StatusTone | undefined {
   if (sessionIsOver(node)) return 'closed';
   // Compaction, inserted ABOVE the three status rules and below nothing else
   // that draws. Both phases are computed by src/compaction.ts, which has
-  // already applied every rule about when a phase is live — including that
-  // 'compacted' loses to a session the roster reports as busy, which is what
-  // "and there is no other command behind it" means. So there is exactly one
-  // precedence decision left here, and it is this: a compaction OUTRANKS the
-  // status underneath it.
+  // already applied every rule about when a phase is live. So there is exactly
+  // one precedence decision left here, and it is this: a compaction OUTRANKS
+  // the status underneath it.
   //
   // For 'compacting' that is the whole point. A compacting session reports
   // `busy` — reading the status first would draw the amber running dot and the
   // ring would never appear, which is precisely the bug this replaces.
   //
-  // For 'compacted' it outranks 'done' and 'idle', and it has to: a compaction
-  // ends with the session quiet and waiting, so deferring to those would mean
-  // the purple dot never drew either. It is not a demotion of the attention
-  // dot — a freshly compacted conversation is not asking you for anything, and
-  // the moment it does (a new turn, hence `busy`) compaction.phaseOf withholds
-  // the phase and the ordinary tones resume.
+  // For 'compacted' it outranks 'done' and 'idle', and it HAS to: a compaction
+  // ends with the session quiet — waiting or idle depending on what the CLI
+  // reports — so deferring to those tones would mean the purple dot never drew
+  // at all. Its safety therefore rests entirely on compaction.phaseOf handing
+  // back 'compacted' only where the words are true, and that is where the two
+  // rules live that this note used to have to make excuses for:
+  //
+  //   * a compaction that ends while the turn CARRIES ON rests no dot at all
+  //     (noteFinish's `busy` argument). The mid-turn auto-compact used to
+  //     settle one anyway, and it was still standing when the turn ended an
+  //     hour later — so the row said "compacted" in purple at the exact moment
+  //     it had "finished, and waiting on you" to say in red.
+  //   * a dot that IS resting is taken down by the next prompt, the next
+  //     `busy`, opening the session, or the session ending — so the only way
+  //     to reach an attention-worthy state from under one is through a `busy`
+  //     that clears it on the way.
+  //
+  // Between them, a standing 'compacted' means what it says: freshly
+  // compacted, and nothing has been asked of it since. Outranking a tone is
+  // safe when you have earned the right to speak for the row.
   if (node.compaction !== undefined) return node.compaction;
   if (node.attention === 'waiting' || node.status === 'waiting') {
     return node.unseen === false ? 'idle' : 'done';
@@ -2767,16 +2779,39 @@ function sessionTooltip(
   return lines.join('\n');
 }
 
-/** True when a session in (or under) `rootIds` is unseen-done. Walks
- *  visibleChildren, so a row removed from view can never light a dot no click
- *  can clear.
+/** True when a session in (or under) `rootIds` is drawing the ATTENTION dot.
+ *  Walks visibleChildren, so a row removed from view can never light a dot no
+ *  click can clear.
  *
- *  A session currently drawing a COMPACTION mark is excluded, for the same
- *  reason the dot itself is: statusTone gives compaction precedence over
- *  'done', so counting one here would roll a red dot up onto the project row
- *  above a child whose own dot is purple — a parent contradicting its child,
- *  which is the one thing a roll-up must never do. The session is still in the
- *  bell's list, which is a history of what finished rather than a mark. */
+ *  THE PREDICATE IS `statusTone(node) === 'done'`, AND THAT IS THE WHOLE POINT.
+ *  A roll-up dot is a promise that something underneath it is lit, so it must
+ *  be the SAME QUESTION the child's own dot is — the one `statusTone` answers
+ *  and `attentionCountOf` already counts with. This used to spell its own
+ *  version of "unseen-done" by hand (`unseen === true && !hidden && no
+ *  compaction`), and the hand-written copy disagreed with statusTone in three
+ *  directions at once, which is what put an unexplainable red dot on some
+ *  project rows and left it off others:
+ *
+ *    OVER. `sessionIsOver` — archived, exited, or a ghost — is 'closed' and
+ *      draws nothing, but it can carry `unseen` from the turn it finished
+ *      before it ended. The project lit a red dot above a subtree in which
+ *      every row was closed and grey, and no click could clear it because
+ *      there was no lit row to open.
+ *    BUSY. A session that finished a turn unseen and was then given more work
+ *      is 'running' amber. The project claimed red over an amber child.
+ *    WAITING WITH TRACKING OFF. `unseen === undefined` (an older record, or
+ *      tracking off for that session) still draws 'done' — waiting IS the ask
+ *      — and the hand-written `unseen === true` missed it, so the child was
+ *      lit and its project was not.
+ *
+ *  Compaction needs no clause of its own any more, and that is the same fix
+ *  rather than a separate one: statusTone already gives compaction precedence
+ *  over 'done', so a purple child simply is not 'done' and cannot roll up red.
+ *  Hidden needs none either — statusTone returns undefined for a muted row.
+ *  One definition, and the parent can no longer contradict the child.
+ *
+ *  (A session excluded here is still in the bell's list, which is a history of
+ *  what finished rather than a mark.) */
 export function subtreeHasUnseen(
   forest: SessionForest,
   rootIds: readonly string[],
@@ -2790,9 +2825,7 @@ export function subtreeHasUnseen(
     seen.add(id);
     const node = forest.nodes.get(id);
     if (!node) continue;
-    if (node.unseen === true && !node.hidden && node.compaction === undefined) {
-      return true;
-    }
+    if (statusTone(node) === 'done') return true;
     stack.push(...node.visibleChildren);
   }
 }

@@ -8,6 +8,27 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Added
 
+- **Open Selected Sessions**, the plural of Open Session Here. Select several
+  closed rows — shift-click, ctrl-click — and open all of them in one gesture,
+  in the order you selected them. It is a separate command from the singular
+  one, with `when` clauses that are complements of `lineage.multiSelect`, the
+  same shape Archive Selected Sessions already uses: a contributed command has
+  one title, so the singular entry on one of five highlighted rows would open
+  one row and read as though it had opened five.
+  Unlike the singular, **it asks first**, because the cost is the thing that
+  scales: each session it opens is a `claude` process and a terminal tab of its
+  own, several hundred megabytes apiece, and "I meant the two at the bottom" is
+  one gesture away from eleven selected rows. The rows it *cannot* open are
+  sorted out before anything launches and named in one sentence rather than in
+  a stack of modal warnings — a session that is still running (reopening it
+  would put a second `claude` on a transcript the first is writing) and a ghost
+  ancestor (no transcript to reopen at all) are counted separately, because
+  they leave you different things to do. A running session this window already
+  has a tab for is simply revealed, which is what "open it" honestly means for
+  a row that is already open.
+  It refuses outright while `lineage.soloSession` is on, and says why: solo
+  mode parks every other session tab each time one opens, so opening five would
+  open five and leave you the last one.
 - **Close with Summary now compacts the branch and keeps what the compaction
   said — and can pass a short form of it up to the parent.** What it used to do
   was open an input box and ask *you* to type the summary: of a conversation you
@@ -362,6 +383,31 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Changed
 
+- **The branch chips now wear Source Control's own branch colours.** They used
+  to be a pick of the theme's `charts.*`, which was the right instinct — the
+  theme author's own set of mutually distinguishable hues — aimed at the wrong
+  set. VS Code already has branch colours: the five the built-in Source Control
+  Graph paints its lanes and ref labels with (`scmGraph.foreground1`–`5`). A
+  branch is one thing, and it should not be one colour in the Flock sidebar and
+  a different one in the SCM view eight pixels to its left. Because these are
+  theme colour *ids* rather than values, a theme that restyles the graph now
+  restyles these chips with it, for free.
+  The palette is five entries rather than six for the same reason — a sixth
+  would be a colour the SCM view never shows — and each entry falls back to the
+  nearest hue of the `charts.*` set it replaced, so an editor without the graph
+  degrades to the old look rather than to six identical greys. They are still
+  softened toward the editor foreground, and that is the one place the two
+  views are meant to differ: the graph paints on an empty canvas, while these
+  sit in a column beside the status dots. `lineage.branchColors` still
+  overrides any slot, raw.
+- **The running-session count is no longer drawn on the activity-bar icon.**
+  It is now `lineage.runningBadge`, off by default. The count is real and the
+  argument for it stands — "no running process without a visible row" is only
+  an invariant you can trust if the processes are counted somewhere — but a
+  number that changes every few seconds on the icon you navigate by is motion
+  in the corner of your eye with nothing to do about it, and the tree already
+  says everything the number does, in rows you can click. Nothing was removed:
+  the count, its predicate and its tests are all still there, one setting away.
 - **Delete is now Archive, and it closes the session before it hides the row.**
   Axel: *"there is a big difference between closing and deleting something…
   we should rename delete session, it should be called something like archive,
@@ -556,6 +602,63 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Fixed
 
+- **The badge said eight when four sessions were running.** Both sidebars — the
+  native tree and the inline webview — are registered at once, and only their
+  `when` clauses decide which one the workbench draws. But a `view.badge` write
+  does not care whether its view is on screen, and the workbench *sums* every
+  badge in a container onto the one icon and joins their tooltips with a comma,
+  so the hover read "4 sessions running, 4 sessions running". Each view now
+  says which surface it is and is answered only when it is the one
+  `lineage.viewStyle` is currently drawing. (With `lineage.runningBadge` off by
+  default, the ordinary way to see this fixed is to turn the badge back on.)
+- **The purple compaction ring could stick for ten minutes, hiding the row's
+  real state behind it.** Every signal that a compaction had *finished* names
+  the successor generation's id, while the `PreCompact` that started it named
+  the generation before — so they only meet over the chain index, which is
+  rebuilt on the poll while the hooks arrive the instant the CLI writes them. A
+  hook that beat its own chain fact found no open ring; and if the turn then
+  carried on — which is exactly what auto-compact does, firing mid-turn and
+  handing straight back to the model — the roster never produced a busy→quiet
+  edge to try again with. The ring stood, outranking the amber the row should
+  have been drawing, until it went stale ten minutes later.
+  There is now a completion signal that cannot lose that race: **a generation
+  that has acquired a successor has finished compacting**, because minting the
+  successor is what a compaction *does*. No hook, no roster edge — just the
+  chain, read on the rebuild that has already built it, which closes the window
+  to one poll interval. (`SessionStart source: 'compact'` is no longer treated
+  as a finish at all: it is the most exact statement that a compaction ended,
+  but at that instant the roster still reports the compaction's own `busy`, so
+  it could not answer the second question — whether anything is behind it.)
+- **A compaction left a purple dot that was still standing when the next turn
+  ended.** "Compacted, and nothing behind it" is what the filled dot means, and
+  it is false the moment a turn is running behind it — which is the ordinary
+  shape of auto-compact. The dot rested mid-turn survived the rest of that turn
+  and up to an hour past it, so at the one moment the row genuinely had
+  "finished, and waiting on you" to say in red, it said "compacted" in purple
+  instead. A compaction that ends while the conversation is still working now
+  rests no dot at all. The `/compact` you type at an idle session — the case
+  the purple dot exists for — is unchanged.
+- **A compaction was announced as a finished turn.** The end of one tripped the
+  same busy→quiet detector a real turn does, so Flock toasted *"X finished its
+  turn"* about a conversation nobody had asked anything of, and left the row
+  marked unseen-done — which is the red attention dot, hidden under the purple
+  while that lasted and surfacing when it expired. A session lighting up for
+  attention an hour after a compaction it did on its own. The detector now
+  recognises its own compaction and stays quiet.
+- **Some projects carried a notification dot with nothing lit underneath it.**
+  The dot that rolls up onto a project row was asking a different question from
+  the dots on the rows below it: it spelled out its own version of "unseen-done"
+  by hand, and the hand-written copy disagreed with `statusTone` in three
+  directions at once. A session that was **over** — archived, exited, or an
+  inferred ancestor — draws no dot of its own but can still carry `unseen` from
+  the turn it finished before it ended, so a project lit red above a subtree in
+  which every row was closed and grey, and no click could clear it because there
+  was no lit row to open. A session that had gone **busy** again rolled red up
+  over its own amber. And a **waiting** session with unseen tracking off lit its
+  own dot while its project stayed dark. Both surfaces — the inline sidebar and
+  the native tree, which each had their own copy — now ask `statusTone`, the
+  same function the row's own dot is drawn from, so a parent can no longer
+  contradict its child.
 - **Fork and Compact told the parent that the new branch was "for `/compact`".**
   With the fork note turned on, a branch announces itself to the conversation it
   came from, and it quotes what the branch is *for* — the opening prompt,

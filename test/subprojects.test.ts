@@ -791,10 +791,13 @@ describe('buildViewModel: directory subproject rows', () => {
   });
 
   it('carries no status dot — the project row rolls that up', () => {
+    // A LIVE unseen-done session, not an archived one. An archived row draws
+    // no dot of its own (statusTone is 'closed'), so it must not roll one up
+    // either — see viewmodel.subtreeHasUnseen, where the two used to disagree.
     const out = buildViewModel(
       input(
         forestOf([
-          node(A, { archived: true, unseen: true }),
+          node(A, { status: 'idle', unseen: true }),
           node(B),
         ]),
         { projects: [split()] },
@@ -803,6 +806,20 @@ describe('buildViewModel: directory subproject rows', () => {
     expect(out[0].badgeKind).toBe('done');
     expect(out[1].badge).toBeUndefined();
     expect(out[1].badgeKind).toBeUndefined();
+  });
+
+  it('and an ARCHIVED unseen session rolls nothing up at all', () => {
+    // The bug that hid here: a closed session keeps whatever `unseen` it had
+    // when it ended, its own row draws nothing, and the project above it lit a
+    // red dot with no lit row anywhere under it to open or clear.
+    const out = buildViewModel(
+      input(
+        forestOf([node(A, { archived: true, unseen: true }), node(B)]),
+        { projects: [split()] },
+      ),
+    );
+    expect(out[0].badge).toBeUndefined();
+    expect(out[0].badgeKind).toBeUndefined();
   });
 
   it('the directory split beats branch grouping', () => {
