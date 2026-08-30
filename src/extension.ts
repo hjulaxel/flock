@@ -53,6 +53,8 @@ import {
   CONTEXT_MULTI_SELECT,
   CONTEXT_ONLY_ACTIVE,
   DEFAULT_BUSY_STALE_MINUTES,
+  DEFAULT_CHAT_AUTO_CLOSE_MINUTES,
+  DEFAULT_SESSION_CLOSE_AFTER_MINUTES,
   DEFAULT_CLOSE_SUMMARY_MODE,
   DEFAULT_PROVIDER,
   DEFAULT_SESSION_SWITCHING,
@@ -160,7 +162,9 @@ import {
 } from './transcript';
 import { repairResumeLeaf } from './resumeLeaf';
 import {
+  TOUCH_COALESCE_MS,
   idleCloseDecisions,
+  lastEngagementMs,
   reconcileTmuxDecisions,
 } from './idleClose';
 import type { ReconcileRecordFacts, SessionCloseFacts } from './idleClose';
@@ -2285,6 +2289,31 @@ export async function activate(
     await store.upsert(sessionId, { seenAt: new Date().toISOString() });
   };
 
+  /**
+   * THE TOUCH: the user just used this session — clicked its row, focused its
+   * tab, revealed its terminal. Stamps `touchedAt`, which is half the idle
+   * clock the lifecycle sweep closes on (see EditorialRecord.touchedAt and
+   * idleClose.lastEngagementMs). Deliberately separate from `markSeen`: that
+   * one writes only when a look clears an attention dot, so it cannot answer
+   * "when was this last used".
+   *
+   * Coalesced against the stamp ALREADY ON THE RECORD rather than an
+   * in-memory map: the throttle then survives a reload, and two windows
+   * flicking between the same session cannot write past each other. Written
+   * to the chain TIP, like every other lifecycle fact, so a `/clear` that
+   * mints a new generation does not reset the conversation's clock to zero.
+   */
+  const noteTouched = (sessionId: string): void => {
+    const tip = chainIndex.tipOf(sessionId);
+    const now = Date.now();
+    const prev = chainAliases(sessionId)
+      .map((id) => Date.parse(store.get(id)?.touchedAt ?? ''))
+      .filter((ms) => Number.isFinite(ms));
+    const newest = prev.length > 0 ? Math.max(...prev) : Number.NaN;
+    if (Number.isFinite(newest) && now - newest < TOUCH_COALESCE_MS) return;
+    void store.upsert(tip, { touchedAt: new Date(now).toISOString() });
+  };
+
   /** The session's terminal is the ACTIVE one in this window — under any of
    *  its generation ids, since the binding lives under the launch-time id. */
   const isWatchedHere = (sessionId: string): boolean => {
@@ -2597,6 +2626,12 @@ export async function activate(
       const rowId = chainIndex.tipOf(sessionId);
       const node = forest.nodes.get(rowId) ?? forest.nodes.get(sessionId);
       if (node?.unseen === true) void markSeen(node.id);
+      // And the idle clock's user half, on the same signal and behind the same
+      // mid-switch guard — for the same reason the guard is here at all. A
+      // switch focuses every terminal it moves, so without it the stow would
+      // stamp "the user just used this" on the whole set it is putting away,
+      // which is the precise opposite of what happened.
+      noteTouched(sessionId);
       // The purple dot goes out for the same reason and on the same signal.
       // A compaction that has SETTLED is a note saying "this conversation was
       // just compacted and nothing has been asked of it since" — and opening
@@ -4665,7 +4700,9 @@ export async function activate(
    *  resurrect the default — but 0 is this setting's off switch. */
   const chatAutoCloseMinutes = (): number => {
     const v = cfg().get<number>(CONFIG_KEYS.chatAutoCloseMinutes);
-    return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 30;
+    return typeof v === 'number' && Number.isFinite(v) && v >= 0
+      ? v
+      : DEFAULT_CHAT_AUTO_CLOSE_MINUTES;
   };
   const sweepIdleChats = (): void => {
     try {
@@ -4706,8 +4743,15 @@ export async function activate(
           isActiveTab:
             activeTip !== null && chainIndex.tipOf(binding.sessionId) === activeTip,
           status: entry === undefined ? ('unknown' as const) : normalizeStatus(entry).status,
-          lastActivityMs:
-            mtimes.length > 0 ? Math.max(...mtimes) : binding.createdAt,
+          // The user half of the clock, exactly as the session sweep folds it
+          // in: opening a chat to re-read the answer is using the chat, and it
+          // writes nothing to the transcript. Without it a chat you had open
+          // and kept glancing at closed on the strength of the model's silence.
+          lastActivityMs: lastEngagementMs({
+            lastRecordMs: mtimes.length > 0 ? Math.max(...mtimes) : undefined,
+            touchedMs: lastTouchedMs(aliases),
+            fallbackMs: binding.createdAt,
+          }),
         };
       });
       const idleOf = new Map(tabs.map((t) => [t.sessionId, t.lastActivityMs]));
@@ -4757,12 +4801,29 @@ export async function activate(
   /** Same not-numCfg rule as the chat window: 0 is the off switch. */
   const sessionCloseAfterMinutes = (): number => {
     const v = cfg().get<number>(CONFIG_KEYS.sessionCloseAfterMinutes);
-    return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 30;
+    return typeof v === 'number' && Number.isFinite(v) && v >= 0
+      ? v
+      : DEFAULT_SESSION_CLOSE_AFTER_MINUTES;
+  };
+
+  /** Epoch ms of the newest `touchedAt` any generation carries — the USER
+   *  half of the idle clock (see noteTouched). Non-finite when the
+   *  conversation has never been clicked since the field shipped, which every
+   *  reader below folds away rather than treats as zero. */
+  const lastTouchedMs = (aliases: readonly string[]): number => {
+    let best = Number.NaN;
+    for (const id of aliases) {
+      const at = Date.parse(store.get(id)?.touchedAt ?? '');
+      if (!Number.isFinite(at)) continue;
+      if (!Number.isFinite(best) || at > best) best = at;
+    }
+    return best;
   };
 
   /** Epoch ms of the last real conversation record any generation wrote —
-   *  the idle clock. Non-finite (NaN) when no generation has a transcript
-   *  yet, which the decision reads as "never close on not knowing". */
+   *  the CONVERSATION half of the idle clock. Non-finite (NaN) when no
+   *  generation has a transcript yet, which the decision reads as "never
+   *  close on not knowing". */
   const lastRealActivityMs = (aliases: readonly string[]): number => {
     let best = Number.NaN;
     for (const id of aliases) {
@@ -4820,7 +4881,6 @@ export async function activate(
         if (aliases.some((id) => store.get(id)?.chat === true)) continue;
         if (!aliases.some((id) => store.get(id)?.launchedByUs === true)) continue;
         const entry = lastEntries.find((e) => aliases.includes(e.sessionId));
-        const last = lastRealActivityMs(aliases);
         facts.push({
           sessionId: binding.sessionId,
           isActiveTab: activeTip !== null && tip === activeTip,
@@ -4830,9 +4890,17 @@ export async function activate(
           closeAfterTurn: aliases.some(
             (id) => store.get(id)?.closeAfterTurn === true,
           ),
-          // A session that has not written yet counts from its tab opening,
-          // exactly as the chat sweep does.
-          lastActivityMs: Number.isFinite(last) ? last : binding.createdAt,
+          // BOTH halves of the clock, newest wins. A session that has neither
+          // counts from its tab opening, exactly as the chat sweep does — and
+          // note that the touch is what makes that fallback safe: a long-open
+          // tab whose transcript tail happened to hide its last record used to
+          // read as idle since the tab opened, which for a tab opened this
+          // morning meant closing a session clicked a minute ago.
+          lastActivityMs: lastEngagementMs({
+            lastRecordMs: lastRealActivityMs(aliases),
+            touchedMs: lastTouchedMs(aliases),
+            fallbackMs: binding.createdAt,
+          }),
         });
       }
 
@@ -4864,7 +4932,15 @@ export async function activate(
           // An unparseable deadline reads as already expired: a corrupt stamp
           // must not hold a hidden process open forever.
           graceUntilMs: Number.isFinite(deadline) ? deadline : 0,
-          lastActivityMs: lastRealActivityMs(aliases),
+          // No fallback: a graced record with neither clock is genuinely
+          // unknown, and unknown is never closed by the timer and sorts LAST
+          // out the door on pool overflow. The grace's own deadline still
+          // expires on time — that is an absolute stamp, not an idleness
+          // measurement, and a touch does not extend it.
+          lastActivityMs: lastEngagementMs({
+            lastRecordMs: lastRealActivityMs(aliases),
+            touchedMs: lastTouchedMs(aliases),
+          }),
         });
       }
 
@@ -5580,6 +5656,10 @@ export async function activate(
       );
       if (!revealed) return false;
       await markSeen(sessionId);
+      // Revealing a foreign session is a click on its row like any other, and
+      // the focus listener above cannot see it: the registry never bound this
+      // terminal, so `onDidChangeActive` does not fire for it.
+      noteTouched(sessionId);
       return true;
     },
     tipOf: (sessionId) => chainIndex.tipOf(sessionId),

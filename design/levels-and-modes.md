@@ -116,7 +116,7 @@ removal of `parked` are the new work.
 
 Transitions:
 - **timer** (the only automatic 1→2): idle for `lineage.session.closeAfterMinutes`
-  (default 30; 0 disables) → close to level 2.
+  (default 4320 — three days; 0 disables) → close to level 2.
 - **user verbs**: 2→1 resume; 1→2 close now; 2→3 archive (which performs the
   1→2 close itself when the session is still running, so no verb ever writes
   level 3 over a live process); 3→2 restore.
@@ -129,9 +129,20 @@ Level-1 protections (generalize chatAutoClose.ts's rules, they are correct):
 - a per-session **keep-awake pin** exempts a session from the timer entirely
   (for long autonomous runs). A pinned session is still level 1 with a
   visible row.
-- Idleness source: last real transcript record timestamp / roster status —
+- Idleness source: the NEWER of the last real transcript record timestamp and
+  the last user TOUCH (`EditorialRecord.touchedAt` — the row clicked, the tab
+  focused, the terminal revealed), with roster status on top as the busy gate.
   NOT file mtime (files get touched by hooks/last-prompt writes without new
   content; measured on this machine).
+  The touch half was added because the record half alone answers the wrong
+  question: it measures what the CONVERSATION did, and a session you open,
+  read and leave open is one you are using without the model saying a word.
+  Folded by `idleClose.lastEngagementMs`; written coalesced
+  (`idleClose.TOUCH_COALESCE_MS`, 60 s), because every tab switch is a touch
+  and a touch is a locked read-merge-write of state.json.
+  What this deliberately does NOT change: the age the tree shows on a row is
+  still "when this last got an answer". Two clocks, two readers — only one of
+  them closes anything.
 
 ### Detach grace — the one sanctioned transient
 

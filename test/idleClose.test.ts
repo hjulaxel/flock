@@ -11,7 +11,9 @@ import { describe, expect, it } from 'vitest';
 
 import {
   GRACE_POOL_CAP,
+  TOUCH_COALESCE_MS,
   idleCloseDecisions,
+  lastEngagementMs,
   reconcileTmuxDecisions,
   type IdleClosePlan,
   type ReconcileRecordFacts,
@@ -397,5 +399,119 @@ describe('reconcileTmuxDecisions', () => {
     });
     expect(plan.closeIds).toEqual([S1]);
     expect(plan.clearTmuxIds).toEqual([]);
+  });
+});
+
+describe('lastEngagementMs — the two halves of the idle clock', () => {
+  it('takes the newer half, whichever it is', () => {
+    expect(
+      lastEngagementMs({ lastRecordMs: NOW - 90 * MIN, touchedMs: NOW - MIN }),
+    ).toBe(NOW - MIN);
+    expect(
+      lastEngagementMs({ lastRecordMs: NOW - MIN, touchedMs: NOW - 90 * MIN }),
+    ).toBe(NOW - MIN);
+  });
+
+  it('a click alone is engagement — the whole point of the second half', () => {
+    // The complaint this fixes: a session nobody has spoken to since Monday
+    // but that the user opens every morning is IN USE, and the transcript is
+    // the one place that fact never appears.
+    expect(lastEngagementMs({ touchedMs: NOW - MIN })).toBe(NOW - MIN);
+    expect(lastEngagementMs({ lastRecordMs: NOW - MIN })).toBe(NOW - MIN);
+  });
+
+  it('falls back only when NEITHER clock is known', () => {
+    expect(lastEngagementMs({ fallbackMs: NOW - 5 * MIN })).toBe(NOW - 5 * MIN);
+    // A known clock beats the fallback even when the fallback is newer: the
+    // bind time is a floor, not a competitor.
+    expect(
+      lastEngagementMs({ lastRecordMs: NOW - 90 * MIN, fallbackMs: NOW }),
+    ).toBe(NOW - 90 * MIN);
+  });
+
+  it('never invents a moment — no clocks and no fallback is NaN', () => {
+    expect(lastEngagementMs({})).toBeNaN();
+    expect(Number.isNaN(lastEngagementMs({ lastRecordMs: Number.NaN }))).toBe(
+      true,
+    );
+  });
+
+  it('non-finite inputs are ignored, not ranked', () => {
+    // Date.parse of a hand-edited stamp, a transcript with no parseable tail:
+    // both arrive as NaN and must not win a Math.max, and must not suppress
+    // the half that IS known.
+    expect(
+      lastEngagementMs({ lastRecordMs: Number.NaN, touchedMs: NOW - MIN }),
+    ).toBe(NOW - MIN);
+    expect(
+      lastEngagementMs({
+        lastRecordMs: Number.POSITIVE_INFINITY,
+        touchedMs: NOW - MIN,
+      }),
+    ).toBe(NOW - MIN);
+    // Both halves unknown but a fallback present — the bound-tab case that
+    // used to close a session clicked a minute ago.
+    expect(
+      lastEngagementMs({
+        lastRecordMs: Number.NaN,
+        touchedMs: Number.NaN,
+        fallbackMs: NOW - 5 * MIN,
+      }),
+    ).toBe(NOW - 5 * MIN);
+  });
+
+  it('a touch inside the coalescing window still moves the clock', () => {
+    // The throttle is a WRITE policy, not a decision policy: the sweep reads
+    // whatever stamp is on the record, and a stamp up to a minute stale is
+    // exactly the resolution loss the constant buys.
+    const touched = NOW - TOUCH_COALESCE_MS;
+    const plan = idleCloseDecisions({
+      now: NOW,
+      closeAfterMinutes: 30,
+      sessions: [
+        tab('t', {
+          lastActivityMs: lastEngagementMs({
+            lastRecordMs: NOW - 90 * MIN,
+            touchedMs: touched,
+          }),
+        }),
+      ],
+    });
+    expect(plan.close).toEqual([]);
+  });
+});
+
+describe('the engagement clock, through the decision', () => {
+  it('a session clicked just now is not closed, however old its last turn', () => {
+    const plan = idleCloseDecisions({
+      now: NOW,
+      closeAfterMinutes: 3 * 24 * 60, // the shipped default: three days
+      sessions: [
+        tab('stale-transcript-fresh-click', {
+          lastActivityMs: lastEngagementMs({
+            lastRecordMs: NOW - 9 * 24 * 60 * MIN,
+            touchedMs: NOW - 2 * MIN,
+          }),
+        }),
+      ],
+    });
+    expect(plan.close).toEqual([]);
+  });
+
+  it('and one nobody has touched or spoken to for four days is', () => {
+    const cold = NOW - 4 * 24 * 60 * MIN;
+    const plan = idleCloseDecisions({
+      now: NOW,
+      closeAfterMinutes: 3 * 24 * 60,
+      sessions: [
+        tab('cold', {
+          lastActivityMs: lastEngagementMs({
+            lastRecordMs: cold,
+            touchedMs: cold,
+          }),
+        }),
+      ],
+    });
+    expect(plan.close).toEqual(['cold']);
   });
 });

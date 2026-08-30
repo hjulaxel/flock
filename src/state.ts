@@ -294,6 +294,7 @@ function sanitizeRecord(key: string, value: unknown): EditorialRecord | null {
     'summaryRequestedAt',
     'doneAt',
     'seenAt',
+    'touchedAt',
     'notifyDismissedAt',
   ] as const) {
     if (rec[k] !== undefined && typeof rec[k] !== 'string') delete rec[k];

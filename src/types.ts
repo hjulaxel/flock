@@ -1836,6 +1836,35 @@ export const DEFAULT_STALE_AFTER_HOURS = 48;
  *  minutes of silence under `busy` is the tell. See roster.destaleBusyStatus. */
 export const DEFAULT_BUSY_STALE_MINUTES = 5;
 
+/** `lineage.session.closeAfterMinutes` — THREE DAYS, in the minutes the
+ *  setting is denominated in.
+ *
+ *  It was thirty minutes, inherited wholesale from the chat sweep this
+ *  lifecycle generalized (chatAutoClose.ts), and thirty minutes is a
+ *  reasonable window for a scratch conversation and a wrong one for a session:
+ *  a session is a piece of WORK, and work is picked up tomorrow. The window
+ *  now has to be long enough that coming back to something on Thursday that
+ *  you left on Monday still finds it open, because the alternative — the tab
+ *  gone, the row archived, the process reaped — reads as the tool throwing
+ *  away what you were doing, whatever the transcript guarantees.
+ *
+ *  Three days also drains the pressure out of every sharp edge in the
+ *  idleness clock. A forty-minute test run, a status the roster froze, a
+ *  transcript whose tail hid its last record — each of those could carry a
+ *  live session past a thirty-minute deadline, and none of them lasts three
+ *  days. The timer stops being a thing that has to be exactly right. */
+export const DEFAULT_SESSION_CLOSE_AFTER_MINUTES = 3 * 24 * 60;
+
+/** `lineage.chat.autoCloseMinutes` — ONE DAY, same units.
+ *
+ *  A chat is cheaper than a session and is MEANT to be abandoned — asked,
+ *  answered, forgotten is its normal ending — so its window is shorter than a
+ *  session's on purpose. But it was thirty minutes, and thirty minutes is
+ *  shorter than a lunch: a side question you meant to come back to after a
+ *  meeting was gone when you got back. A day keeps a chat for as long as the
+ *  day you opened it in, and no longer. */
+export const DEFAULT_CHAT_AUTO_CLOSE_MINUTES = 24 * 60;
+
 // ------------------------------------------------------------------ unions
 
 export type SessionKind = 'interactive' | 'background' | 'unknown';
@@ -2962,6 +2991,25 @@ export interface EditorialRecord {
    *  active one here, a bell row was opened, mark-all-read). `seenAt >= doneAt`
    *  is what puts the attention dot out. */
   seenAt?: string;
+  /** ISO. When the user last TOUCHED this session — clicked its row, focused
+   *  its tab, revealed its terminal. The other half of the idle clock, and the
+   *  half that answers the complaint the record clock could not: a session
+   *  you opened, read, thought about and left open is a session in use, and
+   *  nothing about that reaches the transcript. `lastRecordAt` measures what
+   *  the CONVERSATION did; this measures what the USER did, and the lifecycle
+   *  sweep closes on the newer of the two (idleClose.lastEngagementMs).
+   *
+   *  DELIBERATELY NOT `seenAt`, which sits four fields up and looks like the
+   *  same fact. `seenAt` is written only when a look CLEARS an attention dot
+   *  — focusing a session with nothing new in it stamps nothing — so it
+   *  answers "has this been read since it finished", not "when was this last
+   *  used", and a clock built on it would run fast for the sessions that
+   *  finish turns and not at all for the ones you merely keep open.
+   *
+   *  Written coalesced (idleClose.TOUCH_COALESCE_MS): every tab switch is a
+   *  touch, a touch is a locked read-merge-write of state.json, and a clock
+   *  measured in days does not need second resolution. */
+  touchedAt?: string;
   /** Per-session notifications override. `false` mutes this session: no
    *  attention dot, no bell entry, no toast. Unset = follow
    *  `lineage.notifications.enabled`. Inherited across a generation chain —

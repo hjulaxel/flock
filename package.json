@@ -1740,15 +1740,15 @@
         },
         "lineage.chat.autoCloseMinutes": {
           "type": "number",
-          "default": 30,
+          "default": 1440,
           "minimum": 0,
-          "markdownDescription": "A project chat's tab closes on its own after this many minutes without use. The conversation is kept — **Chat History…** on the project's row reopens it — so this tidies the tab, never the words. A chat that is busy or waiting is never touched, and neither is the tab you are looking at. `0` turns it off."
+          "markdownDescription": "A project chat's tab closes on its own after this many minutes without use — **1440 is one day**. *Use* means either half of it: the chat said something, or you clicked on it. The conversation is kept — **Chat History…** on the project's row reopens it — so this tidies the tab, never the words. A chat that is busy or waiting is never touched, and neither is the tab you are looking at. `0` turns it off."
         },
         "lineage.session.closeAfterMinutes": {
           "type": "number",
-          "default": 30,
+          "default": 4320,
           "minimum": 0,
-          "markdownDescription": "Any session's tab closes on its own after this many minutes without real activity (measured on the transcript, not file timestamps). The conversation is kept — its row stays in the tree as an archived session, and one click resumes it — so this tidies the process, never the words. A busy or waiting session is marked *close after this turn* instead and closes once idle; the tab you are looking at and any session pinned with **Keep Awake** are never touched. `0` turns it off."
+          "markdownDescription": "A session's tab closes on its own after this many minutes without use — **4320 is three days**. *Use* is the newer of two things: the last real turn in the transcript (never file timestamps), and the last time **you clicked on the session** — its row, its tab, its terminal. Clicking is the plainer signal of the two, and it is the one the age shown on the row does not report: that age is still \"when this last got an answer\", which is the question you are asking when you read the tree, not the question that decides what closes. The conversation is kept — its row stays in the tree as an archived session, and one click resumes it — so this tidies the process, never the words. A busy or waiting session is marked *close after this turn* instead and closes once idle; the tab you are looking at and any session pinned with **Keep Awake** are never touched. `0` turns it off."
         },
         "lineage.session.detachGraceMinutes": {
           "type": "number",
