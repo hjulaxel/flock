@@ -740,6 +740,35 @@ describe('buildViewModel: row content', () => {
       ]);
     });
 
+    it('marks a session whose work has fanned out', () => {
+      // A MARK, not a fifth dot colour: the session is already amber and the
+      // amber is right — it IS running. What the dot cannot say is that nine
+      // things are running inside it rather than one.
+      expect(marksOf({ status: 'busy', subagents: true })).toEqual([
+        { icon: 'run-all', title: 'Sub-agents working' },
+      ]);
+    });
+
+    it('carries both marks at once, fan-out first', () => {
+      // Either alone must not shift the other's position, which is why they
+      // are a list built in a fixed order rather than two assignments.
+      expect(
+        marksOf({ status: 'busy', subagents: true, notifyMuted: true }),
+      ).toEqual([
+        { icon: 'run-all', title: 'Sub-agents working' },
+        { icon: 'bell-slash', title: 'Notifications hidden' },
+      ]);
+    });
+
+    it('says the fan-out in the hover too — the native tree draws no mark', () => {
+      const row = buildViewModel(
+        input(forestOf([node(A, { status: 'busy', subagents: true })]), {
+          loose: [A],
+        }),
+      )[0];
+      expect(row.tooltip).toContain('sub-agents working under this session');
+    });
+
     it('leaves an ordinary row without the field at all', () => {
       // Absent, not empty: a row with nothing to mark must cost no width, and
       // the client only appends the box for rows that carry one.
@@ -1844,6 +1873,28 @@ describe('buildViewModel: branch rows', () => {
 // wrong — a line on every row is a tree twice as tall for no new information.
 
 describe('sessionBranchLine', () => {
+  it('carries the shared-floor count at two and up, and stays quiet below', () => {
+    // 0 and 1 are the designed shapes — a worktree of one root, or no roots
+    // probed yet — and must cost no width. 2 is the state the token exists
+    // for: the one where a `git checkout` moves somebody else's session.
+    expect(
+      sessionBranchLine('main', status(), undefined, 'standard', '/c/app', 2)
+        .shared,
+    ).toBe(2);
+    expect(
+      sessionBranchLine('main', status(), undefined, 'standard', '/c/app', 1)
+        .shared,
+    ).toBeUndefined();
+    expect(
+      sessionBranchLine('main', status(), undefined, 'standard').shared,
+    ).toBeUndefined();
+    // Mode-independent: the warning is about the checkout, not the level.
+    expect(
+      sessionBranchLine('main', status(), undefined, 'detailed', '/c/app', 3)
+        .shared,
+    ).toBe(3);
+  });
+
   const status = (over: Partial<BranchStatus> = {}): BranchStatus => ({
     upstream: 'origin/feat/x',
     ahead: 0,

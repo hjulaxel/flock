@@ -1,18 +1,24 @@
 // src/worktrees.ts — the write side of worktrees, and the only one there is.
 //
-// src/git.ts and src/gitBranches.ts read; this module is the two commands that
-// CHANGE a repository, plus the pure decisions in front of them:
+// src/git.ts and src/gitBranches.ts read; this module is the three commands
+// that CHANGE a repository, plus the pure decisions in front of them:
 //
 //     git worktree add [-b <branch>] -- <path> [<branch>]
 //     git worktree remove [--force] -- <path>
+//     git branch -d -- <branch>
 //
-// Everything in here runs ONLY from a verb the user picked and then confirmed.
-// There is no timer, no poll and no path that reaches these from a render, a
+// Everything in here runs ONLY from a verb the user picked. The two
+// DESTRUCTIVE ones — remove, and the branch delete — are confirmed in a modal
+// that quotes the exact command besides. The ADD is the one write allowed to
+// run straight off the `+` (`lineage.git.newSessionInWorktree`): it creates a
+// directory and a fresh ref and touches nothing that already exists, so the
+// click is the consent and the receipt says what it did. There is still no
+// timer, no poll and no path that reaches any of these from a render, a
 // roster tick or a settings change — which is the whole reason a read-only
-// extension can have them at all. `git worktree add` creates a directory and a
-// branch ref; `git worktree remove` deletes a directory, and with `--force`
-// deletes uncommitted work with it. Neither is something to do on somebody's
-// behalf because a cache went stale.
+// extension can have them at all. `git worktree remove` deletes a directory,
+// and with `--force` deletes uncommitted work with it; `git branch -d`
+// deletes a NAME, behind git's own merged-only gate. None of these is
+// something to do on somebody's behalf because a cache went stale.
 //
 // The DECISIONS are pure and exported separately from the commands that carry
 // them out — where the new checkout goes, and whether a removal may be offered
@@ -108,6 +114,58 @@ export function slugifyBranch(branch: unknown): string {
 
 function trimEdges(s: string): string {
   return s.replace(/^[-._]+/, '').replace(/[-._]+$/, '');
+}
+
+/** Cap on the `-2`, `-3`… suffixes tried when a suggested branch name is
+ *  taken. Two digits of retries is already a repository with ninety-odd
+ *  branches minted from the same session stem; past that the flow refuses and
+ *  the user names the branch themselves. */
+const MAX_NAME_BUMPS = 99;
+
+/**
+ * The branch a NEW worktree session gets, minted from the session's own name.
+ *
+ * `flock 3` → `flock-3`, or `axel/flock-3` under a prefix — the Claude Squad
+ * convention — and the reason the `+` can cut a worktree without stopping to
+ * ask: the answer a picker would ask for is derivable, readable in a git
+ * prompt, and cheap to change later (`git branch -m`).
+ *
+ * The PREFIX is cleaned segment by segment with the same slug rule the title
+ * gets, KEEPING its `/`s: a ref is allowed hierarchy where a directory
+ * component is not, and `axel/` in front of every minted branch is the whole
+ * point of the setting. A prefix that cleans away to nothing contributes
+ * nothing rather than failing the launch over a setting.
+ *
+ * A TAKEN name gets `-2`, `-3`, … appended rather than returned anyway:
+ * `git worktree add -b` refuses an existing ref, and this function exists so
+ * the silent flow cannot steer itself into a refusal git would then have to
+ * explain. Returns '' when the title slugs to nothing or the bumps run out —
+ * callers treat '' as a refusal, never as a name.
+ */
+export function suggestBranchName(input: {
+  /** `lineage.git.branchPrefix`. Blank contributes nothing. */
+  prefix?: string;
+  /** The session title the branch is named after. */
+  title: string;
+  /** Every name this repository already has — local branches and checked-out
+   *  ones alike. Compared exactly: refs are case-sensitive. */
+  taken: readonly string[];
+}): string {
+  const stem = slugifyBranch(input.title);
+  if (stem === '') return '';
+  const prefix = (typeof input.prefix === 'string' ? input.prefix : '')
+    .split('/')
+    .map((seg) => slugifyBranch(seg))
+    .filter((seg) => seg !== '')
+    .join('/');
+  const base = prefix === '' ? stem : `${prefix}/${stem}`;
+  const taken = new Set(input.taken);
+  if (!taken.has(base)) return base;
+  for (let n = 2; n <= MAX_NAME_BUMPS; n++) {
+    const bumped = `${base}-${n}`;
+    if (!taken.has(bumped)) return bumped;
+  }
+  return '';
 }
 
 /**
@@ -230,6 +288,34 @@ export function localBranchArgv(): string[] {
 }
 
 /**
+ * `git branch -d` — LOWERCASE, and that is the safety of the whole delete
+ * offer: `-d` is git's own refusal over a branch not merged into HEAD, so
+ * even a probe that lied cannot cost commits — git re-checks at the moment of
+ * deletion and refuses in its own words. `-D` does not appear in this module
+ * and must never be added to it.
+ */
+export function branchDeleteArgv(branch: string): string[] {
+  return ['branch', '-d', '--', branch];
+}
+
+/** `git rev-list --count <main>..<branch>` — how many commits the branch has
+ *  that the main branch does not. One spawn answers both "is it merged" (0)
+ *  and the dialog's sentence (N). Runs only inside the removal verb, never on
+ *  a poll path. The `--` closes the range off from ever reading as a path. */
+export function revListCountArgv(mainName: string, branch: string): string[] {
+  return ['rev-list', '--count', `${mainName}..${branch}`, '--'];
+}
+
+/** `rev-list --count` output → a count, or undefined for anything that is
+ *  not one. Undefined is load-bearing: planBranchFate reads it as "keep the
+ *  branch", so garbage can only make the flow conservative. */
+export function parseRevListCount(stdout: unknown): number | undefined {
+  if (typeof stdout !== 'string') return undefined;
+  const m = /^\s*(\d+)\s*$/.exec(stdout);
+  return m ? Number(m[1]) : undefined;
+}
+
+/**
  * The command as the user will see it in the confirmation, and as they could
  * paste it into a shell themselves.
  *
@@ -349,6 +435,64 @@ export function sessionsInWorktree(
     if (cwd !== '' && isWithin(target, cwd)) n++;
   }
   return n;
+}
+
+/**
+ * What happens to the BRANCH when its worktree goes — the second half of a
+ * removal, decided apart from planWorktreeRemoval because the two questions
+ * have different stakes: the worktree is a directory git can recreate in
+ * seconds; the branch is the name of the work.
+ *
+ * The rule is the field's (docs/proposal-worktree-sessions.md): deletion is
+ * OFFERED only when Flock minted the ref AND everything on it is already on
+ * the main branch. Everything else keeps the ref, and the sentence says which
+ * case this was — a dialog that silently kept the branch would leave "did it
+ * delete my branch?" to be answered by running git.
+ *
+ * `aheadOfMain === undefined` means the probe failed or never ran, and it
+ * reads as "keep": a missing read may make this verb more conservative, never
+ * more destructive — the same direction planWorktreeRemoval falls in.
+ */
+export interface BranchFate {
+  /** Offer "Remove and Delete Branch" beside plain removal. */
+  offerDelete: boolean;
+  /** The dialog's sentence about the branch. Always set. */
+  sentence: string;
+}
+
+export function planBranchFate(input: {
+  branch: string;
+  /** Flock created this ref — a minted-branch record exists for it. */
+  minted: boolean;
+  /** `git rev-list --count main..branch`, or undefined for a failed probe. */
+  aheadOfMain: number | undefined;
+  /** The main worktree's branch name, for the sentence. */
+  mainName: string;
+  primary: boolean;
+}): BranchFate {
+  const name = input.branch === '' ? 'the branch' : `"${input.branch}"`;
+  const main = input.mainName === '' ? 'the main branch' : input.mainName;
+  const kept = {
+    offerDelete: false,
+    sentence: `The branch ${name} itself is kept — only the checkout goes away.`,
+  };
+  // The primary worktree never reaches a removal (planWorktreeRemoval refuses
+  // it first); refusing again keeps this function safe to call on its own.
+  if (input.primary || !input.minted) return kept;
+  if (input.aheadOfMain === undefined) return kept;
+  if (input.aheadOfMain > 0) {
+    const n = input.aheadOfMain;
+    return {
+      offerDelete: false,
+      sentence:
+        `Flock created ${name}, but ${n} commit${n === 1 ? '' : 's'} on it ` +
+        `${n === 1 ? 'is' : 'are'} not on ${main} — the branch is kept.`,
+    };
+  }
+  return {
+    offerDelete: true,
+    sentence: `Flock created ${name} and everything on it is on ${main}.`,
+  };
 }
 
 /** The one shape both of the checks below need: a checkout, by branch name and
@@ -481,6 +625,45 @@ export function runWorktreeRemove(
     worktreeRemoveArgv({ path: opts.path, force: opts.force }),
     run,
   );
+}
+
+/** Run `git branch -d`. Only ever AFTER a successful worktree removal (git
+ *  refuses to delete a checked-out branch), and only from the button
+ *  planBranchFate put on the dialog. */
+export function runBranchDelete(
+  opts: { repoDir: string; branch: string },
+  run?: WorktreeRunOptions,
+): Promise<GitCommandResult> {
+  return runGit(opts.repoDir, branchDeleteArgv(opts.branch), run);
+}
+
+/** How far `branch` is ahead of `mainName`, or undefined when git cannot
+ *  say. A READ on the probe budget, with readLocalBranches's failure
+ *  contract: any failure at all is undefined, and undefined only ever makes
+ *  the caller keep the branch. */
+export function readAheadCount(
+  repoDir: string,
+  mainName: string,
+  branch: string,
+  opts?: WorktreeRunOptions,
+): Promise<number | undefined> {
+  const dir = normalizeDir(repoDir);
+  if (dir === '' || mainName === '' || branch === '') {
+    return Promise.resolve(undefined);
+  }
+  const exec = opts?.run ?? execGit;
+  try {
+    return exec(
+      opts?.gitBinary ?? 'git',
+      revListCountArgv(mainName, branch),
+      dir,
+      opts?.timeoutMs ?? READ_TIMEOUT_MS,
+    )
+      .then((r) => (r.ok ? parseRevListCount(r.output) : undefined))
+      .catch(() => undefined);
+  } catch {
+    return Promise.resolve(undefined);
+  }
 }
 
 function runGit(

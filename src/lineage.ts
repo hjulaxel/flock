@@ -515,7 +515,19 @@ export interface BuildForestInput {
    *  back to what it showed before. */
   tailStats?: ReadonlyMap<
     string,
-    { lastPromptAt?: number; tokens?: number; lastExchange?: string }
+    {
+      lastPromptAt?: number;
+      tokens?: number;
+      lastExchange?: string;
+      /** The two clocks behind the fan-out mark, which are only ever read
+       *  against EACH OTHER — see subagentsWorking. Spelled out here rather
+       *  than left to structural typing: `TranscriptStats` carries them and
+       *  would satisfy the shorter shape silently, so a reader of this
+       *  declaration would conclude the fields are not available when they
+       *  are, and the mark would look like it had no source. */
+      lastRecordAt?: number;
+      sidechainAt?: number;
+    }
   >;
   /** sessionId → the compaction phase to draw, from the in-memory
    *  CompactionTracker (src/compaction.ts). A LOOKUP rather than a map of raw
@@ -631,7 +643,13 @@ function nonEmpty(v: unknown): string | undefined {
 function applyTailStats(
   node: SessionNode,
   stats:
-    | { lastPromptAt?: number; tokens?: number; lastExchange?: string }
+    | {
+        lastPromptAt?: number;
+        tokens?: number;
+        lastExchange?: string;
+        lastRecordAt?: number;
+        sidechainAt?: number;
+      }
     | undefined,
 ): void {
   if (stats === undefined) return;
@@ -650,6 +668,60 @@ function applyTailStats(
   if (typeof exchange === 'string' && exchange.trim() !== '') {
     node.lastExchange = exchange;
   }
+  if (subagentsWorking(node.status, stats)) node.subagents = true;
+}
+
+/**
+ * How far behind the transcript's LAST record a sub-agent line may sit and
+ * still count as "happening now".
+ *
+ * Generous, because it is measuring a gap inside one turn rather than a
+ * timeout: an orchestrating session interleaves its own lines with its agents'
+ * — it reads a result, thinks, dispatches the next one — and a window shorter
+ * than that thinking would blink the mark off and on again through a fan-out
+ * that never stopped. A blinking mark is worse than none.
+ */
+export const SUBAGENT_FRESH_MS = 90_000;
+
+/**
+ * IS WORK FANNING OUT UNDER THIS SESSION RIGHT NOW?
+ *
+ * Two conditions, and both are load-bearing.
+ *
+ * BUSY, because this is a statement about what a session is doing, and a
+ * session that is not doing anything is not doing it with agents. It is also
+ * what makes the mark self-clearing: nothing has to notice a workflow
+ * FINISHING, because the turn ending takes the mark down with it.
+ *
+ * AND THE SIDECHAIN IS RECENT — measured against the transcript's own last
+ * record, never against the wall clock. Sidechain lines do not expire out of a
+ * transcript: every session that has ever dispatched an agent carries them in
+ * its history, so an unqualified "has sidechains" would mark a session forever
+ * on the strength of something it did last week. Comparing two timestamps read
+ * out of the same file also means a machine whose clock disagrees with the
+ * transcript's cannot produce a wrong answer here, which a `Date.now()`
+ * comparison could.
+ *
+ * WHAT IT DELIBERATELY DOES NOT CLAIM. Not how many agents, not which kind,
+ * not a workflow as opposed to a single Task: a transcript tail interleaves
+ * every sidechain into one stream with nothing that reliably separates one
+ * agent's lines from another's, so a count would be a guess presented as a
+ * number. The row says that the work has fanned out, which is the thing the
+ * amber dot could not say and the thing worth knowing.
+ */
+export function subagentsWorking(
+  status: SessionStatus,
+  stats: { lastRecordAt?: number; sidechainAt?: number } | undefined,
+): boolean {
+  if (status !== 'busy' || stats === undefined) return false;
+  const { sidechainAt, lastRecordAt } = stats;
+  if (typeof sidechainAt !== 'number' || !Number.isFinite(sidechainAt)) {
+    return false;
+  }
+  if (typeof lastRecordAt !== 'number' || !Number.isFinite(lastRecordAt)) {
+    return false;
+  }
+  return lastRecordAt - sidechainAt <= SUBAGENT_FRESH_MS;
 }
 
 /**

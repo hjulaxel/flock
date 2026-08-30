@@ -224,6 +224,39 @@ export function canSwitchAccounts(
   return false;
 }
 
+/**
+ * Is there anywhere on this roster a conversation could be HANDED OFF to?
+ *
+ * The exact mirror of `canSwitchAccounts`, and it has to be a separate
+ * question rather than a reuse: a handoff crosses the CLI wall and a switch
+ * refuses to. Gating the handoff entry on `canSwitchAccounts` would hide it on
+ * precisely the roster it exists for — one Claude login plus one Codex login,
+ * which is what this extension seeds by default whenever `~/.codex/auth.json`
+ * exists, and which offers no legal same-CLI move at all.
+ *
+ * So: two host-capable accounts running DIFFERENT clis. Counted the way
+ * `handoffRefusal` decides (`cliOfProfile` + `canHostSession`, its first two
+ * tests) so the menu gate and the picker cannot drift — the drift between
+ * those two is the bug 0.1.7 fixed on the switch entry, and repeating it here
+ * would have been the same bug wearing the other verb's name.
+ *
+ * `hasTranscript`, the refusal's third test, is deliberately NOT counted: it
+ * is a fact about one conversation, not about the roster, and a key read by
+ * every row's `when` cannot ask it. A row whose session has never sent a
+ * message still draws the entry and is refused with "send one message first",
+ * which is the fork rule's wording and the answer that teaches.
+ */
+export function canHandOff(profiles: readonly AccountProfile[]): boolean {
+  const clis = new Set<string>();
+  for (const p of profiles ?? []) {
+    if (!p || p.deleted === true) continue;
+    if (!canHostSession(p)) continue;
+    clis.add(cliOfProfile(p));
+    if (clis.size >= 2) return true;
+  }
+  return false;
+}
+
 /** What `offerSwitch` decided: the accounts to offer, or the one sentence's
  *  worth of reason there are none. */
 export type SwitchOffer =

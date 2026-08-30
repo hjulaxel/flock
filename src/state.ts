@@ -42,14 +42,20 @@ import {
   isProviderId,
   isRoutingChoice,
   isSessionId,
+  DISPATCH_DONE_TTL_MS,
+  isDispatchEntry,
   type AccountProfile,
   type AccountSettings,
   type ChainRecord,
+  type DispatchEntry,
+  type DispatchOutcome,
+  type DispatchRecord,
   type DisposableLike,
   type EditorialRecord,
   type HiddenFolder,
   type HookInstallState,
   type LineageState,
+  type MintedBranchRecord,
   type ProjectRecord,
   type SubprojectRecord,
   type RoutingChoice,
@@ -151,10 +157,12 @@ function emptyState(): LineageState {
     projects: {},
     subprojects: {},
     hiddenFolders: {},
+    mintedBranches: {},
     chains: {},
     workspaces: {},
     accounts: {},
     accountSettings: {},
+    dispatch: {},
   };
 }
 
@@ -408,6 +416,26 @@ function sanitizeAccount(key: string, value: unknown): AccountProfile | null {
   return acc as unknown as AccountProfile;
 }
 
+/** One dispatch-queue record. The BASE entry is validated by the same guard
+ *  the dispatcher trusts (types.isDispatchEntry); the bookkeeping fields are
+ *  checked here. The key must equal the entry's own id — a mismatch means a
+ *  hand edit, and keeping it would file one intent under another's name. */
+function sanitizeDispatch(key: string, value: unknown): DispatchRecord | null {
+  if (!isDispatchEntry(value)) return null;
+  if (value.id !== key) return null;
+  const rec = value as unknown as Record<string, unknown>;
+  if (typeof rec.updatedAt !== 'string' || rec.updatedAt === '') return null;
+  if (
+    rec.done !== undefined &&
+    rec.done !== 'launched' &&
+    rec.done !== 'cancelled'
+  ) {
+    return null;
+  }
+  if (rec.doneAt !== undefined && typeof rec.doneAt !== 'string') return null;
+  return rec as unknown as DispatchRecord;
+}
+
 /** The singleton account settings. Unknown keys survive, the one field we
  *  understand is validated, and a blob that is not an object at all becomes the
  *  empty record rather than being carried as junk. */
@@ -585,6 +613,22 @@ function sanitizeHiddenFolder(key: string, value: unknown): HiddenFolder | null 
       ? value.hiddenAt
       : nowIso();
   return { path, hiddenAt: at };
+}
+
+/** The minted-branch map key: repo pathKey and branch, newline-joined. A ref
+ *  cannot contain a newline (git-check-ref-format forbids ASCII control
+ *  characters), so the two halves cannot collide however they are spelled. */
+export function mintedBranchKey(repoDir: string, branch: string): string {
+  return `${pathKey(repoDir)}\n${branch}`;
+}
+
+function sanitizeMintedBranch(value: unknown): MintedBranchRecord | null {
+  if (!isPlainObject(value)) return null;
+  const repo = isNonEmptyString(value.repo) ? pathKey(value.repo) : '';
+  if (repo === '') return null;
+  if (!isNonEmptyString(value.branch)) return null;
+  const at = isNonEmptyString(value.mintedAt) ? value.mintedAt : nowIso();
+  return { repo, branch: value.branch, mintedAt: at };
 }
 
 function sanitizeWindow(key: string, value: unknown): WindowRecord | null {
@@ -899,6 +943,8 @@ export function migrateState(raw: unknown): LineageState {
       );
     }
   }
+  // v8 -> v9 adds the minted-branch map: purely additive, so there is no
+  // step to run — an older file simply yields an empty map on read.
 
   const out: Record<string, unknown> = { ...working }; // keeps unknown keys
 
@@ -998,6 +1044,21 @@ export function migrateState(raw: unknown): LineageState {
   }
   out.hiddenFolders = hiddenFolders;
 
+  // v8 added the MINTED-BRANCH records. Purely additive: an older file yields
+  // the empty map, and a branch with no record never gets a delete offer —
+  // the conservative direction for missing data, here as everywhere. Re-keyed
+  // from the record's own fields on every load, the way hidden folders are,
+  // so a hand-edited key cannot make two entries disagree about one ref.
+  const mintedBranches: Record<string, MintedBranchRecord> = {};
+  if (isPlainObject(working.mintedBranches)) {
+    for (const [key, value] of Object.entries(working.mintedBranches)) {
+      const rec = sanitizeMintedBranch(value);
+      if (rec) mintedBranches[mintedBranchKey(rec.repo, rec.branch)] = rec;
+      else log('state: dropped unusable minted-branch record', key);
+    }
+  }
+  out.mintedBranches = mintedBranches;
+
   // v3 added the generation chains. Purely additive, exactly like v1 -> v2: an
   // older file simply yields the empty map.
   const chains: Record<string, ChainRecord> = {};
@@ -1046,6 +1107,30 @@ export function migrateState(raw: unknown): LineageState {
   }
   out.accounts = accounts;
   out.accountSettings = sanitizeAccountSettings(working.accountSettings);
+
+  // v8 added the dispatch queue. Additive: an older file yields an empty
+  // queue. A SETTLED entry is the queue's tombstone (see DispatchRecord) and
+  // sweeps on the same clock the account tombstones do.
+  const dispatch: Record<string, DispatchRecord> = {};
+  const dispatchCutoff = Date.now() - DISPATCH_DONE_TTL_MS;
+  if (isPlainObject(working.dispatch)) {
+    for (const [key, value] of Object.entries(working.dispatch)) {
+      const rec = sanitizeDispatch(key, value);
+      if (!rec) {
+        log('state: dropped unusable dispatch record', key);
+        continue;
+      }
+      if (rec.done !== undefined) {
+        const at = Date.parse(rec.doneAt ?? rec.updatedAt);
+        if (Number.isFinite(at) && at < dispatchCutoff) {
+          log('state: swept a settled dispatch entry', key);
+          continue;
+        }
+      }
+      dispatch[key] = rec;
+    }
+  }
+  out.dispatch = dispatch;
 
   const hook = sanitizeHookState(working.hookInstall);
   if (hook) out.hookInstall = hook;
@@ -1176,11 +1261,26 @@ export function mergeStates(
     (f) => f.hiddenAt ?? '',
   );
 
+  // A minted-branch record is the same shape of fact as a hidden folder — a
+  // marker with nothing to merge field-wise — so the merge is the same
+  // per-key newest-wins. A prune only sticks if the other window is not
+  // simultaneously re-minting the ref, which is the intended semantics.
+  out.mintedBranches = newerWins(
+    disk.mintedBranches,
+    mem.mintedBranches,
+    (b) => b.mintedAt ?? '',
+  );
+
   // Chains are append-mostly member SETS, so newest-wins would drop a member
   // the other window observed: the merge is a member UNION, ordered by the
   // newer record first (its view of the order is the fresher one), with the
   // older record's stragglers appended.
   out.chains = mergeChainMaps(disk.chains, mem.chains);
+
+  // A dispatch record is one VALUE whose lifecycle only moves forward
+  // (queued → settled), and a settled record is its own tombstone — so
+  // newest-wins never resurrects a launch. See DispatchRecord.
+  out.dispatch = newerWins(disk.dispatch, mem.dispatch, (d) => d.updatedAt ?? '');
 
   // A workspace snapshot is one VALUE — the layout as last saved — so
   // newest-wins is the whole story.
@@ -1598,6 +1698,56 @@ export class StateStore implements DisposableLike {
     });
   }
 
+  // --------------------------------------------------------------- dispatch
+
+  /** Every dispatch record, settled ones included — copies, no order. The
+   *  dispatcher filters to pending itself; the queue view may want both. */
+  dispatchEntries(): DispatchRecord[] {
+    return Object.values(this.memory.dispatch ?? {}).map((d) => ({ ...d }));
+  }
+
+  /** Park an intent. The entry is validated by the same guard the load path
+   *  trusts, so a queue written here can never be dropped there. Re-queueing
+   *  an existing id is refused: the id becomes the launched session's id, and
+   *  overwriting would let one intent impersonate another. */
+  queueDispatch(entry: DispatchEntry): Promise<void> {
+    if (!isDispatchEntry(entry) || (entry as { done?: unknown }).done !== undefined) {
+      log('state: refusing to queue an invalid dispatch entry');
+      return Promise.resolve();
+    }
+    return this.enqueue((state, stamp) => {
+      if (!isPlainObject(state.dispatch)) state.dispatch = {};
+      if (state.dispatch[entry.id] !== undefined) {
+        log('state: refusing to re-queue dispatch entry', entry.id);
+        return;
+      }
+      state.dispatch[entry.id] = { ...entry, updatedAt: stamp };
+      log('state: queued dispatch entry', entry.id);
+    });
+  }
+
+  /** Settle an entry — launched or cancelled. The record STAYS, as its own
+   *  tombstone (see DispatchRecord), and sweeps after DISPATCH_DONE_TTL_MS on
+   *  the load path. Settling twice or settling an unknown id is a logged
+   *  no-op: both mean another window got there first, which is fine. */
+  settleDispatch(id: string, done: DispatchOutcome): Promise<void> {
+    return this.enqueue((state, stamp) => {
+      const rec = isPlainObject(state.dispatch) ? state.dispatch[id] : undefined;
+      if (rec === undefined) {
+        log('state: cannot settle unknown dispatch entry', id);
+        return;
+      }
+      if (rec.done !== undefined) {
+        log('state: dispatch entry already settled', id, rec.done);
+        return;
+      }
+      rec.done = done;
+      rec.doneAt = stamp;
+      rec.updatedAt = stamp;
+      log('state: dispatch entry', id, done);
+    });
+  }
+
   /**
    * Publish this window's focus handle and prune the windows that are gone.
    * Window records are namespaced by windowId, so another window's merge can
@@ -1889,6 +2039,65 @@ export class StateStore implements DisposableLike {
       if (!isPlainObject(state.hiddenFolders)) state.hiddenFolders = {};
       for (const existing of Object.keys(state.hiddenFolders)) {
         if (pathKey(existing) === key) delete state.hiddenFolders[existing];
+      }
+    });
+  }
+
+  // --------------------------------------------------------- minted branches
+
+  /** Record that Flock created `branch` (`git worktree add -b`). Written once,
+   *  from the verb that ran the add — never from a probe or a poll. */
+  recordMintedBranch(repoDir: string, branch: string): Promise<void> {
+    const repo = pathKey(repoDir);
+    if (repo === '' || branch === '') return Promise.resolve();
+    return this.enqueue((state, stamp) => {
+      if (!isPlainObject(state.mintedBranches)) state.mintedBranches = {};
+      state.mintedBranches[mintedBranchKey(repo, branch)] = {
+        repo,
+        branch,
+        mintedAt: stamp,
+      };
+    });
+  }
+
+  /** Whether Flock created `branch` — what earns the delete OFFER when its
+   *  worktree is removed. Absent means no offer, which is the right reading
+   *  for a ref minted by another tool, by hand, or by a build before v8. */
+  isMintedBranch(repoDir: string, branch: string): boolean {
+    const repo = pathKey(repoDir);
+    if (repo === '' || branch === '') return false;
+    return (
+      this.memory.mintedBranches?.[mintedBranchKey(repo, branch)] !== undefined
+    );
+  }
+
+  /** Drop the record — after the ref is deleted, or found already gone. */
+  forgetMintedBranch(repoDir: string, branch: string): Promise<void> {
+    const repo = pathKey(repoDir);
+    if (repo === '' || branch === '') return Promise.resolve();
+    return this.enqueue((state) => {
+      if (!isPlainObject(state.mintedBranches)) state.mintedBranches = {};
+      delete state.mintedBranches[mintedBranchKey(repo, branch)];
+    });
+  }
+
+  /** Sweep one repository's records against the refs that still exist. Called
+   *  only from a verb that has just READ the branch list anyway (the `+`'s
+   *  auto flow) — never from a timer. A record another window's merge
+   *  resurrects is swept again on the next call, which costs nothing. */
+  pruneMintedBranches(
+    repoDir: string,
+    existing: readonly string[],
+  ): Promise<void> {
+    const repo = pathKey(repoDir);
+    if (repo === '') return Promise.resolve();
+    const live = new Set(existing);
+    return this.enqueue((state) => {
+      if (!isPlainObject(state.mintedBranches)) state.mintedBranches = {};
+      for (const [key, rec] of Object.entries(state.mintedBranches)) {
+        if (rec.repo === repo && !live.has(rec.branch)) {
+          delete state.mintedBranches[key];
+        }
       }
     });
   }

@@ -2,7 +2,7 @@
   "name": "flock",
   "displayName": "Flock for Claude Code",
   "description": "See every Claude Code session you're running as one live tree — who forked from whom, who's working, and who's waiting on you.",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "publisher": "hjulaxel",
   "license": "MIT",
   "repository": {
@@ -318,6 +318,16 @@
         "icon": "$(archive)"
       },
       {
+        "command": "lineage.closeSessions",
+        "title": "Close Selected Sessions",
+        "category": "Flock"
+      },
+      {
+        "command": "lineage.resumeSessions",
+        "title": "Open Selected Sessions",
+        "category": "Flock"
+      },
+      {
         "command": "lineage.deleteSessions",
         "title": "Archive Selected Sessions",
         "category": "Flock",
@@ -546,6 +556,23 @@
         "title": "Move to Account...",
         "category": "Flock",
         "icon": "$(arrow-swap)"
+      },
+      {
+        "command": "lineage.handoffSession",
+        "title": "Continue on Another CLI...",
+        "category": "Flock",
+        "icon": "$(arrow-right)"
+      },
+      {
+        "command": "lineage.queueDispatch",
+        "title": "Queue Session for Dispatch...",
+        "category": "Flock",
+        "icon": "$(watch)"
+      },
+      {
+        "command": "lineage.dispatchQueue",
+        "title": "Dispatch Queue...",
+        "category": "Flock"
       },
       {
         "command": "lineage.hideBranch",
@@ -848,8 +875,18 @@
           "group": "1_actions@4"
         },
         {
+          "command": "lineage.handoffSession",
+          "when": "view == lineageSessions && viewItem =~ /;session;/ && lineage.canHandOff",
+          "group": "1_actions@5"
+        },
+        {
           "command": "lineage.closeSession",
-          "when": "view == lineageSessions && viewItem =~ /;hosted;/",
+          "when": "view == lineageSessions && viewItem =~ /;hosted;/ && !lineage.multiSelect",
+          "group": "2_close@2"
+        },
+        {
+          "command": "lineage.closeSessions",
+          "when": "view == lineageSessions && viewItem =~ /;hosted;/ && lineage.multiSelect",
           "group": "2_close@2"
         },
         {
@@ -875,7 +912,12 @@
         {
           "command": "lineage.resumeSession",
           "group": "1_actions@0",
-          "when": "view == lineageSessions && viewItem =~ /;archived;/"
+          "when": "view == lineageSessions && viewItem =~ /;archived;/ && !lineage.multiSelect"
+        },
+        {
+          "command": "lineage.resumeSessions",
+          "group": "1_actions@0",
+          "when": "view == lineageSessions && viewItem =~ /;archived;/ && lineage.multiSelect"
         },
         {
           "command": "lineage.deleteSession",
@@ -1089,6 +1131,10 @@
           "when": "false"
         },
         {
+          "command": "lineage.closeSessions",
+          "when": "false"
+        },
+        {
           "command": "lineage.closeWithSummary",
           "when": "false"
         },
@@ -1237,7 +1283,12 @@
         },
         {
           "command": "lineage.resumeSession",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;archived;/",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;archived;/ && !lineage.multiSelect",
+          "group": "0_open@0"
+        },
+        {
+          "command": "lineage.resumeSessions",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;archived;/ && lineage.multiSelect",
           "group": "0_open@0"
         },
         {
@@ -1291,8 +1342,18 @@
           "group": "1_actions@4"
         },
         {
+          "command": "lineage.handoffSession",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;session;/ && lineage.canHandOff",
+          "group": "1_actions@5"
+        },
+        {
           "command": "lineage.closeSession",
-          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;hosted;/",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;hosted;/ && !lineage.multiSelect",
+          "group": "2_close@2"
+        },
+        {
+          "command": "lineage.closeSessions",
+          "when": "webviewId == 'lineageSessionsInline' && viewItem =~ /;hosted;/ && lineage.multiSelect",
           "group": "2_close@2"
         },
         {
@@ -1617,6 +1678,11 @@
           ],
           "description": "Run Flock-launched Claude sessions inside a private tmux server (`tmux -L lineage`). This upgrades workspace parking from close-and-resume to detach-and-reattach: switching away hides a session's tab while the conversation KEEPS RUNNING — busy ones too — and switching back reattaches it instantly, live state intact. Requires tmux on PATH; without it (and always on Windows) Flock falls back to close-and-resume. Sessions started outside Flock are never wrapped either way."
         },
+        "lineage.exitToShell": {
+          "type": "boolean",
+          "default": true,
+          "description": "When you `/exit` a session Flock launched, leave a shell prompt in the tab instead of closing it — same tab, same directory — so you can start straight back up with `claude --resume`. Exiting that shell closes the tab as usual. Requires `lineage.tmux` and tmux on PATH: a bare session IS its terminal process, so there is nothing left to put a shell into. The setting is written into Flock's tmux conf, which tmux reads when its server starts, so a change applies to sessions started after every current one has ended."
+        },
         "lineage.terminalLocation": {
           "type": "string",
           "default": "editor",
@@ -1864,6 +1930,11 @@
           "default": "inline",
           "markdownDescription": "How the Sessions view is drawn. `inline` renames on the row like the Explorer; `native` uses the built-in tree widget. Takes effect on the next window reload."
         },
+        "lineage.runningBadge": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Show the number of **running** sessions as a badge on the Flock icon in the activity bar.\n\nOff by default. The count is real and worth being able to see \u2014 \"no running process without a visible row\" is only an invariant you can trust if the processes are counted somewhere \u2014 but it changes every few seconds, and a number moving in the corner of your eye with nothing to do about it is not the same as information. The tree already says everything it does, in rows you can click."
+        },
         "lineage.showTokens": {
           "type": "boolean",
           "default": false,
@@ -1880,7 +1951,7 @@
             "type": "string"
           },
           "default": [],
-          "markdownDescription": "Read only by `#lineage.git.branchDisplay#`'s `color` mode; `inline` tints nothing. Colours for the branch chips, in order — index 0 is the first branch under a project (usually `main`). Each entry is either a hex colour (`#7aa2f7`) or a VS Code theme colour id (`charts.blue`, `terminal.ansiCyan`). A short list fills the rest from the built-in muted palette; anything that is not one of those two shapes is ignored. Empty = the built-in palette, which softens the theme's own `charts.*` colours toward the editor foreground."
+          "markdownDescription": "Read only by `#lineage.git.branchDisplay#`'s `color` mode; `inline` tints nothing. Colours for the branch chips, in order — index 0 is the first branch under a project (usually `main`). Each entry is either a hex colour (`#7aa2f7`) or a VS Code theme colour id (`charts.blue`, `terminal.ansiCyan`). A short list fills the rest from the built-in muted palette; anything that is not one of those two shapes is ignored. Empty = the built-in palette, which is the **Source Control Graph's own branch colours** (`scmGraph.foreground1`\u20135), softened toward the editor foreground so the chips do not out-shout the status dots \u2014 so a branch reads as the same colour here and in the SCM view, and a theme that restyles the graph restyles these too."
         },
         "lineage.git.pullRequests": {
           "type": "boolean",
@@ -1925,8 +1996,13 @@
         },
         "lineage.git.newSessionInWorktree": {
           "type": "boolean",
-          "default": false,
-          "markdownDescription": "Make the **`+` on a project or subproject row** cut a **new worktree** first and start the session there, instead of starting it in the directory as it is.\n\nOne agent per checkout is the reason most people turn the branch feature on at all, and with this off that workflow costs a right-click every time. It changes the **button's default and nothing else**: both verbs — **New Session** and **New Session in New Worktree…** — are on the row's right-click whichever way this points, and the row's `+` says in its tooltip which one it is about to run.\n\nThe worktree half still confirms and still quotes the exact `git worktree add` before running it, and it uses `#lineage.git.worktreePath#` to decide where. Needs `#lineage.git.branches#` on."
+          "default": true,
+          "markdownDescription": "The **`+` on a project row** cuts a **new worktree** first and starts the session there \u2014 one root session, one checkout, which is what keeps two sessions from ever switching branch under each other. The branch is minted from the session's name (`flock 3` \u2192 `flock-3`, with `#lineage.git.branchPrefix#` in front when set) and recorded as Flock's own, which is what later earns it the delete offer in **Remove Worktree**.\n\nNo dialog: `git worktree add -b` creates a directory and a fresh ref and touches nothing that exists \u2014 the status-bar receipt names both, and a project without a readable repository falls back to a plain session in the directory.\n\nTurn it **off** to make `+` start sessions in the project directory as before; **New Worktree\u2026** stays on the right-click either way, and `#lineage.git.worktreePath#` decides where the checkout goes. Does not need `#lineage.git.branches#` on."
+        },
+        "lineage.git.branchPrefix": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "What minted branch names start with \u2014 `axel/` puts every branch the `+` creates under your own namespace, the Claude Squad convention (`axel/flock-3`). Applies only where Flock names a branch itself; names typed into **New Worktree\u2026** are yours and get no prefix. Slashes make hierarchy; anything a ref cannot carry is replaced by `-`. Blank (the default) contributes nothing."
         },
         "lineage.preview.directoryModel": {
           "type": "boolean",

@@ -4,6 +4,260 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8] — 2026-08-30
+
+### Added
+
+- **Continue on Another CLI…** — a conversation carries on in a different
+  provider's session. NOT a resume, and the UI never calls it one: a Codex home
+  holds no Claude transcript, so there is nothing there to resume. What it does
+  is brief a new session on the other CLI to read the transcript — a readable
+  file on this disk — and carry on from it, with a real lineage edge back to
+  where it came from. `switchRefusal` was right to refuse the move and wrong
+  only in what the refusal had been rounded up to: "cannot resume" is not
+  "cannot continue". Move to Account… still owns every same-CLI move; the two
+  verbs never overlap, and each is drawn only on the roster it can act on.
+
+- **Queue Session for Dispatch…** and **Dispatch Queue…** — an intent to start
+  a session, held until an account can actually take it. When every account's
+  five-hour window is spent, the answer used to be a refusal with a good reason
+  and nowhere for "run this when something frees up" to live; you set an alarm,
+  or you forgot. The `resetsAt` already sitting in every usage snapshot names
+  the exact moment that changes, and now something reads it. A settled entry is
+  the queue's tombstone — no merge, reload or sweep can turn one back into a
+  pending launch, because a resurrected entry is a double launch.
+
+- **Remove Worktree decides the branch's fate, out loud.** A ref the `+`
+  minted whose every commit is on the main branch earns a second button —
+  **Remove and Delete Branch**, both commands quoted. Everything else keeps
+  the ref and the dialog says why. The delete is `git branch -d`, never `-D`:
+  git re-checks merged-ness at the moment of deletion, so a stale probe can
+  cost a refused button, never commits. Which refs Flock minted is recorded in
+  state (schema v8, additive) — refs minted by other tools are never offered.
+- **Deleting the last session in a minted worktree offers the cleanup.** One
+  non-modal toast after the Undo window: Clean Up… routes into Remove
+  Worktree, same dialogs, no shortcut. Delete only — a closed session still
+  needs its directory to resume.
+- **`shared ×2`, the shared-floor token.** A session whose checkout hosts two
+  or more root sessions says so on its branch line, in amber, with the hover
+  spelling out why it matters and the way out. Quiet below two.
+- **`lineage.git.branchPrefix`** — what minted branch names start with
+  (`axel/` → `axel/flock-3`, the Claude Squad convention). Blank by default.
+
+- **`/exit` leaves you at a shell instead of closing the tab —
+  `lineage.exitToShell`, on by default.** A session's tab holds exactly one
+  process, so exiting used to take the tab with it. That is the wrong ending for
+  the commonest reason to exit at all: you wanted to start again — a new MCP
+  server to pick up, an edited setting, a fresh context — and instead of a prompt
+  to type `claude --resume` at, the tab vanished and you had to go find the row
+  again. Now the same tab holds a shell prompt, in the same directory, with the
+  conversation still in the scrollback above it. Exiting *that* shell closes the
+  tab exactly as `/exit` used to, so nothing becomes harder to get rid of.
+  Requires tmux and is inert without it: a session on the fallback tier **is**
+  its terminal process, so there is nothing left to put a shell into. The
+  behaviour lives in Flock's generated tmux config, which tmux reads when its
+  server starts — so a flip applies to sessions started after every current one
+  has ended. Reported by [@sidhson](https://github.com/sidhson) in
+  [#7](https://github.com/hjulaxel/flock/issues/7).
+
+- **A session says when its work has fanned out.** A workflow, a Task,
+  sub-agents of any kind: while one is running, the row carries a small
+  **run-all** mark beside its name. The dot could never say this — from outside
+  a session, nine agents working under it and one thinking about a typo are the
+  same word, `busy`, and so the same amber dot.
+  It costs nothing to know. The sidebar already reads a bounded tail of every
+  live session's transcript on every tick, and already inspects `isSidechain`
+  twice in that same loop for the opposite reason (a sub-agent's words are not
+  the conversation's); this is one more assignment inside it. The freshness
+  rule compares two timestamps read out of the *same file* rather than against
+  the wall clock, so a machine whose clock disagrees with its transcripts
+  cannot invent a fan-out or hide one.
+  It is a **mark, not a fifth dot colour**, and that is the whole design
+  decision: the dot column's value is that it holds four meanings a reader has
+  learnt, and a fifth would be paid for by all four. It claims only that the
+  work fanned out — not how many agents, or which kind, because a transcript
+  tail interleaves every sidechain into one stream and a count would be a guess
+  presented as a number. It goes out with the turn that raised it. The native
+  tree draws no mark and says the same thing in the hover.
+- **Close Selected Sessions**, the plural of Close Session — the third command
+  pair on this shape, after Archive and Open. Unlike Archive it asks nothing,
+  which is the singular verb's rule kept rather than an exception made: closing
+  leaves every row where it is, one click from resuming at its last saved turn,
+  so five closes are five clicks from undone for exactly the reason one is one.
+  Sessions running somewhere Flock cannot reach are counted and named in one
+  line instead of raising the singular verb's dialog once per row.
+- **Open Selected Sessions**, the plural of Open Session Here. Select several
+  closed rows — shift-click, ctrl-click — and open all of them in one gesture,
+  in the order you selected them. It is a separate command from the singular
+  one, with `when` clauses that are complements of `lineage.multiSelect`, the
+  same shape Archive Selected Sessions already uses: a contributed command has
+  one title, so the singular entry on one of five highlighted rows would open
+  one row and read as though it had opened five.
+  Unlike the singular, **it asks first**, because the cost is the thing that
+  scales: each session it opens is a `claude` process and a terminal tab of its
+  own, several hundred megabytes apiece, and "I meant the two at the bottom" is
+  one gesture away from eleven selected rows. The rows it *cannot* open are
+  sorted out before anything launches and named in one sentence rather than in
+  a stack of modal warnings — a session that is still running (reopening it
+  would put a second `claude` on a transcript the first is writing) and a ghost
+  ancestor (no transcript to reopen at all) are counted separately, because
+  they leave you different things to do. A running session this window already
+  has a tab for is simply revealed, which is what "open it" honestly means for
+  a row that is already open.
+  It refuses outright while `lineage.soloSession` is on, and says why: solo
+  mode parks every other session tab each time one opens, so opening five would
+  open five and leave you the last one.
+
+### Changed
+
+- **The `+` cuts a worktree per root session, and it is the default.** One
+  session, one checkout: the branch is minted from the session's name
+  (`flock 3` → `flock-3`, behind the new `lineage.git.branchPrefix` when set),
+  `git worktree add -b` runs with no dialog — it creates a directory and a
+  fresh ref and touches nothing that exists — and the status bar names both.
+  No two sessions can switch branches under each other again. Turn
+  `lineage.git.newSessionInWorktree` off for the old in-place `+`; forks stay
+  in their root's checkout either way, and a project with no repository falls
+  back to a plain session. Works without `lineage.git.branches`.
+
+- **The branch chips now wear Source Control's own branch colours.** They used
+  to be a pick of the theme's `charts.*`, which was the right instinct — the
+  theme author's own set of mutually distinguishable hues — aimed at the wrong
+  set. VS Code already has branch colours: the five the built-in Source Control
+  Graph paints its lanes and ref labels with (`scmGraph.foreground1`–`5`). A
+  branch is one thing, and it should not be one colour in the Flock sidebar and
+  a different one in the SCM view eight pixels to its left. Because these are
+  theme colour *ids* rather than values, a theme that restyles the graph now
+  restyles these chips with it, for free.
+  The palette is five entries rather than six for the same reason — a sixth
+  would be a colour the SCM view never shows — and each entry falls back to the
+  nearest hue of the `charts.*` set it replaced, so an editor without the graph
+  degrades to the old look rather than to six identical greys. They are still
+  softened toward the editor foreground, and that is the one place the two
+  views are meant to differ: the graph paints on an empty canvas, while these
+  sit in a column beside the status dots. `lineage.branchColors` still
+  overrides any slot, raw.
+- **The running-session count is no longer drawn on the activity-bar icon.**
+  It is now `lineage.runningBadge`, off by default. The count is real and the
+  argument for it stands — "no running process without a visible row" is only
+  an invariant you can trust if the processes are counted somewhere — but a
+  number that changes every few seconds on the icon you navigate by is motion
+  in the corner of your eye with nothing to do about it, and the tree already
+  says everything the number does, in rows you can click. Nothing was removed:
+  the count, its predicate and its tests are all still there, one setting away.
+
+### Fixed
+
+- **The handoff verb would never have appeared.** Its menu gate read
+  `lineage.manyAccounts`, a context key 0.1.7 renamed to
+  `lineage.canSwitchAccount` when it fixed the same class of bug on Move to
+  Account… — and renamed precisely because the old name had stopped matching
+  what it counted. Pointing handoff at the surviving key would have been the
+  worse repair of the two: that key asks whether two accounts run the SAME cli,
+  and a handoff is the case where they do not, so the entry would have been
+  hidden on exactly the roster it exists for — one Claude login plus one Codex
+  login, which is what Flock seeds by default. It now has a gate of its own,
+  `lineage.canHandOff`, built from `handoffRefusal`'s own tests so the menu and
+  the picker behind it cannot drift the way the switch entry's pair did. The
+  entry is drawn on both the native tree and the inline sidebar, which is the
+  view most installs actually use.
+
+- **A respawned pane could read as "exited to a shell" forever.** The stamp
+  `/exit` leaves behind is a PANE option, so it outlives the process it
+  described — and Move to Account… restarts a conversation's process in place.
+  A move onto a wrap that had ever exited left the stamp standing, and the
+  resume verb, which believes that answer, would then kill and relaunch a
+  session that was running perfectly well. Clearing it is now part of the
+  respawn's own command list rather than the caller's job, so it is covered by
+  the test that pins the order of those commands.
+
+- **Resume no longer risks handing you a shell and calling it a conversation.**
+  Groundwork for the above, and a correctness fix in its own right: the detach
+  tier's "is this session still live" probe asked only whether a tmux session
+  existed under the wrap's name, which a pane sitting at a shell prompt answers
+  just as well as a running CLI. The probe now reads what is *in* the pane, so an
+  exited wrap is treated as gone — **Resume** takes the ordinary `--resume` path
+  with every guard on it, and a fresh launch ends a stale wrap rather than
+  attaching to it and never starting the CLI at all.
+
+- **You could not paste a name into a rename box.** Right-clicking the box to
+  reach Paste destroyed it: the row underneath handles `contextmenu` by taking
+  the keyboard back — so that a menu never acts on rows the tree does not
+  visibly own — and that blurred the input, blur *commits* the edit (Explorer
+  parity), and committing re-renders the row. The box was gone before the menu
+  it was opening could appear. A right-click inside the box is no longer a
+  right-click on the row; the box declares its own `data-vscode-context` so the
+  workbench offers Cut/Copy/Paste instead of the row's verbs (every row sets
+  `preventDefaultContextMenuItems`, which is right for a row and exactly wrong
+  for a text input inside one); and opening a menu no longer counts as clicking
+  away, since the workbench draws it outside the webview's iframe and the blur
+  it causes would otherwise still commit.
+- **The notifications list would not close when you clicked away from it.** It
+  was opened with `ignoreFocusOut`, so Escape was the only way out. That flag
+  earns its keep on a picker holding *work* — something typed, a set of rows
+  ticked, a step with more steps behind it — where a stray click costs you the
+  lot. The bell holds nothing: it is a list of what finished, and re-opening it
+  is one click on the same bell. Removed there and from four more pure
+  browse-and-pick menus (Chats, Closed Projects, Put Away, Switch Workspace);
+  deliberately kept everywhere something typed or ticked would be lost.
+- **The badge said eight when four sessions were running.** Both sidebars — the
+  native tree and the inline webview — are registered at once, and only their
+  `when` clauses decide which one the workbench draws. But a `view.badge` write
+  does not care whether its view is on screen, and the workbench *sums* every
+  badge in a container onto the one icon and joins their tooltips with a comma,
+  so the hover read "4 sessions running, 4 sessions running". Each view now
+  says which surface it is and is answered only when it is the one
+  `lineage.viewStyle` is currently drawing. (With `lineage.runningBadge` off by
+  default, the ordinary way to see this fixed is to turn the badge back on.)
+- **The purple compaction ring could stick for ten minutes, hiding the row's
+  real state behind it.** Every signal that a compaction had *finished* names
+  the successor generation's id, while the `PreCompact` that started it named
+  the generation before — so they only meet over the chain index, which is
+  rebuilt on the poll while the hooks arrive the instant the CLI writes them. A
+  hook that beat its own chain fact found no open ring; and if the turn then
+  carried on — which is exactly what auto-compact does, firing mid-turn and
+  handing straight back to the model — the roster never produced a busy→quiet
+  edge to try again with. The ring stood, outranking the amber the row should
+  have been drawing, until it went stale ten minutes later.
+  There is now a completion signal that cannot lose that race: **a generation
+  that has acquired a successor has finished compacting**, because minting the
+  successor is what a compaction *does*. No hook, no roster edge — just the
+  chain, read on the rebuild that has already built it, which closes the window
+  to one poll interval. (`SessionStart source: 'compact'` is no longer treated
+  as a finish at all: it is the most exact statement that a compaction ended,
+  but at that instant the roster still reports the compaction's own `busy`, so
+  it could not answer the second question — whether anything is behind it.)
+- **A compaction left a purple dot that was still standing when the next turn
+  ended.** "Compacted, and nothing behind it" is what the filled dot means, and
+  it is false the moment a turn is running behind it — which is the ordinary
+  shape of auto-compact. The dot rested mid-turn survived the rest of that turn
+  and up to an hour past it, so at the one moment the row genuinely had
+  "finished, and waiting on you" to say in red, it said "compacted" in purple
+  instead. A compaction that ends while the conversation is still working now
+  rests no dot at all. The `/compact` you type at an idle session — the case
+  the purple dot exists for — is unchanged.
+- **A compaction was announced as a finished turn.** The end of one tripped the
+  same busy→quiet detector a real turn does, so Flock toasted *"X finished its
+  turn"* about a conversation nobody had asked anything of, and left the row
+  marked unseen-done — which is the red attention dot, hidden under the purple
+  while that lasted and surfacing when it expired. A session lighting up for
+  attention an hour after a compaction it did on its own. The detector now
+  recognises its own compaction and stays quiet.
+- **Some projects carried a notification dot with nothing lit underneath it.**
+  The dot that rolls up onto a project row was asking a different question from
+  the dots on the rows below it: it spelled out its own version of "unseen-done"
+  by hand, and the hand-written copy disagreed with `statusTone` in three
+  directions at once. A session that was **over** — archived, exited, or an
+  inferred ancestor — draws no dot of its own but can still carry `unseen` from
+  the turn it finished before it ended, so a project lit red above a subtree in
+  which every row was closed and grey, and no click could clear it because there
+  was no lit row to open. A session that had gone **busy** again rolled red up
+  over its own amber. And a **waiting** session with unseen tracking off lit its
+  own dot while its project stayed dark. Both surfaces — the inline sidebar and
+  the native tree, which each had their own copy — now ask `statusTone`, the
+  same function the row's own dot is drawn from, so a parent can no longer
+  contradict its child.
+
 ## [0.1.7] — 2026-08-30
 
 ### Added

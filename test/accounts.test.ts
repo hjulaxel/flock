@@ -25,6 +25,7 @@ import {
   CODEX_HOME_ENV,
   accountEnvKeys,
   canHostSession,
+  canHandOff,
   canSwitchAccounts,
   offerSwitch,
   cliOfProfile,
@@ -49,6 +50,8 @@ import {
   uniqueAccountId,
   validateAccountLabel,
 } from '../src/accounts';
+import { handoffRefusal } from '../src/handoff';
+
 import type { AccountProfile } from '../src/types';
 
 // ------------------------------------------------------------------ helpers
@@ -827,6 +830,55 @@ describe('accounts: canSwitchAccounts', () => {
     expect(
       canSwitchAccounts([claudeDefault, acct({ id: 'gone', deleted: true })]),
     ).toBe(false);
+  });
+});
+
+describe('accounts: canHandOff', () => {
+  const acct = (p: Partial<AccountProfile>): AccountProfile =>
+    ({ id: 'a', provider: 'claude', label: 'A', ...p }) as AccountProfile;
+
+  const claudeDefault = acct({ id: 'claude-default' });
+  const codexDefault = acct({ id: 'codex-default', provider: 'codex' });
+
+  it('is the MIRROR of canSwitchAccounts, not a copy of it', () => {
+    // The one case that matters, and the reason this is a second key rather
+    // than a reuse of the first: the default roster on a machine with a Codex
+    // login offers no same-CLI move and is exactly where a handoff belongs.
+    // Gating the handoff entry on canSwitchAccounts would have hidden the verb
+    // on the only roster that needs it.
+    const roster = [claudeDefault, codexDefault];
+    expect(canSwitchAccounts(roster)).toBe(false);
+    expect(canHandOff(roster)).toBe(true);
+  });
+
+  it('does not count two accounts that run the same CLI', () => {
+    expect(canHandOff([claudeDefault, acct({ id: 'work' })])).toBe(false);
+    // `generic` is the API-key profile: it runs the Claude binary, so pairing
+    // it with a Claude login is a switch, never a handoff.
+    expect(
+      canHandOff([claudeDefault, acct({ id: 'key', provider: 'generic' })]),
+    ).toBe(false);
+  });
+
+  it('needs TWO — one CLI is what you are on, not what you move to', () => {
+    expect(canHandOff([claudeDefault])).toBe(false);
+    expect(canHandOff([codexDefault])).toBe(false);
+    expect(canHandOff([])).toBe(false);
+  });
+
+  it('never counts a deleted account', () => {
+    expect(
+      canHandOff([claudeDefault, acct({ id: 'codex-default', provider: 'codex', deleted: true })]),
+    ).toBe(false);
+  });
+
+  it('agrees with handoffRefusal on the roster it reports', () => {
+    // The gate and the picker are built from the same two tests, which is the
+    // property that broke on the switch entry in 0.1.6 and is asserted here so
+    // it cannot break again on this one.
+    const roster = [claudeDefault, codexDefault];
+    expect(canHandOff(roster)).toBe(true);
+    expect(handoffRefusal(claudeDefault, codexDefault, true)).toBeNull();
   });
 });
 

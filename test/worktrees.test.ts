@@ -28,17 +28,24 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   DEFAULT_WORKTREE_PATH_PATTERN,
+  branchDeleteArgv,
   describeGitCommand,
   isCheckedOut,
   isExistingWorktree,
   localBranchArgv,
   parseLocalBranches,
+  parseRevListCount,
+  planBranchFate,
   planWorktreeRemoval,
+  readAheadCount,
   readLocalBranches,
+  revListCountArgv,
+  runBranchDelete,
   runWorktreeAdd,
   runWorktreeRemove,
   sessionsInWorktree,
   slugifyBranch,
+  suggestBranchName,
   worktreeAddArgv,
   worktreePathFor,
   worktreeRemoveArgv,
@@ -557,5 +564,141 @@ describe('running the commands', () => {
       async (_f: string, _a: string[], _cwd: string, _t: number) => ok('main\nfeat/x\n'),
     );
     expect(await readLocalBranches('/c/app', { run })).toEqual(['main', 'feat/x']);
+  });
+});
+
+describe('suggestBranchName', () => {
+  it('mints the branch from the session title', () => {
+    expect(suggestBranchName({ title: 'flock 3', taken: [] })).toBe('flock-3');
+  });
+
+  it('keeps the prefix hierarchy and slugs its segments', () => {
+    expect(
+      suggestBranchName({ prefix: 'axel/', title: 'flock 3', taken: [] }),
+    ).toBe('axel/flock-3');
+    // Case preserved, separator normalised — the same promises slugifyBranch
+    // makes about the title.
+    expect(
+      suggestBranchName({ prefix: 'Axel Häg/', title: 'x', taken: [] }),
+    ).toBe('Axel-Hag/x');
+  });
+
+  it('lets a prefix that cleans away contribute nothing', () => {
+    expect(suggestBranchName({ prefix: '///', title: 'x', taken: [] })).toBe('x');
+  });
+
+  it('bumps past taken names rather than steering into a refusal', () => {
+    expect(suggestBranchName({ title: 'flock 3', taken: ['flock-3'] })).toBe(
+      'flock-3-2',
+    );
+    expect(
+      suggestBranchName({ title: 'flock 3', taken: ['flock-3', 'flock-3-2'] }),
+    ).toBe('flock-3-3');
+  });
+
+  it('refuses a title with nothing usable in it', () => {
+    expect(suggestBranchName({ title: '///', taken: [] })).toBe('');
+  });
+
+  it('refuses when the bumps run out', () => {
+    const taken = ['x', ...Array.from({ length: 98 }, (_, i) => `x-${i + 2}`)];
+    expect(suggestBranchName({ title: 'x', taken })).toBe('');
+  });
+});
+
+describe('planBranchFate', () => {
+  const base = { branch: 'axel/x', mainName: 'main', primary: false };
+
+  it('keeps a branch Flock did not mint', () => {
+    const fate = planBranchFate({ ...base, minted: false, aheadOfMain: 0 });
+    expect(fate.offerDelete).toBe(false);
+    expect(fate.sentence).toContain('is kept');
+  });
+
+  it('keeps a minted branch with commits main does not have, and counts them', () => {
+    const fate = planBranchFate({ ...base, minted: true, aheadOfMain: 3 });
+    expect(fate.offerDelete).toBe(false);
+    expect(fate.sentence).toContain('3 commits');
+  });
+
+  it('speaks singular for one commit', () => {
+    expect(
+      planBranchFate({ ...base, minted: true, aheadOfMain: 1 }).sentence,
+    ).toContain('1 commit on it is');
+  });
+
+  it('keeps the branch when the probe never answered', () => {
+    // Undefined is the conservative direction, same as a missing status in
+    // planWorktreeRemoval: a failed read must never widen the offer.
+    expect(
+      planBranchFate({ ...base, minted: true, aheadOfMain: undefined })
+        .offerDelete,
+    ).toBe(false);
+  });
+
+  it('offers deletion only for a minted, fully-merged branch', () => {
+    const fate = planBranchFate({ ...base, minted: true, aheadOfMain: 0 });
+    expect(fate.offerDelete).toBe(true);
+    expect(fate.sentence).toContain('everything on it is on main');
+  });
+
+  it('never offers on the primary worktree, whatever else is true', () => {
+    expect(
+      planBranchFate({ ...base, primary: true, minted: true, aheadOfMain: 0 })
+        .offerDelete,
+    ).toBe(false);
+  });
+});
+
+describe('branch delete and the merged probe', () => {
+  const okResult = (output = ''): GitCommandResult => ({ ok: true, output });
+
+  it('always says -d, never -D', () => {
+    // Lowercase -d is git's own gate on unmerged work; the argv is asserted
+    // exactly for the same reason worktreeRemoveArgv's is.
+    expect(branchDeleteArgv('axel/x')).toEqual(['branch', '-d', '--', 'axel/x']);
+  });
+
+  it('asks rev-list for the exact range, closed off from paths', () => {
+    expect(revListCountArgv('main', 'axel/x')).toEqual([
+      'rev-list',
+      '--count',
+      'main..axel/x',
+      '--',
+    ]);
+  });
+
+  it('parses a count and refuses everything else', () => {
+    expect(parseRevListCount('0\n')).toBe(0);
+    expect(parseRevListCount(' 42 ')).toBe(42);
+    expect(parseRevListCount('')).toBeUndefined();
+    expect(parseRevListCount('fatal: bad revision')).toBeUndefined();
+    expect(parseRevListCount(undefined)).toBeUndefined();
+  });
+
+  it('runs the delete in the repository it was asked about', async () => {
+    const run = vi.fn(
+      async (_f: string, _a: string[], _cwd: string, _t: number) => okResult(),
+    );
+    await runBranchDelete({ repoDir: '/c/app', branch: 'axel/x' }, { run });
+    expect(run.mock.calls[0][1]).toEqual(['branch', '-d', '--', 'axel/x']);
+    expect(run.mock.calls[0][2]).toBe('/c/app');
+  });
+
+  it('reads the ahead count and folds every failure to undefined', async () => {
+    const run = vi.fn(async () => okResult('2\n'));
+    expect(await readAheadCount('/c/app', 'main', 'axel/x', { run })).toBe(2);
+    const failing = vi.fn(async () => ({ ok: false, output: 'boom' }));
+    expect(
+      await readAheadCount('/c/app', 'main', 'axel/x', { run: failing }),
+    ).toBeUndefined();
+    const throwing = vi.fn(async () => {
+      throw new Error('nope');
+    });
+    expect(
+      await readAheadCount('/c/app', 'main', 'axel/x', { run: throwing }),
+    ).toBeUndefined();
+    expect(await readAheadCount('', 'main', 'x')).toBeUndefined();
+    expect(await readAheadCount('/c/app', '', 'x')).toBeUndefined();
   });
 });

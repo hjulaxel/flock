@@ -88,7 +88,7 @@ describe('scaffold: the shared types contract', () => {
     // (src/state.ts); a bump on its own stamps an old-shaped file as the new
     // version without materialising the maps that version promises, and the
     // reader then finds them missing on a file it believes is current.
-    expect(STATE_SCHEMA_VERSION).toBe(8);
+    expect(STATE_SCHEMA_VERSION).toBe(9);
   });
 
   it('declares every contributed command id under the lineage. prefix', () => {
@@ -101,7 +101,7 @@ describe('scaffold: the shared types contract', () => {
     //
     // Bump it in the same commit as the verb, and check the new id reaches a
     // menu: a command nobody can invoke is not a feature.
-    expect(ids).toHaveLength(93);
+    expect(ids).toHaveLength(98);
     // Duplicate values would make one of them unreachable — the later key wins
     // at registration and the earlier verb's menu entry fires the wrong flow.
     expect(new Set(ids).size).toBe(ids.length);
@@ -332,6 +332,10 @@ describe('scaffold: the shared types contract', () => {
       'chat.svg',
       'add.svg',
       'bell-slash.svg',
+      // The fan-out mark: a session whose freshest transcript line was written
+      // by a sub-agent. Missing, it is an unmarked row that looks exactly like
+      // one with nothing to say.
+      'run-all.svg',
       // The mark that leads a branch, in each of the states branchStateIcon
       // names. A missing one here is a branch line with a gap where its state
       // should be, on the rows that have the most to say.

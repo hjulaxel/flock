@@ -109,10 +109,12 @@ export const CLOSED_DOT = '○';
  *  dots, the bell and `lineage.hasUnseen` all still carry it, and
  *  `attentionCountOf` stays live and tested.
  *
- *  Flip to `false` to clear the badge — both surfaces (native tree and inline
- *  webview) read this at the one line where they write `view.badge`, and both
- *  write `undefined` while it is off, so the badge clears rather than
- *  freezing at its last value. */
+ *  THE BUILD-TIME CEILING, not the switch. `lineage.runningBadge` is the
+ *  switch and it is OFF by default; this constant is what would take the
+ *  feature out of both surfaces entirely. Flip it to `false` and neither
+ *  surface writes a badge whatever the setting says — both read it at the one
+ *  line where they write `view.badge`, and both write `undefined` while it is
+ *  off, so the badge clears rather than freezing at its last value. */
 export const RUNNING_BADGE_ENABLED = true;
 export const CONTEXT_HOOKS_INSTALLED = 'lineage.hooksInstalled';
 /** True while any rendered session is done-and-not-looked-at. Drives the bell
@@ -170,6 +172,16 @@ export const CONTEXT_MULTI_SELECT = 'lineage.multiSelect';
  *  while meaning "two accounts one conversation could move between" would have
  *  been the next person's bug, so the name changed with the meaning. */
 export const CONTEXT_CAN_SWITCH_ACCOUNT = 'lineage.canSwitchAccount';
+/** Gates "Continue on Another CLI…" on the session row.
+ *
+ *  Separate from `CONTEXT_CAN_SWITCH_ACCOUNT` because it is the opposite
+ *  question: that key asks whether two accounts run the SAME cli, this one
+ *  whether two run DIFFERENT ones. The default roster — one Claude login plus
+ *  a Codex one — answers no to the first and yes to the second, which is the
+ *  whole reason the handoff verb exists. Counted by `canHandOff`, which is
+ *  built from `handoffRefusal`'s own tests so the gate and the picker cannot
+ *  drift apart. */
+export const CONTEXT_CAN_HAND_OFF = 'lineage.canHandOff';
 /** Gates the project header view inside the BUILT-IN Explorer container.
  *
  *  NOT simply "this window is a Flock workspace". It is "this window has
@@ -225,8 +237,16 @@ export const CONTEXT_MODE = 'lineage.mode';
  *  records left running are ended by the activation-time tmux reconcile
  *  (extension.ts), which needs no record-side name — the tmux session name
  *  encodes the session id.
+ *
+ *  v9 adds the MINTED-BRANCH records — which refs Flock itself created via
+ *  `git worktree add -b`. Purely additive: an older file yields the empty map,
+ *  and a branch with no record simply never gets a delete offer. It is v9 and
+ *  not v8 because v8 shipped in 0.1.7 meaning something else; a version number
+ *  that is already in the field describes what that build wrote, and reusing
+ *  it would tell the next reader's ladder that a 0.1.7 file already holds a
+ *  map it has never heard of.
  */
-export const STATE_SCHEMA_VERSION = 8;
+export const STATE_SCHEMA_VERSION = 9;
 
 /** The first schema version written by a build in which branch rows are OFF by
  *  default. 0.1.1 and earlier drew a row per checkout unconditionally and wrote
@@ -484,6 +504,19 @@ export interface HiddenFolder {
   hiddenAt: string; // ISO; merge key
 }
 
+/** A branch Flock itself created (`git worktree add -b` — the `+`'s auto
+ *  flow, or New Worktree…'s new-branch half). The record is what earns the
+ *  ref a delete OFFER when its worktree is removed; the field's rule: you
+ *  only delete what you minted. Keyed by state.mintedBranchKey(repo, branch)
+ *  — refs cannot contain a newline, which is what makes that key
+ *  unambiguous. */
+export interface MintedBranchRecord {
+  /** pathKey of the repository's MAIN worktree. */
+  repo: string;
+  branch: string;
+  mintedAt: string; // ISO; merge key
+}
+
 export const MAX_PROJECT_NAME_LEN = 60;
 
 /**
@@ -609,6 +642,103 @@ export function isRoutingChoice(v: unknown): v is RoutingChoice {
   }
   return false;
 }
+
+// ----------------------------------------------------------------- dispatch
+
+/** Caps for the dispatch queue's JSON boundary. The prompt ceiling is
+ *  MAX_AGENT_PROMPT_CHARS's figure for MAX_AGENT_PROMPT_CHARS's reason: an
+ *  opening turn is an argv, and argvs have budgets. */
+export const MAX_DISPATCH_PROMPT_CHARS = 4000;
+export const MAX_DISPATCH_TITLE_CHARS = 120;
+
+/**
+ * An intent to start a session, parked until an account is worth it.
+ *
+ * Someone wanted a session — in this directory, maybe with this opening
+ * prompt, on this account or provider or wherever routing likes — at a moment
+ * when starting it was not worth it. The dispatcher (src/dispatch.ts) notices
+ * the moment that changes and acts once, in arrival order. Declared here
+ * rather than in dispatch.ts because the queue PERSISTS (see LineageState),
+ * and state.ts reads shapes from this file alone.
+ */
+export interface DispatchEntry {
+  /** Caller-minted uuid. The queue's key, and later the launch's session id —
+   *  minted once so a crash between decide and launch cannot double-start. */
+  id: string;
+  /** Epoch ms when the entry was queued. FIFO is arrival order, and arrival
+   *  order is a promise to the person who queued first. */
+  createdAt: number;
+  /** Where the session opens. Absent inherits the launcher's default, the
+   *  same as every other launch. */
+  cwd?: string;
+  /** Opening turn, optional — "start looking at the failing tests" is the
+   *  reason to queue a session rather than an alarm clock. */
+  prompt?: string;
+  /** Row title, optional; the launcher's default naming applies otherwise. */
+  title?: string;
+  /** Where this may run: the same RoutingChoice a project pin uses, because
+   *  "which account" must not grow a second grammar. Absent = auto. */
+  routing?: RoutingChoice;
+  /** Epoch ms before which the entry holds regardless of usage — "after
+   *  lunch" composed with "when a window is open", not instead of it. */
+  notBefore?: number;
+}
+
+/** JSON boundary guard: the queue persists in state.json, which is
+ *  hand-editable and survives older builds, so entries arrive as `unknown`.
+ *  Same posture as isRoutingChoice, which it delegates the routing field to. */
+export function isDispatchEntry(v: unknown): v is DispatchEntry {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return false;
+  const e = v as Record<string, unknown>;
+  if (typeof e.id !== 'string' || e.id.length === 0) return false;
+  if (typeof e.createdAt !== 'number' || !Number.isFinite(e.createdAt)) {
+    return false;
+  }
+  if (e.cwd !== undefined && typeof e.cwd !== 'string') return false;
+  if (
+    e.prompt !== undefined &&
+    (typeof e.prompt !== 'string' ||
+      e.prompt.length > MAX_DISPATCH_PROMPT_CHARS)
+  ) {
+    return false;
+  }
+  if (
+    e.title !== undefined &&
+    (typeof e.title !== 'string' || e.title.length > MAX_DISPATCH_TITLE_CHARS)
+  ) {
+    return false;
+  }
+  if (e.routing !== undefined && !isRoutingChoice(e.routing)) return false;
+  if (
+    e.notBefore !== undefined &&
+    (typeof e.notBefore !== 'number' || !Number.isFinite(e.notBefore))
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/** How a queue entry ended. There is no 'failed': a launch that did not stick
+ *  leaves the entry queued for the next decision, because the failure modes
+ *  (binary missing, tmux hiccup) are all things a retry can outlive. */
+export type DispatchOutcome = 'launched' | 'cancelled';
+
+/** What state.json actually holds: the entry, plus the bookkeeping that lets
+ *  two windows merge the queue newest-wins without resurrecting anything. A
+ *  SETTLED entry (done set) is the queue's tombstone — dropping the key
+ *  instead would let the other window's copy re-launch it, which for this
+ *  record type is the single worst outcome. */
+export interface DispatchRecord extends DispatchEntry {
+  /** ISO stamp of the last edit — the newest-wins clock. */
+  updatedAt: string;
+  done?: DispatchOutcome;
+  /** ISO stamp when `done` was set; the sweep clock. */
+  doneAt?: string;
+}
+
+/** As the other tombstone TTLs, and for the same reason: comfortably longer
+ *  than any window could still hold the live record in memory. */
+export const DISPATCH_DONE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 
 /** One rate-limit window as the provider reports it. */
 export interface UsageWindow {
@@ -864,6 +994,22 @@ export const COMMANDS = {
    *  `renameSession`'s quick input when the inline view is not available. */
   renameSessionInline: 'lineage.renameSessionInline',
   closeSession: 'lineage.closeSession',
+  /**
+   * The multi-selection's own Close — the third pair on this shape, after
+   * `deleteSession`/`deleteSessions` and `resumeSession`/`resumeSessions`, and
+   * for the same reason: a contributed command has ONE title, so the singular
+   * entry on one of five highlighted rows would close one and read as though
+   * it had closed five. The `when` clauses are complements of
+   * `lineage.multiSelect`.
+   *
+   * Unlike Archive, it asks NOTHING, which is the singular verb's rule kept
+   * rather than an exception made: a close leaves every row in the tree and
+   * one click from resuming, so it is recoverable N times over for the same
+   * reason it is recoverable once. Archive confirms because archive HIDES the
+   * rows, and being "more of a hassle than just closing it" is the point of
+   * that verb.
+   */
+  closeSessions: 'lineage.closeSessions',
   closeWithSummary: 'lineage.closeWithSummary',
   /** End the session to level 2 IMMEDIATELY, skipping every wait: a grace
    *  countdown is cut short (the detached process is killed, tree and all), a
@@ -916,6 +1062,19 @@ export const COMMANDS = {
   installAgentVerbs: 'lineage.installAgentVerbs',
   removeAgentVerbs: 'lineage.removeAgentVerbs',
   resumeSession: 'lineage.resumeSession',
+  /**
+   * The multi-selection's own Open, the same pair-of-commands shape as
+   * `deleteSession` / `deleteSessions`: a contributed command has ONE title,
+   * so "Open Session Here" on one of five highlighted rows would open one and
+   * read as though it had opened five. The two `when` clauses are complements
+   * of `lineage.multiSelect`, so exactly one is ever on a row.
+   *
+   * It is the plural of a verb that COSTS SOMETHING, which is why it asks
+   * first: every session it opens is a `claude` process and a terminal tab of
+   * its own, and five of those is most of a laptop's memory. See
+   * resumeSessionsFlow.
+   */
+  resumeSessions: 'lineage.resumeSessions',
   // Projects and visibility
   newProject: 'lineage.newProject',
   configureProject: 'lineage.configureProject',
@@ -1279,6 +1438,20 @@ export const COMMANDS = {
    *  resume it there. On a SESSION row, not an account row — the thing being
    *  moved is the conversation, and the account is the destination. */
   switchSessionAccount: 'lineage.switchSessionAccount',
+  /** CONTINUE a conversation on the other CLI — the door through the wall
+   *  `switchSessionAccount` refuses at (`different-cli`): a NEW session on the
+   *  target account whose opening turn is a brief pointing at the parent's
+   *  transcript. Not a resume, and no surface may call it one; the lineage
+   *  edge is minted the way a fork's is. See src/handoff.ts. */
+  handoffSession: 'lineage.handoffSession',
+  /** Park an intent to start a session until an account is worth launching on
+   *  (src/dispatch.ts): the verb asks where it may run and, optionally, what
+   *  its first turn is; the dispatcher does the waiting and the launching. */
+  queueDispatch: 'lineage.queueDispatch',
+  /** The parked intents, each with its holding reason and a cancel. A
+   *  QuickPick rather than a tree section, deliberately, for v1 — see
+   *  docs/proposal-dispatch-and-handoff.md. */
+  dispatchQueue: 'lineage.dispatchQueue',
 } as const;
 export type CommandId = (typeof COMMANDS)[keyof typeof COMMANDS];
 
@@ -1297,6 +1470,10 @@ export const CONFIG_KEYS = {
   /** Detach tier: 'auto' (wrap launches in the private tmux server when tmux
    *  is on PATH) or 'off'. */
   tmux: 'tmux',
+  /** `/exit` leaves a shell in the tab instead of closing it. Rides on the
+   *  detach tier — a wrapped pane is the only one something can be put back
+   *  into — so it is silently inert when `tmux` is off or tmux is absent. */
+  exitToShell: 'exitToShell',
   groupByFolder: 'groupByFolder',
   showGhosts: 'showGhosts',
   showArchived: 'showArchived',
@@ -1480,8 +1657,23 @@ export const CONFIG_KEYS = {
    * quotes the exact `git worktree add`.
    */
   gitNewSessionInWorktree: 'git.newSessionInWorktree',
+  gitBranchPrefix: 'git.branchPrefix',
   /** Override the branch palette used by `branchDisplay: color`. Empty = the
    *  built-in muted one. Read only in that mode: inline mode tints nothing. */
+  /** `lineage.runningBadge` — draw the running-session COUNT on the activity
+   *  bar icon. OFF by default.
+   *
+   *  The count is real and the argument for it stands (see
+   *  RUNNING_BADGE_ENABLED above: "no running process without a visible row"
+   *  is only an invariant you can trust if the processes are counted
+   *  somewhere). What it is not is something to look at all day. A number that
+   *  changes every few seconds on the icon you navigate by is motion in the
+   *  corner of the eye with nothing to do about it, and the tree itself
+   *  already says everything the number does, in rows you can click.
+   *
+   *  So it stays built, tested and one setting away, and the default is
+   *  quiet. */
+  runningBadge: 'runningBadge',
   branchColors: 'branchColors',
   /** Nest a project's sessions UNDER the branch they are running on, instead
    *  of listing the branches and then the sessions as two flat blocks. OFF by
@@ -1889,6 +2081,19 @@ export interface SessionNode {
    *  every node the tail sweep covered, because the fact is the same for a
    *  live session; only the hover ever shows it. */
   lastExchange?: string;
+  /** WORK IS FANNING OUT UNDER THIS SESSION RIGHT NOW: it is busy, and the
+   *  freshest thing in its transcript is a sub-agent's line — a workflow, a
+   *  Task, an agent of any kind. See lineage.subagentsWorking for the two
+   *  conditions and for what this deliberately does not claim (how many, or
+   *  which kind).
+   *
+   *  A ROW FACT WITH NO DOT OF ITS OWN. The session is already amber, and
+   *  correctly so: it IS running. What the dot cannot say is that nine things
+   *  are running rather than one, and that is a mark beside the name (see
+   *  viewmodel's `marks`), not a fifth colour in a column whose whole value is
+   *  that it has four. Absent means "not right now", never "never" — the flag
+   *  goes out with the turn that raised it. */
+  subagents?: true;
   /** Epoch ms of `record.graceUntil` — this session is running DETACHED under
    *  the detach grace (tab closed, process alive so re-attach is instant), and
    *  this is when the sweep will end it. The one sanctioned detached-running
@@ -2930,6 +3135,10 @@ export interface LineageState {
   subprojects?: Record<string, SubprojectRecord>;
   /** v2. Keyed by normalized directory path. */
   hiddenFolders: Record<string, HiddenFolder>;
+  /** v8. Keyed by state.mintedBranchKey(repo, branch) — the refs Flock
+   *  created. Optional for the reason `subprojects` is: hand-built literals
+   *  predate it, and migrateState materialises the map on every load. */
+  mintedBranches?: Record<string, MintedBranchRecord>;
   /** v3. Keyed by chain root id. */
   chains: Record<string, ChainRecord>;
   /** v4. Keyed by project id. */
@@ -2953,6 +3162,11 @@ export interface LineageState {
    *  files did the user consent to", and giving that idea two types would
    *  invite them to drift. */
   verbsInstall?: HookInstallState;
+  /** v8. The dispatch queue, keyed by entry id — intents to start a session,
+   *  parked until an account is worth it (src/dispatch.ts). Optional for the
+   *  reason `accounts` is: hand-built literals predate it, and migrateState
+   *  materialises the map on every load. */
+  dispatch?: Record<string, DispatchRecord>;
 }
 
 // ------------------------------------------------------------------ hooks
@@ -3230,6 +3444,27 @@ export interface TreeDeps {
    *  page (see sanitizeBranchColor — the value lands in an inline style block).
    *  Absent or empty means the built-in muted palette. */
   branchColors?(): readonly string[];
+  /**
+   * `lineage.runningBadge`, asked BY the surface that wants to draw it: should
+   * THIS view put the running count on the activity-bar container?
+   *
+   * THE ARGUMENT IS `surface`, AND IT IS THE BUG FIX. Both views are
+   * registered unconditionally and only their `when` clauses decide which one
+   * the workbench shows (see the note above registerTree's call site) — but a
+   * `view.badge` write does not care whether its view is on screen, and the
+   * workbench SUMS every badge in a container onto the one icon and joins
+   * their tooltips with a comma. Two surfaces each writing the same honest
+   * count is what produced a `8` on a machine with four sessions, reading
+   * "4 sessions running, 4 sessions running" in the hover.
+   *
+   * So the count is not the thing that is conditional here — the SURFACE is.
+   * Each view names itself and is answered no unless it is the one
+   * `lineage.viewStyle` is currently drawing.
+   *
+   * Absent (an older wiring, a unit double) means no badge, which is also the
+   * setting's default.
+   */
+  runningBadge?(surface: 'native' | 'inline'): boolean;
   // ---- branch grouping ------------------------------------------------
   /** `lineage.git.branches` — the branch block's master switch, and the ONE
    *  gate every branch-shaped row passes through. Absent reads as OFF, which is
@@ -3358,7 +3593,33 @@ export interface TerminalDeps {
    *  survives for revival — touching its tree would kill a live session).
    *  Injectable for tests; absent = the real probe. */
   isPidAlive?(pid: number): boolean;
+  /** Detach tier: what the private server holds under this wrap name —
+   *  `gone`, `running`, or `exited` (the CLI left and exit-to-shell put a
+   *  shell in its pane). The launch path needs the third answer specifically:
+   *  its `new-session -A` ATTACHES to an existing session, so launching under
+   *  the name of a wrap sitting at a shell prompt would adopt the shell and
+   *  never start claude at all. Absent (the unit doubles) = the pre-fix
+   *  behaviour, which is correct on any wiring that cannot leave a shell
+   *  behind in the first place. */
+  tmuxWrapState?(name: string): Promise<WrapState>;
 }
+
+/**
+ * Detach tier (src/tmux.ts). What the private server holds under a wrap's name.
+ *
+ *   * `gone`    — no such session (never launched, killed, or died while
+ *                 parked). The everyday answer for a closed conversation.
+ *   * `running` — one pane, a live process in it. A conversation to ATTACH to.
+ *   * `exited`  — one pane, and exit-to-shell has fired in it: the CLI is gone
+ *                 and the user is sitting at a shell prompt.
+ *
+ * `exited` is the state that has to be told apart from `running`, and the
+ * reason this type exists. Both answer a pane pid, so every probe written as
+ * "does a pane pid come back" reads a shell as a live conversation — and the
+ * resume verb, built on exactly that probe, would attach the user to their own
+ * shell and record the session as reopened.
+ */
+export type WrapState = 'gone' | 'running' | 'exited';
 
 /** Detach tier (src/tmux.ts). How to wrap a session launch in the private
  *  tmux server: the resolved binary, plus the conf that makes tmux invisible
@@ -3546,6 +3807,23 @@ export interface CommandDeps {
   getForest(): SessionForest;
   refresh(): void;
   hasTranscript(sessionId: string): boolean;
+  /** The transcript's path, for the one verb that has to NAME the file rather
+   *  than test for it: the handoff brief (src/handoff.ts). Claude layout only,
+   *  like `hasTranscript` — a Codex parent answers null and the verb says
+   *  "not yet" honestly. Optional so every unit double stays valid. */
+  transcriptPathOf?(sessionId: string): string | null;
+  /** The dispatch queue, when the wiring provides one — extension.ts owns the
+   *  store and the clock (dispatchHost.ts); the verbs only park, list and
+   *  cancel. Optional like `accounts`: a build without it has no queue verbs,
+   *  exactly as before the queue existed. */
+  dispatch?: {
+    /** Every record, settled ones included — the picker filters itself. */
+    entries(): DispatchRecord[];
+    queue(entry: DispatchEntry): Promise<void>;
+    cancel(id: string): Promise<void>;
+    /** Something changed — decide again. */
+    poke(): void;
+  };
   /** The background job holding this id, when one does. A native `/fork`
    *  dispatches such a job: live process, no pty any editor owns. Optional —
    *  a wiring without it (and every unit double) simply never offers to adopt
@@ -3923,6 +4201,36 @@ export interface CommandDeps {
     path: string;
     force: boolean;
   }): Promise<GitCommandResult>;
+  /** `git branch -d`. Runs ONLY after a successful worktree removal, from the
+   *  delete offer planBranchFate put on the dialog. Lowercase `-d` always:
+   *  git's own merged-only gate stays in front of every deletion, so a wrong
+   *  probe can cost a dialog, never commits. */
+  deleteBranch?(opts: {
+    repoDir: string;
+    branch: string;
+  }): Promise<GitCommandResult>;
+  /** `git rev-list --count main..branch` — the merged probe behind the delete
+   *  offer. Undefined for every kind of failure, which planBranchFate reads
+   *  as "keep the branch". */
+  aheadCount?(
+    repoDir: string,
+    mainName: string,
+    branch: string,
+  ): Promise<number | undefined>;
+  /** `lineage.git.branchPrefix` — what minted branch names start with.
+   *  Absent or '' contributes nothing. */
+  branchPrefix?(): string;
+  /** The minted-branch ledger (state.ts): which refs Flock itself created.
+   *  All four optional, all four absent from the unit doubles — and absent
+   *  means nothing is minted, so nothing is offered for deletion, which is
+   *  the same conservative shape every other missing member takes. */
+  isMintedBranch?(repoDir: string, branch: string): boolean;
+  recordMintedBranch?(repoDir: string, branch: string): Promise<void>;
+  forgetMintedBranch?(repoDir: string, branch: string): Promise<void>;
+  pruneMintedBranches?(
+    repoDir: string,
+    existing: readonly string[],
+  ): Promise<void>;
   /** Drop every cached git answer for the repository at `dir` and repaint. For
    *  the two verbs that KNOW the answer changed, so the new row appears at once
    *  instead of at the end of a TTL. */
@@ -3994,6 +4302,13 @@ export interface CommandDeps {
   markSeen(sessionId: string): Promise<void>;
   /** `lineage.notifications.enabled` (the global default). */
   notificationsEnabled(): boolean;
+  /** `lineage.soloSession` — "one session tab at a time". Read by exactly one
+   *  verb, `resumeSessions`, which the mode turns into a contradiction: solo
+   *  parks every other session tab each time one opens, so opening five in a
+   *  row would open five and leave one. Optional, and an absent dep reads as
+   *  FALSE — every unit double, and any wiring that has not been taught it,
+   *  opens the batch exactly as a wiring with the setting off would. */
+  soloSessionEnabled?(): boolean;
   // ---- telling a parent what its branches did ------------------------------
   /**
    * `lineage.fork.notifyParent`. Optional, and an absent dep reads as FALSE —

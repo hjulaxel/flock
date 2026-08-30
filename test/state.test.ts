@@ -16,12 +16,15 @@ import {
   mergeChainRecords,
   mergeStates,
   migrateState,
+  mintedBranchKey,
   nowIso,
 } from '../src/state';
 import {
+  DISPATCH_DONE_TTL_MS,
   EXTENSION_ID,
   STATE_SCHEMA_VERSION,
   type ChainRecord,
+  type DispatchRecord,
   type EditorialRecord,
   type LineageState,
   type WindowRecord,
@@ -92,6 +95,8 @@ function state(partial: Partial<LineageState> = {}): LineageState {
     // on an empty object.
     subprojects: {},
     hiddenFolders: {},
+    // v8, on the same terms.
+    mintedBranches: {},
     chains: {},
     workspaces: {},
     // `migrateState` materialises both on every load, so a state
@@ -99,6 +104,8 @@ function state(partial: Partial<LineageState> = {}): LineageState {
     // migrated blob fails on two empty objects.
     accounts: {},
     accountSettings: {},
+    // v8, materialised the same way.
+    dispatch: {},
     ...partial,
   };
 }
@@ -2573,5 +2580,231 @@ describe('state: named subprojects', () => {
       'From A',
       'From B',
     ]);
+  });
+});
+
+// -------------------------------------------------------------------------
+// Dispatch queue (v8). The property that matters more than any accessor:
+// a settled record is the queue's TOMBSTONE, so no merge, reload or sweep may
+// ever turn it back into a pending entry — a resurrected entry is a double
+// launch.
+
+describe('state: dispatch queue', () => {
+  it('queues, lists copies, and refuses a re-queue of the same id', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+
+    await store.queueDispatch({ id: S1, createdAt: 5, prompt: 'go' });
+    const listed = store.dispatchEntries();
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.prompt).toBe('go');
+    expect(listed[0]?.updatedAt).not.toBe('');
+
+    // The id becomes the launched session's id; overwriting would let one
+    // intent impersonate another.
+    await store.queueDispatch({ id: S1, createdAt: 9, prompt: 'other' });
+    expect(store.dispatchEntries()).toHaveLength(1);
+    expect(store.dispatchEntries()[0]?.prompt).toBe('go');
+
+    // Copies out, never the store's memory.
+    listed[0]!.prompt = 'mutated';
+    expect(store.dispatchEntries()[0]?.prompt).toBe('go');
+  });
+
+  it('refuses invalid entries by the same guard the load path trusts', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.queueDispatch({ id: '', createdAt: 5 });
+    await store.queueDispatch({ id: S2, createdAt: Number.NaN });
+    expect(store.dispatchEntries()).toHaveLength(0);
+  });
+
+  it('settles once; a second settle and an unknown id are no-ops', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.queueDispatch({ id: S1, createdAt: 5 });
+
+    await store.settleDispatch(S1, 'launched');
+    let rec = store.dispatchEntries()[0];
+    expect(rec?.done).toBe('launched');
+    expect(rec?.doneAt).toBeTruthy();
+
+    await store.settleDispatch(S1, 'cancelled'); // another window lost the race
+    rec = store.dispatchEntries()[0];
+    expect(rec?.done).toBe('launched');
+
+    await store.settleDispatch(S2, 'cancelled'); // unknown — logged, harmless
+    expect(store.dispatchEntries()).toHaveLength(1);
+  });
+
+  it('round-trips through disk, and a settle in one store survives a write from another', async () => {
+    const dir = tempDir();
+    const a = makeStore(dir);
+    await a.load();
+    await a.queueDispatch({ id: S1, createdAt: 5 });
+
+    const b = makeStore(dir);
+    await b.load();
+    expect(b.dispatchEntries()).toHaveLength(1);
+
+    // A settles; B, still holding the pending copy in memory, writes
+    // something unrelated. B's read-merge-write must keep A's settle —
+    // newest-wins on updatedAt is what makes the tombstone stick.
+    await a.settleDispatch(S1, 'launched');
+    await b.queueDispatch({ id: S2, createdAt: 6 });
+
+    const blob = readFile(dir) as LineageState;
+    expect(blob.dispatch?.[S1]?.done).toBe('launched');
+    expect(blob.dispatch?.[S2]?.done).toBeUndefined();
+  });
+
+  it('sweeps settled records after the TTL and keeps fresh ones', async () => {
+    const dir = tempDir();
+    const old = new Date(Date.now() - DISPATCH_DONE_TTL_MS - 60_000).toISOString();
+    const fresh = nowIso();
+    const rec = (id: string, doneAt: string): DispatchRecord => ({
+      id,
+      createdAt: 5,
+      updatedAt: doneAt,
+      done: 'cancelled',
+      doneAt,
+    });
+    seedStateFile(dir, state({ dispatch: { [S1]: rec(S1, old), [S2]: rec(S2, fresh) } }));
+
+    const store = makeStore(dir);
+    await store.load();
+    expect(store.dispatchEntries().map((d) => d.id)).toEqual([S2]);
+  });
+
+  it('drops hand-edited junk on load: key/id mismatch, bad done, missing stamp', async () => {
+    const dir = tempDir();
+    seedStateFile(
+      dir,
+      state({
+        dispatch: {
+          // key names S1, record claims S2 — filed under another's name.
+          [S1]: { id: S2, createdAt: 5, updatedAt: nowIso() },
+          [S2]: { id: S2, createdAt: 5, updatedAt: nowIso(), done: 'exploded' },
+          [S3]: { id: S3, createdAt: 5 },
+          [S4]: { id: S4, createdAt: 5, updatedAt: nowIso() },
+        } as unknown as Record<string, DispatchRecord>,
+      }),
+    );
+    const store = makeStore(dir);
+    await store.load();
+    expect(store.dispatchEntries().map((d) => d.id)).toEqual([S4]);
+  });
+});
+
+describe('minted branches', () => {
+  const REPO = '/tmp/app';
+
+  it('round-trips a record and answers isMintedBranch', async () => {
+    const dir = tempDir();
+    const store = makeStore(dir);
+    await store.load();
+    await store.recordMintedBranch(REPO, 'axel/flock-3');
+    expect(store.isMintedBranch(REPO, 'axel/flock-3')).toBe(true);
+    expect(store.isMintedBranch(REPO, 'axel/other')).toBe(false);
+    expect(store.isMintedBranch('/tmp/elsewhere', 'axel/flock-3')).toBe(false);
+
+    // A second store over the same file sees the record — the whole point of
+    // persisting it: the delete offer must survive the window that minted it.
+    const again = makeStore(dir);
+    await again.load();
+    expect(again.isMintedBranch(REPO, 'axel/flock-3')).toBe(true);
+  });
+
+  it('compares the repo by pathKey, not by spelling', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.recordMintedBranch('/tmp/app/', 'x');
+    expect(store.isMintedBranch('/tmp/app', 'x')).toBe(true);
+  });
+
+  it('forgets a record, and pruning sweeps only the named repository', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.recordMintedBranch(REPO, 'gone');
+    await store.recordMintedBranch(REPO, 'kept');
+    await store.recordMintedBranch('/tmp/other', 'gone');
+
+    await store.forgetMintedBranch(REPO, 'gone');
+    expect(store.isMintedBranch(REPO, 'gone')).toBe(false);
+    expect(store.isMintedBranch(REPO, 'kept')).toBe(true);
+
+    // Prune against the refs that still exist: 'kept' is not among them, so
+    // its record goes; the other repository's record is not this sweep's to
+    // touch.
+    await store.pruneMintedBranches(REPO, ['main']);
+    expect(store.isMintedBranch(REPO, 'kept')).toBe(false);
+    expect(store.isMintedBranch('/tmp/other', 'gone')).toBe(true);
+  });
+
+  it('refuses empty inputs rather than minting a record for nothing', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.recordMintedBranch('', 'x');
+    await store.recordMintedBranch(REPO, '');
+    // So complete a refusal that no state.json is even written: a refused
+    // mutator never enqueues, and load() alone writes nothing.
+    expect(fs.existsSync(path.join(store.storageDir, 'state.json'))).toBe(false);
+    expect(store.isMintedBranch('', 'x')).toBe(false);
+    expect(store.isMintedBranch(REPO, '')).toBe(false);
+  });
+
+  it('sanitizes a seeded file: re-keys good records, drops the unusable', async () => {
+    const dir = tempDir();
+    seedStateFile(dir, {
+      version: 8,
+      records: {},
+      windows: {},
+      mintedBranches: {
+        'hand-edited-key': { repo: '/tmp/app/', branch: 'x', mintedAt: nowIso() },
+        'no-branch': { repo: '/tmp/app', mintedAt: nowIso() },
+        'no-repo': { branch: 'y', mintedAt: nowIso() },
+        'not-an-object': 'nope',
+      },
+    });
+    const store = makeStore(dir);
+    await store.load();
+    // The good record answers under its canonical key, whatever key it sat
+    // under on disk.
+    expect(store.isMintedBranch('/tmp/app', 'x')).toBe(true);
+    expect(store.isMintedBranch('/tmp/app', 'y')).toBe(false);
+  });
+
+  it('merges as a union across two windows', () => {
+    const a = migrateState({
+      version: 8,
+      records: {},
+      windows: {},
+      mintedBranches: {
+        [mintedBranchKey('/tmp/app', 'from-a')]: {
+          repo: '/tmp/app',
+          branch: 'from-a',
+          mintedAt: nowIso(),
+        },
+      },
+    });
+    const b = migrateState({
+      version: 8,
+      records: {},
+      windows: {},
+      mintedBranches: {
+        [mintedBranchKey('/tmp/app', 'from-b')]: {
+          repo: '/tmp/app',
+          branch: 'from-b',
+          mintedAt: nowIso(),
+        },
+      },
+    });
+    const merged = mergeStates(a, b);
+    expect(Object.keys(merged.mintedBranches ?? {}).sort()).toEqual(
+      [
+        mintedBranchKey('/tmp/app', 'from-a'),
+        mintedBranchKey('/tmp/app', 'from-b'),
+      ].sort(),
+    );
   });
 });

@@ -135,10 +135,25 @@ is the one thing here you could not have discovered by looking at your sidebar.
 
 ### Making and unmaking worktrees
 
-Everything in this section needs `lineage.git.branches`, which is **off** — see
+**The `+` cuts a worktree per session, by default.** With
+`lineage.git.newSessionInWorktree` on — and it ships on — the `+` on a project
+row starts every root session in a fresh checkout of its own: the branch is
+minted from the session's name (`flock 3` → `flock-3`, behind
+`lineage.git.branchPrefix` when one is set), `git worktree add -b` runs with no
+dialog — it creates a directory and a fresh ref and touches nothing that exists
+— and the status bar names both. One session, one checkout is what makes "all
+my sessions switched branch at once" impossible: no two roots share a floor, so
+nobody's `git checkout` moves anybody else. Forks stay in their root's
+checkout, a project with no readable repository falls back to a plain session,
+and the minted ref is recorded as Flock's own — which is what the removal verb
+reads back later. This is the one part of the worktree feature that does NOT
+need `lineage.git.branches`.
+
+Everything else in this section needs `lineage.git.branches`, which is **off**
+— see
 [Branches and worktrees are parked](../README.md#branches-and-worktrees-are-parked).
-With it off, none of these verbs is in a menu or in the palette, and nothing here
-can run.
+With it off, none of these verbs is in a menu or in the palette, and nothing
+here can run.
 
 **New Worktree…** is on a branch row and in the command palette. It offers the repository's local branches — minus any that
 already have a checkout, which `git worktree add` refuses — plus **New branch…**
@@ -156,8 +171,24 @@ inside the one you are removing (Flock cannot stop an agent mid-turn, and will n
 pretend the removal is unrelated to it). And it asks a **second** time when the
 checkout is dirty: `git worktree remove` refuses a worktree with modified or
 untracked files, so getting past that needs `--force`, and `--force` deletes them.
-The branch itself always survives — only the checkout goes away — so a worktree
-you remove can be added back.
+
+**The branch's fate is the dialog's second question**, and the rule is the
+field's: you only delete what you minted. A ref the `+` created whose every
+commit is already on the main branch gets a second button — **Remove and Delete
+Branch**, with both commands quoted in the dialog. Every other case keeps the
+ref, and the dialog says which case this was: a branch Flock did not create is
+never offered ("the branch itself is kept"), and a minted one with commits main
+does not have says how many and keeps it. The delete is `git branch -d` —
+lowercase, never `-D` — so git re-checks merged-ness at the moment of deletion:
+a stale probe can cost a refused button, never commits.
+
+**Deleting the last session in a minted worktree offers the cleanup.** One
+non-modal toast, after the delete's Undo window has passed: `"axel/x" has no
+sessions left. Clean up its worktree?` — and **Clean Up…** routes into Remove
+Worktree, same dialogs, no shortcut. Delete only, never close: a closed session
+is one click from resuming, and resuming needs its directory. A gesture that
+empties several worktrees at once offers nothing, and the verb stays on the
+branch row's right-click.
 
 ### The two display modes
 
@@ -237,6 +268,14 @@ It is a `detailed`-level mark: `standard` reaches nothing but the local status
 cache, and a green arrow in it would be drawn from a source that level does not
 otherwise consult. The native tree draws the same five marks in the same five
 colours on its branch rows, from the same table.
+
+**`shared ×2`, in amber, is the shared-floor token**: two or more root sessions
+of the project are running in this one checkout, which is exactly the state
+where somebody's `git checkout` changes the branch under everybody standing
+there. Roots only — a fork staying in its root's worktree is the designed
+shape, not the hazard — and it draws only at two and up, so the quiet default
+costs no width. The row's hover says it in sentences, in both display modes,
+and ends with the way out: New Worktree… gives each its own.
 
 The **`*` for uncommitted work sits against the branch name**, not out with the
 arrows. `↑4 ↓3` is where this checkout stands against its *upstream*; the star is
@@ -554,13 +593,20 @@ The red dot is an **unread marker**. It appears when a session completes a turn
 focus that session. Red rather than green because it is the one row asking for
 you — green is what everything else on screen uses to mean "nothing to do here".
 It rolls up onto the project row, so a collapsed project still shows there is
-something to come back to. The numeric badge on the view container counts
-something else: how many sessions are **running on this machine** — open tabs
-plus any session still running under a detach grace, in every window — so a number you did not expect is
-a process you did not know about. When a running session's row would be
-filtered out of this window (another folder's work in folder mode, a closed
-project's), it renders in a collapsed **Running elsewhere** group at the bottom
-instead: the badge never counts a process you cannot see and act on.
+something to come back to — and the roll-up asks exactly the question the rows
+below it do, so a project dot always has a lit row under it: a session that is
+closed, or busy again, or muted, lights nothing.
+
+The numeric badge on the view container counts something else: how many
+sessions are **running on this machine** — open tabs plus any session still
+running under a detach grace, in every window — so a number you did not expect
+is a process you did not know about. It is **off by default**
+(`lineage.runningBadge`), because a number that changes every few seconds on the
+icon you navigate by is motion with nothing to do about it. With it on, a
+running session whose row would be filtered out of this window (another
+folder's work in folder mode, a closed project's) renders in a collapsed
+**Running elsewhere** group at the bottom instead: the badge never counts a
+process you cannot see and act on.
 
 A **purple** mark is not an alarm at all: it is a compaction — a hollow ring
 while one runs, a filled dot once it has settled with nothing behind it. It
@@ -582,6 +628,17 @@ session. That is per *finish*, not per session: the next turn that session
 completes puts it straight back. Silencing a session for good is Mute, which is
 a different verb on purpose — a one-click × that could permanently hide a
 session's notifications would be the most destructive control in the popup.
+
+A session whose work has **fanned out** — a workflow, a Task, sub-agents of any
+kind — carries a small **run-all** mark beside its name while that is
+happening. The dot cannot say it: from the outside a session with nine agents
+under it and one thinking about a typo are the same word, `busy`, so they were
+the same amber dot. The mark is read from the transcript the sidebar already
+reads on every tick (an `isSidechain` line no more than 90 seconds behind the
+session's own last line), which is why it costs nothing and why it says only
+that the work fanned out — not how many agents, or which kind. It goes out with
+the turn that raised it. The native tree draws no mark and says the same thing
+in the hover.
 
 A silenced session never dots, never rings the bell, never toasts, and carries a
 **struck-through bell** beside its name, so a session that has gone quiet
@@ -853,6 +910,33 @@ what. Set `lineage.tmux` to `off` to force the fallback anywhere else.
 
 Flock says this once, in a notice you can dismiss, if it finds you without tmux
 while workspaces are on. It never asks twice.
+
+### `/exit` leaves you at a shell
+
+A session's tab holds exactly one process, so `/exit` used to take the tab with
+it. That is the wrong ending for the commonest reason to exit at all: you wanted
+to start again — a new MCP server to pick up, an edited setting, a fresh
+context — and instead of a prompt to type `claude --resume` at, the tab vanished
+and you had to go find the row again.
+
+With `lineage.exitToShell` on (the default), exiting a session Flock launched
+leaves **a shell prompt in the same tab, in the same directory**. Nothing else
+moves: same tab, same position, same scrollback above the prompt. Start back up
+however you like — `claude --resume`, `claude -c`, something else entirely — or
+click the row in the sidebar, which resumes the conversation as it always did.
+Exiting *that* shell closes the tab, exactly as `/exit` used to.
+
+It needs tmux, and the setting is inert without it: a session on the fallback
+tier **is** its terminal process, so there is nothing left to put a shell into.
+
+Two details worth knowing:
+
+- The behaviour lives in Flock's generated tmux config, and tmux reads that
+  config when its **server** starts. So flipping the setting applies to sessions
+  started after every current one has ended — not to the ones already open.
+- Flock can tell a shell left behind this way from a conversation still running
+  (it stamps the pane), which is what stops **Resume** from attaching you to
+  your own shell prompt and calling it a reopened session.
 
 ## Using Flock alongside the Claude Code extension
 

@@ -50,6 +50,7 @@ import {
   COMMANDS,
   COMPACT_PROMPT,
   CONTEXT_HOOKS_INSTALLED,
+  MAX_DISPATCH_PROMPT_CHARS,
   MAX_PROJECT_NAME_LEN,
   PROVIDERS,
   PROVIDER_IDS,
@@ -63,6 +64,7 @@ import type {
   BranchInfo,
   CloseSummaryMode,
   CommandDeps,
+  DispatchEntry,
   DisposableLike,
   EditorialRecord,
   ProjectRecord,
@@ -126,6 +128,7 @@ import {
 } from './modes';
 import {
   canHostSession,
+  cliOfProfile,
   envForProfile,
   isDefaultAccount,
   isEnvVarName,
@@ -136,6 +139,11 @@ import {
   uniqueAccountId,
   validateAccountLabel,
 } from './accounts';
+// Pure, like accounts/routing above: the refusal rule and the brief for
+// continuing a conversation on the OTHER CLI. The flow below is only modals
+// and a launch; every decision it makes lives in handoff.ts where it is
+// testable.
+import { buildHandoffPrompt, handoffRefusal } from './handoff';
 import {
   describeRouting,
   pinnedLaunchProfile,
@@ -156,11 +164,14 @@ import type { SessionHost } from './hosts';
 // and imported here, where the modals are. The two `git worktree` calls
 // themselves go through CommandDeps like every other side effect in this file.
 import {
+  branchDeleteArgv,
   describeGitCommand,
   isCheckedOut,
   isExistingWorktree,
+  planBranchFate,
   planWorktreeRemoval,
   slugifyBranch,
+  suggestBranchName,
   worktreeAddArgv,
   worktreePathFor,
   worktreeRemoveArgv,
@@ -406,6 +417,160 @@ export function sessionIdFromArg(arg: unknown): string | undefined {
   if (obj.type === 'group') return undefined;
   if (isSessionId(obj.id)) return obj.id;
   return undefined;
+}
+
+/**
+ * WHICH OF THE SELECTED ROWS "OPEN THEM" CAN ACTUALLY OPEN, in three piles.
+ *
+ * The whole of the multi-open decision, pulled out of the flow so it can be
+ * asked questions without a workbench — the same shape src/compaction.ts and
+ * src/chatAutoClose.ts are in, and for the same reason: the flow around it is
+ * dialogs and a launch loop, and neither is where the bugs live.
+ *
+ * `targets` is what will be opened, IN THE ORDER THE ROWS WERE GIVEN, because
+ * a person who selected five rows top to bottom will notice if the tabs do not
+ * arrive that way.
+ *
+ * `live` and `ghosts` are the two refusals, kept apart rather than merged into
+ * one "skipped" count because they leave the user with different things to do.
+ * A live session is somebody's running process — possibly in another window,
+ * possibly outside Flock — and resuming it would put a SECOND claude on a
+ * transcript the first is appending to, which is the worst thing this file can
+ * do. A ghost is an ancestor inferred from a child's recorded edge: no
+ * process, no transcript of its own, nothing that could be reopened at all.
+ *
+ * A live session THIS WINDOW ALREADY HAS A TAB FOR is in neither pile. It is
+ * revealed instead (that is what `focusHere` does and reports), because the
+ * honest reading of "open it" for a row already open is "show it to me" — and
+ * that costs nothing, so it needs no warning and no confirmation.
+ *
+ * A row the forest has never heard of is a TARGET, not a refusal: an id with
+ * no node is the ordinary shape of a session read off disk, which is exactly
+ * what this verb is for.
+ */
+export function partitionForOpen(
+  ids: readonly string[],
+  /** The row for an id, if the tree has one. */
+  nodeOf: (id: string) => SessionNode | undefined,
+  /** Reveal an already-open session in THIS window; true when it did. */
+  focusHere: (id: string) => boolean,
+): { targets: string[]; live: string[]; ghosts: string[] } {
+  const targets: string[] = [];
+  const live: string[] = [];
+  const ghosts: string[] = [];
+  const seen = new Set<string>();
+  for (const id of ids) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    let node: SessionNode | undefined;
+    try {
+      node = nodeOf(id);
+    } catch {
+      node = undefined; // a forest that cannot be read is not a refusal
+    }
+    if (node?.ghost === true) {
+      ghosts.push(id);
+      continue;
+    }
+    if (node !== undefined && !sessionIsOver(node)) {
+      let shown = false;
+      try {
+        shown = focusHere(id);
+      } catch {
+        shown = false;
+      }
+      if (!shown) live.push(id);
+      continue;
+    }
+    targets.push(id);
+  }
+  return { targets, live, ghosts };
+}
+
+/**
+ * WHICH OF THE SELECTED ROWS "CLOSE THEM" CAN ACTUALLY CLOSE, in three piles.
+ *
+ * The twin of `partitionForOpen`, and pulled out for the same reason: the flow
+ * around it is a loop and a status line, and neither is where the bugs live.
+ *
+ * `targets` is what will be closed, in the order given. `foreign` is the one
+ * refusal that matters — a session running somewhere Flock cannot reach, which
+ * the singular verb meets with a whole dialog offering to fork it instead. Five
+ * of those dialogs before the first tab closes is not a report, it is an
+ * obstacle, so they are counted here and summarised in one sentence.
+ *
+ * `over` is not a refusal at all. A row that is already closed has nothing to
+ * close, and saying so of a session the user can plainly see is grey would be
+ * pedantry — it is counted only so the summary can tell the difference between
+ * "four of your five were already closed" and "nothing happened".
+ */
+export function partitionForClose(
+  ids: readonly string[],
+  /** The row for an id, if the tree has one. */
+  nodeOf: (id: string) => SessionNode | undefined,
+  /** Can Flock end this one from here? `canEndSession(hostOf(...))`. */
+  canEnd: (id: string) => boolean,
+): { targets: string[]; foreign: string[]; over: string[] } {
+  const targets: string[] = [];
+  const foreign: string[] = [];
+  const over: string[] = [];
+  const seen = new Set<string>();
+  for (const id of ids) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    let node: SessionNode | undefined;
+    try {
+      node = nodeOf(id);
+    } catch {
+      node = undefined;
+    }
+    if (node !== undefined && sessionIsOver(node)) {
+      over.push(id);
+      continue;
+    }
+    let reachable = false;
+    try {
+      reachable = canEnd(id);
+    } catch {
+      reachable = false;
+    }
+    if (!reachable) {
+      foreign.push(id);
+      continue;
+    }
+    targets.push(id);
+  }
+  return { targets, foreign, over };
+}
+
+/**
+ * The one sentence that names what "open them" could not open, or '' when it
+ * could open everything.
+ *
+ * Three shapes rather than one count, because the two refusals mean different
+ * things and a merged number would be true and useless — the same argument
+ * archiveSessionsFlow's `oneRefusal` makes. Only the mixed case gives up and
+ * counts.
+ */
+export function skippedForOpenSentence(
+  liveCount: number,
+  ghostCount: number,
+): string {
+  if (liveCount === 0 && ghostCount === 0) return '';
+  if (ghostCount === 0) {
+    return `${String(liveCount)} of them ${
+      liveCount === 1 ? 'is' : 'are'
+    } still running and cannot be reopened.`;
+  }
+  if (liveCount === 0) {
+    return `${String(ghostCount)} of them ${
+      ghostCount === 1 ? 'has' : 'have'
+    } no transcript on disk to reopen.`;
+  }
+  return (
+    `${String(liveCount + ghostCount)} of them cannot be reopened — some are ` +
+    'still running, some have no transcript on disk.'
+  );
 }
 
 /**
@@ -2276,6 +2441,134 @@ async function newSessionInProjectFlow(
 }
 
 /**
+ * The `+` under `lineage.git.newSessionInWorktree` — the default: EVERY ROOT
+ * SESSION STARTS IN ITS OWN WORKTREE, on a branch minted from the session's
+ * name. One session, one checkout is the invariant that makes "all my
+ * sessions switched branch at once" impossible: no two roots share a floor,
+ * so nobody's `git checkout` moves anybody else. Forks stay in their root's
+ * checkout — the tree they belong to IS that worktree's work.
+ *
+ * NO DIALOG, and the exemption is argued at the top of src/worktrees.ts:
+ * `worktree add -b` creates a directory and a fresh ref and touches nothing
+ * that already exists, so the click is the consent. What stands in for the
+ * modal is the receipt — a status-bar flash naming the branch and the path —
+ * and the log line either can be checked against.
+ *
+ * A project with no readable repository falls back to the plain in-place
+ * launch: the click means "give me a session", and a directory that cannot
+ * have worktrees still deserves one. Every OTHER refusal — a path pattern
+ * that builds nothing, a name that cannot be minted, git saying no — is
+ * shown and STOPS the flow. Those are problems the user has to see once, not
+ * route around forever.
+ */
+async function newWorktreeSessionFlow(
+  deps: AccountCommandDeps,
+  projectId: string,
+): Promise<void> {
+  const project = deps.getProject(projectId);
+  if (!project) return;
+  const { branches, repoDir } = branchesOfProject(deps, projectId);
+  if (repoDir === '' || !deps.addWorktree) {
+    await newSessionInProjectFlow(deps, projectId);
+    return;
+  }
+
+  // The session's name first, because the branch is named AFTER it — computed
+  // with the same helpers the launch itself uses, so the row and the ref
+  // agree: "flock 3" runs on axel/flock-3.
+  const title = nextFreeName(
+    project.name,
+    namesUnder(deps, projectDirs(project)),
+  );
+
+  const locals = await safeAsync(
+    'localBranches',
+    () => deps.localBranches?.(repoDir) ?? Promise.resolve([]),
+    [] as readonly string[],
+  );
+  // The read this flow needed anyway doubles as the minted ledger's sweep:
+  // records for refs deleted outside Flock leave with it. Verb-driven, like
+  // every write to that ledger — there is no timer behind it.
+  await safeAsync(
+    'pruneMintedBranches',
+    () => deps.pruneMintedBranches?.(repoDir, locals) ?? Promise.resolve(),
+    undefined,
+  );
+
+  const branch = suggestBranchName({
+    prefix: safeCall('branchPrefix', () => deps.branchPrefix?.()) ?? '',
+    title,
+    taken: [...locals, ...branches.map((b) => b.name)],
+  });
+  if (branch === '') {
+    void vscode.window.showWarningMessage(
+      `Flock cannot mint a branch name from "${title}" — ` +
+        'use New Worktree… to type one.',
+    );
+    return;
+  }
+
+  const dir = worktreePathFor({
+    pattern: safeCall('worktreePathPattern', () => deps.worktreePathPattern?.()),
+    repoDir,
+    branch,
+  });
+  if (dir === '') {
+    void vscode.window.showWarningMessage(
+      'Flock: lineage.git.worktreePath does not produce a usable path for ' +
+        `"${branch}". It must contain \${branch}.`,
+    );
+    return;
+  }
+  if (isExistingWorktree(dir, branches)) {
+    void vscode.window.showWarningMessage(
+      `Flock: ${dir} is already a worktree of this repository.`,
+    );
+    return;
+  }
+
+  log('worktree: auto add', branch, '->', dir);
+  const result = await deps.addWorktree({
+    repoDir,
+    path: dir,
+    branch,
+    create: true,
+  });
+  if (!result.ok) {
+    // git's own words, exactly as the picker flow shows them: the reasons an
+    // add fails are reasons only git can state.
+    log('worktree: auto add failed:', result.output);
+    void vscode.window.showErrorMessage(
+      `Flock could not cut a worktree for this session.\n\n${result.output}`,
+      { modal: true },
+    );
+    return;
+  }
+
+  // The ledger entry is what later earns this ref the delete offer in Remove
+  // Worktree — written here, at the moment of minting, and nowhere else.
+  await safeAsync(
+    'recordMintedBranch',
+    () => deps.recordMintedBranch?.(repoDir, branch) ?? Promise.resolve(),
+    undefined,
+  );
+  deps.worktreesChanged?.(repoDir);
+  deps.refresh();
+  // The receipt, where the modal is not: which ref, which floor.
+  vscode.window.setStatusBarMessage(
+    `Flock: new worktree on ${branch} — ${dir}`,
+    7000,
+  );
+  await startSessionInProjectDir(
+    deps,
+    project,
+    dir,
+    title,
+    `on new branch ${branch}`,
+  );
+}
+
+/**
  * A session in one specific WORKTREE of a project.
  *
  * Extracted from `newSessionInBranch`'s handler because New Worktree… ends here
@@ -2755,9 +3048,13 @@ function branchNameProblem(
  * the uncommitted work. A single dialog that quietly carried `--force` would be a
  * delete verb wearing a remove verb's wording.
  *
- * The BRANCH survives either way — `git worktree remove` takes the checkout, not
- * the ref — which is what keeps this a two-dialog verb rather than a four-dialog
- * one, and is said out loud in the first dialog.
+ * The BRANCH's fate is the dialog's second question, decided by planBranchFate
+ * (src/worktrees.ts) before anything is asked: a ref Flock minted whose every
+ * commit is already on the main branch earns a "Remove and Delete Branch"
+ * button; every other case keeps the ref, and the dialog says which case this
+ * was rather than leaving "did it delete my branch?" to be answered by running
+ * git. The delete itself is `git branch -d` — lowercase, git's own merged-only
+ * gate — so a stale probe can cost a refused button, never commits.
  */
 async function removeWorktreeFlow(
   deps: CommandDeps,
@@ -2770,7 +3067,7 @@ async function removeWorktreeFlow(
     );
     return;
   }
-  const { repoDir } = branchesOfProject(deps, project.id);
+  const { branches, repoDir } = branchesOfProject(deps, project.id);
   if (repoDir === '') return;
 
   const plan = planWorktreeRemoval({
@@ -2785,21 +3082,53 @@ async function removeWorktreeFlow(
     return;
   }
 
+  // The branch's fate, decided BEFORE the dialog so the dialog can say it.
+  // The probe runs only when it could change the answer — a ref Flock never
+  // minted needs no rev-list to be kept.
+  const mainName = branches.find((b) => b.primary)?.name ?? '';
+  const minted =
+    safeCall('isMintedBranch', () =>
+      deps.isMintedBranch?.(repoDir, branch.name),
+    ) === true;
+  const ahead =
+    minted && !branch.primary && mainName !== '' && deps.aheadCount
+      ? await safeAsync(
+          'aheadCount',
+          () => deps.aheadCount!(repoDir, mainName, branch.name),
+          undefined,
+        )
+      : undefined;
+  const fate = planBranchFate({
+    branch: branch.name,
+    minted,
+    aheadOfMain: ahead,
+    mainName,
+    primary: branch.primary,
+  });
+
   const argv = worktreeRemoveArgv({ path: branch.dir, force: plan.force });
+  const DELETE_TOO = 'Remove and Delete Branch';
+  const REMOVE_ONLY = fate.offerDelete ? 'Remove Worktree Only' : 'Remove Worktree';
   const first = await vscode.window.showWarningMessage(
     `Remove the worktree for "${branch.name}"?`,
     {
       modal: true,
+      // BOTH commands when both are offered — the confirmation's worth is
+      // that it says exactly what will run, and a button that added a second
+      // command the detail never showed would break that.
       detail: [
         describeGitCommand(repoDir, argv),
+        ...(fate.offerDelete
+          ? [describeGitCommand(repoDir, branchDeleteArgv(branch.name))]
+          : []),
         ...plan.warnings,
-        `The branch "${branch.name}" itself is kept — only the checkout at ` +
-          `${branch.dir} goes away.`,
+        fate.sentence,
       ].join('\n\n'),
     },
-    'Remove Worktree',
+    ...(fate.offerDelete ? [DELETE_TOO, REMOVE_ONLY] : [REMOVE_ONLY]),
   );
-  if (first !== 'Remove Worktree') return;
+  if (first !== DELETE_TOO && first !== REMOVE_ONLY) return;
+  const deleteBranchToo = first === DELETE_TOO;
 
   if (plan.force) {
     // The second Yes, and the only thing it is about: --force is what deletes
@@ -2832,8 +3161,116 @@ async function removeWorktreeFlow(
     return;
   }
   log('worktree: removed', branch.dir);
+  if (deleteBranchToo && deps.deleteBranch) {
+    // AFTER the removal, because git refuses to delete a checked-out branch —
+    // and through -d, so git re-checks merged-ness at this very moment. A
+    // refusal here is a kept ref and a message, never a surprise.
+    const del = await deps.deleteBranch({ repoDir, branch: branch.name });
+    if (del.ok) {
+      log('worktree: branch deleted', branch.name);
+      await safeAsync(
+        'forgetMintedBranch',
+        () =>
+          deps.forgetMintedBranch?.(repoDir, branch.name) ?? Promise.resolve(),
+        undefined,
+      );
+    } else {
+      log('worktree: branch delete refused:', del.output);
+      void vscode.window.showWarningMessage(
+        `Flock removed the worktree, but git kept the branch: ${del.output}`,
+      );
+    }
+  }
   deps.worktreesChanged?.(repoDir);
   deps.refresh();
+}
+
+/** The cwds of the rows a delete gesture is about to remove — read BEFORE the
+ *  writes, normalized, deduped: the cleanup offer below is about the rows
+ *  that just left, not the tree that remains. */
+function deletedSessionCwds(
+  deps: CommandDeps,
+  ids: readonly string[],
+): string[] {
+  const out = new Set<string>();
+  try {
+    const nodes = deps.getForest().nodes;
+    for (const id of ids) {
+      const cwd = normalizeDir(nodes.get(id)?.cwd ?? '');
+      if (cwd !== '') out.add(cwd);
+    }
+  } catch (err) {
+    logError('commands.deletedSessionCwds', err);
+  }
+  return [...out];
+}
+
+/** How many VISIBLE sessions — live or closed alike, deleted and ghost rows
+ *  excepted — have their cwd inside `dir`. Stricter than liveSessionCwds on
+ *  purpose: a closed session is one click from resuming, and resuming needs
+ *  its directory, so it holds the worktree open just as a running one does. */
+function sessionsRemainingIn(deps: CommandDeps, dir: string): number {
+  const target = normalizeDir(dir);
+  if (target === '') return 0;
+  let n = 0;
+  try {
+    for (const node of deps.getForest().nodes.values()) {
+      if (node.deleted || node.ghost) continue;
+      const cwd = normalizeDir(node.cwd ?? '');
+      if (cwd !== '' && isWithin(target, cwd)) n++;
+    }
+  } catch (err) {
+    logError('commands.sessionsRemainingIn', err);
+  }
+  return n;
+}
+
+/**
+ * After a DELETE has emptied a worktree Flock minted: ONE non-modal offer to
+ * fold the desk. Delete only, never close — a closed session is one click
+ * from resuming, and resuming needs its directory.
+ *
+ * The offer fires only when the gesture left EXACTLY ONE candidate — a
+ * minted, non-primary worktree with no visible session left inside it. A
+ * multi-delete that empties several offers nothing: two toasts is a queue,
+ * and the verb stays one right-click away on the branch row. "Clean Up…"
+ * routes into removeWorktreeFlow — same plan, same dialogs, no shortcut —
+ * which is where the branch's own fate gets decided.
+ */
+async function offerWorktreeCleanup(
+  deps: CommandDeps,
+  cwds: readonly string[],
+): Promise<void> {
+  if (cwds.length === 0) return;
+  const seen = new Set<string>();
+  const hits: Array<{ project: ProjectRecord; branch: BranchInfo }> = [];
+  for (const project of deps.allProjects()) {
+    const { branches, repoDir } = branchesOfProject(deps, project.id);
+    if (repoDir === '') continue;
+    for (const b of branches) {
+      if (b.primary || b.dir === '') continue;
+      const key = pathKey(b.dir);
+      if (key === '' || seen.has(key)) continue;
+      if (!cwds.some((cwd) => isWithin(b.dir, cwd))) continue;
+      seen.add(key);
+      const minted =
+        safeCall('isMintedBranch', () =>
+          deps.isMintedBranch?.(repoDir, b.name),
+        ) === true;
+      if (!minted) continue;
+      if (sessionsRemainingIn(deps, b.dir) > 0) continue;
+      hits.push({ project, branch: b });
+    }
+  }
+  if (hits.length !== 1) return;
+  const { project, branch } = hits[0];
+  const CLEAN = 'Clean Up…';
+  const choice = await vscode.window.showInformationMessage(
+    `"${branch.name}" has no sessions left. Clean up its worktree?`,
+    CLEAN,
+    'Not Now',
+  );
+  if (choice === CLEAN) await removeWorktreeFlow(deps, project, branch);
 }
 
 /**
@@ -5264,12 +5701,14 @@ export async function chatHistoryFlow(
     sessionId: record.id,
   }));
 
+  // No `ignoreFocusOut`: a list you opened and can click away from, holding
+  // nothing typed and nothing ticked. See showNotificationsSimple for the
+  // argument in full.
   const chosen = await vscode.window.showQuickPick(picks, {
     title: `Chats · ${project.name}`,
     placeHolder: 'Reopen which chat?',
     matchOnDescription: true,
     matchOnDetail: true,
-    ignoreFocusOut: true,
   });
   if (!chosen?.sessionId) return;
 
@@ -7368,6 +7807,278 @@ async function switchAccountFlow(
   );
 }
 
+/**
+ * Continue a conversation on the OTHER CLI — the door through the wall
+ * `switchAccountFlow` refuses at (`different-cli`).
+ *
+ * What actually happens, so the modal-free flow is defensible: a NEW session
+ * is launched on the chosen account, and its opening turn is a brief naming
+ * the parent's transcript file (buildHandoffPrompt) — the same shape as
+ * Fork-and-Compact, where the child does the work as its first turn. The
+ * lineage edge is minted exactly as a fork's is (`recordLaunch`), but the
+ * launch carries NO `parentId`: argv-wise it is a plain new session, because
+ * `--fork-session --resume` could only name a transcript the target CLI can
+ * read, and the whole reason this verb exists is that it cannot.
+ *
+ * No confirmation modal, deliberately: the picker IS the decision, and unlike
+ * the account switch nothing is stopped, moved or restarted — the parent is
+ * untouched and stays exactly where it was.
+ */
+async function handoffFlow(
+  deps: AccountCommandDeps,
+  sessionIdArg: string,
+): Promise<void> {
+  const accts = deps.accounts;
+  if (!accts) return;
+  // The TIP, exactly as fork and switch resolve theirs: handing off a
+  // superseded generation would brief the child on a transcript whose live
+  // continuation is elsewhere.
+  const sessionId = deps.tipOf(sessionIdArg);
+  const node = deps.getForest().nodes.get(sessionId);
+  const label = labelFor(deps, sessionId);
+
+  if (node?.ghost === true) {
+    void vscode.window.showWarningMessage(
+      `Flock: "${label}" is an inferred ancestor with no transcript on disk, ` +
+        'so there is nothing to hand off.',
+    );
+    return;
+  }
+  const profiles = accts.accounts();
+  const current = pinnedProfile(accts.sessionProfileId(sessionId), profiles);
+
+  // Same honesty as the account switch, for the same reason: only Claude's
+  // transcript layout is one Flock knows how to NAME, and the brief has to
+  // name the file. A Codex parent gets "not yet", never a wrong path.
+  if (cliOfProfile(current) !== 'claude') {
+    const cli = current ? (PROVIDERS[current.provider]?.label ?? 'that') : 'that';
+    void vscode.window.showWarningMessage(
+      `Flock: "${label}" is a ${cli} conversation, and Flock cannot yet find ` +
+        "that CLI's own transcript to brief the new session with.",
+    );
+    return;
+  }
+  const transcriptPath = deps.transcriptPathOf?.(sessionId) ?? null;
+  if (transcriptPath === null) {
+    void vscode.window.showWarningMessage(
+      `Flock: "${label}" has not taken a turn yet, so there is nothing to ` +
+        'hand off. Start the session on the account you want instead.',
+    );
+    return;
+  }
+
+  // Only accounts the rule accepts, so the picker cannot offer something the
+  // mechanism would then refuse — and an empty list has one honest cause: no
+  // account on another CLI exists yet.
+  const choices = profiles.filter(
+    (p) => handoffRefusal(current, p, true) === null,
+  );
+  if (choices.length === 0) {
+    void vscode.window.showInformationMessage(
+      'Flock: no account on another CLI is configured to continue ' +
+        `"${label}" on. Add one in the Accounts section first.`,
+    );
+    return;
+  }
+
+  interface HandoffPick extends vscode.QuickPickItem {
+    accountId: string;
+  }
+  const items: HandoffPick[] = choices.map((p) => ({
+    label: p.label,
+    description: accountPickDescription(accts, p),
+    accountId: p.id,
+  }));
+  const chosen = await vscode.window.showQuickPick(items, {
+    // "a NEW session", said in the picker: the one place the difference from
+    // Move to Account… must be visible before anything happens.
+    placeHolder: `Brief a new session on… ("${label}" continues; not a resume)`,
+    matchOnDescription: true,
+    ignoreFocusOut: true,
+  });
+  if (!chosen) return;
+  const target = accts.getAccount(chosen.accountId);
+  // Re-checked against the same rule the list was built from: the account can
+  // have been deleted between the picker opening and the click.
+  if (!target || handoffRefusal(current, target, true) !== null) return;
+
+  const cwd = node?.cwd ?? deps.getRecord(sessionId)?.cwd;
+  // Named like a fork, with the destination CLI visible — a row that hides
+  // which CLI runs it is a row that lies — and deduped against the same names
+  // a fork dedupes against.
+  const stem = `${stripForkCounter(label)} → ${cliOfProfile(target)}`;
+  const siblings = (node?.children ?? [])
+    .map((id) => deps.getForest().nodes.get(id)?.label)
+    .filter((l): l is string => typeof l === 'string');
+  const title = nextFreeName(stem, [...siblings, label]);
+
+  const brief = buildHandoffPrompt({
+    transcriptPath,
+    sourceCli: cliOfProfile(current),
+    parentTitle: label,
+    ...(cwd !== undefined ? { cwd } : {}),
+  });
+
+  const childId = randomUUID();
+  // The minted edge, before the terminal exists — a crash between here and
+  // launch still leaves the lineage correct, exactly as forkFlow puts it.
+  await deps.recordLaunch(childId, sessionId, cwd);
+  await deps.upsertRecord(childId, { title });
+  log('handoff:', shortId(childId), 'continues', shortId(sessionId), 'on', target.id);
+  const binding = await deps.launchSession({
+    sessionId: childId,
+    ...(cwd !== undefined ? { cwd } : {}),
+    prompt: brief,
+    title,
+    env: envForProfile(target),
+    profileId: target.id,
+    ...(launchProviderOf(target) !== undefined
+      ? { provider: launchProviderOf(target) }
+      : {}),
+  });
+  if (!binding) {
+    log('handoff: launch failed for', shortId(childId));
+    return;
+  }
+  await pinLaunch(deps, childId, { profileId: target.id });
+  deps.refresh();
+}
+
+/**
+ * Park an intent to start a session — the queue half of Queued Dispatch
+ * (src/dispatch.ts decides; dispatchHost.ts wakes; this verb only asks).
+ *
+ * Two questions, in the order of how much they matter: WHERE MAY IT RUN
+ * (auto / a provider / a named account — the same three tiers routing speaks,
+ * with the same wording), then the optional opening prompt, because "start
+ * looking at the failing tests" is the reason to queue a session rather than
+ * set an alarm. The directory is not asked: the entry lands where `+` would
+ * have started it, which is the project this window is scoped to.
+ */
+async function queueDispatchFlow(deps: AccountCommandDeps): Promise<void> {
+  const dispatch = deps.dispatch;
+  if (!dispatch) return; // a wiring with no queue has no verb
+  const profiles = deps.accounts?.accounts() ?? [];
+
+  const target = newSessionTarget(deps);
+  const cwd =
+    target.cwd ??
+    (target.projectId !== undefined
+      ? deps.getProject(target.projectId)?.rootDir
+      : undefined);
+
+  interface RoutePick extends vscode.QuickPickItem {
+    choice: RoutingChoice;
+  }
+  const items: RoutePick[] = [
+    {
+      label: 'Auto',
+      description: 'whichever account the router likes when one frees up',
+      choice: { kind: 'auto' },
+    },
+  ];
+  const hostable = profiles.filter((p) => canHostSession(p));
+  const providersSeen = new Set<ProviderId>();
+  for (const p of hostable) {
+    if (providersSeen.has(p.provider)) continue;
+    providersSeen.add(p.provider);
+    items.push({
+      label: `Any ${PROVIDERS[p.provider]?.label ?? p.provider} account`,
+      description: 'stays inside the provider, picks the best window',
+      choice: { kind: 'provider', provider: p.provider },
+    });
+  }
+  for (const p of hostable) {
+    items.push({
+      label: p.label,
+      description: deps.accounts
+        ? accountPickDescription(deps.accounts, p)
+        : undefined,
+      choice: { kind: 'account', id: p.id },
+    });
+  }
+  const routed = await vscode.window.showQuickPick(items, {
+    placeHolder: 'Queue a session for… (launches when a window is worth it)',
+    matchOnDescription: true,
+    ignoreFocusOut: true,
+  });
+  if (!routed) return;
+
+  const rawPrompt = await vscode.window.showInputBox({
+    title: 'Opening prompt (optional)',
+    prompt:
+      'The first turn the queued session starts with. Leave empty to just ' +
+      'open the session.',
+    validateInput: (v) =>
+      v.length > MAX_DISPATCH_PROMPT_CHARS
+        ? `Longer than ${MAX_DISPATCH_PROMPT_CHARS} characters.`
+        : undefined,
+    ignoreFocusOut: true,
+  });
+  if (rawPrompt === undefined) return; // Escape cancels the queueing
+  const prompt = rawPrompt.trim();
+
+  const entry: DispatchEntry = {
+    id: randomUUID(),
+    createdAt: Date.now(),
+    ...(cwd !== undefined ? { cwd } : {}),
+    ...(prompt !== '' ? { prompt } : {}),
+    ...(routed.choice.kind !== 'auto' ? { routing: routed.choice } : {}),
+  };
+  await dispatch.queue(entry);
+  dispatch.poke();
+  // A status line, not a toast: queueing is the user's own act, and the
+  // launch itself will speak when it happens.
+  vscode.window.setStatusBarMessage(
+    `Flock: queued for ${describeRouting(routed.choice, profiles)}` +
+      (cwd !== undefined ? ` in ${cwd}` : ''),
+    5000,
+  );
+}
+
+/** The parked intents, each saying what it waits for, with the one verb a
+ *  parked intent needs: cancel. Settled entries are not shown — the bell and
+ *  the tree already told their story. */
+async function dispatchQueueFlow(deps: AccountCommandDeps): Promise<void> {
+  const dispatch = deps.dispatch;
+  if (!dispatch) return;
+  const profiles = deps.accounts?.accounts() ?? [];
+  const pending = dispatch
+    .entries()
+    .filter((e) => e.done === undefined)
+    .sort((a, b) => a.createdAt - b.createdAt);
+  if (pending.length === 0) {
+    void vscode.window.showInformationMessage(
+      'Flock: the dispatch queue is empty.',
+    );
+    return;
+  }
+  interface QueuePick extends vscode.QuickPickItem {
+    entryId: string;
+  }
+  const items: QueuePick[] = pending.map((e) => ({
+    label: e.title ?? (e.prompt !== undefined ? e.prompt : 'session'),
+    description: describeRouting(e.routing, profiles),
+    ...(e.cwd !== undefined ? { detail: e.cwd } : {}),
+    entryId: e.id,
+  }));
+  const picked = await vscode.window.showQuickPick(items, {
+    placeHolder: `${pending.length} queued — pick one to cancel it`,
+    matchOnDescription: true,
+    ignoreFocusOut: true,
+  });
+  if (!picked) return;
+  const CANCEL = 'Cancel This Entry';
+  const confirm = await vscode.window.showQuickPick(
+    [CANCEL, 'Keep Waiting'],
+    { placeHolder: `"${picked.label}" — ${picked.description ?? ''}` },
+  );
+  if (confirm !== CANCEL) return;
+  await dispatch.cancel(picked.entryId);
+  dispatch.poke();
+  vscode.window.setStatusBarMessage('Flock: queue entry cancelled', 5000);
+}
+
 // ---------------------------------------------------------- registration
 
 type Handler = (...args: unknown[]) => void | Promise<void>;
@@ -7568,6 +8279,155 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     // Already open here? Just show it — reopening would be a second process.
     if (deps.focusSession(id)) return;
     await resumeFlow(deps, id);
+  });
+
+  /**
+   * OPEN EVERY CLOSED SESSION IN THE SELECTION, one after another.
+   *
+   * The plural of Open Session Here, and the same
+   * one-command-per-arity shape as archive's pair (see COMMANDS.resumeSessions
+   * and the note above `deleteSessions`): a contributed command has one title,
+   * so the singular entry on one of five highlighted rows would open one row
+   * and read as though it had opened five.
+   *
+   * IT ASKS FIRST, WHICH THE SINGULAR DOES NOT, because the cost is the thing
+   * that scales. One click here is N `claude` processes and N terminal tabs —
+   * a few hundred megabytes each — and "I meant to open the two at the bottom"
+   * is a gesture away from "I had eleven rows selected". The dialog says the
+   * number and the shape of the cost, and nothing has happened until it is
+   * answered.
+   *
+   * SEQUENTIAL, NOT PARALLEL. Every write in this file is (see
+   * archiveSessionsFlow's note): the store serialises writes, and each resume
+   * records a launch. But the stronger reason here is the terminals — N shells
+   * spawning at once is a thundering herd on a cold machine, and the tabs
+   * would land in nondeterministic order, which is the one thing a person who
+   * just selected rows top-to-bottom will notice.
+   *
+   * THE PARTITION IS DONE BEFORE ANYTHING LAUNCHES, and every row that cannot
+   * be opened is named rather than silently dropped. `resumeFlow` refuses a
+   * live session and a ghost with a dialog of its own, which is right for one
+   * click and wrong for eleven: five modal warnings before the first tab
+   * appears is not a report, it is an obstacle. So the rows that would have
+   * produced one are filtered out here and summarised in a single sentence.
+   */
+  const resumeSessionsFlow = async (ids: string[]): Promise<void> => {
+    if (ids.length === 0) return;
+
+    // The partition is computed ONCE, before anything opens: a launch changes
+    // what the next read would say, and the message has to describe the set
+    // the user was actually looking at. See partitionForOpen — the whole
+    // decision, and the only part of this worth a unit test.
+    const { targets, live, ghosts } = partitionForOpen(
+      ids,
+      (id) =>
+        deps.getForest().nodes.get(id) ??
+        deps.getForest().nodes.get(deps.tipOf(id)),
+      (id) => deps.focusSession(id),
+    );
+    const skipped = [...live, ...ghosts];
+    const skippedSentence = skippedForOpenSentence(live.length, ghosts.length);
+
+    if (targets.length === 0) {
+      void vscode.window.showInformationMessage(
+        skippedSentence === ''
+          ? 'Flock: nothing in that selection is a closed session.'
+          : `Flock: nothing there to open. ${skippedSentence}`,
+      );
+      return;
+    }
+
+    // ONE closed row in the selection is the singular verb by another name.
+    // Skip the dialog: the cost the dialog exists to name is one process, and
+    // that is what clicking Open Session Here already buys without being
+    // asked.
+    if (targets.length > 1) {
+      // SOLO MODE MAKES THIS VERB A CONTRADICTION, so it says so instead of
+      // performing it. `lineage.soloSession` parks every other session tab
+      // each time one opens — so opening five in a row would open five and
+      // leave one, having parked the four the user just asked for. Refusing
+      // beats doing four fifths of nothing.
+      if (deps.soloSessionEnabled?.() === true) {
+        const SETTING = 'Open Settings';
+        const choice = await vscode.window.showWarningMessage(
+          `Flock: "one session tab at a time" (lineage.soloSession) is on, so ` +
+            `opening ${String(targets.length)} sessions would open each one ` +
+            'and immediately park the one before it — you would be left with ' +
+            'the last. Turn the setting off to open them side by side.',
+          SETTING,
+        );
+        if (choice === SETTING) {
+          await vscode.commands.executeCommand(
+            'workbench.action.openSettings',
+            'lineage.soloSession',
+          );
+        }
+        return;
+      }
+
+      const CONFIRM = `Open ${String(targets.length)} Sessions`;
+      const detail = [
+        'Each one opens its own terminal tab and its own claude process — ' +
+          'several hundred megabytes apiece.',
+        skippedSentence,
+      ]
+        .filter((line) => line !== '')
+        .join(' ');
+      const choice = await vscode.window.showWarningMessage(
+        `Open ${String(targets.length)} closed sessions here?`,
+        { modal: true, detail },
+        CONFIRM,
+      );
+      if (choice !== CONFIRM) return;
+    }
+
+    let opened = 0;
+    const refused: string[] = [];
+    for (const id of targets) {
+      try {
+        if (await resumeFlow(deps, id)) opened++;
+        else refused.push(id);
+      } catch (err) {
+        // One session that will not open must not strand the rest: this is a
+        // batch, and the row that threw is named in the summary below.
+        logError('commands.resumeSessions', err);
+        refused.push(id);
+      }
+    }
+
+    log('resume:', String(opened), 'of', String(targets.length), 'selected');
+
+    // THE SUMMARY IS THE ONLY REPORT, and it is only worth showing when
+    // something did not go as asked. `resumeFlow` says its own piece about
+    // every refusal it makes (a live writer, a foreign folder, a ghost), so a
+    // cheerful "opened 5 of 5" on top of that would be noise — the five tabs
+    // are the notification.
+    if (refused.length === 0 && skipped.length === 0) return;
+    const parts = [
+      `Flock: opened ${String(opened)} of ${String(targets.length)}.`,
+      refused.length === 0
+        ? ''
+        : `${String(refused.length)} did not open (${refused
+            .map((id) => `"${labelFor(deps, id)}"`)
+            .join(', ')}).`,
+      skippedSentence,
+    ].filter((line) => line !== '');
+    void vscode.window.showInformationMessage(parts.join(' '));
+  };
+
+  register(COMMANDS.resumeSessions, 'resume sessions', async (...args: unknown[]) => {
+    const ids = selectedSessionIds(deps, args);
+    if (ids.length === 0) {
+      // Reachable from the palette with nothing selected. Say so rather than
+      // opening a picker: this verb means "the rows I have highlighted", and
+      // choosing one from a list is what Open Session Here already is.
+      void vscode.window.showInformationMessage(
+        'Flock: select the closed sessions you want to open first — ' +
+          'shift-click or ctrl-click rows in the tree.',
+      );
+      return;
+    }
+    await resumeSessionsFlow(ids);
   });
 
   // ---------------------------------------------------------------- new
@@ -7823,6 +8683,87 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       `Flock: closed "${label}" — its row stays in the tree, click it to resume`,
       5000,
     );
+  });
+
+  /**
+   * CLOSE EVERY SELECTED SESSION, one after another.
+   *
+   * IT ASKS NOTHING, and that is the singular verb's rule kept rather than an
+   * exception made for the plural. Closing leaves every row where it is, one
+   * click from resuming at its last saved turn — so five closes are five
+   * clicks from undone for exactly the reason one is one. (Archive confirms,
+   * and should: it takes the rows OUT of the tree, and being more of a hassle
+   * than closing is the whole point of that verb.)
+   *
+   * Sequential, like every other multi-row write in this file: the store
+   * serialises its writes, and each close stamps a record.
+   *
+   * The refusals are gathered up first — see partitionForClose. The singular
+   * verb answers a session Flock cannot reach with a dialog offering to fork
+   * it, which is right for one click and wrong for five, so the batch counts
+   * them instead and says so in one line at the end.
+   */
+  const closeSessionsFlow = async (ids: string[]): Promise<void> => {
+    if (ids.length === 0) return;
+
+    const { targets, foreign, over } = partitionForClose(
+      ids,
+      (id) => deps.getForest().nodes.get(id),
+      (id) => canEndSession(hostOf(deps, id)),
+    );
+
+    // Names read BEFORE the writes, or the message would describe rows that
+    // have already changed underneath it.
+    const labels = new Map(targets.map((id) => [id, labelFor(deps, id)] as const));
+
+    if (targets.length === 0) {
+      void vscode.window.showInformationMessage(
+        foreign.length > 0
+          ? `Flock: nothing there to close. ${String(foreign.length)} ` +
+            `${foreign.length === 1 ? 'is' : 'are'} running somewhere Flock ` +
+            'cannot reach — close them where they are running.'
+          : 'Flock: those sessions are already closed.',
+      );
+      return;
+    }
+
+    for (const id of targets) {
+      try {
+        await closeFlow(deps, id);
+      } catch (err) {
+        // One session that will not close must not strand the rest.
+        logError('commands.closeSessions', err);
+      }
+    }
+    log('close:', String(targets.length), 'selected');
+
+    const one = targets.length === 1;
+    const said = one
+      ? `Flock: closed "${labels.get(targets[0]) ?? ''}" — its row stays in ` +
+        'the tree, click it to resume'
+      : `Flock: closed ${String(targets.length)} sessions — their rows stay ` +
+        'in the tree, click one to resume';
+    const footnote =
+      foreign.length > 0
+        ? ` (${String(foreign.length)} left running somewhere Flock cannot reach)`
+        : over.length > 0
+          ? ` (${String(over.length)} already closed)`
+          : '';
+    vscode.window.setStatusBarMessage(`${said}${footnote}`, 5000);
+  };
+
+  register(COMMANDS.closeSessions, 'close sessions', async (...args: unknown[]) => {
+    const ids = selectedSessionIds(deps, args);
+    if (ids.length === 0) {
+      // Reachable from the palette with nothing selected — the singular verb
+      // is the one with a picker.
+      void vscode.window.showInformationMessage(
+        'Flock: select the sessions you want to close first — shift-click ' +
+          'or ctrl-click rows in the tree.',
+      );
+      return;
+    }
+    await closeSessionsFlow(ids);
   });
 
   /**
@@ -8217,6 +9158,10 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     }
 
     const label = targets.length === 1 ? labelFor(deps, targets[0]) : '';
+    // The cwds too, and read from TARGETS rather than from everything asked
+    // about: the cleanup offer at the end is about the rows that actually
+    // left, and a refused row is still running in the worktree it names.
+    const cwds = deletedSessionCwds(deps, targets);
     // The plan per target, computed ONCE here and handed to the loop below:
     // the dialog must be counted with the function that acts, or it goes back
     // to promising one thing and doing another. See archiveEndPlan.
@@ -8312,7 +9257,14 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         ' Undo, or "Archived Sessions..." on the project, brings the row back.',
       UNDO,
     );
-    if (choice2 !== UNDO) return;
+    if (choice2 !== UNDO) {
+      // The undo window has passed un-taken. If this gesture emptied a
+      // worktree the `+` once minted, now is the moment to offer folding it —
+      // and only now: an offer racing the Undo button would be two toasts
+      // arguing over one gesture.
+      await offerWorktreeCleanup(deps, cwds);
+      return;
+    }
     for (const id of targets) await deps.upsertRecord(id, { deleted: false });
     log('archive: undone for', targets.map(shortId).join(' '));
     deps.refresh();
@@ -8719,12 +9671,14 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       action: 'project',
       payload: p.id,
     }));
+    // No `ignoreFocusOut`: a list you opened and can click away from,
+    // holding nothing typed and nothing ticked. See showNotificationsSimple
+    // for the argument in full.
     const chosen = await vscode.window.showQuickPick(items, {
       title: 'Closed projects',
       placeHolder: 'Open which project?',
       matchOnDescription: true,
       matchOnDetail: true,
-      ignoreFocusOut: true,
     });
     if (!chosen?.payload) return;
     const project = deps.getProject(chosen.payload);
@@ -8786,9 +9740,11 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       // the row already said which of the two it is about to do — the `+`'s
       // tooltip is written from the same setting (see viewmodel.pushProject).
       // Both verbs stay on the right-click either way, so this is a default and
-      // never a restriction.
+      // never a restriction. ON — the default since 0.2 — is the AUTO flow: a
+      // worktree per root session, the branch minted from the session's name,
+      // no dialog. The picker-and-confirm flow stays on New Worktree….
       if (deps.newSessionInWorktree?.() === true) {
-        await newWorktreeFlow(deps, id);
+        await newWorktreeSessionFlow(deps, id);
         return;
       }
       await newSessionInProjectFlow(deps, id);
@@ -9238,12 +10194,14 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         payload: f.path,
       })),
     ];
+    // No `ignoreFocusOut`: a list you opened and can click away from,
+    // holding nothing typed and nothing ticked. See showNotificationsSimple
+    // for the argument in full.
     const chosen = await vscode.window.showQuickPick(items, {
       title: 'Put away — closed projects and hidden folders',
       placeHolder: 'Bring which one back?',
       matchOnDescription: true,
       matchOnDetail: true,
-      ignoreFocusOut: true,
     });
     if (!chosen?.payload) return;
     if (chosen.action === 'project') {
@@ -9379,7 +10337,16 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
           : 'Everything has been seen',
       matchOnDescription: true,
       matchOnDetail: true,
-      ignoreFocusOut: true,
+      // A MENU CLOSES WHEN YOU CLICK AWAY FROM IT. `ignoreFocusOut: true`
+      // means it does not: the only way out is Escape, and a list you opened
+      // by clicking the bell — read, decided against, and clicked away from —
+      // sat there over the tree until you found the keyboard.
+      //
+      // The flag earns its keep on a picker that is holding WORK: something
+      // typed, a set of rows ticked, a step of a flow with more steps behind
+      // it, where a stray click costs you the lot. This holds nothing. It is a
+      // list of what finished, and re-opening it is one click on the same bell
+      // you opened it with.
     });
     if (!chosen || chosen.sessionId === '') return;
     if (chosen.markAll === true) {
@@ -9428,7 +10395,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         : 'Everything has been seen';
     quickPick.matchOnDescription = true;
     quickPick.matchOnDetail = true;
-    quickPick.ignoreFocusOut = true;
+    // NO `ignoreFocusOut`, DELIBERATELY — see the note on showNotificationsSimple.
     quickPick.items = picks;
 
     // Resolves when the popup is finished with, whichever way it ended. The
@@ -9980,12 +10947,14 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         action: 'leave',
       });
     }
+    // No `ignoreFocusOut`: a list you opened and can click away from,
+    // holding nothing typed and nothing ticked. See showNotificationsSimple
+    // for the argument in full.
     const chosen = await vscode.window.showQuickPick(items, {
       title: 'Switch Workspace',
       placeHolder:
         'Only the chosen project\'s tabs stay open; the current layout is saved first',
       matchOnDescription: true,
-      ignoreFocusOut: true,
     });
     if (!chosen) return;
     if (chosen.action === 'leave') {
@@ -10364,6 +11333,34 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       );
     },
   );
+
+  // The switch verb's complement (see handoffFlow). Same target resolution,
+  // and `liveOnly: false` for the same reason: a conversation that ran out of
+  // window and got closed is the archetypal thing to continue elsewhere.
+  register(
+    COMMANDS.handoffSession,
+    'handoff session',
+    async (arg?: unknown) => {
+      const id = await targetSession(
+        deps,
+        arg,
+        'Continue which session on another CLI?',
+        { liveOnly: false },
+      );
+      if (!id) return;
+      await handoffFlow(deps, id);
+    },
+  );
+
+  // ------------------------------------------------------------ dispatch
+
+  register(COMMANDS.queueDispatch, 'queue session for dispatch', async () => {
+    await queueDispatchFlow(deps);
+  });
+
+  register(COMMANDS.dispatchQueue, 'show dispatch queue', async () => {
+    await dispatchQueueFlow(deps);
+  });
 
   return {
     dispose(): void {

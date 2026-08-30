@@ -46,6 +46,7 @@ import {
   CONTEXT_HAS_UNSEEN,
   CONTEXT_EXPLORER_FOLLOW,
   CONTEXT_HOOKS_INSTALLED,
+  CONTEXT_CAN_HAND_OFF,
   CONTEXT_CAN_SWITCH_ACCOUNT,
   CONTEXT_MODE,
   CONTEXT_NATIVE_TREE,
@@ -87,6 +88,7 @@ import type {
   TranscriptFacts,
   TranscriptHeaderMeta,
   TreeDeps,
+  WrapState,
 } from './types';
 import {
   type TmuxAdvice,
@@ -96,6 +98,8 @@ import {
   listTmuxSessions,
   queryClientSessions,
   queryPanePid,
+  queryWrapState,
+  resolveExitShell,
   resolveTmuxSpawn,
   respawnTmuxPane,
   sessionIdOfTmuxName,
@@ -200,7 +204,9 @@ import {
 } from './pullRequests';
 import {
   DEFAULT_WORKTREE_PATH_PATTERN,
+  readAheadCount,
   readLocalBranches,
+  runBranchDelete,
   runWorktreeAdd,
   runWorktreeRemove,
 } from './worktrees';
@@ -240,6 +246,7 @@ import type { ProjectViewController } from './projectview';
 // are joined up — the views and the verbs only ever see the interfaces.
 import {
   accountEnvKeys,
+  canHandOff,
   canSwitchAccounts,
   configDirForProfile,
   envForProfile,
@@ -274,6 +281,10 @@ import type {
 import { LimitsService, formatUsageSummary } from './limits';
 import { StateStore } from './state';
 import { registerDecorations } from './decorations';
+// One pure function, for the project roll-up dot: the native tree's dot and
+// the inline sidebar's must answer the same question, and statusTone is where
+// that question is defined. See projectsWithUnseen below.
+import { statusTone } from './viewmodel';
 import { registerTree } from './tree';
 import type { TreeController } from './tree';
 import { registerWebtree } from './webtree';
@@ -286,6 +297,7 @@ import { TerminalRegistry, buildShellArgs, launchEnv } from './terminals';
 import { TerminalMatcher, terminalPid } from './terminalMatch';
 import {
   adoptBackgroundJob,
+  defaultSessionTitle,
   forkForAgent,
   hasForkableRow,
   notificationItems,
@@ -293,6 +305,11 @@ import {
   tabTitleFrom,
 } from './commands';
 import type { AccountCommandDeps } from './commands';
+// The dispatch queue's clockwork: decides (via src/dispatch.ts) when a queued
+// session is worth launching and wakes at the moments that can change the
+// answer. Node-only; this file hands it the store, the usage cache and the
+// same launch path every clicked verb takes.
+import { DispatchHost } from './dispatchHost';
 import { registerFocusIntegration } from './windows';
 import { openProject } from './surfaces';
 import { HooksManager } from './hooks';
@@ -508,7 +525,23 @@ export async function activate(
   // binary and the `lineage.tmux` gate are re-probed per launch, so
   // installing tmux (or flipping the setting) needs no reload. Null — off,
   // no tmux, Windows — means the kill+resume tier, which stays fully wired.
-  const tmuxConfPath = ensureTmuxConf(context.globalStorageUri.fsPath);
+  //
+  // `lineage.exitToShell` rides in the conf: it is three hook lines, not a
+  // launch flag. The conf is read at SERVER start only, so a flip applies to
+  // the next server — which in practice means once every wrapped session has
+  // ended. Rewritten on the config change below rather than only here, so the
+  // file on disk always says what the setting says.
+  const exitShell = (): string | null =>
+    cfg().get<boolean>(CONFIG_KEYS.exitToShell) === false
+      ? null
+      : resolveExitShell(process.env['SHELL'], process.platform);
+  let tmuxConfPath = ensureTmuxConf(
+    context.globalStorageUri.fsPath,
+    exitShell(),
+  );
+  const rewriteTmuxConf = (): void => {
+    tmuxConfPath = ensureTmuxConf(context.globalStorageUri.fsPath, exitShell());
+  };
   const tmuxSpawn = (): TmuxSpawn | null =>
     resolveTmuxSpawn(cfg().get<string>(CONFIG_KEYS.tmux), tmuxConfPath);
 
@@ -1444,6 +1477,29 @@ export async function activate(
         onlyActive: boolCfg(CONFIG_KEYS.onlyActiveSessions, false),
       },
     });
+    // THE FOURTH COMPLETION SIGNAL, and the only one that cannot lose a race:
+    // a generation that has acquired a successor has finished compacting,
+    // because minting that successor is what a compaction DOES. See
+    // compaction.settleSuperseded for the ten-minute stuck ring it exists to
+    // take down.
+    //
+    // AFTER buildForest, not beside the prune above, and the reason is the
+    // second argument. "Is that conversation still working?" decides whether
+    // this rests a purple dot or simply ends the phase, and the only clean
+    // answer to it is `node.status` — the roster's raw `state`/`status` pair
+    // has not been through normalizeStatus or the frozen-busy correction yet,
+    // so reading it here would call a session busy that the tree itself is
+    // about to draw as idle. The cost is that the settle lands on the NEXT
+    // rebuild, one poll interval later; the ring it is taking down had been
+    // standing for minutes.
+    compaction.settleSuperseded(
+      (id) => chainIndex.tipOf(id),
+      (tipId) =>
+        chainAliases(tipId).some(
+          (id) => forest.nodes.get(id)?.status === 'busy',
+        ),
+      compactionNow,
+    );
     unseenProjectsCache = null;
     fireForestChanged();
     detectTurnTransitions();
@@ -1705,6 +1761,15 @@ export async function activate(
       return binary !== null
         ? killTmuxSessionTree(binary, name)
         : Promise.resolve(false);
+    },
+    // Exit-to-shell: whether a wrap under this name still holds a CLI. The
+    // launch path's `new-session -A` would otherwise attach to the shell a
+    // `/exit` left behind instead of starting anything.
+    tmuxWrapState: (name) => {
+      const binary = tmuxSpawn()?.binary ?? findTmuxBinary();
+      return binary !== null
+        ? queryWrapState(binary, name)
+        : Promise.resolve<WrapState>('gone');
     },
   });
   context.subscriptions.push(registry);
@@ -2300,15 +2365,45 @@ export async function activate(
       // the hooks above by up to one poll interval, and the only path at all
       // when hooks are off.
       const aliases = chainAliases(node.id);
-      if (prev === 'busy' && node.status !== 'busy') {
-        compaction.noteFinish(aliases, Date.now());
+      // Was this quiet the END OF A COMPACTION rather than the end of a turn?
+      // Asked BEFORE the settle below, because the settle is what makes the
+      // answer stop being readable — and asked as "does this conversation
+      // carry any live phase at all", so it is still true when a hook beat the
+      // poller to the finish by less than one interval and the ring is already
+      // a resting dot.
+      //
+      // A resting dot cannot survive into a REAL turn's ending and so cannot
+      // suppress its toast: going busy is the only way back to something worth
+      // announcing, and both paths out of quiet — the UserPromptSubmit hook
+      // and the quiet→busy edge below — clear a settled phase on the way.
+      //
+      // Only computed on the edge that reads it: this loop runs over every
+      // node on every poll.
+      const quieting = prev === 'busy' && node.status !== 'busy';
+      const wasCompaction =
+        quieting &&
+        (compaction.isCompacting(aliases) ||
+          compaction.phaseOf(aliases, Date.now(), false) !== undefined);
+      if (quieting) {
+        // `busy: false` is not a guess here — the edge we are standing on IS
+        // the roster leaving `busy`.
+        compaction.noteFinish(aliases, Date.now(), false);
       } else if (prev !== undefined && prev !== 'busy' && node.status === 'busy') {
         compaction.clearSettled(aliases);
       }
       if (node.hidden) continue;
       // The turn ended: it was working, now it is not.
       if (prev === 'busy' && (node.status === 'waiting' || node.status === 'idle')) {
-        noteSessionDone(node.id);
+        // ...UNLESS what just ended was a compaction. A compaction is neither
+        // work you asked for nor a question for you (the whole argument for
+        // giving it a mark of its own — see src/compaction.ts), so calling it
+        // a finished turn was wrong twice over: it toasted "X finished its
+        // turn" at a conversation nobody had asked anything of, and it left
+        // the row unseen-done, which is the red attention dot. The purple mark
+        // hid that red dot while it lasted and the red one surfaced when it
+        // expired — a session lighting up for attention an hour after a
+        // compaction it did on its own.
+        if (!wasCompaction) noteSessionDone(node.id);
         continue;
       }
       // A session found already waiting (window opened onto it, idle →
@@ -2457,7 +2552,14 @@ export async function activate(
       // One resolver for the whole loop — see projectReachNow.
       const reach = projectReachNow();
       for (const node of forest.nodes.values()) {
-        if (node.unseen !== true || node.hidden) continue;
+        // THE SAME QUESTION THE ROW'S OWN DOT ANSWERS, asked with the same
+        // function — see viewmodel.subtreeHasUnseen, which is this loop's twin
+        // for the inline sidebar and carries the argument in full. A
+        // hand-written `unseen === true && !hidden` disagreed with statusTone
+        // in three directions (a session that is OVER, one that is BUSY again,
+        // one WAITING with unseen tracking off), and every disagreement showed
+        // up as a project row whose dot contradicted the rows beneath it.
+        if (statusTone(node) !== 'done') continue;
         // EVERY claimant, not one: a twice-claimed session renders under both
         // project rows (see matchProjects), so the dot has to light both — a
         // row showing the session while its sibling carries the green mark
@@ -2601,6 +2703,13 @@ export async function activate(
     // that writes the CSS (sanitizeBranchColor).
     branchColors: () =>
       cfg().get<unknown[]>(CONFIG_KEYS.branchColors, [])?.map(String) ?? [],
+    // `lineage.runningBadge` — the count on the activity-bar icon, off by
+    // default. Read live (both halves), so the number appears and disappears on
+    // the next tick rather than on a window reload — including when
+    // `lineage.viewStyle` moves between the two sidebars, which is what the
+    // surface half is comparing against. See TreeDeps.runningBadge.
+    runningBadge: (surface) =>
+      boolCfg(CONFIG_KEYS.runningBadge, false) && viewStyle() === surface,
     // `lineage.git.branches` — the whole branch block, off by default. Read per
     // render like every other setting here, so the rows appear and disappear on
     // the next tick rather than on a window reload.
@@ -2621,7 +2730,7 @@ export async function activate(
     },
     // What the `+` on a project or subproject row does.
     newSessionInWorktree: () =>
-      boolCfg(CONFIG_KEYS.gitNewSessionInWorktree, false),
+      boolCfg(CONFIG_KEYS.gitNewSessionInWorktree, true),
     // Anything that is not 'detailed' reads as 'standard' — a mistyped setting
     // should show the quieter line, not no line and not a crash.
     sessionBranchDetail: () =>
@@ -2874,11 +2983,30 @@ export async function activate(
       const aliases = chainAliases(e.sessionId);
       if (e.event === 'PreCompact') {
         compaction.noteStart(e.sessionId, Date.now());
-      } else if (
-        e.event === 'Stop' ||
-        (e.event === 'SessionStart' && e.source === 'compact')
-      ) {
-        compaction.noteFinish(aliases, Date.now());
+      } else if (e.event === 'Stop') {
+        // `busy: false` is what `Stop` MEANS — the turn ended — and it is the
+        // argument that decides whether this rests a purple dot or simply ends
+        // the phase. See noteFinish.
+        compaction.noteFinish(aliases, Date.now(), false);
+        //
+        // SESSIONSTART `source: 'compact'` USED TO END THE PHASE HERE TOO, and
+        // it no longer does. It is still the earliest and most exact statement
+        // that a compaction finished — but finishing is only half of what this
+        // has to decide, and it cannot answer the other half. "Is the
+        // conversation still working?" would have to come from the roster, and
+        // the roster reports a COMPACTING session as plainly `busy`: that
+        // confound is the whole reason src/compaction.ts exists. So the probe
+        // says "busy" for the `/compact` typed at an idle session as readily as
+        // for the auto-compact that fires mid-turn, and the one case the purple
+        // dot exists for would have been the one that never got it.
+        //
+        // Nothing is lost by dropping it. When the conversation really is quiet
+        // afterwards, the roster's own busy→quiet edge and this `Stop` are both
+        // immediate and both know it. When the turn carries on, there is no
+        // quiet edge to have — and `settleSuperseded`, running on the next
+        // rebuild, reads a status taken AFTER the compaction rather than during
+        // it, which is the only reading of "still working" that means anything
+        // here.
       } else if (e.event === 'UserPromptSubmit') {
         // A new prompt IS the "other command behind it" the resting dot
         // promises there is none of, and it arrives a poll interval before the
@@ -3510,6 +3638,38 @@ export async function activate(
   context.subscriptions.push(
     store.onDidChange(() => {
       void syncCanSwitchAccountContext();
+    }),
+  );
+
+  /** The same mirror for the HANDOFF entry, which asks the opposite question:
+   *  two accounts running different clis rather than the same one. Kept as its
+   *  own key and its own cache rather than folded into the block above, so
+   *  that neither verb can start drawing on the other's roster. */
+  let lastCanHandOff: boolean | null = null;
+  const syncCanHandOffContext = async (): Promise<void> => {
+    let can = false;
+    try {
+      can = canHandOff(store.getAccounts());
+    } catch (err) {
+      logError('extension.canHandOffContext', err);
+      return;
+    }
+    if (can === lastCanHandOff) return;
+    lastCanHandOff = can;
+    try {
+      await vscode.commands.executeCommand(
+        'setContext',
+        CONTEXT_CAN_HAND_OFF,
+        can,
+      );
+    } catch (err) {
+      logError('extension.canHandOffContext', err);
+    }
+  };
+  await syncCanHandOffContext();
+  context.subscriptions.push(
+    store.onDidChange(() => {
+      void syncCanHandOffContext();
     }),
   );
 
@@ -5337,16 +5497,37 @@ export async function activate(
     }
   };
 
+  // Assigned right after `commandDeps` exists — the host launches THROUGH
+  // commandDeps.launchSession, and the verbs poke the host, so one of the two
+  // references has to be late-bound. The verbs' poke is the safe one to
+  // defer: a poke before construction is a poke about an empty queue.
+  let dispatchHost: DispatchHost | undefined;
+
   const commandDeps: AccountCommandDeps = {
     // The whole accounts surface, as ONE optional member: the verbs guard
     // on its presence, so a build without it behaves exactly as this extension
     // did before accounts existed.
     accounts: accountDeps,
 
+    // The dispatch queue: the store persists it, the host (below) acts on it,
+    // and the verbs only park, list and cancel. Cancel IS settle — the record
+    // stays as its own tombstone, so another window can never relaunch it.
+    dispatch: {
+      entries: () => store.dispatchEntries(),
+      queue: (entry) => store.queueDispatch(entry),
+      cancel: (id) => store.settleDispatch(id, 'cancelled'),
+      poke: () => dispatchHost?.poke(),
+    },
+
     getForest: () => forest,
     refresh: refreshNow,
     hasTranscript: (sessionId) =>
       hasTranscript(sessionId, { extraProjectsDirs: profileProjectsDirs() }),
+    // The same lookup hasTranscript runs, kept as a pair on purpose: the
+    // handoff brief has to NAME the file, and two different searches answering
+    // the two questions would eventually disagree.
+    transcriptPathOf: (sessionId) =>
+      transcriptFile(sessionId, { extraProjectsDirs: profileProjectsDirs() }),
     repairResumeLeaf: (sessionId) =>
       repairResumeLeaf(sessionId, { extraProjectsDirs: profileProjectsDirs() }),
     transcriptFacts,
@@ -5385,14 +5566,23 @@ export async function activate(
     // native `/fork` dispatches. Stat-cached inside the reader, so asking on
     // every focus costs nothing.
     backgroundJob: (sessionId) => daemonReader.read().jobs.get(sessionId),
-    // Detach tier: does the private server still hold this wrap? Same probe
-    // the registry uses for pane pids — a name that answers with one is a
-    // session that exists. Probed even when the config gate is off, like
+    // Detach tier: does the private server still hold this wrap, with a
+    // CONVERSATION in it? Probed even when the config gate is off, like
     // tmuxPanePid above: sessions wrapped before the flip are still wrapped.
+    //
+    // "With a conversation in it" is the whole of `queryWrapState`'s reason to
+    // exist, and why this is no longer a pane-pid test. Exit-to-shell leaves a
+    // wrap alive with a SHELL in the pane, which answers a pane pid perfectly
+    // well — so the old probe would report that session live, `detachedTmuxName`
+    // would hand `resumeFlow` an attach target, and clicking Resume would drop
+    // the user at their own shell prompt and record the conversation as
+    // reopened. An `exited` wrap is deliberately indistinguishable from `gone`
+    // here: there is nothing to attach to either way, so resume takes the
+    // ordinary `--resume` path, with every guard on it.
     tmuxSessionLive: async (name) => {
       const binary = tmuxSpawn()?.binary ?? findTmuxBinary();
       if (binary === null) return false;
-      return (await queryPanePid(binary, name)) !== undefined;
+      return (await queryWrapState(binary, name)) === 'running';
     },
     revealSession,
     focusSessionsView,
@@ -6010,6 +6200,20 @@ export async function activate(
     worktreesFor: (dir) => worktrees.warm(dir),
     addWorktree: (opts) => runWorktreeAdd(opts),
     removeWorktree: (opts) => runWorktreeRemove(opts),
+    deleteBranch: (opts) => runBranchDelete(opts),
+    aheadCount: (repoDir, mainName, branch) =>
+      readAheadCount(repoDir, mainName, branch),
+    branchPrefix: () => cfg().get<string>(CONFIG_KEYS.gitBranchPrefix, '') ?? '',
+    // The minted-branch ledger, straight through to the store — the same
+    // window-shared file every other record lives in, because the delete
+    // offer has to survive the window that minted the ref.
+    isMintedBranch: (repoDir, branch) => store.isMintedBranch(repoDir, branch),
+    recordMintedBranch: (repoDir, branch) =>
+      store.recordMintedBranch(repoDir, branch),
+    forgetMintedBranch: (repoDir, branch) =>
+      store.forgetMintedBranch(repoDir, branch),
+    pruneMintedBranches: (repoDir, existing) =>
+      store.pruneMintedBranches(repoDir, existing),
     pullRequestFor: (repoDir, branch) => pullRequests.get(repoDir, branch),
     // Gated on the SETTING and not on view visibility, unlike the cache's own
     // refresh: this is a verb somebody just picked, and refusing it because the
@@ -6081,6 +6285,9 @@ export async function activate(
     // Notifications
     markSeen: (sessionId) => markSeen(sessionId),
     notificationsEnabled: () => notificationsOn(),
+    // `lineage.soloSession`, read live — the multi-open verb refuses while it
+    // is on, because solo mode would park each session as the next one opened.
+    soloSessionEnabled: () => boolCfg(CONFIG_KEYS.soloSession, false),
 
     // Telling a parent conversation what happened to it. Both settings are
     // read on every call, like every other one here, so a change takes effect
@@ -6448,6 +6655,56 @@ export async function activate(
       await openProject(target, false);
     },
   };
+
+  // The dispatch queue's clockwork. Launches go through commandDeps.
+  // launchSession so a dispatched session takes the same account-safe path
+  // every clicked one does (pin backfill, parked-alias attach); the entry's
+  // id becomes the session id — minted at queue time, so a crash between
+  // decide and launch cannot double-start.
+  dispatchHost = new DispatchHost({
+    pending: () => store.dispatchEntries().filter((d) => d.done === undefined),
+    settle: (id, done) => store.settleDispatch(id, done),
+    profiles: () => accountDeps.accounts(),
+    usageMap: () => accountDeps.usageMap(),
+    refreshUsage: (profiles, force) => accountDeps.refreshUsage(profiles, force),
+    defaultRouting: () => accountDeps.defaultRouting(),
+    launch: async (l) => {
+      const entry = l.entry;
+      const title = entry.title ?? defaultSessionTitle(entry.cwd, []);
+      await commandDeps.recordLaunch(entry.id, null, entry.cwd);
+      await commandDeps.upsertRecord(entry.id, { title });
+      const binding = await commandDeps.launchSession({
+        sessionId: entry.id,
+        ...(entry.cwd !== undefined ? { cwd: entry.cwd } : {}),
+        ...(entry.prompt !== undefined ? { prompt: entry.prompt } : {}),
+        title,
+        env: envForProfile(l.profile),
+        profileId: l.profile.id,
+        ...(l.profile.provider === 'codex'
+          ? { provider: 'codex' as const }
+          : {}),
+      });
+      if (!binding) return false;
+      try {
+        await accountDeps.pinSession(entry.id, l.profile.id);
+      } catch (err) {
+        logError('dispatch.pinSession', err);
+      }
+      refreshNow();
+      return true;
+    },
+    now: () => Date.now(),
+    notify: (m) => void vscode.window.showInformationMessage(m),
+  });
+  context.subscriptions.push(dispatchHost);
+  // Fresh usage numbers are the signal the gate waits on; queue edits poke
+  // through the verbs directly, and the activation poke below covers a queue
+  // that waited out a restart. Cross-window edits arrive with the next usage
+  // tick — the queue's cadence never depends on a repaint.
+  context.subscriptions.push(
+    accountDeps.onUsageChanged(() => dispatchHost?.poke()),
+  );
+  dispatchHost.poke();
 
   context.subscriptions.push(registerCommands(commandDeps));
 
@@ -6941,6 +7198,20 @@ export async function activate(
       // than at the next 30 s window, or the setting looks broken.
       if (e.affectsConfiguration(`${CONFIG_SECTION}.${CONFIG_KEYS.showArchived}`)) {
         forceArchiveScan = true;
+      }
+      // The exit-to-shell hooks live in the tmux conf, so the flip is a file
+      // rewrite. It cannot take effect on sessions already running: tmux reads
+      // the conf when the SERVER starts, and ours outlives every one of them.
+      if (
+        e.affectsConfiguration(`${CONFIG_SECTION}.${CONFIG_KEYS.exitToShell}`)
+      ) {
+        rewriteTmuxConf();
+        log(
+          'tmux:',
+          exitShell() === null
+            ? 'exit-to-shell off — /exit closes the tab again'
+            : `exit-to-shell on (${exitShell()}) — applies to sessions started after the tmux server next restarts`,
+        );
       }
       // Same reasoning for phantom rows, and it needs more than a rebuild:
       // `lastEntries` has ALREADY had them removed, so only a fresh fetch can
