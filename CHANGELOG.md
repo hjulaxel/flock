@@ -162,6 +162,48 @@ All notable changes to Flock are recorded here. The format follows
   says everything the number does, in rows you can click. Nothing was removed:
   the count, its predicate and its tests are all still there, one setting away.
 
+- **The Shells view now lists the commands Claude runs, not the terminals it
+  runs in.** The section was always meant to answer "what is executing right
+  now"; what it actually listed was one row per terminal *this window* had
+  bound — which is one row per session, carrying a pid and a tmux name, and
+  told you nothing the tree had not already said. The unit was wrong. A
+  terminal is the pty Flock launches claude *into*, and it is not the thing
+  that is invisible. What is invisible is the `npm test` the model decided to
+  run inside it eleven seconds ago and has not come back from.
+  So the rows are now **`Bash` calls**: one per command a session runs, with
+  the ones executing right now pinned to the top and a clock on each that ticks
+  in seconds. A failed run shows its exit code; a refused one says it never
+  ran, kept apart from a failure for the same reason a 403 is not a 500 —
+  reading a denial as a crash sends you debugging a script that was never
+  started. **Backgrounded jobs stay on the list until they actually finish**,
+  which is the single easiest thing in a Claude session to lose track of, and
+  **Open Output** on their menu opens the file the CLI is writing their stdout
+  to — so you can watch one without interrupting the session to ask about it.
+  **Copy Command** takes the command verbatim, not the truncated form the row
+  shows.
+  The scope grew with the rewrite. The old view could only ever show its own
+  window's terminals, because a `vscode.Terminal` does not cross the
+  extension-host boundary; the facts now come off the transcripts on disk, so a
+  command running in a session **another window** launched is a row here like
+  any other, and so is one in a session Flock never launched at all. The
+  section's badge counts what is running, which is what makes a long script
+  noticeable while the section is collapsed — its shipped state.
+  Nothing was added to what has to be installed. There is no hook, no plugin
+  and no `ps` walk: the CLI writes a `tool_use` record while the command it
+  describes is still running, so an unanswered one *is* a command executing
+  right now. That was measured rather than assumed — sampling a transcript from
+  inside a twenty-second command, the record appeared about three seconds in and
+  then sat unanswered for the remaining fifteen. Those three seconds are the
+  honest limit: with the roster tick on top, a command has to last about five
+  seconds to be caught mid-flight, and anything quicker simply appears on the
+  list already finished. That is the half that does not matter — a command too
+  quick to catch is one nobody needed to watch. Reads are incremental (a stat
+  plus the bytes appended since the last look, never a re-read from the top),
+  and the one-second clock only runs while something is live and the section is
+  on screen.
+  The pid and tmux facts the old rows carried are on the session row's hover in
+  the tree, which is where a fact about a session belongs.
+
 ### Fixed
 
 - **The handoff verb would never have appeared.** Its menu gate read

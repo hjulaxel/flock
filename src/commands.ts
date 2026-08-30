@@ -153,6 +153,7 @@ import {
 // Pure, like projects/accounts/routing above — node builtins only, no vscode.
 // Just the name composer: every tmux CALL still goes through CommandDeps.
 import { tmuxSessionName } from './tmux';
+import type { ShellRun } from './toolShells';
 import { MAX_AGENT_FORKS } from './agentVerbs';
 import type { AgentForkOutcome } from './agentVerbs';
 // Pure as well. The single answer to "who is running this", so a verb's refusal
@@ -718,6 +719,31 @@ async function copyToClipboard(text: string, said: string): Promise<void> {
   } catch (err) {
     logError('commands.copyToClipboard', err);
   }
+}
+
+/**
+ * A Shells-row invocation: `{kind:'shell', run, id}`.
+ *
+ * Shaped like the other `*FromArg` readers and just as suspicious of its
+ * input. Only the `run` is taken — the row's `id` is the SESSION's, deliberately
+ * (it is what makes every session verb work from this view unchanged), and a
+ * shell verb that read it would act on the conversation instead of the command.
+ *
+ * Nothing is re-resolved. A run is a historical fact — it happened, at a
+ * timestamp, with a command — and the row holding it is the only place that
+ * fact lives; re-deriving it from the transcript would only introduce a way
+ * for the verb to fail on a run the view had since aged out.
+ */
+export function shellRunFromArg(arg: unknown): ShellRun | undefined {
+  if (arg === null || typeof arg !== 'object') return undefined;
+  const obj = arg as { kind?: unknown; run?: unknown };
+  if (obj.kind !== 'shell') return undefined;
+  const run = obj.run;
+  if (run === null || typeof run !== 'object') return undefined;
+  const candidate = run as ShellRun;
+  if (typeof candidate.id !== 'string' || candidate.id === '') return undefined;
+  if (typeof candidate.command !== 'string') return undefined;
+  return candidate;
 }
 
 /**
@@ -10101,6 +10127,45 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     const target = await resolveWorktree(deps, arg, 'Copy which worktree path?');
     if (!target) return;
     await copyToClipboard(target.branch.dir, 'Copied worktree path');
+  });
+
+  // ---------------------------------------------------------------- shells
+  //
+  // The two verbs on a Shells row. Neither takes a palette fallback and both
+  // are absent from the palette entirely (see package.json's commandPalette
+  // block): there is no sensible way to ask "which of the four hundred
+  // commands Claude has run did you mean", and a picker of them would be a
+  // worse version of the list the user is already looking at.
+
+  register(COMMANDS.copyShellCommand, 'copy command', async (arg?: unknown) => {
+    const run = shellRunFromArg(arg);
+    if (!run || run.command === '') return;
+    // The command off the ARGUMENT rather than re-read from the transcript:
+    // copying touches nothing, and a run that has since been evicted from the
+    // view's history is exactly the one somebody is trying to keep.
+    await copyToClipboard(run.command, 'Copied command');
+  });
+
+  register(COMMANDS.openShellOutput, 'open output', async (arg?: unknown) => {
+    const run = shellRunFromArg(arg);
+    const file = run?.outputFile;
+    if (file === undefined || file === '') return;
+    // `preview: false` so a second background job does not replace the first
+    // in the same preview tab — watching two at once is the case this verb
+    // exists for. A file the CLI has not created yet (or has cleaned up) opens
+    // as the workbench's own "cannot open" notice, which says more than a
+    // silent no-op would.
+    try {
+      const doc = await vscode.workspace.openTextDocument(
+        vscode.Uri.file(file),
+      );
+      await vscode.window.showTextDocument(doc, { preview: false });
+    } catch (err) {
+      logError('commands.openShellOutput', err);
+      void vscode.window.showWarningMessage(
+        `Flock: no output file at ${file} — the command may not have written one yet.`,
+      );
+    }
   });
 
   // The chat. Deliberately NOT a session verb: a chat has no row, no name to

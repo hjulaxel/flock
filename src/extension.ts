@@ -80,7 +80,6 @@ import type {
   RosterEntry,
   RosterResult,
   SessionForest,
-  SessionNode,
   SessionSwitching,
   SubprojectRecord,
   TerminalLocationPref,
@@ -193,6 +192,7 @@ import { chatAutoCloseVictims } from './chatAutoClose';
 import { frontSession, mayFollowSelection } from './switcher';
 import { type WhereAmI, whereAmI } from './whereami';
 import { registerShellsView } from './shellsView';
+import type { ShellSessionInfo } from './shellsView';
 import { CompactionTracker } from './compaction';
 import { planDeepReveal } from './deepSwitch';
 import { WorktreeCache, branchRowsAdvice } from './git';
@@ -4249,42 +4249,63 @@ export async function activate(
 
   // ------------------------------------------------------------ 6c. shells
   //
-  // The third section: one row per TERMINAL this window has bound. See
-  // src/shellsView.ts for why a process list is a view of its own rather than
-  // more columns on the tree — briefly, its unit is a pty with a pid and a
-  // tmux name, none of which survive the re-key that the tree's unit (a
-  // conversation) is defined by.
+  // The third section: one row per COMMAND Claude is running — the `npm test`
+  // it decided to execute inside a session, not the terminal the session
+  // itself lives in. See src/shellsView.ts for why that is a view of its own
+  // rather than more rows in the tree: its unit lives for eleven seconds and
+  // there are hundreds per conversation, so folding them in would bury the
+  // lineage the tree exists to show.
   //
-  // Every session lookup is resolved over the CHAIN here, on the way in, so
-  // that shellsView.ts never has to know generations exist: the binding is
-  // held under the id its terminal was LAUNCHED with, and the row, the status
-  // and the cwd all live on whichever generation is current.
-  const shellSessionNode = (boundId: string): SessionNode | undefined => {
-    for (const id of chainAliases(boundId)) {
-      const node = forest.nodes.get(id);
-      if (node !== undefined) return node;
+  // MACHINE-WIDE, unlike everything else registered in this block. The facts
+  // come off transcripts on disk rather than out of this window's terminal
+  // registry, so a script running in a session another window launched is a
+  // row here like any other.
+  /**
+   * The live sessions, resolved to transcripts.
+   *
+   * LIVE ONLY, and that is the view's correctness rule rather than a cost
+   * saving: "no result yet" means "still executing" only for a session whose
+   * process is alive, and a conversation killed mid-command leaves behind a
+   * tool call that will never be answered. See ShellDeps.sessions.
+   *
+   * Paths come off the archive index, which has already stat'ed every
+   * transcript on its own sweep, and fall back to a direct resolve for a
+   * session so new the last sweep has not seen it — which is exactly the
+   * session most likely to be running something right now.
+   */
+  const shellSessions = (): ShellSessionInfo[] => {
+    const paths = new Map<string, string>();
+    for (const s of archiveIndexer.current()) {
+      paths.set(s.sessionId, s.transcriptPath);
     }
-    return undefined;
+    const out: ShellSessionInfo[] = [];
+    for (const node of forest.nodes.values()) {
+      if (node.ghost || node.archived || node.deleted) continue;
+      if (node.status === 'exited') continue;
+      // A Codex session's rollout file is a different format entirely and
+      // holds no Bash tool calls of this shape; it would parse to nothing.
+      if (sessionProviderFor(node.id) === 'codex') continue;
+      const file =
+        paths.get(node.id) ??
+        transcriptFile(node.id, { extraProjectsDirs: profileProjectsDirs() });
+      if (file === null || file === undefined || file === '') continue;
+      out.push({
+        id: node.id,
+        label: node.label,
+        transcriptPath: file,
+        ...(node.cwd === undefined ? {} : { cwd: node.cwd }),
+      });
+    }
+    return out;
   };
   const shellsViewController = registerShellsView({
-    shells: () => registry.bindings(),
-    sessionLabel: (id) => shellSessionNode(id)?.label,
-    sessionStatus: (id) => shellSessionNode(id)?.status,
-    // The node's cwd first (the roster's answer, which is where the process
-    // actually is), then the record's — a shell whose session the roster has
-    // not reported yet still knows where it was launched.
-    sessionCwd: (id) =>
-      shellSessionNode(id)?.cwd ?? store.get(chainIndex.tipOf(id))?.cwd,
-    // Three signals, one repaint: a terminal appearing, a terminal exiting,
-    // and the roster tick that moves every row's age and status along. The
-    // forest event covers the third and is also what fires after a re-key, so
-    // a row whose conversation changed generations re-reads its label.
+    sessions: shellSessions,
+    // The roster tick, which is also what rebuilds the forest — so the scan
+    // for new commands rides the extension's existing heartbeat rather than
+    // adding a timer of its own. The view starts its own one-second clock on
+    // top of this only while something is actually running and on screen.
     onDidChange: (listener) => {
-      const subs = [
-        registry.onDidBind(() => listener()),
-        registry.onDidExit(() => listener()),
-        onForestChanged.event(() => listener()),
-      ];
+      const subs = [onForestChanged.event(() => listener())];
       return {
         dispose(): void {
           for (const sub of subs) {
