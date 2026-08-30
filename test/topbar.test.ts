@@ -24,9 +24,17 @@ import {
   hasForkableRow,
   newSessionTarget,
 } from '../src/commands';
+import {
+  branchTokens,
+  projectContextValue,
+  sessionContextValue,
+  subprojectTokens,
+} from '../src/viewmodel';
+import { contextValueOf } from '../src/types';
 import type {
   CommandDeps,
   EditorialRecord,
+  ProjectGroupNode,
   ProjectRecord,
   SessionForest,
   SessionNode,
@@ -744,17 +752,269 @@ describe('manifest: the session row context menus', () => {
         .replace(`view == ${SESSIONS}`, 'THIS-VIEW')
         .replace(`webviewId == '${INLINE}'`, 'THIS-VIEW');
 
-    // Any session row, but only while a second account exists to move to — a
-    // menu offering the verb with nowhere to go would be a question with no
-    // answer.
+    // TWO GATES FOR TWO DIFFERENT FACTS, and the pair is the fix. The token
+    // says this ROW is a conversation the mover understands; the context key
+    // says the ROSTER has somewhere to send it. The verb used to be gated on
+    // the key alone, and the key used to count every account a session could
+    // run on — so on the roster this extension seeds by default (one Claude
+    // login, plus a Codex one whenever ~/.codex/auth.json exists) the entry was
+    // drawn on every session row and the picker behind it, which refuses a
+    // cross-CLI pair, was always empty.
     expect(shape(native)).toBe(
-      'THIS-VIEW && viewItem =~ /;session;/ && lineage.manyAccounts',
+      'THIS-VIEW && viewItem =~ /;session;/ && viewItem =~ /;claude;/ && ' +
+        'lineage.canSwitchAccount',
     );
     expect(shape(inline)).toBe(shape(native));
-    // Same slot in both menus: right under rename, whichever rename the view
-    // spells.
-    expect(native.group).toBe('1_actions@3');
+    // Same slot in both menus, and NOT the one Move to Lane sits in: they were
+    // both at 1_actions@3, which leaves their order to contribution accident.
+    expect(native.group).toBe('1_actions@4');
     expect(inline.group).toBe(native.group);
+    for (const menu of ['view/item/context', 'webview/context']) {
+      const lane = pkg.contributes.menus[menu].find(
+        (e) => e.command === 'lineage.moveSessionToLane',
+      );
+      expect(lane?.group, menu).not.toBe(native.group);
+    }
+  });
+
+  // The same trap, one verb later, and this one is the level-2 deliverable:
+  // "we should be able to go to the workspace for that session". Pinned on both
+  // menus with the same gate and the same slot, for the reason above — and with
+  // the GHOST exclusion asserted, because that is a decision rather than an
+  // omission.
+  it('offers Open Workspace for This Session from both views, on live and closed rows alike', () => {
+    const shape = (e: MenuEntry): string =>
+      (e.when ?? '')
+        .replace(`view == ${SESSIONS}`, 'THIS-VIEW')
+        .replace(`webviewId == '${INLINE}'`, 'THIS-VIEW');
+
+    const clausesOf = (menu: string): string[] => {
+      const entries = pkg.contributes.menus[menu].filter(
+        (e) => e.command === 'lineage.openSessionWorkspace',
+      );
+      // Every entry sits directly under fork and fork-and-compact, in both
+      // menus. `0_open@3` is also the branch row's Open Worktree in New Window,
+      // which cannot collide: a branch row carries `;branch;` and never
+      // `;live;` or `;archived;`, so no row can draw both.
+      for (const e of entries) expect(e.group, menu).toBe('0_open@3');
+      return entries.map(shape).sort();
+    };
+
+    const native = clausesOf('view/item/context');
+    const inline = clausesOf('webview/context');
+
+    // TWO entries per menu rather than one on `;session;`, and that is what
+    // keeps the verb off GHOST rows: `sessionContextValue` gives a ghost
+    // neither token, which is how fork and resume already exclude them without
+    // a negated clause. A ghost is an inferred ancestor whose label reads
+    // "(gone)" — opening a window for something that was never a session of
+    // yours is a claim the row cannot support.
+    expect(native).toEqual([
+      'THIS-VIEW && viewItem =~ /;archived;/',
+      'THIS-VIEW && viewItem =~ /;live;/',
+    ]);
+    expect(inline).toEqual(native);
+    for (const clause of [...native, ...inline]) {
+      expect(clause).not.toContain(';ghost;');
+    }
+  });
+});
+
+// ------------------------------------------- one row, one slot per verb
+//
+// THE INVARIANT: two menu entries that can light up on the SAME row must not
+// share a group string. Sharing one across DIFFERENT row kinds is correct and
+// the manifest does it seventeen times on purpose — `0_open@3` is Open
+// Workspace on a session row and Open Worktree in New Window on a branch row,
+// and no row is ever both. What is not correct is two verbs landing in one slot
+// on one row, because the order they then come out in is a property of
+// contribution order rather than of anything anybody decided. "Move to
+// Account…" and "Move to Lane" were doing exactly that on every session row.
+//
+// Checked against REAL rows rather than by reasoning about the clauses: the
+// viewItem strings are generated by `sessionContextValue`, the function both
+// views actually build them with, over the matrix of session shapes it can be
+// handed. A when-clause that cannot be modelled this way is skipped rather than
+// guessed at — see `parseWhen`.
+
+/** One when-clause, split into the parts a row can answer and the parts only
+ *  the window can. */
+interface ParsedWhen {
+  /** Groups of tokens; the row must carry at least one token from each group.
+   *  A plain `viewItem =~ /;x;/` is a group of one. */
+  requires: string[][];
+  /** Tokens the row must NOT carry (`!(viewItem =~ /;x;/)`). */
+  forbids: string[];
+  /** Everything else, verbatim — context keys and config gates. Used only to
+   *  spot a complementary pair like `lineage.multiSelect` / `!lineage.multiSelect`,
+   *  which is two entries that can never be offered at the same moment. */
+  conditions: string[];
+  /** A conjunct this test could not classify. */
+  unmodelled: boolean;
+}
+
+function parseWhen(when: string): ParsedWhen {
+  const out: ParsedWhen = {
+    requires: [],
+    forbids: [],
+    conditions: [],
+    unmodelled: false,
+  };
+  for (const raw of when.split(' && ')) {
+    const term = raw.trim();
+    const negated = /^!\(viewItem =~ \/;([a-zA-Z-]+);\/\)$/.exec(term);
+    if (negated) {
+      out.forbids.push(negated[1]);
+      continue;
+    }
+    const positive = /^viewItem =~ \/;([a-zA-Z-]+);\/$/.exec(term);
+    if (positive) {
+      out.requires.push([positive[1]]);
+      continue;
+    }
+    if (term.startsWith('(') && term.includes('viewItem')) {
+      const tokens = [...term.matchAll(/viewItem =~ \/;([a-zA-Z-]+);\//g)].map(
+        (m) => m[1],
+      );
+      if (tokens.length > 0 && !term.includes('&&') && !term.includes('!')) {
+        out.requires.push(tokens);
+        continue;
+      }
+      out.unmodelled = true;
+      continue;
+    }
+    if (term.includes('viewItem')) {
+      out.unmodelled = true;
+      continue;
+    }
+    out.conditions.push(term);
+  }
+  return out;
+}
+
+const matchesRow = (parsed: ParsedWhen, viewItem: string): boolean =>
+  parsed.requires.every((group) =>
+    group.some((token) => viewItem.includes(`;${token};`)),
+  ) && parsed.forbids.every((token) => !viewItem.includes(`;${token};`));
+
+/** Two entries that a context key keeps apart — the Archive pair, which is one
+ *  verb spelled two ways for one selection and two. */
+const mutuallyExclusive = (a: ParsedWhen, b: ParsedWhen): boolean =>
+  a.conditions.some((c) => b.conditions.includes(`!${c}`)) ||
+  b.conditions.some((c) => a.conditions.includes(`!${c}`));
+
+/** Every viewItem string a SESSION row can carry, from the one function both
+ *  views build it with. */
+function everySessionViewItem(): string[] {
+  const out = new Set<string>();
+  const statuses = ['idle', 'busy', 'waiting', 'exited'] as const;
+  const hosts = [undefined, 'here', 'flock', 'foreign', 'none'] as const;
+  for (const status of statuses)
+    for (const host of hosts)
+      for (const cli of ['claude', 'codex'] as const)
+        for (const ghost of [false, true])
+          for (const archived of [false, true])
+            for (const hidden of [false, true])
+              for (const notifyMuted of [false, true])
+                for (const grace of [false, true])
+                  for (const bound of [false, true])
+                    for (const parentId of [null, B])
+                      out.add(
+                        sessionContextValue(
+                          node(A, {
+                            status,
+                            ghost,
+                            archived,
+                            hidden,
+                            notifyMuted,
+                            parentId,
+                            source: 'minted',
+                            ...(grace ? { graceDeadlineAt: NOW + MINUTE } : {}),
+                          }),
+                          bound,
+                          host,
+                          cli,
+                        ),
+                      );
+  return [...out];
+}
+
+/** Every viewItem string the OTHER four row kinds can carry, built the same way
+ *  — from the functions the two views actually generate them with — for the same
+ *  reason. A session row was the only kind this guard modelled when it was
+ *  written, because a session row was where the collision that prompted it lived
+ *  (Move to Account and Move to Lane, both at `1_actions@3`). That left the
+ *  guard blind to exactly the rows the 2026-08-28 round was ADDING verbs to: a
+ *  project row gained Archived Sessions… and a session row gained Open Workspace
+ *  for This Session, and a project row was already carrying Add Session to
+ *  Project and New Worktree in one slot at `0_open@4` with nothing to say so.
+ *
+ *  The matrix is written out rather than derived from a forest because these
+ *  rows' tokens are cheap and total: a project row is `project` plus `empty`, a
+ *  subproject row is `subproject` plus the `primary`/`named` pair, a branch row
+ *  is `branch` plus three independent flags, and the two header rows carry one
+ *  token each. Enumerating them is the whole space, not a sample. */
+function everyOtherViewItem(): string[] {
+  const out = new Set<string>();
+  for (const empty of [false, true])
+    out.add(
+      projectContextValue({
+        rootIds: empty ? [] : [A],
+      } as unknown as ProjectGroupNode),
+    );
+  for (const main of [false, true])
+    for (const implicit of [false, true])
+      out.add(contextValueOf(subprojectTokens({ main, implicit })));
+  for (const primary of [false, true])
+    for (const pullRequest of [false, true])
+      for (const checkout of [false, true])
+        out.add(
+          contextValueOf(branchTokens(primary, pullRequest, checkout)),
+        );
+  // The two header rows. Neither has a shape to vary; both are here because a
+  // verb contributed to one of them is a verb nothing else in this file checks.
+  out.add(contextValueOf(['group']));
+  out.add(contextValueOf(['elsewhere']));
+  return [...out];
+}
+
+describe('manifest: one row never offers two verbs the same slot', () => {
+  const rows = [...everySessionViewItem(), ...everyOtherViewItem()];
+
+  for (const menu of ['view/item/context', 'webview/context']) {
+    it(`gives every verb its own slot on every row (${menu})`, () => {
+      const entries = pkg.contributes.menus[menu]
+        .filter((e) => (e.when ?? '').includes('viewItem'))
+        .map((e) => ({ entry: e, parsed: parseWhen(e.when ?? '') }))
+        .filter((e) => !e.parsed.unmodelled);
+      expect(entries.length).toBeGreaterThan(5);
+
+      const collisions: string[] = [];
+      for (const viewItem of rows) {
+        const shown = entries.filter((e) => matchesRow(e.parsed, viewItem));
+        for (let i = 0; i < shown.length; i++) {
+          for (let j = i + 1; j < shown.length; j++) {
+            if (shown[i].entry.group !== shown[j].entry.group) continue;
+            if (mutuallyExclusive(shown[i].parsed, shown[j].parsed)) continue;
+            collisions.push(
+              `${shown[i].entry.command} and ${shown[j].entry.command} ` +
+                `both at ${shown[i].entry.group} on ${viewItem}`,
+            );
+          }
+        }
+      }
+      expect([...new Set(collisions)]).toEqual([]);
+    });
+  }
+
+  it('still lets DIFFERENT row kinds share a slot, which is the normal case', () => {
+    // The guard above would be worthless if it had quietly demanded a unique
+    // group per entry: `0_open@3` is deliberately three different verbs on
+    // three kinds of row.
+    const shared = pkg.contributes.menus['view/item/context'].filter(
+      (e) => e.group === '0_open@3',
+    );
+    expect(shared.length).toBeGreaterThan(1);
   });
 });
 

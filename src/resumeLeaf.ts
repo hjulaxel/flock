@@ -5,7 +5,10 @@
 // the CLI cannot just replay it from the top: it has to pick a leaf and walk
 // `parentUuid` back from there. It picks that leaf from the `last-prompt`
 // records the transcript carries — and only falls back to "the newest message"
-// when there is no `last-prompt` leaf at all. Verified in claude 2.1.220:
+// when there is no `last-prompt` leaf at all. Verified in claude 2.1.220 and
+// re-read out of the installed 2.1.250 binary, where both selection paths are
+// still present verbatim in shape (there is no readable `cli.js` any more, so
+// the re-verification is a `grep -a` over a 206 MB Mach-O executable):
 //
 //   let H = m$t(messages, m => leafUuids.has(m.uuid))
 //           ?? (leafUuids.size === 0 && !clearedToEmpty
@@ -26,6 +29,25 @@
 // final answer (child transcript contained the mid-turn tool result and not the
 // text after it).
 //
+// RE-MEASURED under claude 2.1.250, and the premise is much weaker than it was:
+// of the 278 transcripts under ~/.claude/projects today, only 5 end with a leaf
+// that cannot reach the tail (they lose 1, 1, 1, 2 and 13 records). The reason
+// is a change in the CLI's own habits rather than anything here: it now usually
+// records its leaf on a TRAILING record that hangs off the last message — an
+// `away_summary`, a `turn_duration`, an attachment — so the leaf sits PAST the
+// end of the turn instead of inside it. On 222 of the 272 files carrying a leaf
+// that is where it sits, and on 37 more the leaf already IS the last message.
+//
+// That is also why the `no-gain` guard below fires on 227 of those 278 files,
+// and a reader who meets that number first should not conclude this module is
+// dead. In 225 of the 227 the recorded leaf is DEEPER than the newest
+// user/assistant record (the gain distribution runs -5: 64, -3: 49, -2: 33,
+// -4: 27, …), so the skip is the guard doing the one job it was written for:
+// keeping a shallow post-compaction tip from replacing a deeper pre-compaction
+// leaf, which would be a regression dressed up as a fix. The module costs one
+// bounded read per click, and it is still the only thing standing between those
+// 5 transcripts and a fork that silently drops the parent's last answer.
+//
 // THE FIX. Append one more `last-prompt` record naming the true tip. This is
 // the CLI's own mechanism, used the way the CLI uses it, and it is append-only:
 // nothing already in the transcript is rewritten or removed. Because the parse
@@ -35,6 +57,10 @@
 // Dependencies are deliberately minimal — ./types, ./log, ./transcript and
 // node:fs, never vscode — so this module stays unit-testable outside the
 // editor.
+//
+// What all of this means for a fork in plain words — how much of the parent's
+// final turn a child actually inherits, with the numbers above written out — is
+// docs/forking-and-context.md, section 4.
 //
 // This is the one module that WRITES into a transcript, so every gate below is
 // load-bearing. It runs once per fork/resume click — never on a poll tick —

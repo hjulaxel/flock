@@ -252,6 +252,35 @@ describe('explorer: desiredFolders under directory scope', () => {
     );
   });
 
+  it('roots at the current directory when NO project claims the session', () => {
+    // The auto-switch model follows the SESSION, and a session may be running
+    // in a loose checkout nobody has filed into a project yet. Clearing the
+    // tree back to the anchor because of that is the one outcome a following
+    // Explorer may never produce.
+    expect(
+      desiredFolders(null, ANCHOR, {
+        scope: 'directory',
+        currentDir: '/tmp/scratch',
+      }),
+    ).toEqual([{ path: '/tmp/scratch', name: 'scratch' }]);
+  });
+
+  it('still answers nothing for no project under project scope, or with no directory', () => {
+    // `'project'` scope has no directory LIST to expand into roots without a
+    // project, so [] stays the only honest answer there — and an absent
+    // `currentDir` is the "leave workspace" path, which must stay byte-identical.
+    expect(
+      desiredFolders(null, ANCHOR, {
+        scope: 'project',
+        currentDir: '/tmp/scratch',
+      }),
+    ).toEqual([]);
+    expect(desiredFolders(null, ANCHOR, { scope: 'directory' })).toEqual([]);
+    expect(
+      desiredFolders(null, ANCHOR, { scope: 'directory', currentDir: ANCHOR }),
+    ).toEqual([]);
+  });
+
   it('is unchanged from before when the scope is project, or absent', () => {
     const all = desiredFolders(web, ANCHOR);
     expect(desiredFolders(web, ANCHOR, {})).toEqual(all);

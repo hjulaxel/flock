@@ -17,15 +17,25 @@
 // Imports node builtins and ./log only. Never vscode: the tests drive this on
 // real temp directories, and every rule in here is about filesystems.
 //
-// THE INVARIANT, and it is the reason this is a MOVE and never a copy:
-// `transcript.transcriptFile` searches the default projects root first and each
-// account root after it, first hit wins. Two copies of one transcript would
-// therefore resolve to whichever root happens to be scanned first — which, once
-// a conversation has moved OFF the default account, is the stale one. Exactly
-// one `<sessionId>.jsonl` may exist on this machine at any moment, so the
+// THE INVARIANT, and it is the reason this is a MOVE and never a copy: exactly
+// one `<sessionId>.jsonl` may exist on this machine at any moment. So the
 // transcript is renamed (atomic, never two copies), and on the one filesystem
 // where rename cannot work — a config dir the user pointed at another volume —
 // the copy is unwound rather than left behind.
+//
+// The invariant is a rule this module ENFORCES, not a fact it may assume, and
+// the difference cost real conversations. Three ids on the author's machine
+// exist in two accounts at once; the mechanisms are ordinary (a tmux pane that
+// kept a stale `CLAUDE_CONFIG_DIR` and wrote the next turn into the account the
+// conversation had just left, a half-finished move from an older build, a
+// hand-copied config dir), and the guard below was checking only the exact path
+// it was about to write rather than the whole destination account, so a copy
+// under another project slug was no obstacle at all. `transcript.transcriptFile`
+// now breaks a duplicate on newest-mtime instead of on root order, which decides
+// which copy is READ; `setAsideTranscript` below is how a machine already in
+// that state gets back to one copy, and it renames rather than deletes because
+// when an id exists twice nothing in this file can tell whose conversation is
+// whose.
 
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
@@ -141,6 +151,166 @@ export function transcriptInConfigDir(
   return null;
 }
 
+/** A transcript found on disk, with the two facts a person needs in order to
+ *  decide which of two copies of one conversation to keep. */
+export interface TranscriptCopyFacts {
+  /** Absolute path of the `.jsonl`. */
+  path: string;
+  bytes: number;
+  mtimeMs: number;
+}
+
+/**
+ * `transcriptInConfigDir` plus the stat, for the one caller that has to DESCRIBE
+ * what it found rather than just avoid it.
+ *
+ * Kept separate rather than folded into `transcriptInConfigDir` because that
+ * function is on the hot path of every move and every probe and answers a
+ * yes/no question; this one exists for the refusal text and the heal offer,
+ * where a size and a date are the difference between "Flock will not do this"
+ * and a user being able to tell a nine-line stub from their afternoon's work.
+ */
+export function transcriptCopyInConfigDir(
+  configDir: string,
+  sessionId: string,
+): TranscriptCopyFacts | null {
+  const found = transcriptInConfigDir(configDir, sessionId);
+  if (found === null) return null;
+  try {
+    const st = fs.statSync(found);
+    return { path: found, bytes: st.size, mtimeMs: st.mtimeMs };
+  } catch {
+    return null; // it went away between the readdir and the stat
+  }
+}
+
+/** The suffix a set-aside transcript carries. It deliberately does NOT end in
+ *  `.jsonl`: every reader in this extension — `transcriptFile`,
+ *  `transcriptInConfigDir`, the transcript index's scan — selects on that
+ *  extension, so a renamed file leaves the id's namespace entirely without
+ *  anything having to learn a new exclusion rule. */
+export const SET_ASIDE_SUFFIX = '.superseded';
+
+/**
+ * Take one of two copies of a conversation OUT OF THE WAY, by renaming it.
+ *
+ * THE ALTERNATIVE WAS DELETION, and it is rejected. When an id exists twice,
+ * one of those files is somebody's conversation and this code cannot tell which
+ * — that is the entire reason the move refuses instead of overwriting. A verb
+ * that resolves the standoff by deleting a transcript would be betting a user's
+ * history on a heuristic (newest mtime) that is right most of the time. A
+ * rename costs nothing, is one `mv` away from being undone by hand, and gets
+ * the machine back to the one-copy state the whole module is built on, which is
+ * all the move actually needs.
+ *
+ * The stamp is the file's own mtime rather than `Date.now()`, so re-running this
+ * on a file that was already set aside is idempotent in spirit — the name
+ * describes the bytes, not the moment somebody clicked. A collision (the same
+ * file set aside twice in the same millisecond) falls back to a counter rather
+ * than clobbering, for the same reason nothing else here clobbers.
+ *
+ * Never throws.
+ */
+export async function setAsideTranscript(
+  transcriptPath: string,
+): Promise<{ ok: boolean; path?: string; error?: string }> {
+  const from = typeof transcriptPath === 'string' ? transcriptPath.trim() : '';
+  if (from === '' || !isFile(from)) {
+    return { ok: false, error: 'There is no such transcript to set aside.' };
+  }
+  let stamp: string;
+  try {
+    stamp = new Date(fs.statSync(from).mtimeMs)
+      .toISOString()
+      .replace(/[:.]/g, '-');
+  } catch {
+    stamp = 'unknown';
+  }
+  let to = `${from}${SET_ASIDE_SUFFIX}-${stamp}`;
+  for (let n = 2; fs.existsSync(to) && n < 100; n++) {
+    to = `${from}${SET_ASIDE_SUFFIX}-${stamp}-${n}`;
+  }
+  try {
+    await fsp.rename(from, to);
+  } catch (err) {
+    logError('accountMove: could not set a duplicate transcript aside', err);
+    return { ok: false, error: `${from} could not be renamed.` };
+  }
+  log('accountMove: set aside', from, '->', to);
+  return { ok: true, path: to };
+}
+
+/** What `sourceDirFor` found: the config dir that actually holds the
+ *  transcript, and whether that was the one the caller expected. */
+export interface SourceDirResult {
+  /** The config dir — NOT the projects root and not the file: the mover works
+   *  in config dirs, because the sidecars live beside `projects/`. */
+  dir: string;
+  /** False when the pin was wrong and this was found somewhere else. The
+   *  caller logs it; nothing branches on it. */
+  matchedPreferred: boolean;
+}
+
+/**
+ * WHICH ACCOUNT DIRECTORY holds this conversation, preferring the one the pin
+ * claims.
+ *
+ * This is deliberately not a third spelling of "where is this conversation".
+ * `transcript.transcriptFile` answers that one and answers it with a PATH,
+ * which is the shape every reader wants and the one shape a move cannot use:
+ * the mover has to name a config dir, because that is what the destination is
+ * expressed in and what the sidecars hang off. So this walks the same roots and
+ * returns the enclosing account instead.
+ *
+ * THE ORDER IS THE WHOLE DESIGN. `preferred` is probed first, so a conversation
+ * whose pin is right behaves exactly as it did before this function existed —
+ * one readdir, same directory, no new behaviour to regress. The fallback is for
+ * the case that was previously a dead end: a pin is a CLAIM, written by
+ * whichever window last moved the session, and the file is the FACT. They come
+ * apart for real reasons — a tmux pane that kept a stale `CLAUDE_CONFIG_DIR`
+ * and wrote the next turn into the account the conversation had just left, a
+ * half-finished move from an older build, a state file merged from a window
+ * that never saw the last switch. Refusing those with "no transcript in the
+ * account it is pinned to" tells the user something true about the pin and
+ * nothing about their conversation, which is sitting on disk one directory
+ * over.
+ *
+ * The caller is expected to call this BEFORE it stops anything: the refusal
+ * this replaces used to arrive after the process had been killed and restarted,
+ * which spent a turn in flight to reach a sentence.
+ *
+ * Pure filesystem work, node builtins only, never throws.
+ */
+export function sourceDirFor(
+  sessionId: string,
+  opts: {
+    /** The config dir the pin names (`accounts.configDirForProfile`). */
+    preferred: string;
+    /** Every config dir this machine could be holding it in, the default
+     *  login's included. Order matters only for a conversation that somehow
+     *  exists in two of them, which `moveConversation`'s own invariant says
+     *  cannot happen. */
+    roots: readonly string[];
+  },
+): SourceDirResult | null {
+  const preferred =
+    typeof opts?.preferred === 'string' ? opts.preferred.trim() : '';
+  if (preferred !== '' && transcriptInConfigDir(preferred, sessionId) !== null) {
+    return { dir: preferred, matchedPreferred: true };
+  }
+  for (const raw of opts?.roots ?? []) {
+    const root = typeof raw === 'string' ? raw.trim() : '';
+    if (root === '') continue;
+    if (preferred !== '' && path.resolve(root) === path.resolve(preferred)) {
+      continue; // already probed, and probing it twice is a readdir for nothing
+    }
+    if (transcriptInConfigDir(root, sessionId) !== null) {
+      return { dir: root, matchedPreferred: false };
+    }
+  }
+  return null;
+}
+
 /** Copy a directory tree. Hand-rolled rather than `fsp.cp`, whose recursive
  *  mode still prints an experimental warning on the Node the extension host
  *  ships; a sidecar move is not worth a warning in the user's log. Symlinks are
@@ -249,12 +419,28 @@ export async function moveConversation(
   // destination is the same subdirectory under the other account's root.
   const slug = path.basename(path.dirname(source));
   const target = path.join(projectsRootOf(toDir), slug, `${sessionId}.jsonl`);
-  if (isFile(target)) {
-    // Only reachable from an earlier move that died between the copy and the
-    // removal, or from a hand-edit. Either way the right answer is to stop:
-    // overwriting would destroy one of the two conversations claiming this id.
+
+  // THE COLLISION GUARD IS PER-ACCOUNT, not per-slug, and that is a fix rather
+  // than a refinement. It used to ask `isFile(target)` — is there a file at the
+  // exact path this move is about to write — which is a strictly narrower
+  // question than the one the header at the top of this file claims to enforce:
+  // exactly one `<sessionId>.jsonl` on the machine. A copy of the id sitting
+  // under a DIFFERENT slug in the destination account sailed straight through,
+  // the rename landed beside it, and the account ended up holding two files
+  // named after one conversation — which is precisely the state every reader
+  // then has to guess its way out of. Different slugs are not exotic: the slug
+  // encodes the cwd, and a conversation resumed from a git worktree of its own
+  // repo has a different cwd and therefore a different slug.
+  //
+  // Only reachable from an earlier move that died between the copy and the
+  // removal, from a config directory that leaked into a tmux pane and took the
+  // next turn with it, or from a hand-edit. Either way the right answer is to
+  // stop: overwriting would destroy one of the two conversations claiming this
+  // id. `accountMove.setAsideTranscript` is the way out, offered by the caller.
+  const collision = transcriptInConfigDir(toDir, sessionId);
+  if (collision !== null) {
     out.error =
-      `A transcript for this conversation already exists at ${target} — ` +
+      `A transcript for this conversation already exists at ${collision} — ` +
       'refusing to overwrite it.';
     return out;
   }

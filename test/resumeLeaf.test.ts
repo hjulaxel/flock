@@ -103,6 +103,36 @@ describe('repairResumeLeaf', () => {
     expect(report.tip).toBe('u6'); // not u7, the away_summary
   });
 
+  it('leaves a leaf that names a trailing away_summary alone', () => {
+    // THE SHAPE THAT NOW DOMINATES REAL TRANSCRIPTS, and it was untested. Of
+    // the 272 files on this machine that carry a recorded leaf, 222 have a leaf
+    // that names a trailing record hanging off the last message — an
+    // `away_summary`, a `turn_duration`, an attachment — rather than a record
+    // inside the turn. Nothing is lost in that shape: the leaf reaches MORE of
+    // the conversation than the newest user/assistant record does, so the
+    // honest answer is to append nothing at all.
+    //
+    // This is what makes the `no-gain` skip the common case (227 of 278 files)
+    // rather than an edge case, and pinning it here is what stops somebody
+    // reading that number as evidence the guard is dead and loosening it.
+    const { projectsDir, file } = withTranscript([
+      msg('u1', null, 'user', '2026-08-03T07:52:07.000Z'),
+      msg('u2', 'u1', 'assistant', '2026-08-03T07:52:15.000Z'),
+      msg('u3', 'u2', 'system', '2026-08-03T07:55:57.000Z', {
+        subtype: 'away_summary',
+      }),
+      { type: 'last-prompt', leafUuid: 'u3', sessionId: SESSION },
+    ]);
+    const before = fs.readFileSync(file, 'utf-8');
+    const age = Date.now() / 1000 - 60;
+    fs.utimesSync(file, age, age);
+
+    const report = repairResumeLeaf(SESSION, { projectsDir });
+    expect(report.repaired).toBe(false);
+    expect(report.skipped).toBe('no-gain');
+    expect(fs.readFileSync(file, 'utf-8')).toBe(before);
+  });
+
   it('appends only — nothing already in the transcript is touched', () => {
     const { projectsDir, file } = withTranscript(STALE);
     const before = fs.readFileSync(file, 'utf-8');

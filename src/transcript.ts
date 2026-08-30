@@ -38,7 +38,9 @@ export interface TranscriptLocateOptions {
   projectsDir?: string; // default path.join(os.homedir(), '.claude', 'projects')
   /** Account-profile projects roots (`<configDir>/projects`), probed after the
    *  primary — a session launched on a custom account writes its transcript
-   *  there, and "has no transcript" gates resume and fork. */
+   *  there, and "has no transcript" gates resume and fork. Every one of them is
+   *  probed, and order no longer decides an id that resolves twice: see
+   *  `transcriptCopyWins`. */
   extraProjectsDirs?: readonly string[];
 }
 
@@ -50,12 +52,73 @@ function defaultProjectsDir(): string {
   return path.join(os.homedir(), '.claude', 'projects');
 }
 
-function isFile(p: string): boolean {
+/**
+ * `stat`, or null.
+ *
+ * `throwIfNoEntry: false` rather than a try/catch around the miss, and the
+ * difference is not stylistic: the probe below stats every project subdirectory
+ * under every root until it finds the id, so on a machine with 38 projects 37
+ * of those stats are misses. A thrown-and-caught ENOENT captures a stack on
+ * each one, and this function runs on every poll tick — measured, resolving an
+ * id that is nowhere went from 0.319 ms to 0.110 ms on nothing but this. The
+ * try/catch stays anyway for the errors `throwIfNoEntry` does NOT suppress
+ * (EACCES on a directory the user cannot read, ELOOP on a symlink cycle), which
+ * must still be silent here.
+ */
+function statOf(p: string): fs.Stats | null {
   try {
-    return fs.statSync(p).isFile();
+    return fs.statSync(p, { throwIfNoEntry: false }) ?? null;
   } catch {
-    return false; // ENOENT / EACCES / broken symlink — fail silent
+    return null; // EACCES / ELOOP / broken symlink — fail silent
   }
+}
+
+function isFile(p: string): boolean {
+  return statOf(p)?.isFile() === true;
+}
+
+/** One located copy of a session's transcript. `size` and `mtimeMs` are the two
+ *  facts `transcriptCopyWins` decides on; nothing here reads the file. */
+export interface TranscriptCopyStat {
+  mtimeMs: number;
+  size: number;
+}
+
+/**
+ * WHEN ONE SESSION ID RESOLVES TWICE, which copy is the conversation?
+ *
+ * `accountMove`'s invariant says this cannot happen — exactly one
+ * `<id>.jsonl` per machine — and on the author's own machine it happens three
+ * times.
+ * The mechanisms are real and none of them is exotic: a tmux pane that kept a
+ * stale `CLAUDE_CONFIG_DIR` and wrote the next turn into the account the
+ * conversation had just left, a half-finished move from an older build, a
+ * hand-copied config directory. So the resolver needs a rule for it, and until
+ * this function existed the rule was an accident: first root in roster order
+ * won, which meant a nine-line metadata stub written by a stray hook beat a
+ * 12 MB conversation because its account happened to sort first. Two of the
+ * user's real conversations were being drawn from the stub — no cwd, no first
+ * prompt, no turns.
+ *
+ * NEWEST MTIME IS THE PRIMARY KEY, and size is only the tie-break. Size is the
+ * tempting rule and it is the wrong one: it is a proxy for "has more
+ * conversation in it", and it gets the one case that matters backwards — a
+ * transcript the CLI rewrote shorter (a compaction boundary, a truncated tail
+ * repaired on resume) is the CURRENT file and would lose to a stale fat one.
+ * Whichever copy was written to last is the one a resume would have continued.
+ *
+ * Returns true when `candidate` should displace `incumbent`. Deliberately
+ * false on a total tie, so scan order still decides and the answer stays
+ * stable across two calls on an unchanged disk.
+ */
+export function transcriptCopyWins(
+  candidate: TranscriptCopyStat,
+  incumbent: TranscriptCopyStat,
+): boolean {
+  if (candidate.mtimeMs !== incumbent.mtimeMs) {
+    return candidate.mtimeMs > incumbent.mtimeMs;
+  }
+  return candidate.size > incumbent.size;
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -64,8 +127,31 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 
 /**
  * Port of Python `transcript_file`: an existing `hint` wins; otherwise probe
- * <projectsDir>/<project>/<sessionId>.jsonl in readdir order, first hit wins.
- * Any IO error -> null.
+ * <projectsDir>/<project>/<sessionId>.jsonl. Any IO error -> null.
+ *
+ * FIRST HIT WINS WITHIN A ROOT, and the best copy wins ACROSS roots. Inside one
+ * account a duplicate id is impossible — a config dir is one CLI's history
+ * store and it names its files after the session — so the subdirectory loop
+ * still stops at its first hit, which is where the cost is. Across roots it
+ * cannot stop: two accounts CAN hold the same id (see `transcriptCopyWins` for
+ * how, and for why the old first-root-wins rule was reading a metadata stub
+ * instead of a 12 MB conversation), so every root is probed and the copies are
+ * compared.
+ *
+ * WHAT THAT COSTS, since this runs on every poll tick, measured on the machine
+ * this was written on (38 projects in the primary root, three roots configured,
+ * 200 calls averaged): a hit that used to be found in the first root went from
+ * 0.025 ms to 0.073 ms, because it now walks the other two as well; a total miss
+ * went the other way, from 0.319 ms to 0.110 ms, because `statOf` stopped
+ * throwing an ENOENT on each of the ~37 candidates it rejects per root. A miss
+ * is what every session that has not taken a turn yet costs, so the two changes
+ * roughly pay for each other across a sweep — and 0.073 ms is not a number worth
+ * trading correctness for.
+ *
+ * The rejected alternative was caching the resolution, which this module has
+ * promised never to do since it was written: a transcript appears, moves between
+ * accounts and is renamed under us, and a stale entry here is a resume that
+ * finds nothing.
  */
 export function transcriptFile(
   sessionId: string,
@@ -94,6 +180,9 @@ export function transcriptFile(
     ...(opts?.extraProjectsDirs ?? []),
   ];
   const seen = new Set<string>();
+  let best: string | null = null;
+  let bestStat: TranscriptCopyStat | null = null;
+  const discarded: string[] = [];
   for (const raw of roots) {
     const root = typeof raw === 'string' ? raw.trim() : '';
     if (root === '' || seen.has(root)) continue;
@@ -106,10 +195,45 @@ export function transcriptFile(
     }
     for (const sub of subdirs) {
       const candidate = path.join(root, sub, fileName);
-      if (isFile(candidate)) return candidate;
+      const st = statOf(candidate);
+      if (st === null || !st.isFile()) continue;
+      if (bestStat === null || transcriptCopyWins(st, bestStat)) {
+        if (best !== null) discarded.push(best);
+        best = candidate;
+        bestStat = st;
+      } else {
+        discarded.push(candidate);
+      }
+      break; // one root, one copy: see the header above
     }
   }
-  return null;
+  if (discarded.length > 0) announceDuplicate(sessionId, best, discarded);
+  return best;
+}
+
+/** Ids already reported as duplicated, so the resolution above is announced
+ *  ONCE rather than on every poll tick. Not a cache of the answer — this module
+ *  promises never to cache that, because a transcript can be renamed under us
+ *  between two ticks — only a record of what has already been said. A duplicate
+ *  that is healed and then recurs therefore goes unannounced the second time,
+ *  which is the right trade against a log line every few seconds forever. */
+const announcedDuplicates = new Set<string>();
+
+function announceDuplicate(
+  sessionId: string,
+  kept: string | null,
+  discarded: readonly string[],
+): void {
+  if (announcedDuplicates.has(sessionId)) return;
+  announcedDuplicates.add(sessionId);
+  log(
+    'transcript:',
+    sessionId,
+    'resolves in more than one account — reading',
+    kept ?? '(none)',
+    'and ignoring',
+    discarded.join(', '),
+  );
 }
 
 /** transcriptFile(...) !== null. A session can only be resumed/forked once
@@ -186,12 +310,23 @@ function readHead(file: string, maxBytes: number): string {
  *     LineageResolver) because true compaction successors produce the identical
  *     snake/camel signature.
  *
+ *     Branch 3 is NOT stale, and it is the branch that carries every fork Flock
+ *     makes, so it is worth confirming rather than assuming. Re-verified on a
+ *     2.1.229 Flock fork: child 46ce37ae copied 371 of parent 0079b373's 379
+ *     message records, all 371 rewritten to `sessionId: 46ce37ae…`, and 363 of
+ *     them still carrying `session_id: 0079b373…` underneath. Zero of the 153
+ *     Flock parent/child pairs on this machine carry a forkedFrom marker at
+ *     all, across claude 2.1.207-2.1.248 — so for an interactive fork this
+ *     branch is not a fallback, it is the only signal there is.
+ *
  * Returns null — a graceful root, never a wrong edge — for a HEADLESS /
  * print-mode fork (`claude -p --resume P --fork-session`). On claude 2.1.218+
  * such a fork copies the parent's history into the child transcript but
  * rewrites EVERY line's `sessionId` to the child's own id and writes NO
  * `forkedFrom` and NO snake `session_id`, so no transcript-local signal
- * survives. The one artefact that does survive — copied message `uuid`s — is
+ * survives. Scope that to the headless run it was measured on: an INTERACTIVE
+ * fork plainly does write the snake key (the 46ce37ae observation above), so
+ * the two shapes differ and only the headless one is a lost edge. The one artefact that does survive — copied message `uuid`s — is
  * deliberately NOT used: sibling forks of the same parent copy identical uuids
  * (verified: child∩parent == child∩sibling == 12 uuids), so uuid-overlap
  * cannot tell a parent from a sibling and would mint a wrong edge.

@@ -36,6 +36,19 @@ import { logError } from './log';
  *  buy very little and are paid for on every live session, every rebuild. */
 export const TAIL_MAX_BYTES = 96 * 1024;
 
+/** How much of the tail Close with Summary reads, looking for the CLI's own
+ *  compaction summary.
+ *
+ *  Five hundred and twelve kilobytes, deliberately five times the window
+ *  above, and the reason the two numbers differ is what they cost. The 96 kB
+ *  window is paid on EVERY live session on EVERY rebuild and is sized for one
+ *  turn; this one is paid once, on an explicit user verb, and has to contain a
+ *  record whose body alone measured up to 27 kB on this machine with a
+ *  conversation's worth of tool traffic appended after it. A summary is not
+ *  worth putting on the rebuild's hot path — which is also why it is not a
+ *  field of TranscriptStats — but it is worth a generous one-off read. */
+export const SUMMARY_TAIL_MAX_BYTES = 512 * 1024;
+
 export interface TranscriptStats {
   /** Epoch ms of the last real user prompt seen in the tail. */
   lastPromptAt?: number;
@@ -82,8 +95,15 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
  * line cannot be parsed, and guessing at its contents is how a token count
  * becomes fiction. Invalid UTF-8 at the cut becomes U+FFFD, that line then
  * fails JSON.parse, and it is skipped by the same rule.
+ *
+ * Exported because the compaction-summary read (src/closeSummary.ts, wired in
+ * extension.ts) needs exactly this discipline over exactly these files, and a
+ * second copy of a bounded tail reader is a thing that drifts: the day one of
+ * them learns about a new encoding case and the other does not is the day two
+ * readers of one transcript disagree. It throws on a missing file, like every
+ * fs call here — callers wrap.
  */
-function readTail(file: string, maxBytes: number): string {
+export function readTranscriptTail(file: string, maxBytes: number): string {
   const fd = fs.openSync(file, 'r');
   try {
     const size = fs.fstatSync(fd).size;
@@ -205,8 +225,14 @@ function readHead(file: string, maxBytes: number): string {
 /** The text of a prompt record, in both shapes the CLI writes: a bare string,
  *  or a content array whose `text` blocks are joined. Blocks that are not text
  *  (an image, a pasted file reference) contribute nothing rather than a
- *  placeholder — "[object Object]" in a picker is worse than a short label. */
-function promptTextOf(rec: Record<string, unknown>): string | undefined {
+ *  placeholder — "[object Object]" in a picker is worse than a short label.
+ *
+ *  Exported for archive.ts's head scan, which needs the opening prompt out of
+ *  records it is ALREADY parsing for `cwd` and the title. Calling
+ *  `readFirstPrompt` from there would mean a second bounded read of every
+ *  transcript on the index path; reusing this and `isUserPrompt` is also what
+ *  stops a second copy of "what counts as something a person typed" existing. */
+export function promptTextOf(rec: Record<string, unknown>): string | undefined {
   const message = rec['message'];
   if (!isPlainObject(message)) return undefined;
   const content = message['content'];
@@ -264,7 +290,7 @@ export function readTailStats(
   const out: TranscriptStats = {};
   let text: string;
   try {
-    text = readTail(file, maxBytes);
+    text = readTranscriptTail(file, maxBytes);
   } catch {
     return out; // raced deletion / EACCES — no signal, not an error
   }

@@ -172,6 +172,105 @@ describe('profileConfig: identity seeding', () => {
   });
 });
 
+describe('profileConfig: seeding from the account being LEFT', () => {
+  // The account switch's half of this module. The seeding exists so that a
+  // conversation resumed on another account does not meet a trust dialog for
+  // the directory it was already running in — and with only ~/.claude.json as
+  // a source it did not do that for the move that most needs it: A → B, where
+  // the folder was only ever trusted under A.
+  const accountA = (): string => {
+    const dir = path.join(root, '.lineage', 'profiles', 'work');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, '.claude.json');
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        oauthAccount: { emailAddress: 'work@example.com' },
+        projects: {
+          '/Users/x/only-a-knows-this': {
+            hasTrustDialogAccepted: true,
+            allowedTools: ['Bash'],
+          },
+        },
+      }),
+    );
+    return file;
+  };
+
+  it("carries the source account's answer for a folder the machine default never saw", async () => {
+    fs.writeFileSync(identityFile, JSON.stringify({ theme: 'dark' }));
+    const result = await ensureProfileConfig(profileDir, {
+      ...sources(),
+      alsoSeedFrom: accountA(),
+    });
+    expect(result.seeded).toBe(true);
+
+    const seeded = readIdentity();
+    // From the machine default…
+    expect(seeded['theme']).toBe('dark');
+    // …and from the account the conversation is leaving.
+    const project = (seeded['projects'] as Record<string, unknown>)[
+      '/Users/x/only-a-knows-this'
+    ] as Record<string, unknown> | undefined;
+    expect(project?.['hasTrustDialogAccepted']).toBe(true);
+    expect(project?.['allowedTools']).toEqual(['Bash']);
+    // The second source is a source of ANSWERS, not of identity: an account's
+    // own login must never be seeded into another account's file.
+    expect(seeded['oauthAccount']).toBeUndefined();
+  });
+
+  it('is second, so the machine default still wins every key it answers', async () => {
+    fs.writeFileSync(
+      identityFile,
+      JSON.stringify({
+        theme: 'dark',
+        projects: { '/Users/x/repo': { hasTrustDialogAccepted: false } },
+      }),
+    );
+    const dir = path.join(root, '.lineage', 'profiles', 'work');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, '.claude.json');
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        theme: 'light',
+        projects: { '/Users/x/repo': { hasTrustDialogAccepted: true } },
+      }),
+    );
+
+    await ensureProfileConfig(profileDir, { ...sources(), alsoSeedFrom: file });
+    const seeded = readIdentity();
+    expect(seeded['theme']).toBe('dark');
+    const project = (seeded['projects'] as Record<string, unknown>)['/Users/x/repo'] as
+      | Record<string, unknown>
+      | undefined;
+    expect(project?.['hasTrustDialogAccepted']).toBe(false);
+  });
+
+  it('treats a missing or unreadable second source as simply not a source', async () => {
+    fs.writeFileSync(identityFile, JSON.stringify({ theme: 'dark' }));
+    const result = await ensureProfileConfig(profileDir, {
+      ...sources(),
+      alsoSeedFrom: path.join(root, 'nowhere', '.claude.json'),
+    });
+    expect(result.seeded).toBe(true);
+    expect(readIdentity()['theme']).toBe('dark');
+  });
+
+  it('does not seed a profile from its own identity file', async () => {
+    // The switch passes `<fromDir>/.claude.json`, and a move whose two ends
+    // resolve to the same directory would otherwise read the file it is about
+    // to write.
+    fs.writeFileSync(path.join(profileDir, '.claude.json'), JSON.stringify({ theme: 'light' }));
+    const result = await ensureProfileConfig(profileDir, {
+      ...sources(),
+      alsoSeedFrom: path.join(profileDir, '.claude.json'),
+    });
+    expect(result.seeded).toBe(false);
+    expect(readIdentity()).toEqual({ theme: 'light' });
+  });
+});
+
 describe('profileConfig: the allowlists themselves', () => {
   it('the one key the whole design forbids is on NO list', () => {
     expect(ROOT_SEED_KEYS).not.toContain('oauthAccount');

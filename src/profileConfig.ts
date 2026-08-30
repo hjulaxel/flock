@@ -87,6 +87,26 @@ export interface ProfileConfigSources {
   /** The default IDENTITY FILE (normally `~/.claude.json`, home root — NOT
    *  inside the dir above; the CLI has always kept it beside, not within). */
   defaultIdentityFile: string;
+  /**
+   * A SECOND identity file to seed from, read after the default and under the
+   * same never-overwrite rule.
+   *
+   * Set by the account switch, which passes the SOURCE account's own
+   * `.claude.json`. The seeding exists so that a conversation resumed on
+   * another account does not meet a trust dialog for the directory it was
+   * already running in, and with only `~/.claude.json` as a source it did not
+   * do that for the move that most needs it: A → B, where the folder was only
+   * ever trusted under A. A is the account that was running in that directory a
+   * second ago, so A is the honest place to carry the answer from.
+   *
+   * This does not weaken what the trust prompt is for. A prompt for a folder
+   * NOBODY has opened is real security and stays; what is carried here is one
+   * account's already-given answer about the one directory the conversation is
+   * being resumed in, which is continuity rather than a bypass.
+   *
+   * Optional, and a file that is missing or unreadable is simply not a source.
+   */
+  alsoSeedFrom?: string;
 }
 
 export interface ProfileConfigResult {
@@ -184,34 +204,58 @@ export async function ensureProfileConfig(
   }
 
   // ---- 2. identity-file seeding -----------------------------------------
+  //
+  // TWO SOURCES, read in order, and the order is the precedence: `seedKeys`
+  // never overwrites a key that is already present, so the machine's own
+  // identity file wins every key it has an answer for and the second source
+  // fills in only what it left blank. See `ProfileConfigSources.alsoSeedFrom`
+  // for what the second one is and why an A → B account move needs it.
   try {
-    const sourceIdentity = await readJsonOrNull(sources.defaultIdentityFile);
-    if (sourceIdentity !== null) {
-      const identityPath = path.join(dir, IDENTITY_FILE);
-      const identity = (await readJsonOrNull(identityPath)) ?? {};
+    const identityPath = path.join(dir, IDENTITY_FILE);
+    const identity = (await readJsonOrNull(identityPath)) ?? {};
+    let changed = false;
+    let sawProjects = false;
 
-      let changed = seedKeys(identity, sourceIdentity, ROOT_SEED_KEYS);
+    for (const file of [sources.defaultIdentityFile, sources.alsoSeedFrom]) {
+      if (typeof file !== 'string' || file.trim() === '') continue;
+      // Reading the file we are about to write would seed a profile from
+      // itself: harmless, and a readdir plus a parse for nothing.
+      if (path.resolve(file) === path.resolve(identityPath)) continue;
+      const sourceIdentity = await readJsonOrNull(file);
+      if (sourceIdentity === null) continue;
+
+      if (seedKeys(identity, sourceIdentity, ROOT_SEED_KEYS)) changed = true;
 
       const sourceProjects = sourceIdentity['projects'];
       if (isPlainObject(sourceProjects)) {
         const existing = identity['projects'];
         const projects: Record<string, unknown> = isPlainObject(existing) ? existing : {};
+        let touched = false;
         for (const [projectPath, entry] of Object.entries(sourceProjects)) {
           if (!isPlainObject(entry)) continue;
           const current = projects[projectPath];
           const target: Record<string, unknown> = isPlainObject(current) ? current : {};
           if (seedKeys(target, entry, PROJECT_SEED_KEYS)) {
             projects[projectPath] = target;
-            changed = true;
+            touched = true;
           }
         }
-        if (changed && !isPlainObject(existing)) identity['projects'] = projects;
+        if (touched) {
+          changed = true;
+          // Attached to the identity ONCE, and only when something landed in
+          // it — writing an empty `projects` map into a profile that had none
+          // would be a change with nothing in it.
+          if (!isPlainObject(existing) && !sawProjects) {
+            identity['projects'] = projects;
+            sawProjects = true;
+          }
+        }
       }
+    }
 
-      if (changed) {
-        await fsp.writeFile(identityPath, JSON.stringify(identity, null, 2) + '\n', 'utf-8');
-        result.seeded = true;
-      }
+    if (changed) {
+      await fsp.writeFile(identityPath, JSON.stringify(identity, null, 2) + '\n', 'utf-8');
+      result.seeded = true;
     }
   } catch (err) {
     logError('profileConfig: identity seeding failed', err);

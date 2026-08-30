@@ -42,7 +42,6 @@ import type {
   TreeDeps,
 } from './types';
 import { log, logError } from './log';
-import { buildDemoProject } from './demoProject';
 import {
   BRANCH_COLOR_COUNT,
   HIDDEN_RUNNING_GROUP_KEY,
@@ -57,6 +56,7 @@ import {
   folderRowKey,
   projectRowKey,
   runningCountOf,
+  runningWithoutRow,
   sessionRowKey,
   subprojectRowKey,
   subtreeHasRunning,
@@ -458,6 +458,15 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
     // signature over projects: the whole model is re-posted on every change
     // event anyway, so a stale group cache can only survive one tick.
     if (this.groupCacheForest === forest) return this.groupCache;
+    // Read once and shared by the fence and the rowless-running rescue below:
+    // the badge and the appendix must be scoped by the SAME value or the
+    // number and the rows go back to disagreeing.
+    const scopeDirs =
+      this.safe<readonly string[] | undefined>(
+        'scopeDirs',
+        () => this.deps.scopeDirs?.(),
+        undefined,
+      ) ?? [];
     this.groupCache = computeGrouping(
       {
         visibleRootIds: forest.visibleRoots,
@@ -475,16 +484,17 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
         // grouping like every other setting here; the mode flip triggers a
         // rebuild, so the forest-identity cache key above still invalidates
         // in time.
-        scopeDirs:
-          this.safe<readonly string[] | undefined>(
-            'scopeDirs',
-            () => this.deps.scopeDirs?.(),
-            undefined,
-          ) ?? [],
+        scopeDirs,
         // The invariant's escape hatch — see GroupingInput.hasRunning: a
         // filtered RUNNING root files into the "Running elsewhere" appendix
         // instead of losing its row.
         hasRunning: (rootId) => subtreeHasRunning(forest, rootId),
+        // The other half of the same invariant: a live session with no row AT
+        // ALL — an archived record the roster still reports — joins the
+        // appendix rather than being counted by the badge and drawn nowhere.
+        // Scoped with the same fence the badge uses, so the number and the
+        // rows agree. See viewmodel.runningWithoutRow.
+        rowlessRunningIds: runningWithoutRow(forest, scopeDirs),
         worktreesOf: (dir) =>
           this.safe('worktreesOf', () => this.deps.worktreesOf?.(dir) ?? [], []),
         // `lineage.git.branches`. Read per grouping like every other setting
@@ -511,17 +521,19 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
       },
       this.groupCache,
     );
-    // The demo project is APPENDED to the finished result, downstream of every
-    // rule that decides what belongs where — so it cannot claim a real session,
-    // cannot move a real row, and cannot be reached by anything that reads the
-    // store. Last in the list because it is the least important row on screen.
-    // See src/demoProject.ts.
-    if (this.safe('demoProject', () => this.deps.demoProject?.(), false)) {
-      this.groupCache = {
-        ...this.groupCache,
-        projects: [...this.groupCache.projects, buildDemoProject(Date.now())],
-      };
-    }
+    // Everything in this cache came out of computeGrouping, and nothing is
+    // appended to it afterwards. That is a rule and not merely an observation.
+    // A project spliced in at this line is a project no rule of membership ever
+    // agreed to: it answers to nothing that decides where a session belongs and
+    // to nothing that reads the store, so every guard downstream has to be told
+    // about it one at a time. The demo project was the one exception, injected
+    // exactly here on the argument that it was fenced off well enough to be
+    // harmless — and the fence held perfectly, which turned out to be beside
+    // the point the day `lineage.showBranchesAndWorktrees` switched it on for
+    // people who had never heard of it and who then found a project in their
+    // sidebar that they had never made. If a synthetic row is ever wanted
+    // again, it has to arrive as a rule computeGrouping applies, not as an
+    // append after the fact.
     this.groupCacheForest = forest;
     return this.groupCache;
   }
@@ -1294,11 +1306,16 @@ ${branchPaletteCss()}  }
         }
 
         case 'deleteSelection': {
-          // The Delete key. It carries NO payload: the page has just reported
-          // its selection through the message above, and the verb resolves the
-          // ids the same way the context menu's does — from the one place that
-          // holds them. Same rule as the branch chips: the client names a
-          // gesture, the extension decides what it acts on.
+          // The Delete key. It ARCHIVES the selection — the message name is
+          // the client protocol, not a word anybody reads, so it keeps the
+          // spelling both halves already agree on rather than being renamed to
+          // chase a UI title through a wire format.
+          //
+          // It carries NO payload: the page has just reported its selection
+          // through the message above, and the verb resolves the ids the same
+          // way the context menu's does — from the one place that holds them.
+          // Same rule as the branch chips: the client names a gesture, the
+          // extension decides what it acts on.
           await this.deps.runCommand('deleteSessions');
           return;
         }

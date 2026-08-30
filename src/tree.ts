@@ -38,6 +38,7 @@ import type {
   TreeNode,
 } from './types';
 import { log, logError } from './log';
+import { sessionIsOver } from './lineage';
 import { projectUri, sessionUri } from './decorations';
 import {
   HIDDEN_RUNNING_GROUP_KEY,
@@ -83,14 +84,16 @@ import {
   branchStateIcon,
   branchStatusLines,
   branchTokens,
+  exchangeSnippet,
   formatAge,
   formatBranchSync,
-  formatGraceCountdown,
   formatPullRequestChip,
   formatTokens,
+  graceTooltipLine,
   projectContextValue,
   pullRequestLines,
   runningCountOf,
+  runningWithoutRow,
   sessionContextValue,
   sessionSnippet,
   statusDescriptor,
@@ -109,6 +112,7 @@ export {
 
 import { hostMarker, hostTooltipLine } from './hosts';
 import type { SessionHost } from './hosts';
+import type { SessionCli } from './accounts';
 
 /** Escape the markdown that matters inside a trusted MarkdownString. Labels
  *  come from roster names and user renames — never trust them verbatim.
@@ -199,6 +203,17 @@ function groupingSignature(
   return `${groupByFolder ? '1' : '0'}${onlyProjectSessions ? '1' : '0'}${branchRows ? '1' : '0'}|${p}|${hiddenFolders.join('\u0002')}|${l}|${scopeDirs}`;
 }
 
+/**
+ * The two answers to "which branch is this session on" that a native row needs,
+ * built together in one walk — see sessionBranchNamesFor for why they are two.
+ */
+interface SessionBranchNames {
+  /** The rows that say it in their DESCRIPTION: the inline surface's rules. */
+  spoken: Map<string, string>;
+  /** Every row a branch scope claims, for the HOVER, which has room for it. */
+  all: Map<string, string>;
+}
+
 // ---------------------------------------------------------------- provider
 
 export class LineageTreeProvider
@@ -239,7 +254,7 @@ export class LineageTreeProvider
   private groupCacheForest: SessionForest | null = null;
   private groupCacheSignature: string | null = null;
   /** Cleared whenever the grouping is rebuilt — see sessionBranchNamesFor. */
-  private sessionBranchNames: Map<string, string> | null = null;
+  private sessionBranchNames: SessionBranchNames | null = null;
   private groupCache: GroupingResult = EMPTY_GROUPING;
 
   private parentIndexForest: SessionForest | null = null;
@@ -315,6 +330,24 @@ export class LineageTreeProvider
       : undefined;
   }
 
+  /** Same `safe` discipline again, and the same default the inline view's
+   *  `safeSessionCli` applies: a lookup that is not wired, or that throws,
+   *  answers 'claude'. The two surfaces have to emit the same token string or
+   *  the two context menus drift apart — which is the whole lesson of the
+   *  commit that discovered "Move to Account…" had been contributed to the
+   *  native tree only while the DEFAULT view is the inline one.
+   *
+   *  Deliberately NOT `providerOf` below, which falls back to the owning
+   *  project's provider: right for a glyph, wrong for a verb. */
+  private sessionCliOf(sessionId: string): SessionCli {
+    const cli = this.safe<SessionCli | undefined>(
+      'sessionCli',
+      () => this.deps.sessionCli?.(sessionId),
+      undefined,
+    );
+    return cli === 'codex' ? 'codex' : 'claude';
+  }
+
   private groupingFor(forest: SessionForest): GroupingResult {
     const groupByFolder = this.safe('groupByFolder', () => this.deps.groupByFolder(), true);
     const onlyProjectSessions = this.safe(
@@ -376,6 +409,12 @@ export class LineageTreeProvider
         // dropping its row. Liveness is a forest fact, so the lookup lives
         // here and the pure grouping just asks.
         hasRunning: (rootId) => subtreeHasRunning(forest, rootId),
+        // The other half of the same invariant: a live session with no row AT
+        // ALL — an archived record the roster still reports — joins the
+        // appendix rather than being counted by the badge and drawn nowhere.
+        // Scoped with the same fence the badge uses, so the number and the
+        // rows agree. See viewmodel.runningWithoutRow.
+        rowlessRunningIds: runningWithoutRow(forest, scopeDirs),
         // The NAMED subprojects, and the stamp that says which one a session was
         // started in. Both are grouping inputs rather than rendering ones: which
         // row a session belongs to must be the same answer in both view styles.
@@ -408,7 +447,8 @@ export class LineageTreeProvider
   }
 
   /**
-   * session id → the branch to say in its description, for the rows that get one.
+   * Which branch each session row is on: `spoken`, the ones that SAY it in
+   * their description, and `all`, every row a branch scope accounts for.
    *
    * THE NATIVE TREE'S HALF OF `branchDisplay: inline`. A TreeItem has one
    * label and one description and no second line to put a branch on — the same
@@ -421,13 +461,27 @@ export class LineageTreeProvider
    * subdirectory of another), withheld below BRANCH_CHIPS_MIN, and withheld on a
    * fork that stayed in its parent's checkout.
    *
-   * Built once per grouping and thrown away with it, because it is derived from
-   * exactly two things — the grouping's branch lists and the forest's cwds — and
-   * both of those change together.
+   * WHY TWO MAPS AND NOT ONE. A row's DESCRIPTION and its HOVER answer different
+   * questions, and the inline surface has always answered them separately: it
+   * suppresses the branch sub-line on a closed row, on a fork that stayed put and
+   * under branch grouping, but it sets the `branch: …` hover line for every row a
+   * scope claims (viewmodel.pushSession, at `branchAt >= 0`). Until this pass the
+   * native tree had one gated map and no branch line in its hover at all, so
+   * closing a session took the branch name off the row and there was nowhere left
+   * to read it — the description was the native tree's only copy of the fact. The
+   * rejected alternative was to look the branch up again in appendSessionTooltip
+   * with `branchIndexForCwd`: that function needs the BranchInfo[] of the row's
+   * own project-or-directory scope, which only this walk knows, so a second
+   * lookup would have had to re-derive the scoping and would drift from it.
+   *
+   * Built once per grouping and thrown away with it, because both maps are
+   * derived from exactly two things — the grouping's branch lists and the
+   * forest's cwds — and both of those change together.
    */
-  private sessionBranchNamesFor(forest: SessionForest): Map<string, string> {
+  private sessionBranchNamesFor(forest: SessionForest): SessionBranchNames {
     if (this.sessionBranchNames) return this.sessionBranchNames;
-    const map = new Map<string, string>();
+    const spoken = new Map<string, string>();
+    const all = new Map<string, string>();
     const walk = (
       id: string,
       branches: readonly BranchInfo[],
@@ -436,27 +490,90 @@ export class LineageTreeProvider
       const node = forest.nodes.get(id);
       if (!node) return;
       const at = branchIndexForCwd(branches, node.cwd);
-      if (at >= 0 && at !== parentAt) map.set(id, branches[at].name);
-      for (const kid of node.visibleChildren) walk(kid, branches, at);
+      // A closed row says nothing — one row, no branch. The suppression is here
+      // rather than at the call site because this map IS the native tree's half
+      // of `branchDisplay: inline`, and its rules are the inline surface's
+      // rules deliberately.
+      const over = sessionIsOver(node);
+      if (at >= 0) {
+        // The hover's copy: ungated by the compaction, by the transparency rule
+        // and by BRANCH_CHIPS_MIN, exactly like the inline hover's line. A hover
+        // costs no row width, which is what every one of those gates is about.
+        all.set(id, branches[at].name);
+        if (at !== parentAt && !over && branches.length >= BRANCH_CHIPS_MIN) {
+          spoken.set(id, branches[at].name);
+        }
+      }
+      // `parentAt` means "the last checkout NAMED on the way here", not "the
+      // checkout of the row above". A silent row must therefore pass its
+      // parent's index down rather than its own, or it swallows the branch fact
+      // for its whole subtree and the first live descendant in the same
+      // checkout never names its worktree. Identical to the inline renderer's
+      // `spokenBranchAt`; the two walks disagreeing here would be a silent
+      // difference between the surfaces, which is why both are pinned by tests.
+      const said = over ? parentAt : at;
+      for (const kid of node.visibleChildren) walk(kid, branches, said);
     };
     const scope = (
       branches: readonly BranchInfo[],
       rootIds: readonly string[],
     ): void => {
-      if (branches.length < BRANCH_CHIPS_MIN) return;
       for (const id of rootIds) walk(id, branches, -1);
     };
+    // `lineage.groupSessionsByBranch`, read once for the whole walk. Under it a
+    // project's sessions hang off BRANCH ROWS (projectChildren), and the row
+    // immediately above a session then already names its checkout in bigger
+    // type — so repeating it in the description is the same redundancy the
+    // transparency rule removes from a fork that stayed in its parent's
+    // checkout, and it is removed the same way: by seeding the walk with the
+    // branch row's own index instead of -1.
+    //
+    // The rejected alternative was the blunt one the inline surface still uses —
+    // suppress the branch on EVERY row while grouping is on. That deletes the
+    // one place under grouping where the name is load-bearing: a fork living in
+    // a different worktree nests under its PARENT, so it hangs off the parent's
+    // branch row, and the row above it names the wrong checkout. Seeding says
+    // "your branch row already said this" without also saying "no row under
+    // grouping may name a branch".
+    const grouped =
+      this.safe(
+        'groupSessionsByBranch',
+        () => this.deps.groupSessionsByBranch?.(),
+        false,
+      ) === true;
     for (const project of this.groupCache.projects) {
-      scope(project.branches ?? [], project.rootIds);
+      const branches = project.branches ?? [];
+      // The same three-part test projectChildren and getParent apply before they
+      // will draw a branch row at all: below the threshold, or with the block
+      // folded away, the sessions sit directly under the project and nothing
+      // above them has said anything.
+      const rows =
+        grouped &&
+        branches.length >= BRANCH_CHIPS_MIN &&
+        project.branchesShown !== false;
+      if (rows) {
+        for (let at = 0; at < branches.length; at++) {
+          // A folded-away branch draws no row, so its sessions fall through to
+          // `unbranchedRoots` below and speak like any ungrouped row.
+          if (branches[at].shown === false) continue;
+          for (const id of branches[at].rootIds) walk(id, branches, at);
+        }
+        scope(branches, unbranchedRoots(project.rootIds, branches));
+      } else {
+        scope(branches, project.rootIds);
+      }
       // A split project's branches live on its directory rows (the preview
       // directory model), and each directory is its own repository — so each one
-      // is its own scope, exactly as it is in the inline renderer.
+      // is its own scope, exactly as it is in the inline renderer. Never seeded:
+      // this renderer draws no branch rows under a directory row (getChildren
+      // lists a subproject's `rootIds` directly), so nothing above those
+      // sessions has named their checkout.
       for (const sub of project.subprojects ?? []) {
         scope(sub.branches ?? [], sub.rootIds);
       }
     }
-    this.sessionBranchNames = map;
-    return map;
+    this.sessionBranchNames = { spoken, all };
+    return this.sessionBranchNames;
   }
 
   /**
@@ -1184,24 +1301,34 @@ export class LineageTreeProvider
     // name in a field that is already dim, small and elided at the first squeeze
     // would cost the age its place to say something the hover already says in
     // words. See sessionBranchNamesFor for which rows get one.
+    //
+    // A CLOSED ROW HAS NO BRANCH NAME, whatever `branchDisplay` says. This is
+    // the native half of the inline surface's one-row compaction: there the
+    // branch is a second LINE and dropping it is what keeps the row one row
+    // tall; here it is the widest token in a single-line description, sitting
+    // immediately left of the name's own space, and leaving it would make a
+    // closed row read as a branch report rather than as a session. Both
+    // surfaces have to compact the same rows, so both ask
+    // lineage.sessionIsOver — see sessionBranchNamesFor, which applies the same
+    // rule (and the same transparency rule) inside the walk.
+    const over = sessionIsOver(node);
     const branchName =
+      !over &&
       this.safe('branchDisplay', () => this.deps.branchDisplay?.(), 'color') ===
-      'inline'
-        ? this.sessionBranchNamesFor(forest).get(node.id)
+        'inline'
+        ? this.sessionBranchNamesFor(forest).spoken.get(node.id)
         : undefined;
     item.description = [
       branchName ?? '',
       tokens,
       age,
       status,
-      // The grace countdown and the archived conclusion — the same two parts,
-      // in the same order, as the inline surface's description (see
-      // viewmodel.pushSession for why each earns the width it does). Neither
-      // renderer is allowed its own opinion about how a row reads.
-      node.graceDeadlineAt !== undefined
-        ? formatGraceCountdown(node.graceDeadlineAt - Date.now())
-        : '',
-      node.archived ? sessionSnippet(node) : '',
+      // The grace countdown and the archived conclusion USED TO BE HERE, in
+      // this order, matching the inline surface part for part. Both moved to
+      // the hover in the 2026-08-28 review — see viewmodel.pushSession for the
+      // argument, and viewmodel.graceTooltipLine for the countdown's. What has
+      // not changed is that neither renderer is allowed its own opinion about
+      // how a row reads: if one of them puts a fact back, so does the other.
       hostMarker(host ?? 'none') ?? '',
       node.hidden ? 'hidden' : '',
     ]
@@ -1216,7 +1343,12 @@ export class LineageTreeProvider
     } catch (err) {
       logError('tree.isBoundHere', err);
     }
-    item.contextValue = sessionContextValue(node, boundHere, host);
+    item.contextValue = sessionContextValue(
+      node,
+      boundHere,
+      host,
+      this.sessionCliOf(node.id),
+    );
 
     // The leading glyph names WHO is running, not what state it is in: a
     // session row shows its LLM provider's logo. State is not lost — it is in
@@ -1442,6 +1574,23 @@ export class LineageTreeProvider
     const lines: string[] = [];
     lines.push(`kind: ${node.kind}${node.ghost ? ' (ghost)' : ''}`);
     if (node.cwd) lines.push(`cwd: ${mdCode(node.cwd)}`);
+    // WHICH CHECKOUT, in words, next to the path it is a checkout of. The same
+    // line the inline hover carries (viewmodel.pushSession sets
+    // `branch: <name>` for every row a branch scope claims), and for the same
+    // reason: the description can only afford the name on some rows — never on a
+    // closed one, since the 2026-08-28 compaction — and before this line existed
+    // the native tree's answer to "which branch was that session on" was gone the
+    // moment the session closed. The `cwd:` line above is not that answer: a
+    // worktree directory is often named after the task rather than the branch,
+    // and a plain checkout that has changed branches is the same path either way.
+    //
+    // Read from the ungated map (see sessionBranchNamesFor), so it appears on
+    // live and closed rows alike and below the chip threshold, exactly as the
+    // inline hover's does. It is absent, correctly, when `lineage.git.branches`
+    // is off — with no branch block there is no branch scope, and this renderer
+    // must not invent facts the rest of the view is not showing.
+    const branch = this.sessionBranchNamesFor(forest).all.get(node.id);
+    if (branch !== undefined) lines.push(`branch: ${mdEscape(branch)}`);
     if (typeof node.startedAt === 'number' && Number.isFinite(node.startedAt)) {
       let iso = '';
       try {
@@ -1479,19 +1628,16 @@ export class LineageTreeProvider
           : ''
       }`,
     );
-    // The sentence behind the row's countdown — same wording as the inline
-    // sidebar's hover (viewmodel.sessionTooltip), so the two cannot drift.
+    // The detached-running fact, countdown included — viewmodel.ts owns the
+    // wording, so the two surfaces cannot drift. It used to be a hand-written
+    // copy here with a comment promising it would not; the promise is now
+    // structural, which matters more than it did, because since the 2026-08-28
+    // review this hover is the ONLY place either surface says how long is left.
+    // `Date.now()` because this tooltip resolves lazily, on hover: unlike the
+    // inline surface, which computes its hover at build time from `input.now`,
+    // this one is asked the question at the moment the pointer stops.
     if (typeof node.graceDeadlineAt === 'number') {
-      let iso = '';
-      try {
-        iso = new Date(node.graceDeadlineAt).toISOString();
-      } catch {
-        iso = '';
-      }
-      lines.push(
-        'detached: tab closed, process kept for instant re-attach' +
-          (iso !== '' ? ` — closes at ${iso}` : ''),
-      );
+      lines.push(graceTooltipLine(node.graceDeadlineAt, Date.now()));
     }
     if (node.hidden) {
       lines.push('hidden: sorted last, not counted in the badge');
@@ -1519,13 +1665,15 @@ export class LineageTreeProvider
     // The close-with-summary text. Without this the only place it exists is
     // state.json — and the input box that collects it promises it is "recorded
     // on the node", so the node is where it has to be readable.
-    if (node.summary) lines.push(`summary: ${mdEscape(node.summary)}`);
-    // The fallback conclusion where no summary was written — the longer text
-    // behind the archived row's snippet, same rule as the inline hover.
-    else if (node.lastExchange !== undefined) {
-      const exchange = sessionSnippet(node, 4000);
-      if (exchange !== '') lines.push(`last exchange: ${mdEscape(exchange)}`);
-    }
+    if (node.summary) lines.push(`summary: ${mdEscape(sessionSnippet(node))}`);
+    // BOTH, never one or the other — same rule as the inline hover, and the two
+    // must not drift. These are hover-only since the 2026-08-28 review (a closed
+    // row is a name and an age), which is exactly why coalescing them was wrong:
+    // with the row no longer carrying either, `summary ?? lastExchange` left a
+    // summarised session with no surface anywhere showing what it actually last
+    // said. Two facts, two lines, summary first.
+    const exchange = exchangeSnippet(node);
+    if (exchange !== '') lines.push(`last exchange: ${mdEscape(exchange)}`);
 
     for (const line of lines) md.appendMarkdown(`- ${line}\n`);
   }

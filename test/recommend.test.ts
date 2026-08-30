@@ -18,8 +18,14 @@ import {
   recommendedNotice,
   recommendedPlan,
   surfaceChoices,
+  windowModelChoices,
 } from '../src/recommend';
-import type { RecommendedStepId, SurfaceChoiceId } from '../src/recommend';
+import type {
+  RecommendedStepId,
+  SurfaceChoiceId,
+  WindowModelId,
+} from '../src/recommend';
+import { CONFIG_KEYS } from '../src/types';
 import type { RecommendedWorld } from '../src/types';
 
 /** A machine on which nothing is left to do — except the surface question,
@@ -42,6 +48,8 @@ const settled: RecommendedWorld = {
   soloSession: false,
   launchMode: 'flock',
   claudeExtensionInstalled: false,
+  mode: undefined,
+  workspacesEnabled: true,
 };
 
 /** A first launch: nothing installed, no projects, history on disk. */
@@ -66,7 +74,7 @@ describe('recommendedPlan: what is offered', () => {
     const plan = recommendedPlan(settled);
     // A choice has no "already done", so the surface step outlives every
     // repair — and nothing else survives a settled machine.
-    expect(plan.steps.map((s) => s.id)).toEqual(['surface']);
+    expect(plan.steps.map((s) => s.id)).toEqual(['surface', 'windowModel']);
     expect(plan.notes).toEqual([]);
     // Reported rather than dropped: "already installed" is the answer to "did
     // this command do anything".
@@ -78,7 +86,14 @@ describe('recommendedPlan: what is offered', () => {
   });
 
   it('offers the first-launch five, in journey order', () => {
-    expect(ids(fresh)).toEqual(['surface', 'project', 'import', 'hooks', 'verbs']);
+    expect(ids(fresh)).toEqual([
+      'surface',
+      'windowModel',
+      'project',
+      'import',
+      'hooks',
+      'verbs',
+    ]);
   });
 
   it('keeps every step in the declared order', () => {
@@ -113,8 +128,16 @@ describe('recommendedPlan: what is offered', () => {
   });
 
   it('says nothing about hooks or verbs that are already installed', () => {
-    expect(ids(world({ hooksInstalled: false }))).toEqual(['surface', 'hooks']);
-    expect(ids(world({ verbsInstalled: false }))).toEqual(['surface', 'verbs']);
+    expect(ids(world({ hooksInstalled: false }))).toEqual([
+      'surface',
+      'windowModel',
+      'hooks',
+    ]);
+    expect(ids(world({ verbsInstalled: false }))).toEqual([
+      'surface',
+      'windowModel',
+      'verbs',
+    ]);
   });
 
   it('does not offer verbs to a wiring that has none', () => {
@@ -123,12 +146,12 @@ describe('recommendedPlan: what is offered', () => {
     );
     // Neither offered nor claimed as done: a step that cannot be run must not
     // appear on either list.
-    expect(plan.steps.map((s) => s.id)).toEqual(['surface']);
+    expect(plan.steps.map((s) => s.id)).toEqual(['surface', 'windowModel']);
     expect(plan.done).not.toContain('verbs');
   });
 
   it('offers the import only when something is unlisted, and counts it', () => {
-    expect(ids(world({ unlistedCount: 0 }))).toEqual(['surface']);
+    expect(ids(world({ unlistedCount: 0 }))).toEqual(['surface', 'windowModel']);
     const step = recommendedPlan(world({ unlistedCount: 12 })).steps.find(
       (s) => s.id === 'import',
     );
@@ -137,22 +160,26 @@ describe('recommendedPlan: what is offered', () => {
   });
 
   it('offers a first project only to somebody who has none', () => {
-    expect(ids(world({ hasProjects: false }))).toEqual(['surface', 'project']);
-    expect(ids(world({ hasProjects: true }))).toEqual(['surface']);
+    expect(ids(world({ hasProjects: false }))).toEqual([
+      'surface',
+      'windowModel',
+      'project',
+    ]);
+    expect(ids(world({ hasProjects: true }))).toEqual(['surface', 'windowModel']);
   });
 });
 
 describe('recommendedPlan: tmux', () => {
   it('offers the switch back on when tmux is there and turned off', () => {
     const plan = recommendedPlan(world({ tmuxMode: 'off' }));
-    expect(plan.steps.map((s) => s.id)).toEqual(['tmux', 'surface']);
+    expect(plan.steps.map((s) => s.id)).toEqual(['tmux', 'surface', 'windowModel']);
     expect(plan.steps[0]?.settings).toEqual([{ key: 'tmux', value: 'auto' }]);
     expect(plan.notes).toEqual([]);
   });
 
   it('says so as a NOTE when tmux is not installed — it cannot install it', () => {
     const plan = recommendedPlan(world({ tmuxBinary: null }));
-    expect(plan.steps.map((s) => s.id)).toEqual(['surface']);
+    expect(plan.steps.map((s) => s.id)).toEqual(['surface', 'windowModel']);
     expect(plan.notes).toHaveLength(1);
     expect(plan.notes[0]).toContain('brew install tmux');
   });
@@ -172,7 +199,7 @@ describe('recommendedPlan: tmux', () => {
     const plan = recommendedPlan(
       world({ platform: 'win32', tmuxBinary: null, tmuxMode: 'off' }),
     );
-    expect(plan.steps.map((s) => s.id)).toEqual(['surface']);
+    expect(plan.steps.map((s) => s.id)).toEqual(['surface', 'windowModel']);
     expect(plan.notes).toEqual([]);
     expect(plan.done).not.toContain('tmux');
   });
@@ -180,15 +207,19 @@ describe('recommendedPlan: tmux', () => {
 
 describe('recommendedPlan: the branch rows', () => {
   it('offers them only when a repository actually has two checkouts', () => {
-    expect(ids(world({ maxWorktrees: 1 }))).toEqual(['surface']);
-    expect(ids(world({ maxWorktrees: 2 }))).toEqual(['surface', 'worktrees']);
+    expect(ids(world({ maxWorktrees: 1 }))).toEqual(['surface', 'windowModel']);
+    expect(ids(world({ maxWorktrees: 2 }))).toEqual([
+      'surface',
+      'windowModel',
+      'worktrees',
+    ]);
   });
 
   it('does not offer them to somebody who already has them', () => {
     const plan = recommendedPlan(
       world({ maxWorktrees: 4, branchRowsEnabled: true }),
     );
-    expect(plan.steps.map((s) => s.id)).toEqual(['surface']);
+    expect(plan.steps.map((s) => s.id)).toEqual(['surface', 'windowModel']);
     expect(plan.done).toContain('worktrees');
   });
 
@@ -222,7 +253,6 @@ describe('recommendedPlan: what it may never touch', () => {
       'showPhantomRows',
       'onlyProjectSessions',
       'preview.directoryModel',
-      'preview.demoProject',
       'git.pullRequests',
       'soloSession',
       'showTokens',
@@ -257,6 +287,7 @@ describe('recommendedPlan: what it may never touch', () => {
         'project',
         'import',
         'surface',
+        'windowModel',
       ];
       expect(
         step.settings.length > 0 || imperative.includes(step.id),
@@ -361,6 +392,105 @@ describe('surfaceChoices: where sessions open', () => {
   });
 });
 
+describe('windowModelChoices: what a window is', () => {
+  const currentOf = (w: RecommendedWorld): WindowModelId | undefined =>
+    windowModelChoices(w).find((c) => c.current)?.id;
+
+  it('is asked, never pre-answered: the windowModel STEP carries no settings', () => {
+    // Same contract as `surface`, for the same reason — the tick opens the
+    // question and only an option chosen in the picker writes anything.
+    const step = recommendedPlan(settled).steps.find(
+      (s) => s.id === 'windowModel',
+    );
+    expect(step).toBeDefined();
+    expect(step?.settings).toEqual([]);
+    expect(step?.recommended).toBe(true);
+    // A choice has no "already done": it must never appear as settled, however
+    // deliberately the person answered it last time.
+    expect(recommendedPlan(settled).done).not.toContain('windowModel');
+  });
+
+  it('offers exactly the three models, in ladder order', () => {
+    // Most contained to most following, so the list itself teaches the
+    // progression rather than making the reader assemble it.
+    expect(windowModelChoices(settled).map((c) => c.id)).toEqual([
+      'folder',
+      'root',
+      'project',
+    ]);
+  });
+
+  it('marks an unset mode as one folder per project — the shipped default', () => {
+    expect(currentOf(settled)).toBe('folder');
+  });
+
+  it('marks the auto-switch user as auto-switch', () => {
+    expect(currentOf(world({ mode: 'project', workspacesEnabled: true }))).toBe(
+      'project',
+    );
+  });
+
+  it('marks the OLD (project, workspaces off) pair as Flock only', () => {
+    // The picker agrees with `resolveMode`, which is the whole reason `current`
+    // is resolved rather than read. Showing this person "Auto-switch (current)"
+    // would name a model their window has never actually been in — and this is
+    // the one person in the product most in need of a straight answer.
+    expect(currentOf(world({ mode: 'project', workspacesEnabled: false }))).toBe(
+      'root',
+    );
+  });
+
+  it('always marks exactly one, garbage included', () => {
+    for (const w of [
+      settled,
+      world({ mode: 'root' }),
+      world({ mode: 'Project' }),
+      world({ mode: 'workflow', workspacesEnabled: false }),
+    ]) {
+      expect(windowModelChoices(w).filter((c) => c.current)).toHaveLength(1);
+    }
+  });
+
+  it('writes the mode alone, except auto-switch, which untangles the old pair', () => {
+    const byId = new Map(windowModelChoices(settled).map((c) => [c.id, c]));
+    expect(byId.get('folder')?.settings).toEqual([
+      { key: 'mode', value: 'folder' },
+    ]);
+    expect(byId.get('root')?.settings).toEqual([
+      { key: 'mode', value: 'root' },
+    ]);
+    // Without the second write, somebody carrying `workspaces.enabled: false`
+    // would pick Auto-switch, watch resolveMode fold them straight back to
+    // Flock only, and have nothing on screen to explain it. This is also the
+    // only place the deprecated key is ever written — by the user's own choice,
+    // which is the only way this extension touches a settings file.
+    expect(byId.get('project')?.settings).toEqual([
+      { key: 'mode', value: 'project' },
+      { key: 'workspaces.enabled', value: true },
+    ]);
+  });
+
+  it('writes only keys the manifest actually contributes', () => {
+    // The same guard `writeSettings` applies at the wiring (it refuses a key
+    // the extension does not declare), asserted here so a typo fails as a test
+    // rather than as a silent no-op inside the picker.
+    const contributed = new Set<string>(Object.values(CONFIG_KEYS));
+    for (const choice of windowModelChoices(settled)) {
+      for (const setting of choice.settings) {
+        expect(contributed, setting.key).toContain(setting.key);
+      }
+    }
+  });
+
+  it('says what each model COSTS, not only what it gives', () => {
+    // A picker that listed benefits alone would be selling rather than asking,
+    // and each of these three is genuinely worse than the others at something.
+    for (const choice of windowModelChoices(settled)) {
+      expect(choice.description.toLowerCase(), choice.id).toContain('cost');
+    }
+  });
+});
+
 describe('recommendedNotice: the one-time offer', () => {
   it('offers on a first launch', () => {
     expect(recommendedNotice({ world: fresh, dismissed: false })).toBe('offer');
@@ -389,6 +519,7 @@ describe('recommendedNotice: the one-time offer', () => {
     });
     expect(recommendedPlan(almost).steps.map((s) => s.id)).toEqual([
       'surface',
+      'windowModel',
       'project',
     ]);
     expect(recommendedNotice({ world: almost, dismissed: false })).toBe('none');
@@ -404,20 +535,22 @@ describe('recommendedNotice: the one-time offer', () => {
       unlistedCount: 0,
       maxWorktrees: 6,
     });
-    expect(recommendedPlan(almost).steps).toHaveLength(3);
+    expect(recommendedPlan(almost).steps).toHaveLength(4);
     expect(recommendedNotice({ world: almost, dismissed: false })).toBe('none');
   });
 
-  it('does not count the surface question either — it is on every plan', () => {
+  it('does not count the two taste questions either — they are on every plan', () => {
     // Counting a step that is always offered would lower the threshold to
     // "anybody with no projects", which is the exact firing-for-everybody the
-    // threshold exists to stop.
+    // threshold exists to stop. With TWO always-offered questions the
+    // subtraction stopped being merely correct and became load-bearing: they
+    // alone would meet a threshold of two.
     const nothingButChoices = world({ hasProjects: false });
     expect(
       recommendedPlan(nothingButChoices)
         .steps.filter((s) => s.recommended)
         .map((s) => s.id),
-    ).toEqual(['surface', 'project']);
+    ).toEqual(['surface', 'windowModel', 'project']);
     expect(
       recommendedNotice({ world: nothingButChoices, dismissed: false }),
     ).toBe('none');

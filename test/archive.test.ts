@@ -17,7 +17,9 @@ import {
   continuationOf,
   keptArchived,
   memberKeepIds,
+  PROMPT_LABEL_MAX_CHARS,
   readHeadFacts,
+  transcriptFallbackName,
   unlistedPool,
 } from '../src/archive';
 import { buildForest } from '../src/lineage';
@@ -88,6 +90,95 @@ describe('archive: readHeadFacts', () => {
     const f = writeTranscript('-p', A, []);
     fs.writeFileSync(f, '');
     expect(readHeadFacts(f)).toEqual({});
+  });
+
+  // The name a closed row falls back to. Both of these are READ here and
+  // ranked by the caller — the reader has no opinion about precedence, which
+  // is what lets buildForest put an editorial title above either of them.
+  it('picks up the CLI’s own generated title', () => {
+    const f = writeTranscript('-p', A, [
+      { type: 'mode', sessionId: A },
+      { type: 'ai-title', aiTitle: 'Fix auth bug and score drift' },
+      { type: 'user', message: { content: 'hello' }, cwd: '/w' },
+    ]);
+    const facts = readHeadFacts(f);
+    expect(facts.aiTitle).toBe('Fix auth bug and score drift');
+    expect(facts.label).toBeUndefined();
+  });
+
+  it('reads a chosen title and a generated one side by side', () => {
+    const f = writeTranscript('-p', A, [
+      { type: 'custom-title', customTitle: 'api refactor' },
+      { type: 'ai-title', aiTitle: 'Fix auth bug' },
+    ]);
+    const facts = readHeadFacts(f);
+    expect(facts.label).toBe('api refactor');
+    expect(facts.aiTitle).toBe('Fix auth bug');
+  });
+
+  // First-wins, which on real data is also last-wins: 144 of the transcripts
+  // on this machine carry the record more than once and not one of them ever
+  // emits a different string.
+  it('takes the first ai-title when the CLI re-emits it', () => {
+    const f = writeTranscript('-p', A, [
+      { type: 'ai-title', aiTitle: 'first' },
+      { type: 'ai-title', aiTitle: 'second' },
+      { type: 'ai-title', aiTitle: 'third' },
+    ]);
+    expect(readHeadFacts(f).aiTitle).toBe('first');
+  });
+
+  it('takes the first thing a PERSON typed, past the CLI’s own preamble', () => {
+    const f = writeTranscript('-p', A, [
+      { type: 'mode', sessionId: A },
+      {
+        type: 'user',
+        isMeta: true,
+        message: { content: '<local-command-caveat>…</local-command-caveat>' },
+      },
+      {
+        type: 'user',
+        message: { content: 'why is the roster\n  poll firing twice' },
+        cwd: '/w',
+      },
+    ]);
+    expect(readHeadFacts(f).firstPrompt).toBe(
+      'why is the roster poll firing twice',
+    );
+  });
+
+  it('refuses every shape that is not something a person typed', () => {
+    const cases: Record<string, unknown> = {
+      toolResult: { type: 'user', toolUseResult: {}, message: { content: 'x' } },
+      sidechain: { type: 'user', isSidechain: true, message: { content: 'x' } },
+      compaction: {
+        type: 'user',
+        isCompactSummary: true,
+        message: { content: 'This session is being continued from…' },
+      },
+      bashEcho: {
+        type: 'user',
+        message: { content: '<bash-input>creemux br test 2</bash-input>' },
+      },
+    };
+    for (const [name, rec] of Object.entries(cases)) {
+      const f = writeTranscript('-p', A, [{ type: 'mode' }, rec]);
+      expect(readHeadFacts(f).firstPrompt, name).toBeUndefined();
+    }
+  });
+
+  // The one envelope worth keeping: the name inside it IS what was typed.
+  it('unwraps a slash command to the command itself', () => {
+    const f = writeTranscript('-p', A, [
+      {
+        type: 'user',
+        message: {
+          content:
+            '<command-name>/terminal-setup</command-name><command-message>x</command-message>',
+        },
+      },
+    ]);
+    expect(readHeadFacts(f).firstPrompt).toBe('/terminal-setup');
   });
 });
 
@@ -160,6 +251,33 @@ describe('archive: ArchiveIndexer', () => {
     expect(idx.scan({ liveIds: new Set<string>() }).reread).toBe(0);
   });
 
+  // The two new head facts ride that same rule and add NOTHING to the cache
+  // key: they come from the same bytes as `label` and `cwd`, so any change that
+  // could alter them has already moved (mtimeMs, size). This matters most for
+  // ai-title, which the CLI writes early in a conversation that is still
+  // running — so the first scan after it closes is the first scan that can see
+  // it at all.
+  it('picks up the generated title on the scan after a live session closes', () => {
+    writeTranscript('-a', A, [
+      { type: 'ai-title', aiTitle: 'Debug Mars database connection' },
+      { type: 'user', message: { content: 'the mars box is refusing me' } },
+    ]);
+    const idx = new ArchiveIndexer(projects);
+
+    const live = idx.scan({ liveIds: new Set([A]) });
+    expect(live.sessions[0]?.aiTitle).toBeUndefined();
+    expect(live.sessions[0]?.firstPrompt).toBeUndefined();
+
+    // Same file, same mtime, same size — only its liveness changed.
+    const closed = idx.scan({ liveIds: new Set<string>() });
+    expect(closed.sessions[0]?.aiTitle).toBe('Debug Mars database connection');
+    expect(closed.sessions[0]?.firstPrompt).toBe(
+      'the mars box is refusing me',
+    );
+    // Cached from here on, exactly as label and cwd are.
+    expect(idx.scan({ liveIds: new Set<string>() }).reread).toBe(0);
+  });
+
   it('survives a missing projects dir and keeps the last good index', () => {
     writeTranscript('-a', A, [{}]);
     const idx = new ArchiveIndexer(projects);
@@ -211,6 +329,54 @@ describe('archive: helpers', () => {
   it('archivedLabel falls back to the short id', () => {
     expect(archivedLabel(mk(A))).toBe('0f00000a');
     expect(archivedLabel(mk(A, { label: 'named' }))).toBe('named');
+  });
+
+  // A generated title is a NAME; an opening prompt is a QUOTATION. The `{ text,
+  // fallback }` shape is what lets a row show the difference with quote marks
+  // and lets code (terminal-tab naming, the archive picker) act on it.
+  describe('transcriptFallbackName', () => {
+    it('shows a generated title bare', () => {
+      expect(transcriptFallbackName({ aiTitle: 'Fix auth bug' })).toEqual({
+        text: 'Fix auth bug',
+        fallback: false,
+      });
+    });
+
+    it('quotes an opening prompt, and says it is a fallback', () => {
+      expect(transcriptFallbackName({ firstPrompt: 'cd ..' })).toEqual({
+        text: '“cd ..”',
+        fallback: true,
+      });
+    });
+
+    it('prefers the generated title over the prompt', () => {
+      expect(
+        transcriptFallbackName({ aiTitle: 'Fix auth bug', firstPrompt: 'cd ..' })
+          ?.text,
+      ).toBe('Fix auth bug');
+    });
+
+    it('cuts a long prompt INSIDE the quotes', () => {
+      const got = transcriptFallbackName({ firstPrompt: 'z'.repeat(200) });
+      expect(got?.text.startsWith('“')).toBe(true);
+      expect(got?.text.endsWith('…”')).toBe(true);
+      // Quotes are two characters on top of the capped text.
+      expect(got?.text.length).toBe(PROMPT_LABEL_MAX_CHARS + 2);
+    });
+
+    it('is undefined when the transcript offered neither', () => {
+      expect(transcriptFallbackName({})).toBeUndefined();
+    });
+  });
+
+  it('archivedLabel prefers a chosen title, then a generated one, then a quote', () => {
+    expect(
+      archivedLabel(mk(A, { label: 'named', aiTitle: 'generated' })),
+    ).toBe('named');
+    expect(
+      archivedLabel(mk(A, { aiTitle: 'generated', firstPrompt: 'cd ..' })),
+    ).toBe('generated');
+    expect(archivedLabel(mk(A, { firstPrompt: 'cd ..' }))).toBe('“cd ..”');
   });
 
   // Tree membership is editorial: a session with a non-deleted record
@@ -716,6 +882,42 @@ describe('archive: extraProjectsDirs', () => {
     });
     expect(result.ok).toBe(true);
     expect(result.sessions.map((s) => s.sessionId)).toEqual([A]);
+    idx.dispose();
+  });
+
+  it('an id in TWO accounts is indexed once, from the newer copy', () => {
+    // The bug this pins: roots are walked in account order and the first
+    // occurrence won, so two of the author's archived rows were built from a
+    // nine-line metadata stub — no cwd, no opening prompt — while the real
+    // conversation sat in the other account. The rule is now the same one
+    // `transcript.transcriptFile` resolves with, so the row and every reader
+    // open the same file.
+    const stub = writeTranscript('-a', C, [
+      { type: 'custom-title', customTitle: 'the stub' },
+    ]);
+    const otherRoot = path.join(root, 'profiles', 'personal', 'projects');
+    const otherDir = path.join(otherRoot, '-p');
+    fs.mkdirSync(otherDir, { recursive: true });
+    const realFile = path.join(otherDir, `${C}.jsonl`);
+    fs.writeFileSync(
+      realFile,
+      JSON.stringify({ type: 'custom-title', customTitle: 'the conversation' }) +
+        '\n' +
+        JSON.stringify({ cwd: '/code/real' }) +
+        '\n',
+    );
+    const old = Date.now() - 86_400_000;
+    fs.utimesSync(stub, old / 1000, old / 1000);
+    const recent = Date.now() - 60_000;
+    fs.utimesSync(realFile, recent / 1000, recent / 1000);
+
+    const idx = new ArchiveIndexer(projects);
+    const result = idx.scan({ extraProjectsDirs: [otherRoot] });
+    expect(result.ok).toBe(true);
+    const rows = result.sessions.filter((s) => s.sessionId === C);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].transcriptPath).toBe(realFile);
+    expect(rows[0].label).toBe('the conversation');
     idx.dispose();
   });
 

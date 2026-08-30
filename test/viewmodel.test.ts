@@ -6,7 +6,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  SNIPPET_MAX_CHARS,
+  HOVER_SNIPPET_MAX_CHARS,
   attentionCountOf,
   badgeGlyph,
   buildViewModel,
@@ -14,6 +14,7 @@ import {
   formatGraceCountdown,
   projectRowKey,
   runningCountOf,
+  runningWithoutRow,
   sessionBranchLine,
   sessionRowKey,
   sessionSnippet,
@@ -932,7 +933,7 @@ describe('buildViewModel: the row context (native menus + command args)', () => 
     );
     const ctx = rows[0].context;
     expect(ctx.viewItem).toBe(
-      ';session;shown;notified;live;idle;hosted;ours;root;',
+      ';session;shown;notified;live;idle;hosted;here;claude;ours;root;',
     );
     expect(ctx.webviewSection).toBe('session');
     expect(ctx.webviewId).toBe(VIEW);
@@ -941,6 +942,37 @@ describe('buildViewModel: the row context (native menus + command args)', () => 
     expect(ctx.id).toBe(A);
     expect(ctx.preventDefaultContextMenuItems).toBe(true);
   });
+
+  // The CLI token both menus gate "Move to Account…" on. Wired through an
+  // OPTIONAL dep whose absence reads as 'claude', so every older wiring and
+  // every test double keeps the byte-identical contextValue it had: the only
+  // rows that lose the verb are the ones we positively know are Codex.
+  it("carries the conversation's CLI, and defaults to claude when unwired", () => {
+    const codexRow = buildViewModel(
+      input(forestOf([node(A, { status: 'idle' })]), { loose: [A] }, {
+        sessionCli: () => 'codex',
+      }),
+    )[0];
+    expect(codexRow.context.viewItem).toContain(';codex;');
+    expect(codexRow.context.viewItem).not.toContain(';claude;');
+
+    const unwired = buildViewModel(
+      input(forestOf([node(A, { status: 'idle' })]), { loose: [A] }),
+    )[0];
+    expect(unwired.context.viewItem).toContain(';claude;');
+
+    // A lookup that throws must not blank the row or silently take the verb
+    // away — same `safe` discipline every other dep in this file has.
+    const broken = buildViewModel(
+      input(forestOf([node(A, { status: 'idle' })]), { loose: [A] }, {
+        sessionCli: () => {
+          throw new Error('nope');
+        },
+      }),
+    )[0];
+    expect(broken.context.viewItem).toContain(';claude;');
+  });
+
 
   // A session Flock did not launch has to READ as one — otherwise the only
   // clue is that its menu is one entry shorter than its neighbour's.
@@ -1105,11 +1137,19 @@ describe('formatGraceCountdown', () => {
 describe('buildViewModel: the grace countdown state', () => {
   const graceAt = NOW + 9 * 60_000 + 41_000;
 
-  it('puts the countdown in the description and the token in the context', () => {
+  // The 2026-08-28 review: the countdown WORDS come off the row and live in
+  // the hover. The row itself — and the verbs on it — are what make the one
+  // detached-running state reachable, so those must not move with the words.
+  it('keeps the countdown OFF the row and the token ON it', () => {
     const rows = buildViewModel(
-      input(forestOf([node(A, { graceDeadlineAt: graceAt })]), { loose: [A] }),
+      input(
+        forestOf([node(A, { graceDeadlineAt: graceAt, lastPromptAt: NOW })]),
+        { loose: [A] },
+      ),
     );
-    expect(rows[0].description).toContain('closing in 10m');
+    // The age, and nothing else. Not `.not.toContain('closing')` — an exact
+    // description is what pins that no other part crept back in with it.
+    expect(rows[0].description).toBe('now');
     const viewItem = rows[0].context.viewItem as string;
     // Grace is a THIRD token beside live + ownership, never a replacement:
     // the row keeps every live verb and gains Close Now / Keep Awake.
@@ -1118,23 +1158,30 @@ describe('buildViewModel: the grace countdown state', () => {
     expect(viewItem).toContain(';hosted;');
   });
 
-  it('keeps the token and says "closing now" past the deadline', () => {
+  it('keeps the token and says "closing now" in the hover past the deadline', () => {
     const rows = buildViewModel(
-      input(forestOf([node(A, { graceDeadlineAt: NOW - 1_000 })]), {
-        loose: [A],
-      }),
+      input(
+        forestOf([node(A, { graceDeadlineAt: NOW - 1_000, lastPromptAt: NOW })]),
+        { loose: [A] },
+      ),
     );
-    expect(rows[0].description).toContain('closing now');
+    expect(rows[0].description).toBe('now');
+    expect(rows[0].tooltip).toContain('closing now');
     expect(rows[0].context.viewItem as string).toContain(';grace;');
   });
 
-  it('spells out the deal and the absolute deadline in the hover', () => {
+  // The hover is the ONLY place either surface now says how long is left, and
+  // before this change the inline hover got the countdown purely by echoing the
+  // description — so a naive removal would have taken the words out of the one
+  // place the user approved of. All three parts, pinned together.
+  it('spells out the deal, the countdown and the absolute deadline in the hover', () => {
     const rows = buildViewModel(
       input(forestOf([node(A, { graceDeadlineAt: graceAt })]), { loose: [A] }),
     );
     expect(rows[0].tooltip).toContain(
       'detached: tab closed, process kept for instant re-attach',
     );
+    expect(rows[0].tooltip).toContain('closing in 10m');
     expect(rows[0].tooltip).toContain(
       `closes at ${new Date(graceAt).toISOString()}`,
     );
@@ -1161,7 +1208,7 @@ describe('buildViewModel: the grace countdown state', () => {
   });
 });
 
-describe('sessionSnippet: what a level-2 row concluded', () => {
+describe('sessionSnippet: what a level-2 session concluded', () => {
   it('prefers the summary the user wrote for exactly this line', () => {
     expect(
       sessionSnippet(
@@ -1177,8 +1224,8 @@ describe('sessionSnippet: what a level-2 row concluded', () => {
   });
 
   it('truncates with a visible cut at the cap', () => {
-    const got = sessionSnippet(node(A, { lastExchange: 'z'.repeat(200) }));
-    expect(got.length).toBe(SNIPPET_MAX_CHARS);
+    const got = sessionSnippet(node(A, { summary: 'z'.repeat(5000) }));
+    expect(got.length).toBe(HOVER_SNIPPET_MAX_CHARS);
     expect(got.endsWith('…')).toBe(true);
   });
 
@@ -1188,23 +1235,33 @@ describe('sessionSnippet: what a level-2 row concluded', () => {
 });
 
 describe('buildViewModel: the archived conclusion', () => {
-  it('surfaces the snippet on an archived row', () => {
+  // Axel, 2026-08-28: "I can't see the name of the session when I toggle on
+  // show all sessions. I see like the last prompt." The conclusion is a hover
+  // fact now — on a row it was the widest thing on the line and read as the
+  // session's identity. A closed row is a name and an age, like every other row.
+  it('keeps the conclusion off a closed row — name and age, nothing else', () => {
     const rows = buildViewModel(
       input(
         forestOf([
           node(A, {
             archived: true,
             status: 'exited',
+            lastPromptAt: NOW,
+            summary: 'shipped it',
             lastExchange: 'concluded: use BM25',
           }),
         ]),
         { loose: [A] },
       ),
     );
-    expect(rows[0].description).toContain('concluded: use BM25');
+    expect(rows[0].description).toBe('now');
+    expect(rows[0].description).not.toContain('concluded');
+    expect(rows[0].description).not.toContain('shipped it');
+    // Both still readable without resuming — one hover away.
+    expect(rows[0].tooltip).toContain('summary: shipped it');
   });
 
-  it('withholds it from a live row — its last line is on screen in its tab', () => {
+  it('withholds it from a live row too', () => {
     const rows = buildViewModel(
       input(
         forestOf([node(A, { lastExchange: 'concluded: use BM25' })]),
@@ -1230,7 +1287,12 @@ describe('buildViewModel: the archived conclusion', () => {
     expect(rows[0].tooltip).toContain('last exchange: concluded: use BM25');
   });
 
-  it('does not double up in the hover when a summary exists', () => {
+  // BOTH facts, summary first. They answer different questions — what somebody
+  // decided the branch amounted to, and what it actually last said — and since
+  // neither is on the row any more, coalescing them meant writing a summary
+  // silently deleted the session's final words from the only surface that still
+  // had them.
+  it('carries the summary AND the last exchange when both exist', () => {
     const rows = buildViewModel(
       input(
         forestOf([
@@ -1240,6 +1302,22 @@ describe('buildViewModel: the archived conclusion', () => {
             summary: 'shipped it',
             lastExchange: 'the long answer',
           }),
+        ]),
+        { loose: [A] },
+      ),
+    );
+    expect(rows[0].tooltip).toContain('summary: shipped it');
+    expect(rows[0].tooltip).toContain('last exchange: the long answer');
+    // Order matters: the summary was written for exactly this line.
+    const t = rows[0].tooltip ?? '';
+    expect(t.indexOf('summary:')).toBeLessThan(t.indexOf('last exchange:'));
+  });
+
+  it('says nothing about a last exchange the session never had', () => {
+    const rows = buildViewModel(
+      input(
+        forestOf([
+          node(A, { archived: true, status: 'exited', summary: 'shipped it' }),
         ]),
         { loose: [A] },
       ),
@@ -1314,6 +1392,55 @@ describe('runningCountOf', () => {
     // its place in the count.
     const forest = forestOf([node(A, { status: 'busy' })]);
     expect(runningCountOf(forest, ['/code/app'])).toBe(1);
+  });
+});
+
+// The badge's other half. runningCountOf is deliberately machine-wide, so the
+// only way it can stay honest is for every process it counts to have SOME row
+// to point at — and `lineage.isVisible` drops an archived record's node
+// unconditionally, which is one drop the grouping's own filters never see. This
+// is the list that rescues those, and the pair is tested together on purpose:
+// a change that makes one of the two numbers move must make the other move too.
+describe('runningWithoutRow: the live sessions the rendered tree never draws', () => {
+  it('rescues an ARCHIVED record whose process the roster still reports', () => {
+    // The shape found on a real machine: `deleted: true` written over a live
+    // process, so `sessionIsOver` is false (not ghost, not archived, status
+    // busy) and the badge counts it while visibleRoots has no row for it.
+    const forest = forestOf([
+      node(A, { status: 'busy' }),
+      node(B, { status: 'busy', deleted: true }),
+    ]);
+    expect(forest.visibleRoots).toEqual([A]);
+    expect(runningCountOf(forest)).toBe(2);
+    expect(runningWithoutRow(forest)).toEqual([B]);
+  });
+
+  it('rescues nothing when every live session already has a row', () => {
+    const forest = forestOf([
+      node(A, { status: 'busy', visibleChildren: [C] }),
+      node(C, { parentId: A, status: 'busy' }),
+    ]);
+    expect(runningWithoutRow(forest)).toEqual([]);
+  });
+
+  it('leaves a rowless session that is OVER exactly where it is', () => {
+    // An archived row is meant to be gone. Only a live process behind one is a
+    // broken invariant, and only that is rescued.
+    const forest = forestOf([node(B, { status: 'exited', deleted: true })]);
+    expect(runningWithoutRow(forest)).toEqual([]);
+  });
+
+  it('honours the scope fence, so the badge and the appendix agree', () => {
+    // Out of scope is not counted, so it must not be rescued either — a
+    // folder-mode window growing rows for another folder's work through this
+    // input would be a new leak in place of the one it closes.
+    const forest = forestOf([
+      node(B, { cwd: '/code/other', status: 'busy', deleted: true }),
+    ]);
+    expect(runningCountOf(forest, ['/code/app'])).toBe(0);
+    expect(runningWithoutRow(forest, ['/code/app'])).toEqual([]);
+    expect(runningCountOf(forest)).toBe(1);
+    expect(runningWithoutRow(forest)).toEqual([B]);
   });
 });
 
@@ -1969,6 +2096,85 @@ describe('buildViewModel: the branch under a session', () => {
     const rows = on({ groupByBranch: true });
     expect(lineOn(rows, A)).toBeUndefined();
     expect(lineOn(rows, B)).toBeUndefined();
+  });
+
+  // A2: a closed session renders as exactly ONE row. The branch line is the
+  // only thing that makes a session row two lines tall, so this is the whole of
+  // the compaction on this surface — and it must hold for all three arms of
+  // lineage.sessionIsOver, not just the archived one.
+  it('draws no line on a closed session, in any of the three ways over', () => {
+    for (const over of [
+      { archived: true, status: 'exited' as const },
+      { status: 'exited' as const },
+      { ghost: true },
+    ]) {
+      const rows = buildViewModel(
+        input(
+          forestOf([
+            node(A, { cwd: '/code/app/src', ...over }),
+            node(B, { cwd: '/code/app-feat-x' }),
+          ]),
+          { projects: [projectNode([MAIN, FEAT], [A, B])] },
+          { branchDisplay: 'inline' },
+        ),
+      );
+      expect(lineOn(rows, A)).toBeUndefined();
+      // The FACT is not lost: the hover still answers "which branch is this".
+      // Pinned on the other surface too — test/tree.test.ts 'names the branch in
+      // the hover on a closed row as well as a live one' — because until that
+      // line existed the native tree had no branch hover at all, and closing a
+      // session there took the branch name off the screen for good.
+      const row = rows.find((r) => r.sessionId === A);
+      expect(row?.branch).toBe('main');
+      expect(row?.tooltip).toContain('branch: main');
+      // And a live sibling in another checkout is unaffected.
+      expect(lineOn(rows, B)?.name).toBe('feat/x');
+    }
+  });
+
+  // The subtle half of A2. `parentBranchAt` means "what the row above SAID",
+  // not "what checkout it is in" — so a silenced closed row must pass its
+  // PARENT's index down or it eats the branch fact for its whole subtree, and
+  // the failure is invisible (a missing line looks like a line correctly
+  // withheld).
+  it('is transparent: a live child of a closed row speaks the branch instead', () => {
+    const forked = forestOf([
+      node(A, {
+        cwd: '/code/app/src',
+        archived: true,
+        status: 'exited',
+        visibleChildren: [C],
+      }),
+      node(C, { parentId: A, cwd: '/code/app/src' }),
+    ]);
+    const rows = buildViewModel(
+      input(forked, { projects: [projectNode([MAIN, FEAT], [A])] }, {
+        branchDisplay: 'inline',
+      }),
+    );
+    expect(lineOn(rows, A)).toBeUndefined();
+    expect(lineOn(rows, C)?.name).toBe('main');
+  });
+
+  it('is transparent without making a moved grandchild say it twice', () => {
+    const forked = forestOf([
+      node(A, {
+        cwd: '/code/app/src',
+        archived: true,
+        status: 'exited',
+        visibleChildren: [B],
+      }),
+      node(B, { parentId: A, cwd: '/code/app-feat-x', visibleChildren: [C] }),
+      node(C, { parentId: B, cwd: '/code/app-feat-x' }),
+    ]);
+    const rows = buildViewModel(
+      input(forked, { projects: [projectNode([MAIN, FEAT], [A])] }, {
+        branchDisplay: 'inline',
+      }),
+    );
+    expect(lineOn(rows, A)).toBeUndefined();
+    expect(lineOn(rows, B)?.name).toBe('feat/x');
+    expect(lineOn(rows, C)).toBeUndefined();
   });
 
   it('draws no branch ROWS for the session line alone', () => {

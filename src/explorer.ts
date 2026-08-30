@@ -239,8 +239,23 @@ export function desiredFolders(
   anchorPath: string,
   opts: DesiredFoldersOptions = {},
 ): FolderSpec[] {
-  if (!project) return [];
   const anchorKey = pathKey(normalizeDir(anchorPath));
+  // NO PROJECT is a normal state under `'directory'` scope and an impossible
+  // one under `'project'` scope, so the two answer differently. The auto-switch
+  // model follows the SESSION (src/follow.ts), and a session may be running in
+  // a loose checkout nobody has filed into a project yet — clearing the tree
+  // back to the anchor because of that is the one outcome a following Explorer
+  // may never produce, and `narrowToCurrent` already knows how to label a bare
+  // path and how to refuse the anchor. Under `'project'` scope there is no
+  // directory LIST to expand into roots, so `[]` remains the only honest
+  // answer. Both leave `sync(null)` — the "leave workspace" path, which passes
+  // no `currentDir` at all — byte-identical: an absent `currentDir` falls
+  // through to the empty `all` below and clears the tail, as it always has.
+  if (!project) {
+    return (opts.scope ?? 'project') === 'project'
+      ? []
+      : narrowToCurrent([], opts.currentDir, anchorKey);
+  }
   const all: FolderSpec[] = [];
   const seen = new Set<string>();
   for (const dir of projectDirs(project)) {
@@ -518,9 +533,8 @@ export class ExplorerSync {
         this.warnedNotAnchored = true;
         log(
           'explorer: this window is not a Flock workspace (folder[0] is not ' +
-            'the anchor) — the Explorer will not follow the active project. ' +
-            'Run "Flock: Follow the Active Project in the Explorer" to set ' +
-            'one up.',
+            'the anchor) — the Explorer will not follow the session you are ' +
+            'in. Run "Flock: Follow the Session I Am In" to set one up.',
         );
       }
       return 'not-anchored';

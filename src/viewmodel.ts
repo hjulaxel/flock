@@ -2,8 +2,16 @@
 //
 // This is the whole rendering decision for the tree, expressed as a flat list of
 // serializable rows, so it can be unit-tested without a workbench AND posted
-// straight into a webview. It imports ./types and ./projects and nothing else —
-// no vscode, no node — which is what keeps that true.
+// straight into a webview. It never imports vscode, which is what keeps that
+// true. Its other imports are the pure model modules — ./types, ./projects,
+// ./modes, ./hosts, ./lineage and (for one type name) ./accounts — and it takes
+// exactly one thing from ./lineage: `sessionIsOver`, the definition of "this
+// conversation is finished".
+// That predicate now decides LAYOUT (a closed row is one row), so both this
+// surface and tree.ts have to compact the same set of rows, and lineage.ts —
+// which owns SessionNode and computes all three flags it reads — is where it
+// belongs. A local copy would have been a fifth and sixth in a file that
+// already had four.
 //
 // Why a flat list: the webview renders rows, not a nested DOM. Flattening here
 // (honouring the collapsed set) means the client is a dumb painter with no model
@@ -33,10 +41,16 @@ import type {
   SubprojectNode,
 } from './types';
 import { branchIndexForCwd, unbranchedRoots } from './projects';
+import { sessionIsOver } from './lineage';
 import { outsideScope } from './modes';
 import type { GroupingResult } from './projects';
 import { hostMarker, hostTooltipLine } from './hosts';
 import type { SessionHost } from './hosts';
+// Type only, and the module stays pure: ./accounts imports ./types and nothing
+// else, and ./hosts above already depends on it. What is borrowed is the name
+// of a fact a row states — which CLI wrote this conversation — and declaring a
+// second spelling of it here is how the two would come to disagree.
+import type { SessionCli } from './accounts';
 
 // ------------------------------------------------------------ pure helpers
 
@@ -53,7 +67,8 @@ export function formatAge(deltaMs: number): string {
 }
 
 /**
- * The grace countdown as a row reads it: `closing in 9m`, then `closing now`.
+ * The grace countdown as the HOVER reads it: `closing in 9m`, then
+ * `closing now`.
  *
  * Minute granularity on purpose, not the mm:ss a stopwatch would show: the
  * repaint cadence is the roster poll (~3 s) plus a once-a-minute nudge from
@@ -65,7 +80,7 @@ export function formatAge(deltaMs: number): string {
  *
  * `closing now` past the deadline rather than nothing: a busy session
  * outlives its deadline on purpose (the sweep marks it close-after-turn and
- * waits), and the row must keep saying the process is on its way out for as
+ * waits), and the hover must keep saying the process is on its way out for as
  * long as it runs. Not-a-number renders as nothing, same rule as formatAge.
  */
 export function formatGraceCountdown(remainingMs: number): string {
@@ -76,26 +91,113 @@ export function formatGraceCountdown(remainingMs: number): string {
   return `closing in ${Math.ceil(remainingMs / 60_000)}m`;
 }
 
-/** How much of the last exchange an archived ROW carries. The description
- *  shares a line with the age and is elided by the surface at the first
- *  squeeze anyway; 80 characters is enough to recognise a conclusion and
- *  little enough that the age column stays a column. The hover shows the
- *  longer text (bounded at capture — see usage.LAST_EXCHANGE_MAX_CHARS). */
-export const SNIPPET_MAX_CHARS = 80;
+/** `undefined` for anything that is not a finite epoch-ms number, so callers
+ *  can push-if-defined without a try/catch at every call site. */
+function isoOrUndefined(ms: number | undefined): string | undefined {
+  if (typeof ms !== 'number' || !Number.isFinite(ms)) return undefined;
+  try {
+    return new Date(ms).toISOString();
+  } catch {
+    return undefined;
+  }
+}
 
 /**
- * What a level-2 row says it CONCLUDED: the recorded close-with-summary when
- * there is one, else the last conversation text out of the transcript tail.
- * The summary wins because the user wrote it for exactly this line.
+ * The detached-running deal, in one sentence, for both surfaces' hovers.
  *
- * Whitespace is collapsed because both surfaces render descriptions and hover
- * lines single-line — a newline in a TreeItem.description is a box glyph, not
- * a break. '' when the node has neither, so callers can filter it out of a
- * ` · `-joined description like every other optional part.
+ * WHY THE COUNTDOWN LIVES HERE AND NOT ON THE ROW. `design/levels-and-modes.md`
+ * made the detach grace safe by demanding that "the tree row MUST show it
+ * distinctly, with a countdown". What that constraint is actually buying is
+ * the impossibility of a running process with nothing on screen — and the ROW
+ * is what buys it. The countdown TEXT was the price the spec happened to name,
+ * and in the 2026-08-28 review the user, who is the authority on that price,
+ * looked at the hover and said it was enough. So the row stays, keeps its
+ * `;grace;` verbs (Close Now / Keep Awake) and keeps counting toward the view
+ * badge; the words move here. The cost, stated plainly because it is real: a
+ * detached-running row is now visually identical to a live idle one, and only
+ * the hover tells them apart.
+ *
+ * Shared rather than written twice because before this change the inline
+ * surface got the countdown only by ECHOING its own description — so removing
+ * the countdown from the row would have silently taken it out of the one hover
+ * the user approved. The native tree, meanwhile, had a hand-written copy of the
+ * sentence with a comment promising it would not drift from this file's. One
+ * function is what makes that promise structural, the same way hosts.ts owns
+ * the ownership sentence both surfaces print.
+ */
+export function graceTooltipLine(deadlineAt: number, now: number): string {
+  const countdown = formatGraceCountdown(deadlineAt - now);
+  const deadline = isoOrUndefined(deadlineAt);
+  return (
+    'detached: tab closed, process kept for instant re-attach' +
+    (countdown === '' ? '' : ` — ${countdown}`) +
+    (deadline === undefined ? '' : `, closes at ${deadline}`)
+  );
+}
+
+/** How much of the last exchange a HOVER carries. No row carries it at all any
+ *  more, so this is not a width budget — it is a guard on the one source that
+ *  is otherwise unbounded, the close-with-summary text a user typed. The
+ *  scraped `lastExchange` is already capped at capture (see
+ *  usage.LAST_EXCHANGE_MAX_CHARS, 400) and never reaches this number. */
+export const HOVER_SNIPPET_MAX_CHARS = 4000;
+
+/**
+ * One hover line's worth of conversation text: whitespace collapsed, capped.
+ *
+ * Collapsed because both surfaces render hover lines single-line — a newline in
+ * a TreeItem.description is a box glyph, not a break. '' for nothing, so
+ * callers can filter it out.
+ */
+function hoverText(
+  raw: string | undefined,
+  maxChars: number = HOVER_SNIPPET_MAX_CHARS,
+): string {
+  const text = (raw ?? '').replace(/\s+/g, ' ').trim();
+  if (text === '' || !Number.isFinite(maxChars) || text.length <= maxChars) {
+    return text;
+  }
+  return text.slice(0, Math.max(maxChars - 1, 1)).trimEnd() + '…';
+}
+
+/**
+ * The scraped tail on its own — what the conversation last SAID, whether or not
+ * anybody also wrote a summary about it.
+ *
+ * Separate from `sessionSnippet` because the two answer different questions and
+ * the hover now asks both. Until 2026-08-28 the tooltips read
+ * `summary ?? lastExchange`, which meant recording a summary DELETED the last
+ * exchange from the only place it was readable — the row had already lost it,
+ * so a closed session with a summary had no surface at all carrying its final
+ * words. Axel's rule when that was put to him was "as long as both are
+ * available to the user, that's fine", and both is what this makes possible.
+ */
+export function exchangeSnippet(
+  node: SessionNode,
+  maxChars: number = HOVER_SNIPPET_MAX_CHARS,
+): string {
+  return hoverText(node.lastExchange, maxChars);
+}
+
+/**
+ * What a level-2 session CONCLUDED: the recorded close-with-summary when there
+ * is one, else the last conversation text out of the transcript tail. The
+ * summary wins because the user wrote it for exactly this purpose.
+ *
+ * A HOVER helper only, since the 2026-08-28 review. It used to be appended to
+ * every archived ROW's description, and next to a session that had no name of
+ * its own — 71% of the closed transcripts on a real machine rendered as a bare
+ * hex id — it was the only readable thing on the line, so the row read as its
+ * own last prompt. Both tooltips already carried the same fact, at greater
+ * length, so taking it off the row was a removal rather than a move.
+ *
+ * Still coalescing, and still the answer to "in one line, what came of this" —
+ * the hovers now spend two lines instead (see `exchangeSnippet`), but a caller
+ * that has room for exactly one wants this one.
  */
 export function sessionSnippet(
   node: SessionNode,
-  maxChars: number = SNIPPET_MAX_CHARS,
+  maxChars: number = HOVER_SNIPPET_MAX_CHARS,
 ): string {
   const text = (node.summary ?? node.lastExchange ?? '')
     .replace(/\s+/g, ' ')
@@ -483,7 +585,7 @@ export type StatusTone =
  */
 export function statusTone(node: SessionNode): StatusTone | undefined {
   if (node.hidden) return undefined;
-  if (node.ghost || node.archived || node.status === 'exited') return 'closed';
+  if (sessionIsOver(node)) return 'closed';
   // Compaction, inserted ABOVE the three status rules and below nothing else
   // that draws. Both phases are computed by src/compaction.ts, which has
   // already applied every rule about when a phase is live — including that
@@ -548,9 +650,13 @@ export function sessionContextValue(
   node: SessionNode,
   boundHere: boolean,
   host?: SessionHost,
+  /** Which CLI wrote this conversation. Optional, and an absent or unknown
+   *  answer resolves to 'claude' — see the token pair's note in types.ts for
+   *  why the default is a claim rather than silence. */
+  cli?: SessionCli,
 ): string {
   const tokens: ContextToken[] = ['session'];
-  const live = !node.ghost && !node.archived && node.status !== 'exited';
+  const live = !sessionIsOver(node);
 
   // Muted rows offer Unhide where the others offer Hide. Exactly one of the two
   // is always present, so neither menu entry needs a negated `when` clause.
@@ -564,9 +670,7 @@ export function sessionContextValue(
   else if (node.archived) tokens.push('archived');
   else if (live) tokens.push('live');
 
-  if (node.ghost || node.archived || node.status === 'exited') {
-    tokens.push('exited');
-  }
+  if (sessionIsOver(node)) tokens.push('exited');
 
   if (live) {
     if (node.status === 'waiting') tokens.push('waiting');
@@ -584,6 +688,12 @@ export function sessionContextValue(
     // and any caller that builds a context value without a registry — so it
     // reads as 'hosted' and the menus are byte-identical to what they were.
     tokens.push(host === 'foreign' ? 'foreign' : 'hosted');
+    // The strict half of `hosted`, for the verbs that have to type into a
+    // terminal rather than merely end a process — see the token's note in
+    // types.ts. An absent host takes it too, which is what keeps the
+    // back-compat promise the line above makes: a wiring with no opinion gets
+    // the menus it always had.
+    if (host === undefined || host === 'here') tokens.push('here');
     // Detached under the grace countdown — a third token BESIDE the live and
     // ownership ones, never instead of them, because a grace row keeps every
     // live verb and gains exactly two: Close Now and Keep Awake. Emitted for
@@ -592,6 +702,11 @@ export function sessionContextValue(
     // from a row whose process is still running.
     if (node.graceDeadlineAt !== undefined) tokens.push('grace');
   }
+
+  // WHICH CLI, on every row that has a transcript to have been written by one.
+  // Withheld from a ghost for the reason the provider glyph is: an inferred
+  // ancestor has no file on disk, so either answer would be invented.
+  if (!node.ghost) tokens.push(cli === 'codex' ? 'codex' : 'claude');
 
   if (node.source === 'minted') tokens.push('ours');
   if (boundHere) tokens.push('bound');
@@ -1033,6 +1148,21 @@ export interface ViewModelInput {
    * it did before accounts could be switched, which is every unit double.
    */
   accountLabelOf?(sessionId: string): string | undefined;
+  /**
+   * Which CLI wrote a conversation — the fact behind the row's `;claude;` /
+   * `;codex;` token pair, and therefore behind whether "Move to Account…" is
+   * in its menu at all.
+   *
+   * Must be resolved the way a LAUNCH resolves it (the session's own record,
+   * then which history store holds its transcript), never the way the glyph
+   * does: the glyph falls back to the owning project's provider, which is a
+   * presentation guess and would here withdraw a working verb from every
+   * Claude conversation filed under a project somebody flipped to Codex.
+   *
+   * Optional, like every lookup here, and an absent or throwing one resolves
+   * to 'claude' rather than to no token — see the pair's note in types.ts.
+   */
+  sessionCli?(sessionId: string): SessionCli | undefined;
   /** Ahead/behind and dirt for one checkout, from the cache in
    *  src/gitBranches.ts. Synchronous by contract — this is called inside a
    *  paint. Absent, or returning undefined, means the branch rows carry no
@@ -1506,6 +1636,22 @@ function safeAccountLabel(
   }
 }
 
+/** Same contract again, with one difference that is the whole point: this one
+ *  resolves an unwired or throwing lookup to 'claude' rather than to
+ *  undefined. `sessionContextValue` reads undefined as 'claude' anyway, so the
+ *  two agree; the wrapper is written this way so that the default is stated
+ *  where somebody changing it would see it. */
+function safeSessionCli(
+  input: ViewModelInput,
+  sessionId: string,
+): SessionCli {
+  try {
+    return input.sessionCli?.(sessionId) === 'codex' ? 'codex' : 'claude';
+  } catch {
+    return 'claude';
+  }
+}
+
 /**
  * The rendered tree, flattened depth-first in display order.
  *
@@ -1639,19 +1785,37 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
     // so it keeps the position it has always had, hard against the dot.
     const tokens = input.showTokens === true ? formatTokens(node.tokens) : '';
     const host = safeHost(input, id);
-    // The grace countdown — the words that make the one detached-running
-    // state a VISIBLE state. After the age and the status fact, because those
-    // two keep the positions every row gives them; NEWS still beats the
-    // standing host marker behind it.
-    const grace =
-      node.graceDeadlineAt !== undefined
-        ? formatGraceCountdown(node.graceDeadlineAt - input.now)
-        : '';
-    // What the session concluded — the level-2 question, answered on the one
-    // kind of row that has no tab to answer it in. Only archived rows spend
-    // the width: a live conversation's last line is on screen in its own tab,
-    // and a ghost never said anything.
-    const snippet = node.archived ? sessionSnippet(node) : '';
+    // TWO THINGS THIS DESCRIPTION USED TO CARRY AND NO LONGER DOES, both taken
+    // off in the 2026-08-28 review, both now in the hover:
+    //
+    //   the grace countdown  `closing in 9m`. See graceTooltipLine for the
+    //                        argument: the ROW is what makes the one
+    //                        detached-running state reachable, the countdown
+    //                        text was only the price the spec happened to
+    //                        name, and the user judged the hover enough.
+    //   the conclusion       `sessionSnippet(node)` on every archived row —
+    //                        the recorded close summary, else a scrape of the
+    //                        transcript's tail. This is the one the user
+    //                        actually complained about: "I can't see the name
+    //                        of the session, I see like the last prompt". On a
+    //                        closed session that nobody named (71% of the real
+    //                        transcripts on this machine) the row's label was a
+    //                        hex id and the snippet was the only readable thing
+    //                        on the line, so the row read as its own last
+    //                        prompt. A3 gives those rows a real name; this is
+    //                        the other half — a closed row is a name and an
+    //                        age, exactly like every other row.
+    //
+    // The recorded summary goes with the scraped tail deliberately, and it is
+    // the closer call of the two: a summary someone typed on purpose is a
+    // better sentence than a scrape, and it was written for this line. But it
+    // is still an answer to "what did this conclude" rather than a name, and it
+    // is answers-beside-the-age that pushed the name off the row in the first
+    // place. Both hovers already carried both, at greater length, so this is a
+    // removal and not a move. To put the summary back: add
+    // `node.summary !== undefined ? sessionSnippet(node) : ''` to the array
+    // below, and the same in tree.ts.
+    //
     // 'elsewhere' — one quiet word, and only on a row Flock does not own. It
     // goes LAST, after the age and after whatever a waiting session is waiting
     // for, because it is a standing fact about the row rather than news: what
@@ -1660,8 +1824,6 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
       tokens,
       age,
       status,
-      grace,
-      snippet,
       hostMarker(host ?? 'none') ?? '',
       node.hidden ? 'hidden' : '',
     ]
@@ -1684,7 +1846,12 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
           : { type: 'provider', provider };
     }
 
-    const contextValue = sessionContextValue(node, safeBound(input, id), host);
+    const contextValue = sessionContextValue(
+      node,
+      safeBound(input, id),
+      host,
+      safeSessionCli(input, id),
+    );
 
     // One dot, at the right edge. statusTone() withholds a tone from a row that
     // has been put away or has nothing to report; badgeGlyph() then withholds
@@ -1696,6 +1863,15 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
     // history it does not have. It still gets the 'closed' TONE — see
     // statusTone() — which is what the hover reads back.
     const closed = !node.ghost && (node.archived || node.status === 'exited');
+    // ONE ROW FOR A CLOSED SESSION — the compaction rule, and deliberately NOT
+    // `closed` above. This one INCLUDES ghosts: a ghost's cwd is inherited from
+    // whichever child spoke first, so a branch claim on a ghost row is a guess
+    // dressed as a fact, and it is the one row in the tree that has least
+    // business spending a second line. `closed` keeps excluding them because it
+    // governs dimming, which would claim a history a ghost does not have.
+    // lineage.sessionIsOver is the shared definition, so the native tree cannot
+    // compact a different set of rows than this one does.
+    const compact = sessionIsOver(node);
 
     const row: ViewRow = {
       key,
@@ -1742,6 +1918,7 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
         node,
         description,
         closed,
+        input.now,
         host,
         safeAccountLabel(input, id),
       ),
@@ -1772,8 +1949,18 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
       //
       // Suppressed under branch GROUPING, where the branch row this session
       // hangs off already says it, one line up and in bigger type.
+      //
+      // And suppressed on a CLOSED row, whatever the mode says. A row with a
+      // branch line is a two-line row (media/webtree.js turns any row carrying
+      // one into a `.two-line` column), and the point of the compaction is that
+      // leaving "Show Closed Sessions Too" on permanently has to be
+      // comfortable: a history of finished work must not cost twice the
+      // vertical space of the work you are doing. The branch fact is not lost —
+      // `row.branch`, the tint and the `branch: …` hover line are all set
+      // above, and a hover can afford a fact a row has no width for.
       if (
         inlineMode &&
+        !compact &&
         branchAt !== parentBranchAt &&
         branchScope.branches.length >= BRANCH_CHIPS_MIN &&
         input.groupByBranch !== true
@@ -1826,21 +2013,35 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
 
     if (expanded) {
       const kids = node.visibleChildren;
+      // A SUPPRESSED CLOSED ROW IS TRANSPARENT TO THE "says something new"
+      // RULE, and this line is the whole of it.
+      //
+      // `parentBranchAt` means "what the row above SAID", not "what checkout
+      // the row above is in" — the line is drawn where a row's index differs
+      // from the last index anyone spoke. A closed row that no longer speaks
+      // must therefore pass its parent's index down, not its own: otherwise it
+      // absorbs the branch fact for its entire subtree, and the first live
+      // descendant in the same checkout stays silent about a worktree nothing
+      // above it ever named. That failure is invisible — a missing line looks
+      // exactly like a line correctly withheld — which is why it is pinned by
+      // a test in both surfaces rather than left to be noticed.
+      const spokenBranchAt = compact ? parentBranchAt : branchAt;
       for (let i = 0; i < kids.length; i++) {
         // The appended entry is this row's rail seen from the child: it carries
         // on below the child unless the child is the last one hanging off it.
         // `indent` is passed straight down: a fork is nested by the SPINE, not
         // by padding, and the project it is filed under has not changed.
         //
-        // `branchAt` goes down as the child's parentBranchAt — THIS row's
-        // checkout, not the one the walk started at, so a fork that moved
-        // worktrees says so and a fork under it that moved back says so again.
+        // `spokenBranchAt` goes down as the child's parentBranchAt — the last
+        // checkout NAMED on the way here, not the one the walk started at, so a
+        // fork that moved worktrees says so and a fork under it that moved back
+        // says so again.
         pushSession(
           kids[i],
           depth + 1,
           [...rails, i < kids.length - 1],
           indent,
-          branchAt,
+          spokenBranchAt,
         );
       }
     }
@@ -2492,21 +2693,11 @@ const TONE_WORDS: Record<StatusTone, string> = {
   compacted: 'compacted — nothing running',
 };
 
-/** `undefined` for anything that is not a finite epoch-ms number, so callers
- *  can push-if-defined without a try/catch at every call site. */
-function isoOrUndefined(ms: number | undefined): string | undefined {
-  if (typeof ms !== 'number' || !Number.isFinite(ms)) return undefined;
-  try {
-    return new Date(ms).toISOString();
-  } catch {
-    return undefined;
-  }
-}
-
 function sessionTooltip(
   node: SessionNode,
   description: string,
   closed: boolean,
+  now: number,
   host?: SessionHost,
   accountLabel?: string,
 ): string {
@@ -2518,15 +2709,13 @@ function sessionTooltip(
   // is the only tone word that survives being hidden.
   if (tone !== undefined) lines.push(TONE_WORDS[tone]);
   else if (closed) lines.push(TONE_WORDS.closed);
-  // The sentence behind the row's countdown: what "closing in 9m" means, and
-  // the absolute deadline the relative words are computed from — the same
-  // relative-on-the-row, absolute-in-the-hover deal the age gets below.
+  // The whole detached-running fact, since the row stopped carrying any of it:
+  // what the state is, how long is left, and the absolute deadline the relative
+  // words are computed from. graceTooltipLine owns the wording so the native
+  // tree says it identically — see there for why the countdown is here rather
+  // than in the description.
   if (node.graceDeadlineAt !== undefined) {
-    const deadline = isoOrUndefined(node.graceDeadlineAt);
-    lines.push(
-      'detached: tab closed, process kept for instant re-attach' +
-        (deadline !== undefined ? ` — closes at ${deadline}` : ''),
-    );
+    lines.push(graceTooltipLine(node.graceDeadlineAt, now));
   }
   if (description !== '') lines.push(description);
   // The age in `description` is relative ("5m"); these are the absolute
@@ -2563,15 +2752,17 @@ function sessionTooltip(
   // default" under every row would be a line nobody ever needs.
   if (accountLabel !== undefined) lines.push(`account: ${accountLabel}`);
   if (node.cwd) lines.push(node.cwd);
-  if (node.summary) lines.push(`summary: ${node.summary}`);
-  // The fallback conclusion, only where no summary was written: the hover
-  // gets the longer text (bounded at capture — usage.LAST_EXCHANGE_MAX_CHARS)
-  // where the archived row itself carries at most SNIPPET_MAX_CHARS. The cap
-  // here is a formality sessionSnippet needs, not a second budget.
-  else if (node.lastExchange !== undefined) {
-    const exchange = sessionSnippet(node, 4000);
-    if (exchange !== '') lines.push(`last exchange: ${exchange}`);
-  }
+  if (node.summary) lines.push(`summary: ${hoverText(node.summary)}`);
+  // BOTH facts, not one or the other. These two are hover-only now — a closed
+  // row is a name and an age like every other row, and "what did this conclude"
+  // is a question you ask about one session, which is what a hover is for — so
+  // the earlier `summary ?? lastExchange` meant writing a summary silently
+  // removed the session's final words from the only surface that still had
+  // them. They are different facts: what somebody decided this branch amounted
+  // to, and what the conversation actually last said. The summary leads because
+  // it was written for exactly this line.
+  const exchange = exchangeSnippet(node);
+  if (exchange !== '') lines.push(`last exchange: ${exchange}`);
   if (node.hidden) lines.push('hidden: sorted last, not counted in the badge');
   return lines.join('\n');
 }
@@ -2677,7 +2868,7 @@ export function runningCountOf(
 ): number {
   let count = 0;
   for (const node of forest.nodes.values()) {
-    if (node.ghost || node.archived || node.status === 'exited') continue;
+    if (sessionIsOver(node)) continue;
     // Same asymmetry as modes.outsideScope, and for the same reason: only a
     // POSITIVE "that path is elsewhere" excludes. A session whose cwd this
     // window cannot place still has a row here, so it still counts.
@@ -2685,6 +2876,63 @@ export function runningCountOf(
     count++;
   }
   return count;
+}
+
+/**
+ * The ids `runningCountOf` counts that the rendered tree never draws — the
+ * badge's own broken promise, as a list the surfaces can act on.
+ *
+ * THE ONE SHAPE THAT REACHES IT. `lineage.isVisible` drops a node with
+ * `deleted: true` unconditionally, and `sessionIsOver` — the badge's
+ * predicate — does not look at `deleted` at all, so an ARCHIVED record whose
+ * process the roster still reports is counted and never drawn. That is not
+ * hypothetical: it was found on a real machine with the badge reading 6 and
+ * four rows on screen, and one of the two missing sessions had been in that
+ * state for four days. Archive now refuses or ends such a session (see
+ * commands.archiveRefusal), so what is left here is the tail: records archived
+ * by older versions, the poll or two before the roster catches up with a kill,
+ * and any future path that writes the flag over a live process.
+ *
+ * WHY A ROW RATHER THAN A SMALLER NUMBER. The obvious fix is to stop counting
+ * a deleted node, and it is the wrong one: this count IS the levels invariant
+ * as a number — the 84-detached-session incident was survivable precisely
+ * because nothing anywhere showed "84" — so making the badge quietly agree
+ * with the view would delete the only on-screen evidence of exactly the leak
+ * it exists to detect. The design already has the other answer for a running
+ * process a view rule drops: it renders in the "Still running" appendix
+ * (GroupingResult.hiddenRunning). This is the same rescue, for the one drop
+ * that `visibleRoots` makes rather than the grouping.
+ *
+ * Walks the RENDERED tree (visibleRoots plus visibleChildren) rather than
+ * asking `node.deleted`, so it stays true of any future reason a live node
+ * loses its row instead of only this one.
+ */
+export function runningWithoutRow(
+  forest: SessionForest,
+  /** The same fence runningCountOf takes, and it must be the same value: an
+   *  out-of-scope session is not counted, so it must not be rescued either or
+   *  folder mode would grow rows for other folders' work. */
+  scopeDirs?: readonly string[],
+): string[] {
+  const shown = new Set<string>();
+  const stack = [...forest.visibleRoots];
+  for (;;) {
+    const id = stack.pop();
+    if (id === undefined) break;
+    if (shown.has(id)) continue;
+    shown.add(id);
+    const node = forest.nodes.get(id);
+    if (node === undefined) continue;
+    stack.push(...node.visibleChildren);
+  }
+  const out: string[] = [];
+  for (const node of forest.nodes.values()) {
+    if (sessionIsOver(node)) continue;
+    if (outsideScope(scopeDirs, node.cwd)) continue;
+    if (shown.has(node.id)) continue;
+    out.push(node.id);
+  }
+  return out;
 }
 
 /**
@@ -2709,7 +2957,7 @@ export function subtreeHasRunning(
     seen.add(id);
     const node = forest.nodes.get(id);
     if (!node) continue;
-    if (!node.ghost && !node.archived && node.status !== 'exited') return true;
+    if (!sessionIsOver(node)) return true;
     stack.push(...node.visibleChildren);
   }
 }
