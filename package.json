@@ -82,7 +82,7 @@
           "id": "lineageShells",
           "name": "Shells",
           "icon": "media/flock.svg",
-          "contextualTitle": "Running Shells",
+          "contextualTitle": "Commands Claude Is Running",
           "when": "config.lineage.shells.section",
           "visibility": "collapsed"
         }
@@ -621,6 +621,18 @@
         "command": "lineage.createPullRequest",
         "title": "Create Pull Request...",
         "category": "Flock"
+      },
+      {
+        "command": "lineage.copyShellCommand",
+        "title": "Copy Command",
+        "category": "Flock",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "lineage.openShellOutput",
+        "title": "Open Output",
+        "category": "Flock",
+        "icon": "$(output)"
       }
     ],
     "menus": {
@@ -1061,6 +1073,21 @@
           "command": "lineage.newWorktree",
           "when": "config.lineage.git.branches && view == lineageSessions && viewItem =~ /;subproject;/",
           "group": "0_open@5"
+        },
+        {
+          "command": "lineage.openShellOutput",
+          "when": "view == lineageShells && viewItem =~ /;output;/",
+          "group": "inline@1"
+        },
+        {
+          "command": "lineage.openShellOutput",
+          "when": "view == lineageShells && viewItem =~ /;output;/",
+          "group": "0_open@1"
+        },
+        {
+          "command": "lineage.copyShellCommand",
+          "when": "view == lineageShells && viewItem =~ /;shell;/",
+          "group": "9_copy@1"
         }
       ],
       "commandPalette": [
@@ -1207,6 +1234,14 @@
         {
           "command": "lineage.branchDisplayColor",
           "when": "config.lineage.git.branches"
+        },
+        {
+          "command": "lineage.copyShellCommand",
+          "when": "false"
+        },
+        {
+          "command": "lineage.openShellOutput",
+          "when": "false"
         }
       ],
       "webview/context": [
@@ -1545,7 +1580,7 @@
       },
       {
         "id": "lineage.compacting",
-        "description": "Status dot for a session being compacted \u2014 a hollow ring while the compaction runs, a full dot once it has finished with nothing behind it.",
+        "description": "Status dot for a session being compacted — a hollow ring while the compaction runs, a full dot once it has finished with nothing behind it.",
         "defaults": {
           "light": "charts.purple",
           "dark": "charts.purple",
@@ -1581,7 +1616,7 @@
       },
       {
         "view": "lineageShells",
-        "contents": "No shells in this window.\n[New Session](command:lineage.newSession)\nThis lists the terminals THIS window has bound — one per session it is running, with the pid in it and whether it is wrapped in tmux. Sessions in other windows are still in the tree above, which reads a machine-wide roster; their terminals belong to those windows."
+        "contents": "Claude has not run anything yet.\n[New Session](command:lineage.newSession)\nThis lists the commands your sessions RUN — every `Bash` call Claude makes, with the ones executing right now at the top and a clock on each. Background jobs stay listed until they finish, which is the one thing in a Claude session that is otherwise easy to lose track of.\nIt covers every live session on this machine, not just this window's. Click a row to jump to the conversation that started it."
       }
     ],
     "configuration": {
@@ -1665,7 +1700,7 @@
         "lineage.fork.notifyParent": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "After a fork, type **one sentence into the parent conversation** saying that a branch was made, what it is called and \u2014 when you gave the fork an opening prompt \u2014 what it is for.\n\n**This is new, not something being switched on.** Flock has no session-to-session messaging and never has had: the in-session verbs channel runs one way, session \u2192 Flock, and the only text that has ever gone the other way is a fork's opening prompt, delivered once when the branch starts. This note rides the one channel that can reach a conversation already running \u2014 the same one the **Wrap Up Session** prompt uses \u2014 which **types into the terminal**. It costs the parent a real turn, and if you have half a message typed in that input box the note is appended to it and sent with it.\n\n**It only works while the parent's tab is open in this window.** A parent that is closed, hosted by another VS Code window, running outside Flock, or parked detached by a workspace switch cannot be typed into, and in all four cases **nothing is queued and nothing is retried** \u2014 the note simply does not happen, with one line in the **Flock** output channel. Those are the ordinary cases, not the exotic ones. The tree already shows you the fork either way.\n\nNot sent when **Claude itself** asked for the fork (\"fork this session\", the in-session verb): the verbs CLI already reports the new branches into that same turn, and a second copy typed into the terminal would both duplicate it and land keystrokes mid-turn. A branch renamed on its row in the inline sidebar is announced under its **generated** name \u2014 the note goes out while the rename editor is still open."
+          "markdownDescription": "After a fork, type **one sentence into the parent conversation** saying that a branch was made, what it is called and — when you gave the fork an opening prompt — what it is for.\n\n**This is new, not something being switched on.** Flock has no session-to-session messaging and never has had: the in-session verbs channel runs one way, session → Flock, and the only text that has ever gone the other way is a fork's opening prompt, delivered once when the branch starts. This note rides the one channel that can reach a conversation already running — the same one the **Wrap Up Session** prompt uses — which **types into the terminal**. It costs the parent a real turn, and if you have half a message typed in that input box the note is appended to it and sent with it.\n\n**It only works while the parent's tab is open in this window.** A parent that is closed, hosted by another VS Code window, running outside Flock, or parked detached by a workspace switch cannot be typed into, and in all four cases **nothing is queued and nothing is retried** — the note simply does not happen, with one line in the **Flock** output channel. Those are the ordinary cases, not the exotic ones. The tree already shows you the fork either way.\n\nNot sent when **Claude itself** asked for the fork (\"fork this session\", the in-session verb): the verbs CLI already reports the new branches into that same turn, and a second copy typed into the terminal would both duplicate it and land keystrokes mid-turn. A branch renamed on its row in the inline sidebar is announced under its **generated** name — the note goes out while the rename editor is still open."
         },
         "lineage.close.summaryMode": {
           "type": "string",
@@ -1680,9 +1715,9 @@
             "Send /compact, keep the summary the Claude CLI writes, type a short form of it into the parent conversation, then close. One to three minutes; Claude only; needs the session's tab open in this window.",
             "The same, but tell nobody: the summary is recorded on the row and the parent is left alone.",
             "The old behaviour: an input box asking you to type the summary yourself.",
-            "Close with no summary at all \u2014 exactly what Close Session does."
+            "Close with no summary at all — exactly what Close Session does."
           ],
-          "markdownDescription": "What **Close with Summary** does.\n\n**How the summary is produced, precisely.** Flock cannot ask a model for a summary: it has no API client, and it can only speak to a running conversation by typing into its terminal. So the two compacting modes **send `/compact`** \u2014 a command the Claude CLI interprets \u2014 and then **read back the summary the CLI wrote** into the transcript. The words are genuinely the model's; the driving is a keystroke. It is not a scrape of the last exchange, and it is not something Flock wrote.\n\n**What that costs.** A compaction takes roughly **one to three minutes**, during which a progress notification with a **Cancel** button is shown. It **squashes the branch's own context** \u2014 acceptable only because the branch is being closed in the same breath, so if you cancel or it times out, you are left with a compacted branch. It is **Claude only**: a Codex session is offered the plain close by name instead. It needs the session's **tab open in this window**; a closed row, a session another window hosts, a foreign process and a session parked by a workspace switch are all refused **before** anything is typed. And if no summary comes back, **nothing is closed** \u2014 the session is mid-turn and cutting it off would lose the compaction too.\n\n`compact-and-tell-parent` (the default) also types a short form of the summary into the **parent** conversation, over the same channel and with the same limits as `#lineage.fork.notifyParent#`: only while the parent's tab is open here, nothing queued otherwise.\n\n`ask-me` is the behaviour this replaced, kept by name so it can be chosen deliberately. It is also what every refusal above falls back to when you pick **Type a Summary\u2026**."
+          "markdownDescription": "What **Close with Summary** does.\n\n**How the summary is produced, precisely.** Flock cannot ask a model for a summary: it has no API client, and it can only speak to a running conversation by typing into its terminal. So the two compacting modes **send `/compact`** — a command the Claude CLI interprets — and then **read back the summary the CLI wrote** into the transcript. The words are genuinely the model's; the driving is a keystroke. It is not a scrape of the last exchange, and it is not something Flock wrote.\n\n**What that costs.** A compaction takes roughly **one to three minutes**, during which a progress notification with a **Cancel** button is shown. It **squashes the branch's own context** — acceptable only because the branch is being closed in the same breath, so if you cancel or it times out, you are left with a compacted branch. It is **Claude only**: a Codex session is offered the plain close by name instead. It needs the session's **tab open in this window**; a closed row, a session another window hosts, a foreign process and a session parked by a workspace switch are all refused **before** anything is typed. And if no summary comes back, **nothing is closed** — the session is mid-turn and cutting it off would lose the compaction too.\n\n`compact-and-tell-parent` (the default) also types a short form of the summary into the **parent** conversation, over the same channel and with the same limits as `#lineage.fork.notifyParent#`: only while the parent's tab is open here, nothing queued otherwise.\n\n`ask-me` is the behaviour this replaced, kept by name so it can be chosen deliberately. It is also what every refusal above falls back to when you pick **Type a Summary…**."
         },
         "lineage.launch.mode": {
           "type": "string",
@@ -1708,7 +1743,7 @@
             "Leave the Claude Code extension's own agent list alone. Flock stops following the conversation in front and contributes no alt+left binding."
           ],
           "default": "flock",
-          "markdownDescription": "Where you switch between conversations.\n\n`flock` makes the tree the switcher. The row of whatever conversation is in front stays **selected**, so the sidebar always already says where you are \u2014 and `alt+left`, while the Claude Code extension has focus, puts the **keyboard** on that row, so the up and down arrows move you between sessions from there.\n\nThat binding exists because of the back arrow at the top of the Claude Code extension's panel, which leaves your conversation for an agent list that knows nothing about forks, projects or worktrees, and is very easy to hit by accident. **Flock cannot intercept that arrow**: it is a route change inside another extension's webview and produces no tab, title, command or context key on the outside. What it can do is make sure the tree never lost your place, and give the same gesture somewhere better to go.\n\n`claude` turns both halves off and leaves the agent list alone."
+          "markdownDescription": "Where you switch between conversations.\n\n`flock` makes the tree the switcher. The row of whatever conversation is in front stays **selected**, so the sidebar always already says where you are — and `alt+left`, while the Claude Code extension has focus, puts the **keyboard** on that row, so the up and down arrows move you between sessions from there.\n\nThat binding exists because of the back arrow at the top of the Claude Code extension's panel, which leaves your conversation for an agent list that knows nothing about forks, projects or worktrees, and is very easy to hit by accident. **Flock cannot intercept that arrow**: it is a route change inside another extension's webview and produces no tab, title, command or context key on the outside. What it can do is make sure the tree never lost your place, and give the same gesture somewhere better to go.\n\n`claude` turns both halves off and leaves the agent list alone."
         },
         "lineage.groupByFolder": {
           "type": "boolean",
@@ -1792,7 +1827,7 @@
           "enumDescriptions": [
             "Native VS Code: a window is the folder you opened. The sidebar shows the sessions under that folder, grouped by the projects that claim them; other projects' work routes to their own windows. Nothing rearranges itself and file tabs are never touched. Needs no tmux and no window management; costs a window per project, and alt-tab is your switcher.",
             "The window is Flock's: no folder is opened, nothing scopes the tree, and the sidebar holds everything on the machine — you open a session's own window when you want its files. In-window switching is still there when you ask for it, but nothing ever switches by itself and no workspace item appears in the status bar. Costs you that window, and a sidebar with nothing narrowing it.",
-            "One window follows you: work in another project's session and the window switches there, saving the layout you leave and restoring the target's. The most convenient of the three and the hardest to keep straight — it wants tmux, so the sessions you switch away from keep running, and one reload (Flock: Follow the Session I Am In) before the file tree follows you too \u2014 down to the session's own subproject directory, in the git worktree that session is checked out in, with Source Control showing that same checkout."
+            "One window follows you: work in another project's session and the window switches there, saving the layout you leave and restoring the target's. The most convenient of the three and the hardest to keep straight — it wants tmux, so the sessions you switch away from keep running, and one reload (Flock: Follow the Session I Am In) before the file tree follows you too — down to the session's own subproject directory, in the git worktree that session is checked out in, with Source Control showing that same checkout."
           ],
           "default": "folder",
           "markdownDescription": "What a window **is** — three answers, from the window that holds one thing to the window that follows you. **One folder per project** (`folder`, the default): the window is the folder you opened, the tree scopes itself to sessions under it, and working on another project means going to that project's own window. **Root**, i.e. Flock only (`root`): the window is Flock's — nothing fenced, nothing scoped, nothing rearranging itself, and you open a window on a session when you want its files. **Auto-switch** (`project`): one window spans many projects and switches between them as your attention moves. Navigation never changes a session's lifecycle in any of the three: a closed tab keeps its row under a detach grace (the hover says how long is left), then archives to a click-to-resume row. Run **Flock: Choose Window Model…** to pick one with what it costs written beside it — the picker is also the only thing that clears the deprecated `lineage.workspaces.enabled` below."
@@ -1844,7 +1879,7 @@
         "lineage.shells.section": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Draw **Shells** as a section of the Flock sidebar: one row per terminal this window has bound, with the pid actually running in it, whether it is wrapped in tmux, and how old it is. Clicking a row brings that terminal to the front.\n\nIt ships collapsed. The tree above deliberately hides all of this \u2014 it collapses a conversation's generations onto one row so that the machinery underneath stops being your problem \u2014 and this is where it stops being hidden, for the times when it *is* your problem: a session that will not focus, a tmux wrap you want to confirm, an editor that has quietly accumulated eleven terminals.\n\n**This window only.** A terminal belongs to the window that made it, so a second window's shells are not here. Its sessions still are \u2014 the tree above reads a machine-wide roster.\n\nLike **Accounts**, drawing a second section moves Flock's top-bar buttons down onto the **SESSIONS** row; see `lineage.accounts.section`."
+          "markdownDescription": "Draw **Shells** as a section of the Flock sidebar: one row per command your sessions actually run — every `Bash` call Claude makes, with the ones executing right now pinned to the top and a live clock on each. Failed runs show their exit code, refused ones say they never ran, and a backgrounded job stays on the list until it finishes, with **Open Output** on its menu for the file the CLI is writing its stdout to.\n\nIt ships collapsed, and the section's badge counts what is running — so a script that is still going is visible without opening it.\n\n**Every live session on this machine**, not only this window's: the facts come from the transcripts on disk, so a command running in a session another window launched is a row here like any other. Clicking a row focuses the conversation that started it.\n\nLike **Accounts**, drawing a second section moves Flock's top-bar buttons down onto the **SESSIONS** row; see `lineage.accounts.section`."
         },
         "lineage.accounts.offerSwitchAtLimit": {
           "type": "boolean",

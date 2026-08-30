@@ -1028,6 +1028,17 @@ export const COMMANDS = {
   foldBranches: 'lineage.foldBranches',
   unfoldBranches: 'lineage.unfoldBranches',
   revealBranch: 'lineage.revealBranch',
+  /** Copy a Shells row's command to the clipboard — the whole thing, not the
+   *  truncated version the row and the hover show. The verb the view is most
+   *  often opened for after "is it still running": you want to run the thing
+   *  Claude ran, yourself, in a terminal you control. */
+  copyShellCommand: 'lineage.copyShellCommand',
+  /** Open a backgrounded command's OUTPUT FILE in an editor. The CLI writes a
+   *  detached command's stdout to a real path and tells the model where; this
+   *  puts that path in front of the user, which is the only way to watch a
+   *  background job without interrupting the session to ask about it. On the
+   *  menu only for a row that has one (`;output;`). */
+  openShellOutput: 'lineage.openShellOutput',
   copyBranchName: 'lineage.copyBranchName',
   copyBranchPath: 'lineage.copyBranchPath',
   /** THE TWO VERBS THAT WRITE. Everything else in this table reads, renders or
@@ -2612,20 +2623,28 @@ export type ContextToken =
    *  later would mean changing a contextValue every `when` clause matches. */
   | 'account'
   | 'default'
-  /** A row in the Shells view — one terminal this window has bound. Its own
+  /** A row in the Shells view — one `Bash` command a session ran. Its own
    *  token rather than 'session' even though the row carries a session id: a
-   *  shell row's verbs are about a PROCESS (reveal its terminal, confirm its
-   *  wrap) and the tree's session menu — fork, rename, hide, move to account —
-   *  is a menu about a conversation, which would be nonsense on a list of
-   *  ptys. */
+   *  shell row's verbs are about a COMMAND (copy it, read what it printed) and
+   *  the tree's session menu — fork, rename, hide, move to account — is a menu
+   *  about a conversation, which would be nonsense on a list of commands. */
   | 'shell'
-  /** This shell is WRAPPED in the private tmux server. A second token on a
-   *  shell row, never alone, and it marks the one fact on that row with a
-   *  consequence: a wrapped shell survives a workspace switch (the pane is
-   *  detached and reattached) where an unwrapped one is closed and resumed.
-   *  Positive, like every other pair here, because the manifest never negates
-   *  a viewItem regex. */
-  | 'tmux';
+  /** How that command went, exactly one per shell row. `running` means the
+   *  session is blocked on it; `background` means it was detached and is still
+   *  up while the conversation moved on; `denied` means a permission rule, a
+   *  hook or the user refused it and nothing ever executed, which is kept
+   *  apart from `failed` for the same reason a 403 is not a 500. `ok` and
+   *  `failed` are the ordinary two. See src/toolShells.ts (ShellOutcome). */
+  | 'running'
+  | 'background'
+  | 'ok'
+  | 'failed'
+  | 'denied'
+  /** This run has an OUTPUT FILE on disk — a backgrounded command, whose
+   *  stdout the CLI is writing somewhere readable. The one row-level fact with
+   *  an action attached (Open Output), so it gets a token rather than being
+   *  re-derived in a `when` clause that cannot see it. */
+  | 'output';
 export function contextValueOf(tokens: ContextToken[]): string {
   return ';' + tokens.join(';') + ';';
 }

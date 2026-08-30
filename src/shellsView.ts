@@ -1,221 +1,265 @@
-// src/shellsView.ts — the Shells view, under Sessions and Accounts.
+// src/shellsView.ts — the Shells view: what CLAUDE is running, right now.
 //
-// One row per TERMINAL this window has bound: the shells Flock launched, with
-// the pid actually running in each, whether it is wrapped in tmux, and how old
-// it is.
+// One row per `Bash` command a session has issued — `npm test`, the migration
+// script, the background job somebody started forty minutes ago and forgot.
+// Not one row per terminal: a terminal is the pty Flock launched claude INTO,
+// there is one per session, it is yours, and it never told you anything you
+// did not already know from the tree. The thing that is genuinely invisible is
+// what the model decided to execute inside it, and that is what this lists.
 //
-// WHY A THIRD VIEW rather than more columns on the tree. The three answer
-// three different questions and change at three different rates:
+// (An earlier build of this view listed the terminals. It was a process list
+// of the wrong processes: it answered "which shells do I have open", which the
+// workbench's own terminal dropdown already answers, instead of "what is
+// Claude running", which nothing did. The pid/tmux facts it carried are still
+// reachable — they are on the session row's hover in the tree, which is where
+// a fact about a session belongs.)
 //
-//   Sessions — what conversations exist, and how do they relate. Repaints on
-//     every roster tick; its unit is a conversation, which outlives any number
-//     of terminals (every `--resume`, `/clear` and compaction mints a new
-//     generation onto the same row).
-//   Accounts — whose subscription is paying. Changes when you add an account
-//     or a five-hour window rolls over.
-//   Shells  — what PROCESSES are up right now. Its unit is a terminal, and a
-//     terminal is a thing with a pid, a tmux name and an age, none of which
-//     the tree has anywhere to put and none of which survive a re-key.
+// WHY A VIEW OF ITS OWN rather than more rows under each session in the tree.
+// The three sections answer three questions that change at three rates:
 //
-// The tree deliberately hides all of that: it collapses a conversation's
-// generations onto one row precisely so that the machinery underneath stops
-// being your problem. This view is where it stops being hidden, for the times
-// when it IS your problem — a session that will not focus, a tmux wrap you
-// want to confirm, an editor that has quietly accumulated eleven terminals.
+//   Sessions — what conversations exist and how they relate. Its unit is a
+//     conversation, which outlives everything below.
+//   Accounts — whose subscription is paying. Changes when a five-hour window
+//     rolls over.
+//   Shells  — what COMMANDS are executing. Its unit lives for eleven seconds,
+//     there are hundreds per conversation, and folding them into the tree
+//     would bury the lineage the tree exists to show under a scrolling log.
 //
-// WHAT IT DOES NOT SHOW, and this is stated on the view itself rather than
-// left to be discovered: terminals belonging to OTHER windows. A binding lives
-// in the window that made it — `TerminalRegistry` holds `vscode.Terminal`
-// objects, which do not cross the extension-host boundary — so a second window
-// running four sessions is four shells this view cannot see. The Sessions tree
-// covers those (the roster is machine-wide); this one is honest about being a
-// window-local process list rather than pretending to a machine-wide one it
-// cannot deliver.
+// SCOPE: every live session on this machine, not just this window's. The old
+// view could only ever show its own window's terminals, because a
+// `vscode.Terminal` does not cross the extension-host boundary; this one reads
+// transcripts off disk, so a script running in a session another window
+// launched is a row here like any other. That is a straight enlargement of
+// what the section is worth opening for.
 //
-// The row FORMATTING is pure and exported, and the tests bite there — a
-// TreeDataProvider is almost impossible to assert against and almost entirely
-// uninteresting, while "what does this row say" is the whole feature.
+// COST, stated because this view reads files on a timer. Per live session the
+// steady state is one `statSync` plus the bytes appended since the last look
+// (see ShellRunsTracker) — the transcript is never re-read from the top. The
+// scan runs on the roster tick whether or not the section is expanded, because
+// the container BADGE is how a running script is noticed at all when the
+// section is collapsed, and a badge that is only correct while you are looking
+// at it is not a badge. The one-second clock that advances the elapsed times
+// runs only while the view is visible AND something is actually live.
 
 import * as vscode from 'vscode';
 
-import { contextValueOf, isSessionId, shortId } from './types';
-import type {
-  DisposableLike,
-  SessionStatus,
-  TerminalBinding,
-} from './types';
+import { contextValueOf, isSessionId } from './types';
+import type { DisposableLike } from './types';
 import { COMMANDS } from './types';
-import { formatAge } from './viewmodel';
+import {
+  ShellRunsTracker,
+  isLive,
+  shellRunDetail,
+  shellRunIconId,
+  shellRunLabel,
+  shellRunTokens,
+  shellRunTooltip,
+  sortShellRuns,
+} from './toolShells';
+import type { ShellRun } from './toolShells';
 import { log, logError } from './log';
 
 // -------------------------------------------------------------- identifiers
 
 export const SHELLS_VIEW_ID = 'lineageShells';
 
+/**
+ * Rows the view will draw, across every session.
+ *
+ * A cap on the LIST, on top of the per-session cap the tracker already holds.
+ * Six sessions each keeping sixty commands is 360 rows of mostly `git status`,
+ * and a list that long is not read, it is scrolled past. Live runs are never
+ * the ones dropped — see pickShellRows.
+ */
+export const MAX_ROWS = 100;
+
+/** How often the elapsed times advance while the view is visible and something
+ *  is live. One second, because the numbers are in seconds: a clock that
+ *  updates more slowly than its own smallest unit reads as frozen, which is
+ *  the exact thing somebody watching a long command is trying to rule out. */
+export const TICK_MS = 1_000;
+
 // -------------------------------------------------------------------- deps
 
-/**
- * Everything the view needs from the rest of the extension.
- *
- * Every session lookup is BY THE BOUND ID and every one is optional. A
- * terminal is bound under the id it was launched with, which after a re-key is
- * not the id its tree row carries — extension.ts resolves that over the chain
- * on the way in, so this file never has to know that generations exist. And a
- * shell whose conversation has no row is a real, ordinary state (a session the
- * roster has not reported yet, or one filtered out of the tree), so every
- * lookup may answer undefined and the row degrades to what the binding itself
- * knows.
- */
+/** A session worth reading shells out of. */
+export interface ShellSessionInfo {
+  /** The claude session id — also what a session verb invoked from this view
+   *  receives, so every existing command works here unchanged. */
+  id: string;
+  /** The conversation's display name, chain-resolved by the caller. */
+  label: string;
+  /** Its transcript. The one thing this view cannot work without. */
+  transcriptPath: string;
+  /** Where it is running, for the hover. */
+  cwd?: string;
+}
+
 export interface ShellDeps {
-  /** `TerminalRegistry.bindings()` — this window's terminals. */
-  shells(): readonly TerminalBinding[];
-  /** The conversation's display name, chain-resolved. */
-  sessionLabel(sessionId: string): string | undefined;
-  /** What the roster says, so a shell row and its tree row cannot disagree. */
-  sessionStatus(sessionId: string): SessionStatus | undefined;
-  /** Where it is running. */
-  sessionCwd(sessionId: string): string | undefined;
-  /** Fires whenever a terminal is bound, exits, or the roster ticks. */
+  /**
+   * The LIVE sessions, resolved to transcripts.
+   *
+   * Live only, and that is a correctness rule rather than a cost one. "No
+   * result yet" means "still executing" — verified over 6 890 Bash calls, zero
+   * orphans — but only for a session whose process is alive. A conversation
+   * that was killed mid-command leaves a `tool_use` that will never be
+   * answered, and listing it as running would be the view's one way to lie.
+   */
+  sessions(): readonly ShellSessionInfo[];
+  /** Fires on the roster tick and whenever the forest changes. */
   onDidChange(listener: () => void): DisposableLike;
 }
 
 // -------------------------------------------------------------------- rows
 
-/** The view is flat: one row per terminal. Discriminated so that a context
- *  menu argument arriving back in commands.ts is recognisable, and so that
- *  `sessionIdFromArg` finds the `id` field without any special case. */
+/** The view is flat: one row per command. */
 export interface ShellRow {
   kind: 'shell';
-  binding: TerminalBinding;
-  /** The bound session id, under the name `sessionIdFromArg` already reads —
-   *  which is what lets every existing session verb work from this view
-   *  without a single new command. */
+  run: ShellRun;
+  /** The SESSION id, under the name `sessionIdFromArg` already reads — which
+   *  is what lets Focus, Fork, Rename and the rest work from this view without
+   *  a single new command. The run's own id is on `run.id`. */
   id: string;
-}
-
-/** `;shell;` (+ `;tmux;` when the terminal is wrapped), through the repo's own
- *  token builder — the wrapping semicolons are what stop a `viewItem =~
- *  /;shell;/` clause half-matching a longer token. */
-export function shellContextValue(binding: TerminalBinding): string {
-  return contextValueOf(
-    binding?.tmuxName !== undefined ? ['shell', 'tmux'] : ['shell'],
-  );
+  /** Set only when the list spans more than one conversation. */
+  sessionLabel?: string;
 }
 
 /**
- * Newest LAST, by launch time.
+ * Every run, newest and live first, capped.
  *
- * The same order the workbench's own terminal list uses, which is the list the
- * user is cross-referencing when they open this view at all. Deliberately not
- * sorted by status: a row that jumps to the top the moment its session goes
- * busy is a row you cannot click, and this view exists to be clicked at
- * exactly the moment things are busy.
- *
- * Ties break on session id so the order is total — two terminals launched in
- * the same millisecond (a fork of N branches does this) must not swap places
- * between repaints.
+ * The session label is attached HERE rather than at render time, and only when
+ * the rows span more than one conversation: in a window with one session it is
+ * the same word on all hundred rows, which is a column of noise, and in a
+ * window with four it is the only thing telling them apart.
  */
-export function sortShells(
-  bindings: readonly TerminalBinding[],
-): TerminalBinding[] {
-  return [...(bindings ?? [])]
-    .filter((b) => b && isSessionId(b.sessionId))
-    .sort((a, b) => {
-      const at = Number.isFinite(a.createdAt) ? a.createdAt : 0;
-      const bt = Number.isFinite(b.createdAt) ? b.createdAt : 0;
-      if (at !== bt) return at - bt;
-      return a.sessionId < b.sessionId ? -1 : a.sessionId > b.sessionId ? 1 : 0;
-    });
-}
-
-/**
- * The right-hand line: `pid 40213 · tmux · 12m`.
- *
- * PID FIRST because it is the reason to open this view — it is the one fact
- * here that no other surface in the extension shows, and the one you need when
- * you are about to go and look at a process yourself. `tmux` is a word rather
- * than the session's name (that is in the hover): what matters at a glance is
- * the tier, since it decides whether a workspace switch will park this shell
- * or close it.
- *
- * A missing pid renders as `pid ?` rather than as nothing. A terminal whose
- * pid we never learnt is a real state — the pty is created asynchronously and
- * a wrapped terminal's own pid is the tmux client's, not claude's — and the
- * honest answer is that we do not know it, not silence that reads as though
- * the column did not apply.
- */
-export function shellDescription(
-  binding: TerminalBinding,
-  now: number,
-): string {
-  const pid =
-    typeof binding?.pid === 'number' && Number.isFinite(binding.pid)
-      ? `pid ${binding.pid}`
-      : 'pid ?';
-  const age = formatAge(now - (binding?.createdAt ?? Number.NaN));
-  return [pid, binding?.tmuxName !== undefined ? 'tmux' : '', age]
-    .filter((s) => s !== '')
-    .join(' · ');
-}
-
-/**
- * The hover: every fact the row had to leave out, one per line.
- *
- * Plain text, not markdown, and that is deliberate — a cwd is a path and a
- * label is a user string, and neither is trusted markup. The accounts view
- * escapes because it wants a markdown table; this wants none of that, and not
- * building the string as markup is a stronger guarantee than escaping it.
- */
-export function shellTooltip(input: {
-  binding: TerminalBinding;
-  label?: string;
-  status?: SessionStatus;
-  cwd?: string;
-  now: number;
-}): string {
-  const { binding, now } = input;
-  const lines: string[] = [];
-  lines.push(input.label ?? shortId(binding.sessionId));
-  if (input.status !== undefined) lines.push(input.status);
-  lines.push(`session ${binding.sessionId}`);
-  if (typeof binding.pid === 'number' && Number.isFinite(binding.pid)) {
-    // Said in full here rather than left implicit, because a wrapped
-    // terminal's pid is a genuine trap: it is the tmux CLIENT's, and somebody
-    // reading it as claude's will kill the wrong process.
-    lines.push(
-      binding.tmuxName !== undefined
-        ? `pid ${binding.pid} (the tmux client, not claude)`
-        : `pid ${binding.pid}`,
-    );
+export function pickShellRows(
+  perSession: ReadonlyMap<string, readonly ShellRun[]>,
+  labels: ReadonlyMap<string, string>,
+  max: number = MAX_ROWS,
+): ShellRow[] {
+  const all: ShellRun[] = [];
+  for (const runs of perSession.values()) {
+    for (const run of runs ?? []) if (run) all.push(run);
   }
-  if (binding.tmuxName !== undefined) {
-    lines.push(`tmux session ${binding.tmuxName} — parks on a workspace switch`);
-  } else {
-    lines.push('no tmux wrap — a workspace switch closes this one');
-  }
-  if (input.cwd !== undefined && input.cwd !== '') lines.push(input.cwd);
-  const age = formatAge(now - (binding.createdAt ?? Number.NaN));
-  if (age !== '') lines.push(`opened ${age === 'now' ? 'just now' : `${age} ago`}`);
-  lines.push(`terminal "${binding.terminalName}"`);
-  return lines.join('\n');
+  // sortShellRuns puts live first, so a cap can only ever cut history.
+  const kept = sortShellRuns(all).slice(0, Math.max(0, max));
+  const spread = new Set(kept.map((r) => r.sessionId)).size > 1;
+  return kept.map((run) => {
+    const label = labels.get(run.sessionId);
+    return {
+      kind: 'shell' as const,
+      run,
+      id: run.sessionId,
+      ...(spread && label !== undefined && label !== ''
+        ? { sessionLabel: label }
+        : {}),
+    };
+  });
 }
 
-/** The glyph. A wrapped shell says so in the icon as well as the description,
- *  because the tier is the only thing on this row with a consequence — it is
- *  what decides whether switching projects hides this process or ends it. */
-export function shellIconId(binding: TerminalBinding): string {
-  return binding?.tmuxName !== undefined ? 'server-process' : 'terminal';
+/** `;shell;` + the outcome (+ `;live;`, + `;output;` when there is a file to
+ *  open). Through the repo's own token builder — the wrapping semicolons are
+ *  what stop a `viewItem =~ /;ok;/` clause half-matching a longer token. */
+export function shellContextValue(run: ShellRun): string {
+  return contextValueOf(shellRunTokens(run));
+}
+
+/**
+ * The view's own subtitle: `2 running`, `1 running · 1 background`, or nothing.
+ *
+ * Nothing when nothing is live, deliberately — a header that permanently reads
+ * "0 running" is a header nobody reads, and the point of putting the count up
+ * there is that it MEANS something on the day it appears.
+ */
+export function shellsViewDescription(runs: readonly ShellRun[]): string {
+  let running = 0;
+  let background = 0;
+  for (const run of runs ?? []) {
+    if (run?.outcome === 'running') running++;
+    else if (run?.outcome === 'background') background++;
+  }
+  const parts: string[] = [];
+  if (running > 0) parts.push(`${running} running`);
+  if (background > 0) parts.push(`${background} background`);
+  return parts.join(' · ');
 }
 
 // ---------------------------------------------------------------- provider
 
 export class ShellsViewProvider implements vscode.TreeDataProvider<ShellRow> {
   private readonly deps: ShellDeps;
+  private readonly tracker = new ShellRunsTracker();
   private readonly emitter = new vscode.EventEmitter<ShellRow | undefined>();
   readonly onDidChangeTreeData = this.emitter.event;
+  /** The last scan's rows, so the badge and the description can be read
+   *  without a second pass over the filesystem. */
+  private rows: ShellRow[] = [];
+  /** sessionId → cwd, from the same scan. The hover wants the directory a
+   *  command ran in — `npm test` means two different things in two worktrees —
+   *  and the row itself has nowhere to put a path. */
+  private cwds = new Map<string, string>();
 
   constructor(deps: ShellDeps) {
     this.deps = deps;
+  }
+
+  /**
+   * Re-read every live session's transcript and rebuild the row list.
+   *
+   * Returns the rows rather than only storing them, because the caller wants
+   * the same scan for three things at once — the tree data, the container
+   * badge and the view's subtitle — and doing it three times would triple the
+   * only expensive thing this file does.
+   */
+  scan(): ShellRow[] {
+    const perSession = new Map<string, readonly ShellRun[]>();
+    const labels = new Map<string, string>();
+    let sessions: readonly ShellSessionInfo[] = [];
+    try {
+      sessions = this.deps.sessions() ?? [];
+    } catch (err) {
+      logError('shellsView.sessions', err);
+    }
+    const seen = new Set<string>();
+    for (const session of sessions) {
+      if (!session || !isSessionId(session.id)) continue;
+      if (typeof session.transcriptPath !== 'string') continue;
+      if (session.transcriptPath === '') continue;
+      seen.add(session.id);
+      labels.set(session.id, session.label ?? '');
+      if (session.cwd !== undefined && session.cwd !== '') {
+        this.cwds.set(session.id, session.cwd);
+      }
+      try {
+        perSession.set(
+          session.id,
+          this.tracker.update({
+            id: session.id,
+            transcriptPath: session.transcriptPath,
+          }),
+        );
+      } catch (err) {
+        logError('shellsView.track', err);
+      }
+    }
+    // Bounded by what is live, so a window left open for a week does not
+    // accumulate a tail position per session it once watched.
+    this.tracker.prune(seen);
+    for (const id of [...this.cwds.keys()]) {
+      if (!seen.has(id)) this.cwds.delete(id);
+    }
+    this.rows = pickShellRows(perSession, labels);
+    return this.rows;
+  }
+
+  /** The rows from the last scan — no filesystem work. */
+  current(): readonly ShellRow[] {
+    return this.rows;
+  }
+
+  /** How many commands are executing right now, background jobs included.
+   *  This is the badge. */
+  liveCount(): number {
+    return this.rows.filter((row) => isLive(row.run)).length;
   }
 
   refresh(): void {
@@ -228,77 +272,55 @@ export class ShellsViewProvider implements vscode.TreeDataProvider<ShellRow> {
 
   getChildren(element?: ShellRow): ShellRow[] {
     if (element) return []; // flat by construction
-    try {
-      return sortShells(this.deps.shells()).map((binding) => ({
-        kind: 'shell' as const,
-        binding,
-        id: binding.sessionId,
-      }));
-    } catch (err) {
-      logError('shellsView.getChildren', err);
-      return [];
-    }
+    return this.rows;
   }
 
   getTreeItem(row: ShellRow): vscode.TreeItem {
-    const binding = row.binding;
+    const run = row.run;
     const now = Date.now();
-    const label = this.ask('sessionLabel', () =>
-      this.deps.sessionLabel(binding.sessionId),
-    );
     const item = new vscode.TreeItem(
-      label ?? shortId(binding.sessionId),
+      shellRunLabel(run),
       vscode.TreeItemCollapsibleState.None,
     );
-    // Keyed on the SESSION, not on the terminal name: claude rewrites its
-    // terminal's title constantly while it runs, and an item id that moved
-    // with it would make the workbench treat every repaint as a new row.
-    item.id = `shell:${binding.sessionId}`;
-    item.iconPath = new vscode.ThemeIcon(shellIconId(binding));
-    item.contextValue = shellContextValue(binding);
-    item.description = shellDescription(binding, now);
-    item.tooltip = shellTooltip({
-      binding,
+    // Keyed on the RUN, which never changes and is never reused — a list that
+    // re-sorts as things finish must not make the workbench treat a row that
+    // moved as a row that appeared.
+    item.id = `shell:${run.id}`;
+    item.iconPath = new vscode.ThemeIcon(shellRunIconId(run));
+    item.contextValue = shellContextValue(run);
+    item.description = shellRunDetail({
+      run,
       now,
-      ...(label === undefined ? {} : { label }),
-      ...(() => {
-        const status = this.ask('sessionStatus', () =>
-          this.deps.sessionStatus(binding.sessionId),
-        );
-        return status === undefined ? {} : { status };
-      })(),
-      ...(() => {
-        const cwd = this.ask('sessionCwd', () =>
-          this.deps.sessionCwd(binding.sessionId),
-        );
-        return cwd === undefined ? {} : { cwd };
-      })(),
+      ...(row.sessionLabel === undefined ? {} : { sessionLabel: row.sessionLabel }),
     });
-    // Clicking a shell brings its terminal to the front — which is what a
-    // process list is FOR, and is already exactly what `focusSession` does,
-    // tiers and all. The id goes through as a bare string, the shape
-    // `sessionIdFromArg` reads first, so this view adds no command of its own.
+    const cwd = this.cwds.get(run.sessionId);
+    item.tooltip = shellRunTooltip({
+      run,
+      now,
+      ...(row.sessionLabel === undefined ? {} : { sessionLabel: row.sessionLabel }),
+      ...(cwd === undefined ? {} : { cwd }),
+    });
+    // Clicking goes to the CONVERSATION, not to the command: a command is not
+    // a thing you can open, and the question a row provokes ("why is this
+    // still going?") is answered in the session that started it. `focusSession`
+    // already does that, tiers and all, and takes a bare id — the shape
+    // `sessionIdFromArg` reads first — so this view adds no command of its own
+    // for the common gesture.
     item.command = {
       command: COMMANDS.focusSession,
       title: 'Focus',
-      arguments: [binding.sessionId],
+      arguments: [run.sessionId],
     };
     return item;
   }
 
-  /** Every dep call is a lookup into machinery that may be mid-rebuild, and a
-   *  throw inside getTreeItem blanks the whole view. Same guard shape the
-   *  native tree uses (`safe`), for the same reason. */
-  private ask<T>(what: string, read: () => T | undefined): T | undefined {
-    try {
-      return read();
-    } catch (err) {
-      logError(`shellsView.${what}`, err);
-      return undefined;
-    }
-  }
-
   dispose(): void {
+    this.cwds.clear();
+    try {
+      this.tracker.dispose();
+    } catch (err) {
+      logError('shellsView.dispose.tracker', err);
+    }
     try {
       this.emitter.dispose();
     } catch (err) {
@@ -314,15 +336,16 @@ export interface ShellsViewController extends DisposableLike {
 }
 
 /**
- * createTreeView(SHELLS_VIEW_ID) + a repaint on every bind, exit and roster
- * tick.
+ * createTreeView(SHELLS_VIEW_ID), a scan on every roster tick, and a
+ * one-second clock while something is live and the view is on screen.
  *
- * No timer of its own, unlike the accounts view: nothing here is fetched, and
- * every fact on a row changes only when something the extension already
- * watches changes. The one exception is the AGE, which drifts — and a section
- * that repaints itself on a timer to advance `12m` to `13m` would be a
- * background task bought with nothing. The roster tick moves it along often
- * enough.
+ * TWO CADENCES, because the two things being kept true have different costs.
+ * The SCAN is what finds a new command and what the badge is computed from, so
+ * it must run whether or not the section is expanded — it rides the roster
+ * tick, which is the extension's existing heartbeat, and adds a stat plus a
+ * few appended kilobytes per live session to it. The CLOCK only advances
+ * numbers that are already on screen, so it is pure waste when nothing is
+ * running or nobody is looking, and it stops in both cases.
  */
 export function registerShellsView(deps: ShellDeps): ShellsViewController {
   const provider = new ShellsViewProvider(deps);
@@ -332,33 +355,89 @@ export function registerShellsView(deps: ShellDeps): ShellsViewController {
     canSelectMany: false,
   });
 
-  // Said on the view rather than in the docs, because the scope is the first
-  // thing somebody will get wrong about it: this is THIS WINDOW's terminals,
-  // and a second window's sessions are in the tree above but not here.
-  try {
-    view.description = 'this window';
-  } catch (err) {
-    logError('shellsView.description', err);
-  }
+  let tick: NodeJS.Timeout | null = null;
+  let disposed = false;
 
-  let sub: DisposableLike | undefined;
+  const paint = (): void => {
+    if (disposed) return;
+    let rows: readonly ShellRow[];
+    try {
+      rows = provider.scan();
+    } catch (err) {
+      logError('shellsView.scan', err);
+      rows = provider.current();
+    }
+    provider.refresh();
+
+    const live = provider.liveCount();
+    try {
+      // The same shape the Sessions view's badge uses (see
+      // types.RUNNING_BADGE_ENABLED): a count of processes, ON the container,
+      // so "nothing is running that has no row" is a claim you can check.
+      view.badge =
+        live > 0
+          ? {
+              value: live,
+              tooltip: `${live} command${live === 1 ? '' : 's'} running`,
+            }
+          : undefined;
+    } catch (err) {
+      logError('shellsView.badge', err);
+    }
+    try {
+      view.description = shellsViewDescription(rows.map((r) => r.run));
+    } catch (err) {
+      logError('shellsView.description', err);
+    }
+    schedule(live > 0);
+  };
+
+  /** Start or stop the clock. Never two timers, and never one that outlives
+   *  the reason it was started. */
+  const schedule = (wanted: boolean): void => {
+    const want = wanted && !disposed && view.visible;
+    if (want && tick === null) {
+      tick = setInterval(paint, TICK_MS);
+    } else if (!want && tick !== null) {
+      clearInterval(tick);
+      tick = null;
+    }
+  };
+
+  const subs: DisposableLike[] = [];
   try {
-    sub = deps.onDidChange(() => provider.refresh());
+    subs.push(deps.onDidChange(() => paint()));
   } catch (err) {
     logError('shellsView.onDidChange', err);
   }
+  try {
+    // Expanding the section is itself a reason to repaint: the rows were
+    // scanned on the roster tick, but their elapsed times are as old as that
+    // tick and the first thing a reader does is look at them.
+    subs.push(view.onDidChangeVisibility(() => paint()));
+  } catch (err) {
+    logError('shellsView.onDidChangeVisibility', err);
+  }
 
+  paint();
   log('shells: view registered');
 
   return {
     refresh(): void {
-      provider.refresh();
+      paint();
     },
     dispose(): void {
-      try {
-        sub?.dispose();
-      } catch (err) {
-        logError('shellsView.dispose.sub', err);
+      disposed = true;
+      if (tick !== null) {
+        clearInterval(tick);
+        tick = null;
+      }
+      for (const sub of subs) {
+        try {
+          sub.dispose();
+        } catch (err) {
+          logError('shellsView.dispose.sub', err);
+        }
       }
       try {
         view.dispose();
