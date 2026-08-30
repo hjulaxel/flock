@@ -562,6 +562,16 @@ filtered out of this window (another folder's work in folder mode, a closed
 project's), it renders in a collapsed **Running elsewhere** group at the bottom
 instead: the badge never counts a process you cannot see and act on.
 
+A **purple** mark is not an alarm at all: it is a compaction — a hollow ring
+while one runs, a filled dot once it has settled with nothing behind it. It
+outranks both the other tones for the length of the phase, because a compacting
+session reports as plainly `busy` and would otherwise draw amber for work nobody
+asked for and then red for a finish nobody was waiting on. The dot clears when
+you open the session, when the next prompt or turn arrives, and when the session
+ends; both phases expire on their own, so a compaction that never reports
+finishing cannot leave a mark on the row for good. Themeable as
+`lineage.compacting`.
+
 The **bell** — leftmost in the view title — lists the latest finished sessions,
 unseen above a divider, then history, each with its project and how long ago it
 finished. Clicking an entry focuses the session and marks it read; *Mark All

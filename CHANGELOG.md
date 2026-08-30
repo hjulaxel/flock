@@ -556,6 +556,28 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Fixed
 
+- **The onboarding walkthrough had fallen behind the releases it introduces.**
+  The walkthrough is the one surface a fresh install is *given*, so a stale
+  sentence there is worse than a stale one in the reference — it is read first,
+  and read by somebody with nothing to check it against. Four were wrong. The
+  attention page taught the dot column as "amber, red, and everything else
+  draws nothing", which stopped being true when compaction took a colour of its
+  own; it now teaches the purple ring and dot alongside the other two. The same
+  page said the number on the sidebar icon counts the red dots, which stopped
+  being true when that slot went to the running count. The setup page said
+  Flock ships *forty* settings — the sweep that recomputed the manifest to 48
+  reached `docs/settings.md` and not this — and it listed what Recommended
+  Setup asks without the question the window models added, so the checklist
+  asked people to choose what a window is and the page introducing the
+  checklist had never mentioned it. The manifest's own step descriptions
+  carried the last two of those and are corrected with them.
+- **The empty sidebar did not say the tree starts empty on purpose.** The
+  clean slate has been the default since 0.1.5 and the native tree's welcome
+  has said so since; the inline sidebar — which is the default view, and
+  therefore the empty box a fresh install actually meets — said only "No Claude
+  sessions here yet", which reads as a bug to anybody who knows they have run
+  `claude` on this machine before. It now says the same thing the native
+  welcome does, and points at the import button already sitting underneath it.
 - **Fork and Compact told the parent that the new branch was "for `/compact`".**
   With the fork note turned on, a branch announces itself to the conversation it
   came from, and it quotes what the branch is *for* — the opening prompt,

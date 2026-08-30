@@ -421,7 +421,9 @@
     // sessions they know they have.
     p.textContent = filtered
       ? 'No active sessions. Closed ones are hidden — use the filter in the title bar to show them again.'
-      : 'No Claude sessions here yet. Start one and its forks will appear as a tree.';
+      : 'No Claude sessions here yet — Flock starts with a clean slate. Start '
+        + 'one and its forks appear as a tree; what ran before Flock waits '
+        + 'behind the import button below.';
     box.appendChild(p);
     const button = (label, command, secondary) => {
       const btn = document.createElement('button');
