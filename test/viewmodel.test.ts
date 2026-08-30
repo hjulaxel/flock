@@ -1873,28 +1873,6 @@ describe('buildViewModel: branch rows', () => {
 // wrong — a line on every row is a tree twice as tall for no new information.
 
 describe('sessionBranchLine', () => {
-  it('carries the shared-floor count at two and up, and stays quiet below', () => {
-    // 0 and 1 are the designed shapes — a worktree of one root, or no roots
-    // probed yet — and must cost no width. 2 is the state the token exists
-    // for: the one where a `git checkout` moves somebody else's session.
-    expect(
-      sessionBranchLine('main', status(), undefined, 'standard', '/c/app', 2)
-        .shared,
-    ).toBe(2);
-    expect(
-      sessionBranchLine('main', status(), undefined, 'standard', '/c/app', 1)
-        .shared,
-    ).toBeUndefined();
-    expect(
-      sessionBranchLine('main', status(), undefined, 'standard').shared,
-    ).toBeUndefined();
-    // Mode-independent: the warning is about the checkout, not the level.
-    expect(
-      sessionBranchLine('main', status(), undefined, 'detailed', '/c/app', 3)
-        .shared,
-    ).toBe(3);
-  });
-
   const status = (over: Partial<BranchStatus> = {}): BranchStatus => ({
     upstream: 'origin/feat/x',
     ahead: 0,
@@ -2009,56 +1987,64 @@ describe('sessionBranchLine', () => {
     );
   });
 
-  it('spells `merged` as a word rather than leaving it to the chip colour', () => {
-    // The whole point of moving the branch off the session's NAME is that a row
-    // should not need colour to be read — and merged is the one state that says
-    // the worktree can go.
+  it('leaves a merged request to its number and its colour, with no word', () => {
+    // `#124 merged` was the label. The merge is on the row three times without
+    // it — the purple mark leading the line, the chip's own purple, the hover —
+    // and the word was the fourth, in the one place that costs a column.
     const line = sessionBranchLine(
       'fix/csv',
       status({ upstream: 'origin/fix/csv' }),
       pr({ number: 124, state: 'merged' as PullRequestState, checks: 'none' as PullRequestChecks }),
       'detailed',
     );
-    expect(line.pr?.label).toBe('#124 merged');
+    expect(line.pr?.label).toBe('#124');
+    // The state still travels, because that is what the client colours from.
     expect(line.pr?.state).toBe('merged');
   });
 
-  it('says `local` for a branch that tracks nothing, which the arrows draw blank', () => {
+  it('drops the checks glyph on a merged request too', () => {
+    // They ran and it landed: a ✓ there reports on a question nobody is still
+    // asking, and a ✕ on a merged request reads as a problem that is not one.
+    const line = sessionBranchLine(
+      'fix/csv',
+      status({ upstream: 'origin/fix/csv' }),
+      pr({ number: 124, state: 'merged' as PullRequestState, checks: 'pass' as PullRequestChecks }),
+      'detailed',
+    );
+    expect(line.pr?.label).toBe('#124');
+    // And the checks themselves still travel — the hover says them in words.
+    expect(line.pr?.checks).toBe('pass');
+  });
+
+  it('says nothing at all for a branch that tracks nothing', () => {
+    // `local` used to sit where the arrows would be. Never-pushed is the state
+    // every branch starts in, so the token announced the default on every row
+    // of it; the hover still says `no upstream branch` in words.
     const line = sessionBranchLine(
       'spike/cache',
       status({ upstream: '', dirty: true }),
       undefined,
       'detailed',
     );
-    expect(line.sync).toBe('local');
+    expect(line.sync).toBeUndefined();
+    // The star is a fact about the checkout, not about the upstream, and is
+    // untouched by any of that.
     expect(line.dirty).toBe(true);
   });
 
-  it('says `local` alone on a clean never-pushed branch', () => {
-    expect(
-      sessionBranchLine('spike/cache', status({ upstream: '' }), undefined, 'detailed').sync,
-    ).toBe('local');
-  });
-
-  it('does not call an unprobed branch local', () => {
-    // "never pushed" and "not looked at yet" are different claims, and only one
-    // of them is ours to make.
+  it('leaves an unprobed branch bare at either level', () => {
     expect(
       sessionBranchLine('spike/cache', undefined, undefined, 'detailed'),
     ).toEqual({ name: 'spike/cache', glyph: 'git-branch' });
+    expect(
+      sessionBranchLine('spike/cache', undefined, undefined, 'standard'),
+    ).toEqual({ name: 'spike/cache', glyph: 'git-branch' });
   });
 
-  it('withholds `local` at the standard level', () => {
-    const line = sessionBranchLine(
-      'spike/cache',
-      status({ upstream: '', dirty: true }),
-      undefined,
-      'standard',
-    );
-    expect(line.sync).toBeUndefined();
-    // The star is not part of that word and does not go with it: it is a fact
-    // about the checkout, which the standard level reports.
-    expect(line.dirty).toBe(true);
+  it('draws the same arrows at both levels, so only the request differs', () => {
+    const ahead = status({ upstream: 'origin/spike', ahead: 4, behind: 3 });
+    expect(sessionBranchLine('spike/cache', ahead, undefined, 'standard').sync).toBe('↑4 ↓3');
+    expect(sessionBranchLine('spike/cache', ahead, undefined, 'detailed').sync).toBe('↑4 ↓3');
   });
 });
 

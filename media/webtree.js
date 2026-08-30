@@ -60,14 +60,27 @@
    * truthful place to keep it for the length of the gesture.
    */
   let dragKey = null;
-  /** The in-flight rename, `{ key, input, cancel }`, or null while nothing is
-   *  being renamed. Set for as long as an input is on screen, so a re-render
-   *  does not destroy it. `cancel` is the same teardown the Escape key runs,
-   *  exposed on the object so a model update that takes the row away can end
-   *  the edit properly instead of orphaning the input. */
+  /** The in-flight rename, `{ key, input, cancel, insert }`, or null while
+   *  nothing is being renamed. Set for as long as an input is on screen, so a
+   *  re-render does not destroy it. `cancel` is the same teardown the Escape
+   *  key runs, exposed on the object so a model update that takes the row away
+   *  can end the edit properly instead of orphaning the input. `insert` is the
+   *  paste's landing point — see the clipboard block in beginRename. */
   let editing = null;
 
   const MAX_TITLE_LEN = 80;
+
+  /** The three clipboard keys, lower-cased, as `additive(e)` finds them: cmd on
+   *  a Mac, ctrl everywhere else. Not `a` — select-all needs no help from us,
+   *  it never crosses the iframe boundary. */
+  const CLIPBOARD_KEYS = ['c', 'v', 'x'];
+
+  /** Which row's rename box asked for the clipboard, or null. A paste is the
+   *  one gesture here that is answered on a LATER tick, so the answer has to
+   *  name the box it was asked for: Escape is faster than a round trip, and
+   *  text that arrives for an edit that has ended must go nowhere rather than
+   *  into whichever box happens to be open. */
+  let pastingInto = null;
 
   /** Gutter geometry, in px, and the ONE copy of it that is arithmetic rather
    *  than paint. Every one of these has a twin in webtree.css (--indent,
@@ -934,23 +947,12 @@
     // fact about this checkout, where `↑4 ↓3` is a fact about its upstream.
     if (line.dirty) el.appendChild(renderDirtyMark());
 
-    // THE SHARED-FLOOR TOKEN IS DELIBERATELY NOT DRAWN. `line.shared` still
-    // arrives with the count on it and the row's hover still says it in
-    // sentences; what came out is the amber `shared ×2` that used to sit
-    // here, beside the branch name, along with its `.branch-shared` rule in
-    // webtree.css. The token was a permanent mark on the row for a fact the
-    // user already knows — how many sessions they started in one directory is
-    // a choice they made, not news the sidebar has to break — and it spent
-    // width on every row of a shared checkout to say it. To bring it back:
-    // this block and that rule are the whole of it, the model side never
-    // stopped feeding them.
-
     // Everything above is the name's half of the line; everything below is the
     // state column at the right edge. The spacer is what divides them, so the
     // name can be elided without the tokens moving.
     el.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
 
-    // Where the checkout stands: `↑4 ↓3`, plus `local` at the detailed level.
+    // Where the checkout stands: `↑4 ↓3` — the same tokens at either level.
     // `.branch-sync` is the BRANCH ROW's class, reused rather than copied: the
     // tokens are the same tokens, and the whole argument for the standard level
     // is that a reader should not have to learn a second dialect inside one
@@ -968,10 +970,10 @@
     // classes for the same reason. Allowlisted rather than interpolated — see
     // the note in renderBranchRow, which this is the second reader of.
     //
-    // `merged` is the one state whose WORD is in the label (the extension spells
-    // it out), because it is the one that means "this worktree can go" and the
-    // point of moving the branch off the session's name is that the row should
-    // not need colour to be read.
+    // The label is a number and at most one check glyph. No state is spelled
+    // out in it — a merged request says so with the purple it takes here and
+    // the purple merge mark already leading the line, and the hover says the
+    // word for anyone who wants it in letters.
     if (line.pr && line.pr.label) {
       const pr = document.createElement('span');
       pr.className =
@@ -1484,6 +1486,75 @@
     };
 
     input.addEventListener('input', () => showRefusal(refuse(input.value)));
+
+    /**
+     * Put text where the caret is, as a paste would.
+     *
+     * A single-line box, so a pasted newline is a SPACE and not a line break:
+     * a name copied out of a commit message or a branch listing is the
+     * ordinary case, and the alternative — keeping the first line and silently
+     * dropping the rest, which is what an <input> does with a native paste —
+     * is the one outcome nobody can see happen. Runs of whitespace collapse
+     * for the same reason: indentation in the source is not indentation here.
+     *
+     * `insertText` first, because it is the one insertion the browser puts on
+     * the input's OWN undo stack — cmd+Z after a paste undoes the paste, which
+     * is the whole reason not to simply assign `.value`. Assignment is the
+     * fallback for a host that refuses the command, and it hand-runs the
+     * validation that a real edit would have raised an `input` event for.
+     */
+    const insertAtCaret = (text) => {
+      // Collapsed, NOT trimmed: a trailing newline off a terminal copy becomes
+      // a trailing space that the commit trims anyway, while a leading space
+      // somebody typed on purpose is a separator and survives.
+      const clean = String(text).replace(/\s+/g, ' ');
+      if (clean === '') return;
+      input.focus();
+      let inserted = false;
+      try {
+        inserted = document.execCommand('insertText', false, clean);
+      } catch (err) {
+        inserted = false;
+      }
+      if (!inserted) {
+        const at = input.selectionStart === null ? input.value.length : input.selectionStart;
+        const to = input.selectionEnd === null ? at : input.selectionEnd;
+        input.value = input.value.slice(0, at) + clean + input.value.slice(to);
+        const caret = at + clean.length;
+        input.setSelectionRange(caret, caret);
+      }
+      showRefusal(refuse(input.value));
+    };
+
+    /** What is highlighted right now. '' when the caret is a caret rather than
+     *  a range: a copy with nothing selected must put nothing on the clipboard,
+     *  not quietly take the whole name. */
+    const selectedText = () => {
+      const at = input.selectionStart;
+      const to = input.selectionEnd;
+      if (at === null || to === null || at === to) return '';
+      return input.value.slice(at, to);
+    };
+
+    /** Cut is copy plus the deletion, and the deletion is an insertion of
+     *  nothing — same undo entry, same validation, one code path. */
+    const dropSelection = () => {
+      const at = input.selectionStart;
+      const to = input.selectionEnd;
+      if (at === null || to === null || at === to) return;
+      let deleted = false;
+      try {
+        deleted = document.execCommand('insertText', false, '');
+      } catch (err) {
+        deleted = false;
+      }
+      if (!deleted) {
+        input.value = input.value.slice(0, at) + input.value.slice(to);
+        input.setSelectionRange(at, at);
+      }
+      showRefusal(refuse(input.value));
+    };
+
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
@@ -1493,10 +1564,69 @@
         e.preventDefault();
         e.stopPropagation();
         finish(false);
+      } else if (
+        additive(e) &&
+        !e.altKey &&
+        CLIPBOARD_KEYS.indexOf(e.key.toLowerCase()) >= 0
+      ) {
+        // CUT, COPY AND PASTE FROM THE KEYBOARD, served by the extension host.
+        //
+        // The right-click route was fixed first and is not this: the box keeps
+        // its own data-vscode-context so the workbench offers Cut/Copy/Paste,
+        // and the menu no longer counts as clicking away (both below). What
+        // that never reached is cmd+V, which is how anybody actually pastes a
+        // name — and inside a webview it is the gesture with no owner. The
+        // iframe is a different document from the workbench: the workbench's
+        // own paste command does not apply to it, and the iframe's clipboard
+        // is subject to a permission nothing here can grant itself. So the
+        // keystroke arrived, matched nothing, and did nothing — visibly a
+        // rename box that swallowed the one key you pressed at it.
+        //
+        // `vscode.env.clipboard` is on the OTHER side of that boundary and has
+        // none of the problem, so the gesture is named here and served there,
+        // which is the shape every other verb in this client already has.
+        //
+        // preventDefault is not optional. If some host does hand the iframe a
+        // working paste, letting it run alongside this one inserts the text
+        // twice — and a duplicate is worse than the nothing we started with,
+        // because it looks like it worked.
+        e.preventDefault();
+        e.stopPropagation();
+        // Named `combo`, not `key`: `key` in this closure is the ROW's key, and
+        // the paste below has to remember which row asked.
+        const combo = e.key.toLowerCase();
+        if (combo === 'v') {
+          // Answered asynchronously by the 'clipboard' message. The ROW has to
+          // survive the round trip; the caret does not — the input keeps the
+          // keyboard throughout, so wherever the caret is when the text lands
+          // is where the user last put it.
+          pastingInto = key;
+          post('clipboardRead', {});
+          return;
+        }
+        const text = selectedText();
+        if (text === '') return;
+        post('clipboardWrite', { text: text });
+        if (combo === 'x') dropSelection();
       } else {
         // Arrow keys etc. belong to the input while editing, never to the tree.
         e.stopPropagation();
       }
+    });
+    // The MENU's Paste — and any host that does hand the iframe a working
+    // native one — arrives here instead of through the keydown above. Routed
+    // into the same insertion so the two ways of pasting cannot differ, and in
+    // particular so a multi-line paste is collapsed here too rather than being
+    // truncated at the first newline, which is what an <input> does with one
+    // left to itself. A host that hands us no clipboardData is left alone: a
+    // native paste that keeps the first line beats no paste at all.
+    input.addEventListener('paste', (e) => {
+      const data = e.clipboardData;
+      if (!data || typeof data.getData !== 'function') return;
+      const text = data.getData('text');
+      if (typeof text !== 'string' || text === '') return;
+      e.preventDefault();
+      insertAtCaret(text);
     });
     // THE MENU MUST NOT COUNT AS CLICKING AWAY. The workbench draws its
     // context menu as an overlay OUTSIDE the webview's iframe, so opening one
@@ -1527,7 +1657,12 @@
     // `cancel` is finish(false) — the Escape path — so that anything which has
     // to end an edit it did not start (a model update that removes the row)
     // runs exactly the same teardown rather than a second copy of it.
-    editing = { key: key, input: input, cancel: () => finish(false) };
+    editing = {
+      key: key,
+      input: input,
+      cancel: () => finish(false),
+      insert: insertAtCaret,
+    };
     input.focus();
     // Pre-selected, so Enter accepts the current name and typing replaces it.
     input.select();
@@ -1778,6 +1913,19 @@
       // F2 came from the workbench keybinding rather than from inside here.
       const key = msg.key || focusKey;
       if (key) beginRename(key);
+      return;
+    }
+    if (msg.type === 'clipboard') {
+      // The answer to a cmd+V in a rename box, and it lands only in the box
+      // that asked: the round trip is asynchronous, Escape is faster than it,
+      // and a reply arriving after the edit ended must go nowhere rather than
+      // into whichever box opened next. Cleared either way — a stale key would
+      // make the NEXT paste into that same row land twice.
+      const asked = pastingInto;
+      pastingInto = null;
+      if (asked !== null && editing && editing.key === asked && typeof msg.text === 'string') {
+        editing.insert(msg.text);
+      }
       return;
     }
     if (msg.type === 'select') {

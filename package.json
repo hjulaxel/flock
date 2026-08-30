@@ -2020,9 +2020,9 @@
           ],
           "enumDescriptions": [
             "The branch name and where the checkout stands: ↑4 ahead, ↓3 behind, * uncommitted. Local files only.",
-            "Also the pull request (#128 ✓), `merged` on a branch whose request landed, and `local` on one that was never pushed."
+            "Also the pull request — #128, with ✓ ✕ • for its checks and the state in its colour. Needs `lineage.git.pullRequests`."
           ],
-          "markdownDescription": "How much the line under a session says, in `inline` mode — see `#lineage.git.branchDisplay#`. Colour mode has no line, so this does nothing there.\n\n`standard` is the vocabulary git prompts and the SCM view already use — `↑4 ↓3 *` and nothing else — so it reads without anybody learning it, and it touches nothing but local files.\n\n`detailed` adds the pull-request chip and the two states arrows render as blank: **`local`** for a branch that tracks nothing, and the word **`merged`**, which is the signal that the worktree can be removed. The chip half needs `#lineage.git.pullRequests#` on as well, since that is what fills the cache it reads."
+          "markdownDescription": "How much the line under a session says, in `inline` mode — see `#lineage.git.branchDisplay#`. Colour mode has no line, so this does nothing there.\n\n`standard` is the vocabulary git prompts and the SCM view already use — `↑4 ↓3 *` and nothing else — so it reads without anybody learning it, and it touches nothing but local files.\n\n`detailed` adds the **pull request** — the number, one glyph for its checks, and its state in the chip's colour — and nothing else. It needs `#lineage.git.pullRequests#` on as well, since that is what fills the cache it reads. The arrows are the same arrows at either level: a branch that tracks nothing gets no word for it, because never-pushed is where every branch starts, and the row's hover says `no upstream branch` for the case where you want it in letters."
         },
         "lineage.git.worktreePath": {
           "type": "string",

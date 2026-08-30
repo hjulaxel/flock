@@ -249,7 +249,7 @@ named.
 | Level                  | On the line                                            |
 |------------------------|--------------------------------------------------------|
 | `standard` *(default)* | `⎇ feat/x *` `↑4` `↓3` — local files only               |
-| `detailed`             | also the state mark, `#128 ✓`, `merged`, and `local`    |
+| `detailed`             | also the state mark and the request, `#128 ✓`           |
 
 #### The mark on the left, and the star on the right
 
@@ -268,16 +268,6 @@ It is a `detailed`-level mark: `standard` reaches nothing but the local status
 cache, and a green arrow in it would be drawn from a source that level does not
 otherwise consult. The native tree draws the same five marks in the same five
 colours on its branch rows, from the same table.
-
-**A shared checkout is named in the row's hover**, and nowhere else: when two
-or more root sessions of the project are running in this one checkout — the
-state where somebody's `git checkout` changes the branch under everybody
-standing there — the hover says how many, names the directory, and ends with
-the way out (New Worktree… gives each its own). Roots only, since a fork
-staying in its root's worktree is the designed shape rather than the hazard,
-and quiet below two. There is no mark on the row: sharing a checkout is a
-choice you made when you started the sessions, and a standing token would
-spend width on every one of those rows to report it back to you.
 
 The **`*` for uncommitted work sits against the branch name**, not out with the
 arrows. `↑4 ↓3` is where this checkout stands against its *upstream*; the star is
@@ -305,11 +295,17 @@ your own click hands the url to. Both verbs are on the row's right-click as well
 keyboard reaches them.
 
 `standard` is the vocabulary git prompts and the SCM view already use, so the
-line reads without being learned. `detailed` adds the pull-request chip (which
-needs `lineage.git.pullRequests` on as well — that is what fills the cache) plus
-the two states the arrows render as blank: **`local`**, a branch that tracks
-nothing and was never pushed, and **`merged`**, the signal that the worktree can
-be removed.
+line reads without being learned. `detailed` adds the **pull request** — which
+needs `lineage.git.pullRequests` on as well, since that is what fills the cache —
+and nothing else. The arrows are the same arrows at either level.
+
+The chip is a number and at most one check glyph: **no state is spelled out in
+it**. A merged request says so three times over without a word — the purple merge
+mark leading the line, the chip's own purple, and the hover — and it drops the
+check glyph too, since the checks ran and it landed. A branch that tracks nothing
+gets no token either: never-pushed is the state every branch starts in, so a word
+for it would announce the default on every row of it, and the hover says `no
+upstream branch` for anyone who wants the distinction in letters.
 
 There is deliberately **no "can this be merged" mark** at either level.
 Ready-to-merge is the *absence* of tokens — a line that says a branch name and
@@ -1236,6 +1232,15 @@ of leaving a permanent gap.
 **Rename happens on the row**, the way it does in the Explorer: **F2** or
 double-click turns the row into a text field. Enter commits, Escape cancels,
 clicking away commits.
+
+**Cut, copy and paste work in that field**, by keyboard (`cmd`/`ctrl` + `X`,
+`C`, `V`) and from its right-click menu. Both routes had to be built: the row is
+a webview, and a webview's iframe is a document apart from the workbench — the
+workbench's own paste does not reach into it, and the iframe cannot grant itself
+clipboard access — so the keystroke used to land on nothing at all. Flock serves
+it from the extension side instead. A pasted newline becomes a space rather than
+being dropped with everything after it, since a name copied out of a commit
+message or a branch listing is the ordinary case.
 
 ## The sidebar
 

@@ -40,7 +40,7 @@ import type {
   SessionNode,
   Worktree,
 } from '../src/types';
-import { Uri, commands } from './mocks/vscode';
+import { Uri, commands, env } from './mocks/vscode';
 // src/webtree.ts's own `import * as vscode from 'vscode'` resolves (for tsc,
 // as opposed to vitest's runtime alias) to the REAL @types/vscode ambient
 // declaration, so `LineageWebtreeProvider`'s `extensionUri: vscode.Uri`
@@ -402,6 +402,125 @@ describe('LineageWebtreeProvider inline rename (via the "rename" message)', () =
     expect(calls.renameCancelled).toBe(1);
     expect(calls.renameSession).toEqual([]);
     expect(calls.renameProject).toEqual([]);
+  });
+});
+
+// ------------------------------------------------------------------- clipboard
+//
+// cmd+V in a rename box. The box is in a webview, whose iframe is a document
+// apart from the workbench: the keystroke reached nothing, so pasting a name
+// into the one field that exists to hold a string from elsewhere did nothing at
+// all. The client names the gesture; this side owns `vscode.env.clipboard`.
+//
+// `env` in the mock is deliberately bare (test/mocks/vscode.ts), so each test
+// that needs one hangs its own stub off it and takes it down afterwards — the
+// convention hooks.test.ts and windows.test.ts already follow.
+
+describe('LineageWebtreeProvider clipboard messages', () => {
+  function setup(over: Parameters<typeof fakeView>[0] = {}) {
+    const forest = forestOf([node(ROOT, { cwd: '/proj' })]);
+    const { deps } = makeDeps(forest);
+    const provider = new LineageWebtreeProvider(deps, EXT_URI);
+    const priv = internals(provider);
+    priv.view = fakeView(over);
+    return { priv };
+  }
+
+  /** Install a clipboard on the bare mock namespace for one test. */
+  function withClipboard(clipboard: unknown): () => void {
+    const ns = env as Record<string, unknown>;
+    ns.clipboard = clipboard;
+    return () => {
+      delete ns.clipboard;
+    };
+  }
+
+  it('posts what the clipboard holds back to the page', async () => {
+    const posted: unknown[] = [];
+    const { priv } = setup({
+      postMessage: async (msg: unknown) => {
+        posted.push(msg);
+        return true;
+      },
+    });
+    const undo = withClipboard({ readText: async () => 'feat/search-ranking' });
+    try {
+      await priv.onMessage({ type: 'clipboardRead' });
+    } finally {
+      undo();
+    }
+    expect(posted).toEqual([{ type: 'clipboard', text: 'feat/search-ranking' }]);
+  });
+
+  it('posts nothing for an empty clipboard', async () => {
+    // Same outcome as no clipboard at all: a paste that inserts nothing, and no
+    // message for the client to have to ignore.
+    const posted: unknown[] = [];
+    const { priv } = setup({
+      postMessage: async (msg: unknown) => {
+        posted.push(msg);
+        return true;
+      },
+    });
+    const undo = withClipboard({ readText: async () => '' });
+    try {
+      await priv.onMessage({ type: 'clipboardRead' });
+    } finally {
+      undo();
+    }
+    expect(posted).toEqual([]);
+  });
+
+  it('survives a host with no clipboard at all', async () => {
+    // The bare mock IS that host, and so is any slim one. A paste that cannot
+    // read does nothing; it must not take the message pump down with it.
+    const posted: unknown[] = [];
+    const { priv } = setup({
+      postMessage: async (msg: unknown) => {
+        posted.push(msg);
+        return true;
+      },
+    });
+    await expect(priv.onMessage({ type: 'clipboardRead' })).resolves.toBeUndefined();
+    expect(posted).toEqual([]);
+  });
+
+  it('writes a copied selection through to the clipboard', async () => {
+    const written: string[] = [];
+    const { priv } = setup();
+    const undo = withClipboard({
+      writeText: async (t: string) => {
+        written.push(t);
+      },
+    });
+    try {
+      await priv.onMessage({ type: 'clipboardWrite', text: 'search-ranking' });
+    } finally {
+      undo();
+    }
+    expect(written).toEqual(['search-ranking']);
+  });
+
+  it('refuses a write that is empty, unstringy or absurdly long', async () => {
+    // The payload is the user's own selection out of a box they are typing in,
+    // so none of these can happen by hand — but it arrives from a page, and a
+    // page's strings are bounded on arrival whatever they claim to be about.
+    const written: string[] = [];
+    const { priv } = setup();
+    const undo = withClipboard({
+      writeText: async (t: string) => {
+        written.push(t);
+      },
+    });
+    try {
+      await priv.onMessage({ type: 'clipboardWrite', text: '' });
+      await priv.onMessage({ type: 'clipboardWrite', text: 42 });
+      await priv.onMessage({ type: 'clipboardWrite' });
+      await priv.onMessage({ type: 'clipboardWrite', text: 'x'.repeat(4097) });
+    } finally {
+      undo();
+    }
+    expect(written).toEqual([]);
   });
 });
 
