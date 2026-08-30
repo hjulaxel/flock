@@ -119,6 +119,13 @@ chats, and much more.
   first, it closes the session before it hides it, it is undoable, and every
   project row has an **Archived Sessions…** list to search and restore from.
 
+- **`/exit` puts you at a shell, not back to nothing.** Exiting a session leaves
+  a prompt in the same tab, in the same directory, with the conversation still
+  above it — so the exit-and-start-again you actually meant is one
+  `claude --resume` away instead of a hunt for the row. Exiting that shell closes
+  the tab as before. Needs tmux; `lineage.exitToShell` turns it off.
+  [Details →](docs/reference.md#exit-leaves-you-at-a-shell)
+
 - **A recommended setup, that says why.** Seventeen of Flock's settings ship
   off, and they are not off for the same reason: two of them — instant updates
   and the in-session verbs — are off only because turning them on writes files
@@ -255,7 +262,7 @@ this release.
 
 ## Documentation
 
-- **[Settings](docs/settings.md)** — all 49, with defaults.
+- **[Settings](docs/settings.md)** — all 50, with defaults.
 - **[Reference](docs/reference.md)** — how it works, projects, subprojects,
   notifications, workspaces, close vs archive, naming, the sidebar rendering
   modes, and what you get alongside the Claude Code extension.

@@ -454,6 +454,116 @@ describe('launch wraps in the private tmux server when the wiring says so', () =
     registry.dispose();
   });
 
+  // EXIT-TO-SHELL, the launch side. `new-session -A` attaches when the name
+  // already exists — the whole mechanism behind restoring a parked session, and
+  // exactly wrong when what exists is a wrap the user `/exit`ed out of, whose
+  // pane now holds a shell. Attaching there would show them that shell and
+  // never run the argv at all, so Flock would report a resumed conversation
+  // over a bash prompt.
+  it('ends a wrap left at a shell prompt before relaunching into its name', async () => {
+    const captured: Array<Record<string, unknown>> = [];
+    fakeHost(captured);
+    const killed: string[] = [];
+    const order: string[] = [];
+    const registry = new TerminalRegistry({
+      claudeBinary: () => '/bin/claude',
+      tmux: () => ({ binary: '/bin/tmux' }),
+      tmuxWrapState: async (name) => {
+        order.push(`probe:${name}`);
+        return 'exited';
+      },
+      tmuxKillSession: async (name) => {
+        order.push(`kill:${name}`);
+        killed.push(name);
+        return true;
+      },
+    });
+
+    await registry.launch({ sessionId: CHILD, resumeId: CHILD });
+
+    expect(killed).toEqual([`lineage-${CHILD}`]);
+    // AWAITED before createTerminal, not fire-and-forget: a kill racing the
+    // new-session could still find the session there to attach to.
+    expect(order).toEqual([`probe:lineage-${CHILD}`, `kill:lineage-${CHILD}`]);
+    expect(captured).toHaveLength(1);
+    registry.dispose();
+  });
+
+  it('never touches a wrap that is running, or one that is already gone', async () => {
+    for (const state of ['running', 'gone'] as const) {
+      const captured: Array<Record<string, unknown>> = [];
+      fakeHost(captured);
+      const killed: string[] = [];
+      const registry = new TerminalRegistry({
+        claudeBinary: () => '/bin/claude',
+        tmux: () => ({ binary: '/bin/tmux' }),
+        tmuxWrapState: async () => state,
+        tmuxKillSession: async (name) => {
+          killed.push(name);
+          return true;
+        },
+      });
+
+      await registry.launch({ sessionId: CHILD });
+
+      expect(killed, state).toEqual([]);
+      registry.dispose();
+    }
+  });
+
+  it('leaves a RECORDED name alone — that one means "re-attach to this"', async () => {
+    // A name that arrived in opts came from the park record, and the restore
+    // path has its own liveness answer. Probing here would put the kill verb in
+    // front of a conversation that is running perfectly well, detached.
+    const captured: Array<Record<string, unknown>> = [];
+    fakeHost(captured);
+    const probed: string[] = [];
+    const killed: string[] = [];
+    const registry = new TerminalRegistry({
+      claudeBinary: () => '/bin/claude',
+      tmux: () => ({ binary: '/bin/tmux' }),
+      tmuxWrapState: async (name) => {
+        probed.push(name);
+        return 'exited';
+      },
+      tmuxKillSession: async (name) => {
+        killed.push(name);
+        return true;
+      },
+    });
+
+    await registry.launch({
+      sessionId: CHILD,
+      resumeId: CHILD,
+      tmuxName: `lineage-${PARENT}`,
+    });
+
+    expect(probed).toEqual([]);
+    expect(killed).toEqual([]);
+    registry.dispose();
+  });
+
+  it('launches anyway when the probe is absent or the kill fails', async () => {
+    // Every unit double, and any wiring that cannot leave a shell behind in the
+    // first place. Best-effort: no worse than not having looked.
+    const captured: Array<Record<string, unknown>> = [];
+    fakeHost(captured);
+    const registry = new TerminalRegistry({
+      claudeBinary: () => '/bin/claude',
+      tmux: () => ({ binary: '/bin/tmux' }),
+      tmuxWrapState: async () => {
+        throw new Error('no server');
+      },
+      tmuxKillSession: async () => false,
+    });
+
+    const binding = await registry.launch({ sessionId: CHILD });
+
+    expect(binding?.tmuxName).toBe(`lineage-${CHILD}`);
+    expect(captured).toHaveLength(1);
+    registry.dispose();
+  });
+
   it('no tmux in the wiring: bare claude, and the binding carries no name', async () => {
     const captured: Array<Record<string, unknown>> = [];
     fakeHost(captured);

@@ -87,6 +87,7 @@ import type {
   TranscriptFacts,
   TranscriptHeaderMeta,
   TreeDeps,
+  WrapState,
 } from './types';
 import {
   type TmuxAdvice,
@@ -96,6 +97,8 @@ import {
   listTmuxSessions,
   queryClientSessions,
   queryPanePid,
+  queryWrapState,
+  resolveExitShell,
   resolveTmuxSpawn,
   respawnTmuxPane,
   sessionIdOfTmuxName,
@@ -512,7 +515,23 @@ export async function activate(
   // binary and the `lineage.tmux` gate are re-probed per launch, so
   // installing tmux (or flipping the setting) needs no reload. Null — off,
   // no tmux, Windows — means the kill+resume tier, which stays fully wired.
-  const tmuxConfPath = ensureTmuxConf(context.globalStorageUri.fsPath);
+  //
+  // `lineage.exitToShell` rides in the conf: it is three hook lines, not a
+  // launch flag. The conf is read at SERVER start only, so a flip applies to
+  // the next server — which in practice means once every wrapped session has
+  // ended. Rewritten on the config change below rather than only here, so the
+  // file on disk always says what the setting says.
+  const exitShell = (): string | null =>
+    cfg().get<boolean>(CONFIG_KEYS.exitToShell) === false
+      ? null
+      : resolveExitShell(process.env['SHELL'], process.platform);
+  let tmuxConfPath = ensureTmuxConf(
+    context.globalStorageUri.fsPath,
+    exitShell(),
+  );
+  const rewriteTmuxConf = (): void => {
+    tmuxConfPath = ensureTmuxConf(context.globalStorageUri.fsPath, exitShell());
+  };
   const tmuxSpawn = (): TmuxSpawn | null =>
     resolveTmuxSpawn(cfg().get<string>(CONFIG_KEYS.tmux), tmuxConfPath);
 
@@ -1732,6 +1751,15 @@ export async function activate(
       return binary !== null
         ? killTmuxSessionTree(binary, name)
         : Promise.resolve(false);
+    },
+    // Exit-to-shell: whether a wrap under this name still holds a CLI. The
+    // launch path's `new-session -A` would otherwise attach to the shell a
+    // `/exit` left behind instead of starting anything.
+    tmuxWrapState: (name) => {
+      const binary = tmuxSpawn()?.binary ?? findTmuxBinary();
+      return binary !== null
+        ? queryWrapState(binary, name)
+        : Promise.resolve<WrapState>('gone');
     },
   });
   context.subscriptions.push(registry);
@@ -5475,14 +5503,23 @@ export async function activate(
     // native `/fork` dispatches. Stat-cached inside the reader, so asking on
     // every focus costs nothing.
     backgroundJob: (sessionId) => daemonReader.read().jobs.get(sessionId),
-    // Detach tier: does the private server still hold this wrap? Same probe
-    // the registry uses for pane pids — a name that answers with one is a
-    // session that exists. Probed even when the config gate is off, like
+    // Detach tier: does the private server still hold this wrap, with a
+    // CONVERSATION in it? Probed even when the config gate is off, like
     // tmuxPanePid above: sessions wrapped before the flip are still wrapped.
+    //
+    // "With a conversation in it" is the whole of `queryWrapState`'s reason to
+    // exist, and why this is no longer a pane-pid test. Exit-to-shell leaves a
+    // wrap alive with a SHELL in the pane, which answers a pane pid perfectly
+    // well — so the old probe would report that session live, `detachedTmuxName`
+    // would hand `resumeFlow` an attach target, and clicking Resume would drop
+    // the user at their own shell prompt and record the conversation as
+    // reopened. An `exited` wrap is deliberately indistinguishable from `gone`
+    // here: there is nothing to attach to either way, so resume takes the
+    // ordinary `--resume` path, with every guard on it.
     tmuxSessionLive: async (name) => {
       const binary = tmuxSpawn()?.binary ?? findTmuxBinary();
       if (binary === null) return false;
-      return (await queryPanePid(binary, name)) !== undefined;
+      return (await queryWrapState(binary, name)) === 'running';
     },
     revealSession,
     focusSessionsView,
@@ -7034,6 +7071,20 @@ export async function activate(
       // than at the next 30 s window, or the setting looks broken.
       if (e.affectsConfiguration(`${CONFIG_SECTION}.${CONFIG_KEYS.showArchived}`)) {
         forceArchiveScan = true;
+      }
+      // The exit-to-shell hooks live in the tmux conf, so the flip is a file
+      // rewrite. It cannot take effect on sessions already running: tmux reads
+      // the conf when the SERVER starts, and ours outlives every one of them.
+      if (
+        e.affectsConfiguration(`${CONFIG_SECTION}.${CONFIG_KEYS.exitToShell}`)
+      ) {
+        rewriteTmuxConf();
+        log(
+          'tmux:',
+          exitShell() === null
+            ? 'exit-to-shell off — /exit closes the tab again'
+            : `exit-to-shell on (${exitShell()}) — applies to sessions started after the tmux server next restarts`,
+        );
       }
       // Same reasoning for phantom rows, and it needs more than a rebuild:
       // `lastEntries` has ALREADY had them removed, so only a fresh fetch can
