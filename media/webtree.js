@@ -934,17 +934,16 @@
     // fact about this checkout, where `↑4 ↓3` is a fact about its upstream.
     if (line.dirty) el.appendChild(renderDirtyMark());
 
-    // The shared-floor token: two or more ROOT sessions in this one checkout.
-    // Amber like the working dot and not red like a failure — sharing is
-    // legal, it is just the state in which one `git checkout` moves every one
-    // of them. The sentence version is in the row's hover, per the
-    // one-tooltip rule the rest of this line follows.
-    if (typeof line.shared === 'number' && line.shared >= 2) {
-      const shared = document.createElement('span');
-      shared.className = 'branch-shared';
-      shared.textContent = 'shared ×' + line.shared;
-      el.appendChild(shared);
-    }
+    // THE SHARED-FLOOR TOKEN IS DELIBERATELY NOT DRAWN. `line.shared` still
+    // arrives with the count on it and the row's hover still says it in
+    // sentences; what came out is the amber `shared ×2` that used to sit
+    // here, beside the branch name, along with its `.branch-shared` rule in
+    // webtree.css. The token was a permanent mark on the row for a fact the
+    // user already knows — how many sessions they started in one directory is
+    // a choice they made, not news the sidebar has to break — and it spent
+    // width on every row of a shared checkout to say it. To bring it back:
+    // this block and that rule are the whole of it, the model side never
+    // stopped feeding them.
 
     // Everything above is the name's half of the line; everything below is the
     // state column at the right edge. The spacer is what divides them, so the

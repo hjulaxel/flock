@@ -269,13 +269,15 @@ cache, and a green arrow in it would be drawn from a source that level does not
 otherwise consult. The native tree draws the same five marks in the same five
 colours on its branch rows, from the same table.
 
-**`shared ×2`, in amber, is the shared-floor token**: two or more root sessions
-of the project are running in this one checkout, which is exactly the state
-where somebody's `git checkout` changes the branch under everybody standing
-there. Roots only — a fork staying in its root's worktree is the designed
-shape, not the hazard — and it draws only at two and up, so the quiet default
-costs no width. The row's hover says it in sentences, in both display modes,
-and ends with the way out: New Worktree… gives each its own.
+**A shared checkout is named in the row's hover**, and nowhere else: when two
+or more root sessions of the project are running in this one checkout — the
+state where somebody's `git checkout` changes the branch under everybody
+standing there — the hover says how many, names the directory, and ends with
+the way out (New Worktree… gives each its own). Roots only, since a fork
+staying in its root's worktree is the designed shape rather than the hazard,
+and quiet below two. There is no mark on the row: sharing a checkout is a
+choice you made when you started the sessions, and a standing token would
+spend width on every one of those rows to report it back to you.
 
 The **`*` for uncommitted work sits against the branch name**, not out with the
 arrows. `↑4 ↓3` is where this checkout stands against its *upstream*; the star is

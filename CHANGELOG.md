@@ -38,9 +38,13 @@ All notable changes to Flock are recorded here. The format follows
   non-modal toast after the Undo window: Clean Up… routes into Remove
   Worktree, same dialogs, no shortcut. Delete only — a closed session still
   needs its directory to resume.
-- **`shared ×2`, the shared-floor token.** A session whose checkout hosts two
-  or more root sessions says so on its branch line, in amber, with the hover
-  spelling out why it matters and the way out. Quiet below two.
+- **A shared checkout says so in the row's hover.** Two or more root sessions
+  in one checkout is the state where somebody's `git checkout` changes the
+  branch under everybody standing there, so the hover names the directory, the
+  count and the way out (New Worktree… gives each its own). Deliberately no
+  mark on the row itself: how many sessions you started in one directory is a
+  choice you made, not news the sidebar has to break, and a permanent token
+  would spend width on every row of every shared checkout to say it.
 - **`lineage.git.branchPrefix`** — what minted branch names start with
   (`axel/` → `axel/flock-3`, the Claude Squad convention). Blank by default.
 
