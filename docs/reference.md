@@ -376,8 +376,10 @@ sidebar would turn a mis-click into a notification for everybody watching the
 repository.
 
 There is no daemon, no background service, and no Python. Your editorial layer
-(titles, summaries, deleted flags) lives in the extension's own `globalStorage`
-directory; nothing else on disk is modified.
+(titles, summaries, deleted flags) lives in one file, `~/.lineage/state/state.json`
+— one per machine rather than one per editor, so VS Code and Cursor show you the
+same flock and neither one's housekeeping can surprise the other. Nothing else on
+disk is modified.
 
 **Hooks are optional.** Flock is fully functional without them. If you opt in,
 they install as a self-contained plugin under `~/.claude/skills/lineage-events/`
@@ -1403,8 +1405,9 @@ to whatever you had half-written in its input box.
 
 Nothing leaves your machine unless you turn on `lineage.git.pullRequests`, which
 is off by default. Flock reads the local session roster and local transcript
-files, and writes only to its own extension storage — plus, if you explicitly opt
-in, the hooks plugin directory and `~/.lineage/events.ndjson`, and the
+files, and writes only to `~/.lineage/state/` and its own extension storage —
+plus, if you explicitly opt in, the hooks plugin directory and
+`~/.lineage/events.ndjson`, and the
 [in-session verbs](#in-session-verbs) files: `~/.claude/skills/flock/`,
 `~/.lineage/flock-verbs.mjs` and the transient request/reply files under
 `~/.lineage/requests/`.
