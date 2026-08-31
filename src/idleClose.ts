@@ -325,6 +325,31 @@ export interface ReconcileRecordFacts {
   updatedAtMs: number;
 }
 
+/**
+ * Session names a tmux CLIENT is currently attached to — `list-clients`
+ * (tmux.queryClientSessions), which is machine-wide because the server is.
+ *
+ * THE INCIDENT THIS ANSWERS. Every other claim below is read out of the
+ * editorial store, and the store used to live in `globalStorageUri` — per
+ * editor APPLICATION. The `-L lineage` socket never did: one per machine.
+ * Open Flock in a second editor (Cursor beside VS Code) and its first
+ * activation listed seven live sessions its brand-new store had never heard
+ * of, judged every one of them an orphan, and killed the lot — a reaper whose
+ * reach was machine-wide and whose evidence was not. The store now lives in
+ * one shared place (src/stateHome.ts), which removes the cause; this is the
+ * fact that makes the rule safe on its own terms, and it protects the mixed
+ * build, the failed migration and the second machine-wide reader nobody has
+ * written yet.
+ *
+ * It is also simply TRUE, independent of any of that: a session with a client
+ * attached is on someone's screen right now. None of the orphans this
+ * reconcile exists to reap has one — a crash takes its clients with it, a
+ * window closed mid-grace detached on the way out, and a parked leftover is
+ * parked precisely because nothing is attached. So the rule costs the reaper
+ * nothing it was ever meant to catch.
+ */
+export type AttachedNames = ReadonlySet<string>;
+
 /** What one activation's reconcile should do. */
 export interface ReconcilePlan {
   /** Live tmux sessions nothing claims — kill them (tree and all). */
@@ -360,7 +385,9 @@ export const RECONCILE_FRESH_MS = 2 * 60_000;
  *
  * Names that do not parse as ours (`sessionIdOfTmuxName`) are skipped: they
  * are on our socket but we did not mint them, and killing what we cannot
- * identify is how reapers earn distrust.
+ * identify is how reapers earn distrust. `attachedNames` is the same
+ * principle applied to a session we DID mint but cannot account for: somebody
+ * is looking at it (see AttachedNames).
  */
 export function reconcileTmuxDecisions(input: {
   now: number;
@@ -368,11 +395,24 @@ export function reconcileTmuxDecisions(input: {
   records: readonly ReconcileRecordFacts[];
   /** Session ids bound in THIS window, chain-expanded by the wiring. */
   boundHere: ReadonlySet<string>;
+  /** @see AttachedNames. Absent (an old wiring, a tmux that would not answer)
+   *  reads as "no client anywhere", which is the pre-existing behaviour. */
+  attachedNames?: AttachedNames;
   freshMs?: number;
 }): ReconcilePlan {
   const { now, liveNames, records, boundHere } = input;
+  const attached: AttachedNames = input.attachedNames ?? new Set<string>();
   const freshMs = input.freshMs ?? RECONCILE_FRESH_MS;
   const plan: ReconcilePlan = { killNames: [], closeIds: [], clearTmuxIds: [] };
+  // AN EMPTY STORE HAS NO STANDING. Every judgement below is "the store knows
+  // of no claim on this", and a store that knows of nothing at all reaches
+  // that verdict about every session on the socket by vacuous truth. That is
+  // not a machine full of orphans, it is an installation that has not learned
+  // anything yet: a first run, a store that could not be read, a migration
+  // that deferred. Reaping on it is how a second editor came to kill seven
+  // working sessions (see AttachedNames), and the next activation — by which
+  // point there IS a record of something — loses nothing by waiting.
+  if (records.length === 0) return plan;
   const live = new Set(liveNames);
   const closing = new Set<string>();
 
@@ -390,6 +430,10 @@ export function reconcileTmuxDecisions(input: {
     // tip. Both are consulted.
     const holder = byName.get(name) ?? byId.get(id);
     const claimed =
+      // A terminal — any window's, any editor's, a hand-typed `tmux attach` —
+      // is showing this session right now. Nothing in the store can outrank
+      // that, and nothing in the store can see it either. @see AttachedNames.
+      attached.has(name) ||
       boundHere.has(id) ||
       (holder !== undefined &&
         (boundHere.has(holder.sessionId) ||

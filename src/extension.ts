@@ -317,10 +317,10 @@ import { DispatchHost } from './dispatchHost';
 import { registerFocusIntegration } from './windows';
 import { openProject } from './surfaces';
 import { HooksManager } from './hooks';
+import { STATE_FILE_NAME, resolveStateDir } from './stateHome';
 import { AgentVerbsManager } from './agentVerbs';
 
 const DEFAULT_POLL_INTERVAL_MS = 3000;
-const STATE_FILE_NAME = 'state.json';
 /** workspaceState key holding this window's active project workspace. */
 const ACTIVE_WORKSPACE_KEY = 'lineage.activeWorkspace';
 /** workspaceState key counting extension-host activations in this window — the
@@ -640,17 +640,39 @@ export async function activate(
 
   // ------------------------------------------------------- 2. editorial state
 
-  const store = new StateStore(context.globalStorageUri.fsPath);
+  // `~/.lineage/state`, NOT globalStorage — one store per machine, because
+  // everything in it (the tmux server, the roster, the transcripts, the
+  // checkouts) is one per machine. globalStorage is per editor APPLICATION,
+  // so the same install seen from Cursor and from VS Code used to be two
+  // flocks that could not see each other, and the second one's activation
+  // reaper killed the first one's sessions. src/stateHome.ts carries the
+  // whole argument and the one-time adoption of the old per-app file.
+  const stateHome = resolveStateDir({
+    legacyDir: context.globalStorageUri.fsPath,
+    homeDir: os.homedir(),
+  });
+  if (stateHome.status === 'failed') {
+    log(
+      'state: could not reach the shared store — staying on this ' +
+        `application's own copy at ${context.globalStorageUri.fsPath}`,
+    );
+  }
+  const store = new StateStore(stateHome.dir);
   context.subscriptions.push(store);
   await store.load();
 
-  // Cross-window sync. A simple non-recursive pattern with a RelativePattern
-  // base is what makes watching outside the workspace work. reloadFromDisk()
-  // coalesces a burst itself and stays silent on a byte-identical re-read, so
-  // the echo of our own write never causes a double refresh.
+  // Cross-window sync — and, now that the file is shared, cross-APPLICATION
+  // sync on the same mechanism. A simple non-recursive pattern with a
+  // RelativePattern base is what makes watching outside the workspace work.
+  // reloadFromDisk() coalesces a burst itself and stays silent on a
+  // byte-identical re-read, so the echo of our own write never causes a
+  // double refresh.
   try {
     const watcher = vscode.workspace.createFileSystemWatcher(
-      new vscode.RelativePattern(context.globalStorageUri, STATE_FILE_NAME),
+      new vscode.RelativePattern(
+        vscode.Uri.file(stateHome.dir),
+        STATE_FILE_NAME,
+      ),
     );
     const reload = (): void => {
       void store.reloadFromDisk();
@@ -1988,6 +2010,13 @@ export async function activate(
       const binary = tmuxSpawn()?.binary ?? findTmuxBinary();
       if (binary === null) return;
       const liveNames = await listTmuxSessions(binary);
+      // Machine-wide, unlike everything below it: `list-clients` answers for
+      // the whole server, so a session another editor's terminal is showing
+      // is claimed here even though this store has never heard of it. See
+      // idleClose.AttachedNames for the incident that put this line in.
+      const attachedNames = new Set(
+        (await queryClientSessions(binary)).values(),
+      );
       const records = store.all();
       const liveWindows = new Set(store.getWindows().map((w) => w.windowId));
       const boundHere = new Set<string>();
@@ -2027,6 +2056,7 @@ export async function activate(
         liveNames,
         records: recordFacts,
         boundHere,
+        attachedNames,
       });
       if (
         plan.killNames.length === 0 &&

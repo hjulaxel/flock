@@ -4,6 +4,53 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **One flock per machine, not one per editor.** Everything Flock's state file
+  describes belongs to the machine: the private tmux server is one per machine,
+  `claude agents --json` answers for the machine, the transcripts sit under
+  `~/.claude`, and a project record names a checkout on disk. The file itself
+  did not. It lived in `globalStorageUri`, which is per editor *application* —
+  and Flock ships on Open VSX, which is where the forks of VS Code shop. Open
+  Cursor beside VS Code and you got a second, empty Flock: no projects, every
+  project verb answering "Flock: no projects yet", and the sessions falling back
+  to folder rows labelled with their absolute paths, which is also exactly what
+  a genuine first run looks like.
+
+  That much was merely wrong. The next part was destructive. The activation
+  reconcile compares the live tmux sessions against the store and kills the ones
+  nothing claims — a sound rule, because a running process with no visible row
+  is a leak. But its reach was the shared socket and its evidence was one app's
+  file, so the second editor's first activation looked at seven live sessions it
+  had never heard of, called all seven orphans, and ended them. They were named,
+  working sessions in another window that was still open.
+
+  The store now lives at `~/.lineage/state/state.json`, beside the account
+  profiles that were already there. Each application's old file is folded in
+  once, through the store's own concurrent-write merge — the same newest-wins
+  the windows have always used on each other, because two apps' stores are that
+  same problem one tick further apart — and then left exactly where it is, so
+  going back to an older build finds what it left behind.
+
+- **The reconcile will not end a session somebody is looking at.** A tmux
+  session with a client attached is on someone's screen: another window's
+  terminal, another editor's, a hand-typed `tmux attach`. It is now claimed on
+  that fact alone, ahead of everything the store has to say. This costs the
+  reaper nothing it was ever meant to catch — a crash takes its clients with it,
+  a window closed mid-grace detached on the way out, and a parked session is
+  parked precisely because nothing is attached — and it is the half of the fix
+  that does not depend on both editors running the same build.
+
+- **An empty store reaps nothing.** Every judgement the reconcile makes is
+  "nothing on record claims this process", which a store holding no records at
+  all reaches about everything on the socket by vacuous truth. That is not a
+  machine full of orphans; it is an installation that has not learned anything
+  yet — a first run, a store that could not be read, a migration still
+  finishing. It now waits for the next activation, by which point it knows
+  something, and the wait costs nothing: an orphan is not in a hurry.
+
 ## [0.1.9] — 2026-08-31
 
 ### Fixed

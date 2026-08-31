@@ -282,9 +282,10 @@ this release.
 ## Privacy
 
 Nothing leaves your machine unless you turn on one setting, named below. Flock
-reads the local session roster and local transcript files, and writes only to its
-own extension storage — plus, if you explicitly opt in, the hooks plugin
-directory and `~/.lineage/events.ndjson`, and the in-session verbs files
+reads the local session roster and local transcript files, and writes only to
+`~/.lineage/state/` and its own extension storage — plus, if you explicitly opt
+in, the hooks plugin directory and `~/.lineage/events.ndjson`, and the
+in-session verbs files
 (`~/.claude/skills/flock/`, `~/.lineage/flock-verbs.mjs`, `~/.lineage/requests/`).
 
 **Your repositories are read on a timer and changed only when you ask.** By

@@ -255,12 +255,14 @@ function reconcile(input: {
   liveNames?: string[];
   records?: ReconcileRecordFacts[];
   boundHere?: string[];
+  attachedNames?: string[];
 }) {
   return reconcileTmuxDecisions({
     now: NOW,
     liveNames: input.liveNames ?? [],
     records: input.records ?? [],
     boundHere: new Set(input.boundHere ?? []),
+    attachedNames: new Set(input.attachedNames ?? []),
   });
 }
 
@@ -277,9 +279,48 @@ describe('reconcileTmuxDecisions', () => {
 
   it('kills a live session with NO record at all — the orphan of orphans', () => {
     const name = tmuxSessionName(S1);
-    const plan = reconcile({ liveNames: [name] });
+    const plan = reconcile({ liveNames: [name], records: [fact(S3)] });
     expect(plan.killNames).toEqual([name]);
     expect(plan.closeIds).toEqual([]);
+  });
+
+  // A store that knows of nothing reaches "nothing claims this" about every
+  // session on the socket, and it is wrong about all of them.
+  it('judges nothing at all on a store with no records in it', () => {
+    const plan = reconcile({
+      liveNames: [S1, S2].map(tmuxSessionName),
+      records: [],
+    });
+    expect(plan).toEqual({ killNames: [], closeIds: [], clearTmuxIds: [] });
+  });
+
+  // The Cursor-beside-VS-Code incident: a second editor's first activation
+  // has an EMPTY store, so every one of the store-side claims is absent —
+  // and every session on the shared socket reads as the orphan above. The
+  // attached client is the one fact that crosses the store boundary.
+  it('spares a live session a client is attached to, record or no record', () => {
+    const orphan = tmuxSessionName(S1);
+    const stale = tmuxSessionName(S2);
+    const plan = reconcile({
+      liveNames: [orphan, stale],
+      attachedNames: [orphan, stale],
+      records: [fact(S2, { tmux: stale })],
+    });
+    expect(plan.killNames).toEqual([]);
+    expect(plan.closeIds).toEqual([]);
+    expect(plan.clearTmuxIds).toEqual([]);
+  });
+
+  it('still kills the unattached orphan sitting next to an attached one', () => {
+    const attached = tmuxSessionName(S1);
+    const parked = tmuxSessionName(S2);
+    const plan = reconcile({
+      liveNames: [attached, parked],
+      attachedNames: [attached],
+      records: [fact(S2, { tmux: parked })],
+    });
+    expect(plan.killNames).toEqual([parked]);
+    expect(plan.closeIds).toEqual([S2]);
   });
 
   it('spares every kind of claim: bound here, graced, live window, fresh', () => {
