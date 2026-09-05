@@ -50,7 +50,7 @@
 import { resolveLaunchMode } from './hosts';
 import { resolveMode } from './modes';
 import { tmuxInstallHint } from './tmux';
-import { CONFIG_KEYS } from './types';
+import { CONFIG_KEYS, LEGACY_KEYS } from './types';
 import type { RecommendedWorld } from './types';
 
 export type { RecommendedWorld };
@@ -73,10 +73,12 @@ export type RecommendedStepId = (typeof RECOMMENDED_STEP_IDS)[number];
 
 /** One setting write, section-relative (`git.branches`, not
  *  `lineage.git.branches`) — the spelling `CONFIG_KEYS` uses and the one a
- *  configuration scoped to `lineage` takes. */
+ *  configuration scoped to `lineage` takes. `undefined` DELETES the key: the
+ *  one write a retired key (`LEGACY_KEYS`) may receive, and only from a choice
+ *  the user made that the old key would otherwise fold straight back. */
 export interface RecommendedSetting {
   readonly key: string;
-  readonly value: boolean | string;
+  readonly value: boolean | string | undefined;
 }
 
 export interface RecommendedStep {
@@ -494,24 +496,34 @@ export interface WindowModelChoice {
  * where they are, and that is precisely the confusion this whole change exists
  * to end. Same contract as `surfaceChoices` and `resolveLaunchMode` above.
  *
- * AUTO-SWITCH WRITES TWO KEYS. `folder` and `flock` write `lineage.mode` alone;
- * `project` also writes `lineage.workspaces.enabled: true`, because without it a
- * user with the old `false` sitting in their settings would choose Auto-switch,
- * watch `resolveMode` fold them straight back to Flock only, and have no way to
- * see why. This is the only place the deprecated key is ever written, and it is
- * written by somebody's own choice — which is the only way this extension
- * touches a settings file.
+ * AUTO-SWITCH WRITES THREE KEYS. `folder` and `flock` write `lineage.mode`
+ * alone; `project` also writes `lineage.workspaces.enabled: true` and DELETES
+ * the retired `lineage.workspaces.autoSwitch`, because without those a user
+ * with an old `false` sitting in their settings would choose Auto-switch, watch
+ * `resolveMode` fold them straight back to Flock only, and have no way to see
+ * why. These are the only places either old key is ever touched, and both
+ * happen by somebody's own choice — which is the only way this extension
+ * touches a settings file. The retired key is deleted rather than set: the
+ * manifest no longer declares it, and VS Code refuses a value on a key it does
+ * not know but permits removing one.
  */
 export function windowModelChoices(
-  /** The TWO fields this actually reads, rather than the whole world. Narrowed
-   *  so a caller that only wants to name the current model — the gear menu's
-   *  preview — does not have to build (or await) the rest of it: assembling a
-   *  `RecommendedWorld` probes every project's worktrees, which is far too much
-   *  work to put behind opening a menu. Every existing caller passes a full
-   *  world and is unaffected. */
-  world: Pick<RecommendedWorld, 'mode' | 'workspacesEnabled'>,
+  /** The THREE fields this actually reads, rather than the whole world.
+   *  Narrowed so a caller that only wants to name the current model — the gear
+   *  menu's preview — does not have to build (or await) the rest of it:
+   *  assembling a `RecommendedWorld` probes every project's worktrees, which is
+   *  far too much work to put behind opening a menu. Every existing caller
+   *  passes a full world and is unaffected. */
+  world: Pick<
+    RecommendedWorld,
+    'mode' | 'workspacesEnabled' | 'workspacesAutoSwitch'
+  >,
 ): WindowModelChoice[] {
-  const current = resolveMode(world.mode, world.workspacesEnabled);
+  const current = resolveMode(
+    world.mode,
+    world.workspacesEnabled,
+    world.workspacesAutoSwitch,
+  );
 
   return [
     {
@@ -548,6 +560,7 @@ export function windowModelChoices(
       settings: [
         { key: CONFIG_KEYS.mode, value: 'project' },
         { key: CONFIG_KEYS.workspacesEnabled, value: true },
+        { key: LEGACY_KEYS.workspacesAutoSwitch, value: undefined },
       ],
       current: current === 'project',
     },

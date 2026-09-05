@@ -663,12 +663,14 @@ shipped default is *One folder per project*, where a window simply is the folder
 you opened and none of this runs. [The three window models
 →](settings.md#the-three-window-models)
 
-Inside Auto-switch, the workspace **follows your focus** by default: start
-working in a session that belongs to another project and the window switches to
-that project's workspace by itself — nothing is stopped and nothing asks a
-question. Turn that off with `lineage.workspaces.autoSwitch`. You
-can always switch explicitly from the palette (**Flock: Switch Workspace…**) or
-a project row's context menu — and, in the auto-switch model, from the
+Inside Auto-switch, the workspace **follows your focus**: start working in a
+session that belongs to another project and the window switches to that
+project's workspace by itself — nothing is stopped and nothing asks a question.
+A window that should switch only when you ask is the **Root** model
+(`lineage.mode: root`), which keeps the verb and never fires it for you; the
+old `lineage.workspaces.autoSwitch: false` resolves to exactly that. You can
+always switch explicitly from the palette (**Flock: Switch Workspace…**) or a
+project row's context menu — and, in the auto-switch model, from the
 `$(layers)` status-bar item, which that model is the only one to draw.
 
 ### Where you are
@@ -682,7 +684,8 @@ one project — which is not a workspace switch at all — is visible. The Explo
 **Project** view carries the same answer as a row of its own, untruncated.
 
 When the window and the keyboard disagree — you focused a conversation belonging
-to another project, with auto-switching off — the line carries both names
+to another project and the window did not follow, a hidden project's say — the
+line carries both names
 (`App → API`) and clicking it switches straight to the one you are in. A project
 you have **closed** is never named there: putting one away removes its rows, and
 this must not become the one place it comes back.

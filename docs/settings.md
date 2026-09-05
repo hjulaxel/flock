@@ -45,7 +45,7 @@ else, so change the words there and rerun the script rather than editing here.
 
 <!-- generated:settings:start -->
 
-Flock contributes **47 settings**. **17** of them are switches that ship off, and **19** are tagged *advanced* — paths, timings, diagnostics and previews, the rows `@tag:advanced` finds in the Settings editor. Advanced rows are marked below and sit last in their category.
+Flock contributes **46 settings**. **17** of them are switches that ship off, and **19** are tagged *advanced* — paths, timings, diagnostics and previews, the rows `@tag:advanced` finds in the Settings editor. Advanced rows are marked below and sit last in their category.
 
 ### Sessions
 
@@ -103,7 +103,6 @@ Flock contributes **47 settings**. **17** of them are switches that ship off, an
 | --- | --- | --- |
 | `lineage.mode` | `"folder"` | What a window **is** — three answers, from the window that holds one thing to the window that follows you. **One folder per project** (`folder`, the default): the window is the folder you opened, the tree scopes itself to sessions under it, and working on another project means going to that project's own window. **Root**, i.e. Flock only (`root`): the window is Flock's — nothing fenced, nothing scoped, nothing rearranging itself, and you open a window on a session when you want its files. **Auto-switch** (`project`): one window spans many projects and switches between them as your attention moves. Navigation never changes a session's lifecycle in any of the three: a closed tab keeps its row under a detach grace (the hover says how long is left), then archives to a click-to-resume row. Run **Flock: Choose Window Model…** to pick one with what it costs written beside it — the picker is also the only thing that clears the deprecated `lineage.workspaces.enabled` below. Values: `folder` — One folder per project; `root` — Root (Flock only); `project` — Auto-switch. |
 | `lineage.workspaces.enabled` (deprecated) | `true` | Show the workspace switcher in the status bar. A workspace scopes this window to one project: switching saves the current tab layout under the project you leave, hides what does not belong to the target, and restores the target's saved layout. Foreign session tabs close under a detach grace: with tmux installed (see `lineage.tmux`) the conversation keeps running detached for `lineage.session.detachGraceMinutes` — its row stays in the tree, its hover says how long is left, click to reattach — and archives to a click-to-resume row after that; without tmux the terminal closes and the conversation resumes from its transcript, in which case busy sessions are never closed. Unsaved editors and terminals Flock does not own are never touched. The terminal panel is never used. Deprecated: Superseded by `lineage.mode`, and still honoured: while this is `false` and the mode is `project`, this window resolves to the **Root** (Flock only) model — which is what that pair has always actually meant. Set `lineage.mode` to the model you want, or run **Flock: Choose Window Model…**, which writes both; then this key can go. |
-| `lineage.workspaces.autoSwitch` | `true` | Focus follows project: when you start working in a session that belongs to another project, the window switches to that project's workspace by itself — the layout you leave is saved, foreign tabs hide, the project's saved layout comes back. Nothing is stopped and nothing asks a question. Turn off to switch only via the status bar / command. |
 | `lineage.workspaces.resumeSessions` | `true` | Advanced — When switching to a project workspace, resume its parked sessions from their transcripts (up to 8 per switch). Parking closes a session's terminal when you switch away, so with this OFF nothing is parked at all — foreign session tabs stay open instead. |
 | `lineage.explorer.followProject` | `true` | Advanced — The Explorer follows the session you are working in: the file tree roots itself at that session's subproject directory, inside the git worktree the session is actually checked out in. Auto-switch only — the other two window models never move the tree. Requires running "Flock: Follow the Session I Am In" once per window, which converts it to a Flock workspace (one reload, then following is instant and no terminal is lost). Turning it off leaves you in the auto-switch model with the file tree where you put it: tabs still switch, the status-bar line still says where you are, and Source Control still follows the session's checkout — none of which reroots a tree you asked to be left alone. |
 | `lineage.explorer.scope` | `"directory"` | Advanced — How much of the active project the Explorer shows. `directory` keeps the file tree to the one directory you are in, the way a plain folder window does; `project` shows every connected directory as its own root. Only applies when `lineage.explorer.followProject` is on, and only in the **Auto-switch** window model (`lineage.mode`). Following the session is a `directory` behaviour by construction — under `project` the folder tree stops moving on its own and only a switch reshapes it, while Source Control goes on following the session's checkout either way. Takes effect on the next focus change — no reload. Values: `directory` — The directory you are in; `project` — Every project directory. |
@@ -230,29 +229,38 @@ to set rather than Flock's — it changes behaviour for every repository you ope
 
 `lineage.mode` used to have two values, with `lineage.workspaces.enabled`
 shadowing it, so the third model existed as a corner of a truth table nobody
-could name. It is now a value, and the old pair folds into it once, on read.
-**Nothing on your machine was rewritten** — the fold is a rule, not an edit, and
-Flock does not write to a `settings.json` you did not ask it to write to.
+could name — and `lineage.workspaces.autoSwitch: false` spelled the same
+corner a second way, as auto-switch with the auto taken out. The model is now
+a value, and both old keys fold into it once, on read. **Nothing on your machine
+was rewritten** — the fold is a rule, not an edit, and Flock does not write to
+a `settings.json` you did not ask it to write to. `lineage.workspaces.enabled`
+is still listed, struck through, so the editor can point at its replacement;
+`lineage.workspaces.autoSwitch` is no longer listed at all, and is honoured
+just the same.
 
-| `lineage.mode` | `lineage.workspaces.enabled` | you are now in |
-|---|---|---|
-| unset | anything | **One folder per project** |
-| `"folder"` | anything | **One folder per project** |
-| `"project"` | unset or `true` | **Auto-switch** |
-| `"project"` | `false` | **Root (Flock only)** |
-| `"root"` | anything | **Root (Flock only)** |
-| anything else | anything | **One folder per project** |
+| `lineage.mode` | `lineage.workspaces.enabled` | `lineage.workspaces.autoSwitch` | you are now in |
+|---|---|---|---|
+| unset | anything | anything | **One folder per project** |
+| `"folder"` | anything | anything | **One folder per project** |
+| `"project"` | unset or `true` | unset or `true` | **Auto-switch** |
+| `"project"` | `false` | anything | **Root (Flock only)** |
+| `"project"` | anything | `false` | **Root (Flock only)** |
+| `"root"` | anything | anything | **Root (Flock only)** |
+| anything else | anything | anything | **One folder per project** |
 
-The one row worth pausing on is `("project", false)`. That pair *already* gave a
-window with no auto-switch, no status-bar button and no fence — Flock only in
-everything but name — so calling it that moves nobody. The only visible
-difference is that the `$(layers)` button in the Explorer's **Project** view
-title, which is persistent chrome, belongs to Auto-switch now: in the Flock-only
-model it would have been a second, quieter copy of the status-bar button that
-model is defined by not having. The verb itself is still on the project row, in
-the palette, and on any keybinding you gave it.
+The rows worth pausing on are the two `"project"` rows that end in **Root**.
+`("project", enabled: false)` *already* gave a window with no auto-switch, no
+status-bar button and no fence — Flock only in everything but name — so calling
+it that moves nobody. `("project", autoSwitch: false)` gave the same window plus
+a status-bar item, which is the one thing the Root model is defined by not
+having: the `$(layers)` item, like the button in the Explorer's **Project** view
+title, belongs to Auto-switch now, since in the Flock-only model it would have
+been a second, quieter copy of the switch that model never fires for you. The
+verb itself is still on the project row, in the palette, and on any keybinding
+you gave it.
 
 If you want the auto-switching window, set `lineage.mode` to `project` **and**
-delete `lineage.workspaces.enabled` — or just run **Flock: Choose Window
-Model…**, which writes both for you. That picker is the only thing in Flock that
-ever writes that key, and it writes it because you asked.
+delete both old keys — or just run **Flock: Choose Window Model…**, which does
+all three for you: it writes the mode, writes `lineage.workspaces.enabled` back
+to `true`, and removes `lineage.workspaces.autoSwitch`. That picker is the only
+thing in Flock that ever touches either key, and it does so because you asked.

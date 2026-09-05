@@ -25,7 +25,7 @@ import type {
   SurfaceChoiceId,
   WindowModelId,
 } from '../src/recommend';
-import { CONFIG_KEYS } from '../src/types';
+import { CONFIG_KEYS, LEGACY_KEYS } from '../src/types';
 import type { RecommendedWorld } from '../src/types';
 
 /** A machine on which nothing is left to do — except the surface question,
@@ -471,6 +471,18 @@ describe('windowModelChoices: what a window is', () => {
     );
   });
 
+  it('marks the retired (project, autoSwitch off) pair as Flock only too', () => {
+    // The same fold for the key that used to switch the auto-switch off on its
+    // own. A world that does not carry the key at all — every double that
+    // predates it — reads as no opinion.
+    expect(
+      currentOf(world({ mode: 'project', workspacesAutoSwitch: false })),
+    ).toBe('root');
+    expect(
+      currentOf(world({ mode: 'project', workspacesAutoSwitch: true })),
+    ).toBe('project');
+  });
+
   it('always marks exactly one, garbage included', () => {
     for (const w of [
       settled,
@@ -492,23 +504,33 @@ describe('windowModelChoices: what a window is', () => {
     ]);
     // Without the second write, somebody carrying `workspaces.enabled: false`
     // would pick Auto-switch, watch resolveMode fold them straight back to
-    // Flock only, and have nothing on screen to explain it. This is also the
-    // only place the deprecated key is ever written — by the user's own choice,
-    // which is the only way this extension touches a settings file.
+    // Flock only, and have nothing on screen to explain it. The third entry
+    // is the same repair for the retired `workspaces.autoSwitch`, whose
+    // `false` folds identically — DELETED rather than set, since the manifest
+    // no longer declares it. These are the only places either old key is ever
+    // touched — by the user's own choice, which is the only way this extension
+    // touches a settings file.
     expect(byId.get('project')?.settings).toEqual([
       { key: 'mode', value: 'project' },
       { key: 'workspaces.enabled', value: true },
+      { key: 'workspaces.autoSwitch', value: undefined },
     ]);
   });
 
-  it('writes only keys the manifest actually contributes', () => {
+  it('writes only keys the manifest contributes, and only deletes retired ones', () => {
     // The same guard `writeSettings` applies at the wiring (it refuses a key
-    // the extension does not declare), asserted here so a typo fails as a test
-    // rather than as a silent no-op inside the picker.
+    // the extension does not declare, except to remove a retired one),
+    // asserted here so a typo fails as a test rather than as a silent no-op
+    // inside the picker.
     const contributed = new Set<string>(Object.values(CONFIG_KEYS));
+    const retired = new Set<string>(Object.values(LEGACY_KEYS));
     for (const choice of windowModelChoices(settled)) {
       for (const setting of choice.settings) {
-        expect(contributed, setting.key).toContain(setting.key);
+        if (retired.has(setting.key)) {
+          expect(setting.value, `${setting.key} may only be deleted`).toBeUndefined();
+        } else {
+          expect(contributed, setting.key).toContain(setting.key);
+        }
       }
     }
   });

@@ -2041,16 +2041,10 @@
             "markdownDeprecationMessage": "Superseded by `#lineage.mode#`, and still honoured: while this is `false` and the mode is `project`, this window resolves to the **Root** (Flock only) model — which is what that pair has always actually meant. Set `#lineage.mode#` to the model you want, or run **Flock: Choose Window Model…**, which writes both; then this key can go.",
             "description": "Show the workspace switcher in the status bar. A workspace scopes this window to one project: switching saves the current tab layout under the project you leave, hides what does not belong to the target, and restores the target's saved layout. Foreign session tabs close under a detach grace: with tmux installed (see `lineage.tmux`) the conversation keeps running detached for `lineage.session.detachGraceMinutes` — its row stays in the tree, its hover says how long is left, click to reattach — and archives to a click-to-resume row after that; without tmux the terminal closes and the conversation resumes from its transcript, in which case busy sessions are never closed. Unsaved editors and terminals Flock does not own are never touched. The terminal panel is never used."
           },
-          "lineage.workspaces.autoSwitch": {
-            "type": "boolean",
-            "default": true,
-            "order": 3,
-            "description": "Focus follows project: when you start working in a session that belongs to another project, the window switches to that project's workspace by itself — the layout you leave is saved, foreign tabs hide, the project's saved layout comes back. Nothing is stopped and nothing asks a question. Turn off to switch only via the status bar / command."
-          },
           "lineage.workspaces.resumeSessions": {
             "type": "boolean",
             "default": true,
-            "order": 4,
+            "order": 3,
             "description": "When switching to a project workspace, resume its parked sessions from their transcripts (up to 8 per switch). Parking closes a session's terminal when you switch away, so with this OFF nothing is parked at all — foreign session tabs stay open instead.",
             "tags": [
               "advanced"
@@ -2059,7 +2053,7 @@
           "lineage.explorer.followProject": {
             "type": "boolean",
             "default": true,
-            "order": 5,
+            "order": 4,
             "description": "The Explorer follows the session you are working in: the file tree roots itself at that session's subproject directory, inside the git worktree the session is actually checked out in. Auto-switch only — the other two window models never move the tree. Requires running \"Flock: Follow the Session I Am In\" once per window, which converts it to a Flock workspace (one reload, then following is instant and no terminal is lost). Turning it off leaves you in the auto-switch model with the file tree where you put it: tabs still switch, the status-bar line still says where you are, and Source Control still follows the session's checkout — none of which reroots a tree you asked to be left alone.",
             "tags": [
               "advanced"
@@ -2080,7 +2074,7 @@
               "Every connected directory as its own collapsible root, the main one on top. The shape Flock shipped before this setting existed — and the shape in which the tree does NOT follow you, because a scope that expands every directory into a root has nothing left to narrow."
             ],
             "default": "directory",
-            "order": 6,
+            "order": 5,
             "markdownDescription": "How much of the active project the Explorer shows. `directory` keeps the file tree to the one directory you are in, the way a plain folder window does; `project` shows every connected directory as its own root. Only applies when `#lineage.explorer.followProject#` is on, and only in the **Auto-switch** window model (`#lineage.mode#`). Following the session is a `directory` behaviour by construction — under `project` the folder tree stops moving on its own and only a switch reshapes it, while Source Control goes on following the session's checkout either way. Takes effect on the next focus change — no reload.",
             "tags": [
               "advanced"

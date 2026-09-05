@@ -118,6 +118,32 @@ describe('resolveMode: the migration table', () => {
     expect(resolveMode('Project', false)).toBe('folder');
     expect(resolveMode(42, false)).toBe('folder');
   });
+
+  it('folds the retired (project, autoSwitch off) pair to Flock-only the same way', () => {
+    // `workspaces.autoSwitch: false` was a third spelling of the Root window:
+    // auto-switch with the auto taken out, the switch verb still there, and a
+    // status-bar item that model is defined by not having. Honouring the mode
+    // alone would switch auto-switching back on for exactly the people who
+    // turned it off by hand.
+    expect(resolveMode('project', true, false)).toBe('root');
+    // Either old key alone is enough; both together say the same thing.
+    expect(resolveMode('project', false, true)).toBe('root');
+    expect(resolveMode('project', false, false)).toBe('root');
+  });
+
+  it('leaves the auto-switch user alone when the retired key is absent or true', () => {
+    // The third argument is optional and the callers that predate it hand in
+    // nothing — "no opinion", never a demotion.
+    expect(resolveMode('project', true)).toBe('project');
+    expect(resolveMode('project', true, undefined)).toBe('project');
+    expect(resolveMode('project', true, true)).toBe('project');
+  });
+
+  it('never lets the retired key move a window that is not in project mode', () => {
+    expect(resolveMode('folder', true, false)).toBe('folder');
+    expect(resolveMode('root', true, false)).toBe('root');
+    expect(resolveMode(undefined, true, false)).toBe('folder');
+  });
 });
 
 describe('the four gates', () => {

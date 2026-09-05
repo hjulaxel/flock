@@ -1784,7 +1784,6 @@ export const CONFIG_KEYS = {
    *  settings file nobody asked it to touch. */
   workspacesEnabled: 'workspaces.enabled',
   workspacesResumeSessions: 'workspaces.resumeSessions',
-  workspacesAutoSwitch: 'workspaces.autoSwitch',
   // The Explorer follows the project
   explorerFollowProject: 'explorer.followProject',
   /** How much of the project the Explorer shows: `directory` (the one you are
@@ -1839,6 +1838,11 @@ export const LEGACY_KEYS = {
    *  `false` still keeps the Accounts list from being registered
    *  (accounts.accountsSectionDrawn); anything else defers to the section. */
   accountsEnabled: 'accounts.enabled',
+  /** `lineage.workspaces.autoSwitch`, folded into `mode`: `project` with the
+   *  auto-switch off was the Root model under another name, so a `false` here
+   *  resolves to `root` (modes.resolveMode) and the window-model picker deletes
+   *  the key when somebody chooses auto-switch. */
+  workspacesAutoSwitch: 'workspaces.autoSwitch',
 } as const;
 
 /**
@@ -2094,6 +2098,12 @@ export interface RecommendedWorld {
    *  window is really auto-switching or is the Flock-only model wearing the old
    *  spelling. */
   readonly workspacesEnabled: boolean;
+  /** The retired `lineage.workspaces.autoSwitch`, raw — undefined when the
+   *  settings file never had it, which is nearly everyone. The third input to
+   *  `resolveMode`: a `false` folds a `project` window to Root exactly as
+   *  `workspacesEnabled: false` does. Optional so every wiring and double that
+   *  predates the fold reads as "no opinion". */
+  readonly workspacesAutoSwitch?: boolean;
 }
 
 // ------------------------------------------------------------------ lineage results
@@ -4552,9 +4562,12 @@ export interface CommandDeps {
    *  Keys are section-relative — `git.branches`, the spelling `CONFIG_KEYS`
    *  uses — and every write goes to the GLOBAL target: a recommendation is
    *  about this person's editor, not about the folder they happen to have
-   *  open. */
+   *  open. A value of `undefined` DELETES the key, and the wiring allows that
+   *  for a `LEGACY_KEYS` entry alone: a retired key is never given a value,
+   *  but a choice that supersedes it may take the old spelling away so it
+   *  cannot fold the new answer back. */
   writeSettings?(
-    entries: readonly { key: string; value: boolean | string }[],
+    entries: readonly { key: string; value: boolean | string | undefined }[],
   ): Promise<readonly string[]>;
   // ---- the gear menu ------------------------------------------------------
   /** The state the gear menu labels itself with, read when it opens.

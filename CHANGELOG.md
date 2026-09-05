@@ -67,6 +67,13 @@ All notable changes to Flock are recorded here. The format follows
   still honoured — the Accounts list is not registered, and the log says so —
   and either half of the gear's **Show / Hide Accounts Section** pair clears
   the old key, since after that gesture the section setting states the answer.
+- **`lineage.workspaces.autoSwitch`**, folded into `lineage.mode`. Auto-switch
+  with the auto-switch turned off was the **Root** model under another name —
+  a window that never rearranges itself and keeps the switch verb — so it is
+  that model now: an old `false` left in `settings.json` resolves a `project`
+  window to Root exactly as `workspaces.enabled: false` always has, on read,
+  with nothing rewritten. **Flock: Choose Window Model…** removes the old key
+  when you choose Auto-switch, so it cannot fold your choice straight back.
 
 ### Changed
 

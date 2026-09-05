@@ -431,18 +431,20 @@ export async function activate(
     return Math.min(v, 60);
   };
   /** WHICH OF THE THREE WINDOW MODELS this window is in, resolved
-   *  (src/modes.ts) — the mode string and the legacy `lineage.workspaces.enabled`
-   *  folded into one value here, so no surface downstream can compute the model
-   *  differently from another. The single reader of that deprecated key.
+   *  (src/modes.ts) — the mode string, the legacy `lineage.workspaces.enabled`
+   *  and the retired `lineage.workspaces.autoSwitch` folded into one value
+   *  here, so no surface downstream can compute the model differently from
+   *  another. The single reader of both old keys.
    *
    *  Re-read on every call like every other setting here, and safely: the
-   *  configuration listener below already fires on both keys and already calls
-   *  `syncModeContext()` unconditionally, so a change to either one repaints the
-   *  when-clause key, the status bar and the forest with no reload. */
+   *  configuration listener below already fires on all three keys and already
+   *  calls `syncModeContext()` unconditionally, so a change to any one repaints
+   *  the when-clause key, the status bar and the forest with no reload. */
   const lineageMode = (): LineageMode =>
     resolveMode(
       cfg().get<string>(CONFIG_KEYS.mode),
       boolCfg(CONFIG_KEYS.workspacesEnabled, true),
+      cfg().get<boolean>(LEGACY_KEYS.workspacesAutoSwitch),
     );
 
   /** The Flock anchor's path (src/explorer.ts owns its identity): the empty
@@ -5119,8 +5121,11 @@ export async function activate(
   // the project's saved layout comes back. "When we are in a certain project,
   // we only see that project's tabs" without ever hunting for a verb. The
   // auto path never interrupts: busy foreign sessions stay open (no modal)
-  // and the summary goes to the status bar. `lineage.workspaces.autoSwitch`
-  // (default true) turns it off; the explicit command remains either way.
+  // and the summary goes to the status bar. There is no separate off switch:
+  // a window that should not switch by itself is the Root model, and the
+  // retired `lineage.workspaces.autoSwitch: false` resolves to it
+  // (modes.resolveMode). The explicit command remains in every model but
+  // `folder`.
   context.subscriptions.push(
     registry.onDidChangeActive((sessionId) => {
       try {
@@ -5135,7 +5140,6 @@ export async function activate(
         // Flock-only model keeps the switch VERB but never fires it for you —
         // that difference is the whole of what separates the two.
         if (!projectSwitchingOn(lineageMode())) return;
-        if (!boolCfg(CONFIG_KEYS.workspacesAutoSwitch, true)) return;
         const tip = chainIndex.tipOf(sessionId);
         const cwd =
           forest.nodes.get(tip)?.cwd ??
@@ -5241,13 +5245,14 @@ export async function activate(
         preferred !== null && preferred.project.hidden !== true
           ? preferred
           : null;
-      if (
-        claimant !== null &&
-        claimant.project.id !== activeId &&
-        boolCfg(CONFIG_KEYS.workspacesAutoSwitch, true)
-      ) {
-        return;
-      }
+      // Another project's session in front is the AUTO-SWITCH's case, not
+      // this one's: in the one model where this runs the window is about to
+      // move to that project and follow from there, and rooting the tree
+      // first would show a directory the switch is about to leave. (A
+      // separate auto-switch-off setting used to let the follow proceed here
+      // instead; that window is the Root model now, which never reaches this
+      // line.)
+      if (claimant !== null && claimant.project.id !== activeId) return;
       const project = claimant?.project ?? null;
       const plan = planFollow({
         sessionId: front,
@@ -6706,6 +6711,7 @@ export async function activate(
         // is the model the user is actually in and not the string they typed.
         mode: cfg().get<string>(CONFIG_KEYS.mode),
         workspacesEnabled: boolCfg(CONFIG_KEYS.workspacesEnabled, true),
+        workspacesAutoSwitch: cfg().get<boolean>(LEGACY_KEYS.workspacesAutoSwitch),
         claudeExtensionInstalled:
           claudeDelegate !== undefined &&
           vscode.extensions?.getExtension(claudeDelegate.extensionId) !==
@@ -6716,15 +6722,21 @@ export async function activate(
     // The table-driven setter behind the recommended steps. Two guards, and the
     // first is the one that matters: `update()` on a key the manifest does not
     // declare throws, so an entry that is not a contributed setting is refused
-    // by name here rather than reported as a mysterious failure. Writes keep
-    // going after one fails, exactly as setBranchAndWorktreeFeatures does — a
-    // half-written plan the person is told about beats an abandoned one they
-    // are not.
+    // by name here rather than reported as a mysterious failure. The one
+    // exception is DELETING a retired key: VS Code permits removing a key it no
+    // longer knows, and a choice that supersedes an old spelling takes it away
+    // so it cannot fold the new answer back — never given a value, only
+    // removed, and only inside the user's own gesture. Writes keep going after
+    // one fails, exactly as setBranchAndWorktreeFeatures does — a half-written
+    // plan the person is told about beats an abandoned one they are not.
     writeSettings: async (entries) => {
       const declared = new Set<string>(Object.values(CONFIG_KEYS));
+      const retired = new Set<string>(Object.values(LEGACY_KEYS));
       const unwritable: string[] = [];
       for (const entry of entries) {
-        if (!declared.has(entry.key)) {
+        const deletesRetired =
+          retired.has(entry.key) && entry.value === undefined;
+        if (!declared.has(entry.key) && !deletesRetired) {
           logError(
             'extension.writeSettings',
             new Error(`${entry.key} is not a contributed setting`),
@@ -6770,6 +6782,7 @@ export async function activate(
       windowModelChoices({
         mode: cfg().get<string>(CONFIG_KEYS.mode),
         workspacesEnabled: boolCfg(CONFIG_KEYS.workspacesEnabled, true),
+        workspacesAutoSwitch: cfg().get<boolean>(LEGACY_KEYS.workspacesAutoSwitch),
       }).find((c) => c.current)?.label,
 
     menuState: () => ({
@@ -7440,14 +7453,18 @@ export async function activate(
       ) {
         pokeNow();
       }
-      // The status bar's visibility follows the resolved window model, so both
-      // keys `resolveMode` reads have to wake it: the mode itself, and the
-      // deprecated `workspaces.enabled` that still folds a `project` window
-      // down to `flock`. Watching only the mode would leave somebody who
-      // deleted the old key looking at a stale button until their next reload.
+      // The status bar's visibility follows the resolved window model, so every
+      // key `resolveMode` reads has to wake it: the mode itself, the deprecated
+      // `workspaces.enabled` and the retired `workspaces.autoSwitch`, either of
+      // which still folds a `project` window down to `root`. Watching only the
+      // mode would leave somebody who deleted an old key looking at a stale
+      // button until their next reload.
       if (
         e.affectsConfiguration(
           `${CONFIG_SECTION}.${CONFIG_KEYS.workspacesEnabled}`,
+        ) ||
+        e.affectsConfiguration(
+          `${CONFIG_SECTION}.${LEGACY_KEYS.workspacesAutoSwitch}`,
         ) ||
         e.affectsConfiguration(`${CONFIG_SECTION}.${CONFIG_KEYS.mode}`)
       ) {

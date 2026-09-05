@@ -5852,7 +5852,7 @@ describe('the add / import flows', () => {
     infos: string[];
     warnings: string[];
     /** The recommended setup's two side effects, in the order they landed. */
-    settings: { key: string; value: boolean | string }[];
+    settings: { key: string; value: boolean | string | undefined }[];
     installs: string[];
     projectDirs: string[];
   }
@@ -6346,7 +6346,8 @@ describe('the add / import flows', () => {
       // A user carrying `workspaces.enabled: false` is shown as Flock only —
       // which is what their window has always been — and choosing Auto-switch
       // has to write BOTH keys, or `resolveMode` would fold them straight back
-      // with nothing on screen to explain it.
+      // with nothing on screen to explain it. The retired `autoSwitch` key
+      // folds the same way, so the same choice deletes it (value undefined).
       const { deps, calls } = poolDeps({
         world: { ...settledWorld, mode: 'project', workspacesEnabled: false },
       });
@@ -6356,6 +6357,7 @@ describe('the add / import flows', () => {
       expect(calls.settings).toEqual([
         { key: 'mode', value: 'project' },
         { key: 'workspaces.enabled', value: true },
+        { key: 'workspaces.autoSwitch', value: undefined },
       ]);
     });
 

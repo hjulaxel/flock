@@ -20,6 +20,7 @@ import {
   CONFIG_SECTION,
   DONE_COLOR_ID,
   EXTENSION_ID,
+  LEGACY_KEYS,
   PROVIDERS,
   PROVIDER_IDS,
   PROVIDER_MEDIA_DIR,
@@ -212,8 +213,16 @@ describe('scaffold: the shared types contract', () => {
     ];
     // The loop asserting nothing is the failure mode this guards against.
     expect(entries.length).toBeGreaterThan(0);
+    const retired = new Set<string>(Object.values(LEGACY_KEYS));
     for (const { key, value } of entries) {
       const full = `${CONFIG_SECTION}.${key}`;
+      // A retired key is the one thing a choice may name without the manifest
+      // declaring it, and only to DELETE it: the wiring lets that through and
+      // refuses a value, because VS Code does the same.
+      if (retired.has(key)) {
+        expect(value, `${full} may only be deleted`).toBeUndefined();
+        continue;
+      }
       const declared = properties[full];
       expect(declared, `${full} is not a contributed setting`).toBeDefined();
       expect(typeof value, `${full} type`).toBe(declared.type);
