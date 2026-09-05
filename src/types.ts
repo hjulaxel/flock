@@ -1792,18 +1792,15 @@ export const CONFIG_KEYS = {
    *  root). Read fresh on every sync — see ExplorerHost.scope — so flipping it
    *  takes effect on the next switch rather than on the next reload. */
   explorerScope: 'explorer.scope',
-  /** Show the Accounts view. The VERBS stay registered when this is off —
-   *  turning it off means "I do not want a second list in my sidebar", not
-   *  "unregister ten commands so the palette reports them missing". The
-   *  manifest's view contribution matches on `config.lineage.accounts.enabled`,
-   *  which is this key spelled the way a when-clause spells it. */
-  accountsEnabled: 'accounts.enabled',
-  /** Draw Accounts as a SECTION of the Flock container. OFF by default, and
-   *  that default is the reason the bell sits on the FLOCK row: a container
-   *  showing two views gives each of them a header of its own, so every button
-   *  landed a row lower behind an overflow `...`. AND-ed with `accountsEnabled`
-   *  in the view's when-clause — `accountsEnabled` stays the feature's off
-   *  switch, this only decides whether the list is drawn in the sidebar. */
+  /** Draw Accounts as a SECTION of the Flock container — the one switch the
+   *  view has, since `accounts.enabled` folded into it (LEGACY_KEYS). The
+   *  manifest's view contribution matches on `config.lineage.accounts.section`,
+   *  which is this key spelled the way a when-clause spells it. ON by default,
+   *  which is why the bell sits on the SESSIONS row rather than FLOCK: a
+   *  container showing two views gives each of them a header of its own. The
+   *  VERBS stay registered when this is off — turning it off means "I do not
+   *  want a second list in my sidebar", not "unregister ten commands so the
+   *  palette reports them missing". */
   accountsSection: 'accounts.section',
   /** Draw Shells as a section of the Flock container — one row per `Bash`
    *  call a session is running. ON by default, like Accounts. The view's
@@ -1818,6 +1815,30 @@ export const CONFIG_KEYS = {
    *  who has decided in advance that they would rather be asked. Everyone else
    *  gets the verb in the row's menu and no opinions. */
   offerSwitchAtLimit: 'accounts.offerSwitchAtLimit',
+} as const;
+
+/**
+ * Settings the manifest NO LONGER CONTRIBUTES but the source still reads.
+ *
+ * The rule for a retired key: a value somebody still has in settings.json
+ * keeps doing what it did, or does nothing — it never breaks, and it is never
+ * rewritten for them. This extension writes a setting only behind the user's
+ * own gesture; an activation that edits a settings.json nobody asked it to
+ * touch is the alternative that was rejected (see modes.resolveMode), and
+ * Settings Sync would carry such an edit to every machine.
+ *
+ * Kept apart from CONFIG_KEYS on purpose. That table IS the manifest — a test
+ * holds the two to each other in both directions — and the table-driven
+ * setter (`CommandDeps.writeSettings`) refuses anything outside it. A key here
+ * can therefore be read but never written; the one exception is DELETING it,
+ * which VS Code permits for an unregistered key, and which happens only inside
+ * the gesture that states the new answer (the gear's section verbs).
+ */
+export const LEGACY_KEYS = {
+  /** `lineage.accounts.enabled`, folded into `accounts.section`. An explicit
+   *  `false` still keeps the Accounts list from being registered
+   *  (accounts.accountsSectionDrawn); anything else defers to the section. */
+  accountsEnabled: 'accounts.enabled',
 } as const;
 
 /**

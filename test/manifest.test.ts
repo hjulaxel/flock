@@ -19,6 +19,7 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
+import { CONFIG_KEYS, LEGACY_KEYS } from '../src/types';
 import { contributedSettings, settingsCategories } from './manifest';
 
 const ROOT = path.join(__dirname, '..');
@@ -106,6 +107,33 @@ describe('the manifest: what the editor and the generator both read', () => {
       }
     }
     expect(links).toBeGreaterThan(0);
+  });
+});
+
+describe('CONFIG_KEYS is the manifest, and LEGACY_KEYS is what left it', () => {
+  // The same cross-check COMMANDS gets, for the same reason: a key in one
+  // table and not the other is a setting the code reads but the editor never
+  // shows, or a row the editor shows that nothing reads. The table-driven
+  // setter refuses anything outside CONFIG_KEYS, so this is also what keeps a
+  // retired key from being written back into somebody's settings.json.
+  it('names every contributed setting, and nothing else', () => {
+    const contributed = Object.keys(contributedSettings())
+      .map((k) => k.replace(/^lineage\./, ''))
+      .sort();
+    expect([...Object.values(CONFIG_KEYS)].sort()).toEqual(contributed);
+  });
+
+  // A retired key that came back into the manifest would be two tables
+  // answering one question, and a key in both would let writeSettings write
+  // it. Every legacy key still has a reader — that is the only reason to keep
+  // its spelling anywhere — so a dangling entry here is a fold nobody finished.
+  it('keeps the retired keys out of the manifest and out of CONFIG_KEYS', () => {
+    const contributed = new Set(Object.keys(contributedSettings()));
+    const live = new Set<string>(Object.values(CONFIG_KEYS));
+    for (const key of Object.values(LEGACY_KEYS)) {
+      expect(contributed.has(`lineage.${key}`), `${key} is still contributed`).toBe(false);
+      expect(live.has(key), `${key} is still in CONFIG_KEYS`).toBe(false);
+    }
   });
 });
 

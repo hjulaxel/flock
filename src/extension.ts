@@ -60,6 +60,7 @@ import {
   DEFAULT_SESSION_SWITCHING,
   ENV_NODE_ID,
   EXTENSION_ID,
+  LEGACY_KEYS,
   isCloseSummaryMode,
   isProviderId,
   isSessionId,
@@ -249,6 +250,7 @@ import type { ProjectViewController } from './projectview';
 // are joined up — the views and the verbs only ever see the interfaces.
 import {
   accountEnvKeys,
+  accountsSectionDrawn,
   canHandOff,
   canSwitchAccounts,
   configDirForProfile,
@@ -3580,7 +3582,7 @@ export async function activate(
   // routing.ts that neither of the two view layers may import directly.
   //
   // Everything below is wired unconditionally except the VIEW, which
-  // `lineage.accounts.enabled` gates. The verbs stay registered either way:
+  // `lineage.accounts.section` gates. The verbs stay registered either way:
   // turning the view off is "I do not want a second list in my sidebar", not
   // "unregister ten commands so the palette reports them missing".
 
@@ -4216,6 +4218,20 @@ export async function activate(
 
   let accountsViewController: AccountsViewController | undefined;
 
+  /** The retired `lineage.accounts.enabled`, raw. Only a literal `false`
+   *  still means anything (accounts.accountsSectionDrawn). Read fresh on every
+   *  call, so deleting the key by hand takes effect on the next configuration
+   *  event rather than the next reload. */
+  const legacyAccountsEnabled = (): unknown =>
+    cfg().get<unknown>(LEGACY_KEYS.accountsEnabled);
+  /** Whether the Accounts list should be registered: the section switch, with
+   *  the folded key honoured where it still says `false`. */
+  const accountsSectionOn = (): boolean =>
+    accountsSectionDrawn(
+      boolCfg(CONFIG_KEYS.accountsSection, true),
+      legacyAccountsEnabled(),
+    );
+
   const accountDeps: AccountDeps = {
     accounts: () => store.getAccounts(),
     getAccount: (id) => store.getAccount(id),
@@ -4315,9 +4331,18 @@ export async function activate(
     formatUsage: (snapshot) => formatUsageSummary(snapshot),
   };
 
-  if (boolCfg(CONFIG_KEYS.accountsEnabled, true)) {
+  if (accountsSectionOn()) {
     accountsViewController = registerAccountsView(accountDeps);
     context.subscriptions.push(accountsViewController);
+  } else if (legacyAccountsEnabled() === false) {
+    // Said once, here, because the Settings editor no longer can: the key is
+    // gone from the manifest, so nothing else on screen explains why the list
+    // is missing. Only the section key can hide the header now, and only the
+    // user's own gear gesture writes it.
+    log(
+      'accounts: lineage.accounts.enabled is retired but still honoured — it is false here, so the Accounts list is not registered.',
+      'lineage.accounts.section is the switch now; Hide Accounts Section in the gear writes it and clears the old key.',
+    );
   }
 
   // ------------------------------------------------------------ 6c. shells
@@ -6526,6 +6551,21 @@ export async function activate(
           on,
           vscode.ConfigurationTarget.Global,
         );
+        // The same gesture retires the folded key. Whichever way the section
+        // was just set, the new key states the answer now, and an old
+        // `accounts.enabled: false` left beside it would go on hiding a list
+        // the person just asked for. Deleted rather than rewritten — VS Code
+        // permits removing a key it no longer knows — and only here, under
+        // the user's own hand; activation never touches it.
+        if (
+          cfg().inspect(LEGACY_KEYS.accountsEnabled)?.globalValue !== undefined
+        ) {
+          await cfg().update(
+            LEGACY_KEYS.accountsEnabled,
+            undefined,
+            vscode.ConfigurationTarget.Global,
+          );
+        }
       } catch (err) {
         // Same failure mode as the filter above, and the same reason to say so
         // out loud: silently leaving the section where it was would read as a
@@ -7439,18 +7479,23 @@ export async function activate(
         refreshViews();
       }
       // The accounts view is contributed under a `config.` when-clause, so
-      // turning the setting on reveals a view whose provider does not exist yet
-      // — the workbench then renders "no data provider registered" until a
+      // turning the section on reveals a view whose provider does not exist
+      // yet — the workbench then renders "no data provider registered" until a
       // reload. Registering it here on the way up closes that gap. There is no
       // way down: a TreeView cannot be un-registered without leaking the old
-      // one, and the when-clause has already hidden it, so turning the setting
+      // one, and the when-clause has already hidden it, so turning the section
       // off simply leaves an invisible provider that nothing ever resolves.
+      // The retired key is watched too: deleting an old `accounts.enabled:
+      // false` by hand is the other way the answer flips to "draw it".
       if (
-        e.affectsConfiguration(
-          `${CONFIG_SECTION}.${CONFIG_KEYS.accountsEnabled}`,
-        ) &&
+        (e.affectsConfiguration(
+          `${CONFIG_SECTION}.${CONFIG_KEYS.accountsSection}`,
+        ) ||
+          e.affectsConfiguration(
+            `${CONFIG_SECTION}.${LEGACY_KEYS.accountsEnabled}`,
+          )) &&
         accountsViewController === undefined &&
-        boolCfg(CONFIG_KEYS.accountsEnabled, true)
+        accountsSectionOn()
       ) {
         try {
           accountsViewController = registerAccountsView(accountDeps);

@@ -52,7 +52,7 @@ import { log, logError } from './log';
 export const ACCOUNTS_VIEW_ID = 'lineageAccounts';
 
 // The ten account verbs live in `COMMANDS` (types.ts) with every other id, and
-// the setting behind this view is `CONFIG_KEYS.accountsEnabled`. Both were once
+// the setting behind this view is `CONFIG_KEYS.accountsSection`. Both were once
 // local stand-ins here; a private table would have been a set of ids nothing
 // checks, since a test cross-checks `COMMANDS` against the manifest in both
 // directions.

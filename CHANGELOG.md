@@ -60,6 +60,13 @@ All notable changes to Flock are recorded here. The format follows
   fallback, and without them three seconds is the tempo the tree was built
   around; a tuning knob for it was one more row nobody should turn. A value
   left in `settings.json` does nothing.
+- **`lineage.accounts.enabled`**, folded into `lineage.accounts.section`. Both
+  had to be on to draw one view, and only the section had a gear verb; the
+  section setting is the one switch now and its description says what the
+  other used to. An old `accounts.enabled: false` left in `settings.json` is
+  still honoured — the Accounts list is not registered, and the log says so —
+  and either half of the gear's **Show / Hide Accounts Section** pair clears
+  the old key, since after that gesture the section setting states the answer.
 
 ### Changed
 

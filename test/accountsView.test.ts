@@ -795,12 +795,12 @@ describe('package.json — the Accounts surface is wired, not just declared', ()
     const lineageViews = pkg.contributes.views['lineage'] ?? [];
     const accountsView = lineageViews.find((v) => v.id === ACCOUNTS_VIEW_ID);
     expect(accountsView, 'lineageAccounts not under contributes.views.lineage').toBeDefined();
-    expect(accountsView?.when).toContain(CONFIG_KEYS.accountsEnabled);
+    expect(accountsView?.when).toContain(CONFIG_KEYS.accountsSection);
   });
 
-  it('declares lineage.accounts.enabled as a boolean defaulting to true', () => {
-    const prop = contributedSettings()[`lineage.${CONFIG_KEYS.accountsEnabled}`];
-    expect(prop, 'lineage.accounts.enabled not declared').toBeDefined();
+  it('declares lineage.accounts.section as a boolean defaulting to true', () => {
+    const prop = contributedSettings()[`lineage.${CONFIG_KEYS.accountsSection}`];
+    expect(prop, 'lineage.accounts.section not declared').toBeDefined();
     expect(prop?.type).toBe('boolean');
     expect(prop?.default).toBe(true);
   });
