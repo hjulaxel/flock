@@ -6700,16 +6700,6 @@ export async function activate(
       return unwritable;
     },
 
-    // What the gear menu labels itself with. Read here, together, at the moment
-    // the menu opens — the same three facts the `when` clauses this replaced read
-    // off two context keys and one configuration value. `hookState` is the live
-    // record the context key is set from, so the menu and the palette cannot
-    // disagree about whether hooks are installed.
-    // Through `windowModelChoices` rather than off `lineage.mode`, so the gear
-    // menu's sentence and the picker's "(current)" mark come from one function
-    // — and so the legacy `workspaces.enabled` pair is folded by the same
-    // `resolveMode` every gate here runs, which a raw read of the setting would
-    // miss. RAW values in, exactly as `recommendedWorld` hands them over.
     // The Status verb's two binary rows: the same probes every launch makes,
     // with the same settings applied, so a row saying "found at" names the
     // binary a launch would actually run.
@@ -6720,6 +6710,16 @@ export async function activate(
         (cfg().get<string>(CONFIG_KEYS.codexBinary) ?? '').trim() !== '',
     }),
 
+    // What the gear menu labels itself with. Read here, together, at the moment
+    // the menu opens — the same three facts the `when` clauses this replaced read
+    // off two context keys and one configuration value. `hookState` is the live
+    // record the context key is set from, so the menu and the palette cannot
+    // disagree about whether hooks are installed.
+    // Through `windowModelChoices` rather than off `lineage.mode`, so the gear
+    // menu's sentence and the picker's "(current)" mark come from one function
+    // — and so the legacy `workspaces.enabled` pair is folded by the same
+    // `resolveMode` every gate here runs, which a raw read of the setting would
+    // miss. RAW values in, exactly as `recommendedWorld` hands them over.
     windowModel: () =>
       windowModelChoices({
         mode: cfg().get<string>(CONFIG_KEYS.mode),
