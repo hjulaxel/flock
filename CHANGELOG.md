@@ -4,6 +4,50 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **The Shells section shows what is running now, not what was running the
+  last time the roster moved.** Its scan rode the forest-changed event, and the
+  forest is rebuilt only when `claude agents --json` says something different
+  from last time. A session that stays `busy` while it runs one command after
+  another says nothing different, so the section kept showing the command
+  before last — and since its one-second clock only starts once a live row
+  exists, a section with no rows had no way to ever get one until something
+  unrelated happened. The scan now runs on every roster poll, changed or not.
+  Measured cost per idle session per poll: one `stat`.
+
+- **A background job started before the window opened is found.** The first
+  look at a transcript read its last 256 kB and so could not see a dev server
+  started in the session's first minute; the CLI's own indicator kept saying
+  "1 shell running" while the section said nothing. The first look now reads
+  the whole file — 40 ms on the largest transcript on the machine this was
+  measured on, once per session per window — and only what is appended after
+  that.
+
+- **A command waiting for your permission does not spin.** The CLI writes the
+  call to the transcript before it asks, so an unanswered call in a session the
+  roster reports blocked is the one the prompt is about, not one executing.
+  Such a row now wears the shield glyph, says *awaiting approval* with how long
+  the prompt has been sitting there, and stays out of the running count.
+  Measured across the denials on this machine, the old spinner would have run
+  for a median of 22 seconds on nothing.
+
+- **A command whose session died under it does not run forever.** Two of the
+  30 214 `Bash` calls in the transcripts here have no result: their sessions
+  crashed mid-command and were resumed. The API refuses a new assistant turn
+  while a call is unanswered, so a later turn is proof the call ended; the
+  parser now settles on it.
+
+### Changed
+
+- **The Shells section lists running commands only.** Finished ones — exit
+  codes, denials, the hundred `git status` rows — are gone from it; what ran is
+  in the conversation, and what is running is the thing nothing else shows.
+  The section is now the CLI's own "1 shell running" indicator across every
+  session, with the command, a clock, and Open Output on a background job.
+
 ## [0.1.10] — 2026-08-31
 
 ### Fixed

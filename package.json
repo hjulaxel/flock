@@ -1677,7 +1677,7 @@
       },
       {
         "view": "lineageShells",
-        "contents": "Claude has not run anything yet.\n[New Session](command:lineage.newSession)\nThis lists the commands your sessions RUN — every `Bash` call Claude makes, with the ones executing right now at the top and a clock on each. Background jobs stay listed until they finish, which is the one thing in a Claude session that is otherwise easy to lose track of.\nIt covers every live session on this machine, not just this window's. Click a row to jump to the conversation that started it."
+        "contents": "Nothing is running.\n[New Session](command:lineage.newSession)\nThis lists the commands your sessions are running right now — every `Bash` call Claude has started and not yet got back from, with a clock on each, and every background job until it finishes, which is the one thing in a Claude session that is otherwise easy to lose track of. A command that ends leaves the list.\nIt covers every live session on this machine that Flock lists, not just this window's. Click a row to jump to the conversation that started it."
       }
     ],
     "configuration": {
@@ -1945,7 +1945,7 @@
         "lineage.shells.section": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Draw **Shells** as a section of the Flock sidebar: one row per command your sessions actually run — every `Bash` call Claude makes, with the ones executing right now pinned to the top and a live clock on each. Failed runs show their exit code, refused ones say they never ran, and a backgrounded job stays on the list until it finishes, with **Open Output** on its menu for the file the CLI is writing its stdout to.\n\nIt ships collapsed, and the section's badge counts what is running — so a script that is still going is visible without opening it.\n\n**Every live session on this machine**, not only this window's: the facts come from the transcripts on disk, so a command running in a session another window launched is a row here like any other. Clicking a row focuses the conversation that started it.\n\nLike **Accounts**, drawing a second section moves Flock's top-bar buttons down onto the **SESSIONS** row; see `lineage.accounts.section`."
+          "markdownDescription": "Draw **Shells** as a section of the Flock sidebar: the commands your sessions are running right now — every `Bash` call Claude has started and not yet got back from, with a live clock on each, and every backgrounded job until it finishes, with **Open Output** on its menu for the file the CLI is writing its stdout to. A command that ends leaves the list: this is the CLI's own running-shell indicator, across every session at once, not a history. A command waiting for your permission is listed too, marked as awaiting approval, and is not counted as running.\n\nIt ships collapsed, and the section's badge counts what is running — so a script that is still going is visible without opening it.\n\n**Every live session on this machine** that Flock lists, not only this window's: the facts come from the transcripts on disk, so a command running in a session another window launched is a row here like any other. Clicking a row focuses the conversation that started it.\n\nLike **Accounts**, drawing a second section moves Flock's top-bar buttons down onto the **SESSIONS** row; see `lineage.accounts.section`."
         },
         "lineage.accounts.offerSwitchAtLimit": {
           "type": "boolean",

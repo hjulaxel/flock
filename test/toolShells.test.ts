@@ -604,3 +604,145 @@ describe('ShellRunsTracker', () => {
     expect(tracker.update(ref)).toHaveLength(1);
   });
 });
+
+// ------------------------------------------------------- the orphan guard
+
+/** An assistant record of message `messageId` with a text block and no call —
+ *  the next turn, as the CLI writes it. */
+function say(messageId: string, text: string, at = T1): string {
+  return JSON.stringify({
+    type: 'assistant',
+    timestamp: at,
+    message: { id: messageId, content: [{ type: 'text', text }] },
+  });
+}
+
+/** `ask`, stamped with the API message id every real record carries. */
+function askIn(messageId: string, id: string, command: string, at = T0): string {
+  const rec = JSON.parse(ask(id, command, { at })) as {
+    message: Record<string, unknown>;
+  };
+  rec.message['id'] = messageId;
+  return JSON.stringify(rec);
+}
+
+describe('a call the conversation moved on from', () => {
+  // Two of the 30 214 Bash calls on the machine this was written on have no
+  // result: their sessions died under them and were resumed. The API refuses
+  // a new assistant turn while a call is unanswered, so the next turn is the
+  // proof that it ended.
+  it('is settled by an assistant record of a LATER message', () => {
+    const run = only([askIn('msg_1', 'toolu_1', 'npm test'), say('msg_2', 'Done.')]);
+    expect(run.outcome).toBe('failed');
+    expect(run.endedAt).toBe(MS1);
+    expect(run.reason).toMatch(/moved on/);
+  });
+
+  // One turn lands as one record per content block, all sharing message.id —
+  // a turn that fires four commands writes four records while all four run.
+  it('is NOT settled by another block of the same message', () => {
+    const runs = parseShellRuns(
+      [
+        askIn('msg_1', 'toolu_1', 'npm test'),
+        askIn('msg_1', 'toolu_2', 'npm run lint'),
+        JSON.stringify({
+          type: 'assistant',
+          timestamp: T0,
+          message: { id: 'msg_1', content: [{ type: 'text', text: 'Running both.' }] },
+        }),
+      ].join('\n'),
+      SESSION,
+    );
+    expect(runs.map((r) => r.outcome)).toEqual(['running', 'running']);
+  });
+
+  // A sub-agent's records interleave with the conversation's; neither chain
+  // proves anything about the other.
+  it('is NOT settled by the other chain', () => {
+    const sub = JSON.parse(askIn('msg_9', 'toolu_sub', 'pytest')) as Record<string, unknown>;
+    sub['isSidechain'] = true;
+    const runs = parseShellRuns(
+      [askIn('msg_1', 'toolu_main', 'npm test'), JSON.stringify(sub), say('msg_2', 'Next.')].join(
+        '\n',
+      ),
+      SESSION,
+    );
+    const byId = new Map(runs.map((r) => [r.id, r.outcome]));
+    expect(byId.get('toolu_main')).toBe('failed'); // same chain, later message
+    expect(byId.get('toolu_sub')).toBe('running'); // other chain, untouched
+  });
+
+  // A record without a message id — the synthetic kind above, or a build that
+  // stops writing one — proves nothing and settles nothing.
+  it('is left alone when either record has no message id', () => {
+    expect(only([ask('toolu_1', 'ls'), say('msg_2', 'Done.')]).outcome).toBe('running');
+    const runs = parseShellRuns(
+      [
+        askIn('msg_1', 'toolu_1', 'ls'),
+        JSON.stringify({
+          type: 'assistant',
+          timestamp: T1,
+          message: { content: [{ type: 'text', text: 'Done.' }] },
+        }),
+      ].join('\n'),
+      SESSION,
+    );
+    expect(runs[0]?.outcome).toBe('running');
+  });
+
+  it('does not touch a background job — its end is the notice, not the next turn', () => {
+    const runs = parseShellRuns(
+      [
+        askIn('msg_1', 'toolu_bg', 'npm run dev'),
+        answer('toolu_bg', {
+          content: 'Command running in background with ID: bg1. Output is being written to: /tmp/bg1.output.',
+          toolUseResult: { backgroundTaskId: 'bg1' },
+        }),
+        say('msg_2', 'The server is up.'),
+      ].join('\n'),
+      SESSION,
+    );
+    expect(runs[0]?.outcome).toBe('background');
+  });
+});
+
+// --------------------------------------------------- the first look reads it all
+
+describe('ShellRunsTracker — the first look', () => {
+  function fakeFs(text: string) {
+    return {
+      statSync: () => ({ size: Buffer.byteLength(text) }),
+      openSync: () => 1,
+      readSync: (_fd: number, buf: Buffer, off: number, len: number, pos: number) =>
+        Buffer.from(text).copy(buf, off, pos, pos + len),
+      closeSync: () => undefined,
+    } as unknown as ConstructorParameters<typeof ShellRunsTracker>[0];
+  }
+
+  // The scenario the tail-seeded first draft got wrong: a dev server started
+  // in the session's first minute, a megabyte of conversation on top of it,
+  // and a window reload. The CLI's indicator said "1 shell running"; the
+  // section said nothing, because the job's record was above its window.
+  it('finds a background job started a megabyte before the end of the file', () => {
+    const filler = JSON.stringify({
+      type: 'user',
+      timestamp: T1,
+      message: { content: [{ type: 'text', text: 'x'.repeat(4_000) }] },
+    });
+    const lines = [
+      askIn('msg_1', 'toolu_server', 'npm run dev'),
+      answer('toolu_server', {
+        content: 'Command running in background with ID: srv. Output is being written to: /tmp/srv.output.',
+        toolUseResult: { backgroundTaskId: 'srv' },
+      }),
+      ...Array.from({ length: 300 }, () => filler), // ~1.2 MB
+      askIn('msg_2', 'toolu_late', 'git status'),
+      answer('toolu_late'),
+    ];
+    const tracker = new ShellRunsTracker(fakeFs(lines.join('\n') + '\n'));
+    const runs = tracker.update({ id: SESSION, transcriptPath: '/fake/t.jsonl' });
+    const server = runs.find((r) => r.id === 'toolu_server');
+    expect(server?.outcome).toBe('background');
+    expect(server?.outputFile).toBe('/tmp/srv.output');
+  });
+});

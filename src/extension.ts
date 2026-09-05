@@ -692,6 +692,14 @@ export async function activate(
   const resolver = new LineageResolver();
   const onForestChanged = new vscode.EventEmitter<void>();
   context.subscriptions.push(onForestChanged);
+  /** Every successful roster poll, whether or not the roster moved. The
+   *  forest event above fires only on a CHANGE — a rebuild is not free — and
+   *  most of what the Shells view watches happens without one: a session that
+   *  stays `busy` while it runs one command after another looks identical to
+   *  the roster from first to last. That view reads transcripts on this
+   *  heartbeat instead. */
+  const onRosterTick = new vscode.EventEmitter<void>();
+  context.subscriptions.push(onRosterTick);
 
   // VIEW SUSPENSION. A workspace switch closes a batch of tabs,
   // disposes a terminal per parked session and writes a record for each one —
@@ -4359,18 +4367,27 @@ export async function activate(
         label: node.label,
         transcriptPath: file,
         ...(node.cwd === undefined ? {} : { cwd: node.cwd }),
+        // Blocked at a prompt: an unanswered command in this session is the
+        // one being asked about, not one executing. See ShellSessionInfo.
+        ...(node.status === 'waiting' ? { waiting: true } : {}),
       });
     }
     return out;
   };
   const shellsViewController = registerShellsView({
     sessions: shellSessions,
-    // The roster tick, which is also what rebuilds the forest — so the scan
-    // for new commands rides the extension's existing heartbeat rather than
-    // adding a timer of its own. The view starts its own one-second clock on
-    // top of this only while something is actually running and on screen.
+    // The roster tick — EVERY tick, not only the ones that changed the forest,
+    // because a busy session's next command changes nothing the roster can
+    // see — so the scan rides the extension's existing heartbeat rather than
+    // adding a timer of its own. The forest event is kept alongside for the
+    // things the tick does not carry: a session appearing, a rename, a cwd.
+    // The view starts its own one-second clock on top of this only while it
+    // has rows and is on screen.
     onDidChange: (listener) => {
-      const subs = [onForestChanged.event(() => listener())];
+      const subs = [
+        onRosterTick.event(() => listener()),
+        onForestChanged.event(() => listener()),
+      ];
       return {
         dispose(): void {
           for (const sub of subs) {
@@ -7281,6 +7298,11 @@ export async function activate(
     // expires any other window's next publish deletes the record AND nulls
     // boundWindowId on every session bound here. Self-throttled to hours.
     void focusIntegration.refreshPublication();
+
+    // Before the change check, on purpose: the Shells view's scan rides this,
+    // and the ticks on which nothing in the roster moved are exactly the ones
+    // on which a busy session started its next command.
+    onRosterTick.fire();
 
     if (!changed) return;
     void scheduleRebuild(r.entries);

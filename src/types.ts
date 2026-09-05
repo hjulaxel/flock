@@ -2874,6 +2874,11 @@ export type ContextToken =
   | 'ok'
   | 'failed'
   | 'denied'
+  /** A `running` row whose session the roster reports blocked: the call is
+   *  unanswered because a permission prompt is asking about it, not because
+   *  it is executing. Drawn without the spinner and kept out of the running
+   *  count. See shellsView.ShellRow.awaiting. */
+  | 'awaiting'
   /** This run has an OUTPUT FILE on disk — a backgrounded command, whose
    *  stdout the CLI is writing somewhere readable. The one row-level fact with
    *  an action attached (Open Output), so it gets a token rather than being
