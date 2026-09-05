@@ -1,11 +1,14 @@
 // test/manifest.test.ts — the manifest is the one source of truth for the
 // settings, and docs/settings.md is rendered from it.
 //
-// `contributes.configuration` is what the Settings editor draws, and since
-// step C it is also what scripts/settings-doc.mjs renders into the table
-// between two markers in docs/settings.md. The generator is dependency-free
-// Node that runs outside vitest, so this suite checks its OUTPUT rather than
-// its code: the markers are in the doc, every setting has exactly one row
+// `contributes.configuration` is what the Settings editor draws, and it is
+// also what scripts/settings-doc.mjs renders into the table between two
+// markers in docs/settings.md. Two readers, one record: the first suite holds
+// the record to what both need from every row — an order to sort by, one label
+// and one sentence per enum value to pair by index, a `#lineage.x#` link that
+// lands on a key that exists — and the second checks the generator's OUTPUT
+// rather than its code, since it is dependency-free Node that runs outside
+// vitest: the markers are in the doc, every setting has exactly one row
 // between them, the summary line's counts agree with a fresh count of the
 // manifest, and `--check` — the gate the release runs — passes on the
 // committed doc. A hand edit between the markers, a manifest edit without a
@@ -16,7 +19,7 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-import { contributedSettings } from './manifest';
+import { contributedSettings, settingsCategories } from './manifest';
 
 const ROOT = path.join(__dirname, '..');
 const DOC = path.join(ROOT, 'docs', 'settings.md');
@@ -33,6 +36,78 @@ function generatedBlock(): string {
   expect(end, `docs/settings.md carries ${END}`).toBeGreaterThan(start);
   return doc.slice(start + START.length, end);
 }
+
+describe('the manifest: what the editor and the generator both read', () => {
+  // test/settingsEditor.test.ts pins the stricter shape the editor wants
+  // (1..n inside each category). The generator needs less — a number on every
+  // row — but needs it on EVERY row: `sort` on a missing order is a table in
+  // manifest order, which is the historical order the categories exist to end.
+  it('gives every property a numeric order', () => {
+    for (const [key, p] of Object.entries(contributedSettings())) {
+      expect(typeof p.order, `${key} order`).toBe('number');
+      expect(Number.isInteger(p.order), `${key} order is an integer`).toBe(true);
+    }
+  });
+
+  // The generator pairs value i with label i and the editor pairs value i with
+  // description i, so a list one short is a value with the wrong words beside
+  // it on both surfaces, not a missing one.
+  it('gives every enum as many labels and descriptions as values', () => {
+    let enums = 0;
+    for (const [key, p] of Object.entries(contributedSettings())) {
+      if (p.enum === undefined) continue;
+      enums += 1;
+      expect(p.enumItemLabels, `${key} enumItemLabels`).toHaveLength(p.enum.length);
+      expect(p.enumDescriptions, `${key} enumDescriptions`).toHaveLength(p.enum.length);
+    }
+    expect(enums).toBeGreaterThan(0);
+  });
+
+  // A superseded key is either the legacy half of the window model, which
+  // belongs beside `lineage.mode` so the struck-through row and its
+  // replacement are read together, or an advanced row on its way out. Anywhere
+  // else it is a deprecated setting among the preferences a first-time reader
+  // is meant to be able to read without it.
+  it('keeps every deprecated key in Window or among the advanced rows', () => {
+    let deprecated = 0;
+    for (const category of settingsCategories()) {
+      for (const [key, p] of Object.entries(category.properties)) {
+        if (p.deprecationMessage === undefined && p.markdownDeprecationMessage === undefined) {
+          continue;
+        }
+        deprecated += 1;
+        const placed = category.title === 'Window' || (p.tags?.includes('advanced') ?? false);
+        expect(placed, `${key} is deprecated in ${category.title} without the advanced tag`).toBe(
+          true,
+        );
+      }
+    }
+    expect(deprecated).toBeGreaterThan(0);
+  });
+
+  // `#lineage.x#` is the editor's link syntax and the generator's cue to
+  // backtick the key. Neither checks the target: the editor renders a dead
+  // link and the doc a key that is not in its own tables. The deprecation
+  // messages and the per-value sentences are scanned too — they are markdown
+  // the editor renders the same way.
+  it('links only to settings that exist', () => {
+    const settings = contributedSettings();
+    const keys = new Set(Object.keys(settings));
+    let links = 0;
+    for (const [key, p] of Object.entries(settings)) {
+      const text = [
+        p.markdownDescription ?? '',
+        p.markdownDeprecationMessage ?? '',
+        ...(p.enumDescriptions ?? []),
+      ].join('\n');
+      for (const match of text.matchAll(/#(lineage\.[\w.]+)#/g)) {
+        links += 1;
+        expect(keys.has(match[1] as string), `${key} links to ${match[1]}`).toBe(true);
+      }
+    }
+    expect(links).toBeGreaterThan(0);
+  });
+});
 
 describe('docs/settings.md is generated from the manifest', () => {
   it('carries both markers, start before end, and one of each', () => {

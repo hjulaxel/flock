@@ -1,6 +1,6 @@
 ## Turn on the parts that are off
 
-Flock ships fifty-one settings and seventeen of them are off. They are not
+Flock ships dozens of settings, and a good many of them are off. They are not
 all off for the same reason, and that is the thing worth knowing:
 
 - **Two are off because turning them on writes files in your home directory.**

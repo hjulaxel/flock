@@ -333,3 +333,9 @@ plan.
   manifest still happens in step D.
 - Settings are written only on a user gesture — never on activation, never
   on a timer. Restated here because every later step depends on it.
+- **§6 step 2 landed as `scripts/settings-doc.mjs`** (step C), which renders
+  `contributes.configuration` into `docs/settings.md` between two markers,
+  with `npm run docs:check` as a test and a release gate. The walkthrough's
+  and README's counts were made numberless rather than generated: a count a
+  script rewrites is still a number the prose asks a reader to trust, and the
+  one place the numbers now live is the generated summary line.

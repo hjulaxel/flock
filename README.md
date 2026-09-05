@@ -131,7 +131,7 @@ chats, and much more.
   the tab as before. Needs tmux; `lineage.exitToShell` turns it off.
   [Details →](docs/reference.md#exit-leaves-you-at-a-shell)
 
-- **A recommended setup, that says why.** Seventeen of Flock's settings ship
+- **A recommended setup, that says why.** A good many of Flock's settings ship
   off, and they are not off for the same reason: two of them — instant updates
   and the in-session verbs — are off only because turning them on writes files
   in your home directory, four of them *are* the clean slate below, and the rest
@@ -271,7 +271,7 @@ this release.
 
 ## Documentation
 
-- **[Settings](docs/settings.md)** — all 51, with defaults.
+- **[Settings](docs/settings.md)** — every setting, with its default.
 - **[Reference](docs/reference.md)** — how it works, projects, subprojects,
   notifications, workspaces, close vs archive, naming, the sidebar rendering
   modes, and what you get alongside the Claude Code extension.

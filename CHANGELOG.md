@@ -45,6 +45,18 @@ All notable changes to Flock are recorded here. The format follows
   Palette under **Flock**. Hiding the section hides a list, nothing more: the
   commands your sessions run are untouched.
 
+### Changed
+
+- **One description per setting.** `docs/settings.md` used to carry a
+  hand-kept table beside the descriptions `package.json` already holds for the
+  Settings editor, and the two drifted: the table ran short, its header quoted
+  a count from three settings ago. The table is now generated from the manifest
+  by `npm run docs:settings` — one table per category, in the editor's order,
+  each dropdown's values beside the words the editor shows for them, advanced
+  and deprecated rows marked — and `npm run docs:check` gates the release on it
+  being current. The README, the walkthrough and the settings page stop quoting
+  a settings count that the next removal would have made wrong.
+
 ## [0.1.10] — 2026-08-31
 
 ### Fixed
