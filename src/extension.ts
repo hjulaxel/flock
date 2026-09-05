@@ -7000,6 +7000,16 @@ export async function activate(
           'workbench.action.openWalkthrough',
           WALKTHROUGH_REF,
         );
+        // ONE DOOR. The walkthrough's second step offers the checklist the
+        // recommended-setup toast below would offer, so on the launch that
+        // opened the page the toast is stamped as shown rather than fired a
+        // few seconds later on top of it — the same offer twice is a first
+        // impression worth avoiding. Stamped AFTER the open, so a page that
+        // failed to open leaves the toast as the fallback door; and stamped
+        // for good, because this install has now been shown the offer, by the
+        // page. The toast stays for the install the page never opens for: an
+        // upgrade with no projects and two things left to turn on.
+        await context.globalState.update(RECOMMENDED_NOTICE_KEY, true);
       } catch (err) {
         logError('walkthrough.frontDoor', err);
       }
@@ -7015,7 +7025,10 @@ export async function activate(
   //
   // It is deliberately hard to trigger: a tree with NO PROJECTS and at least
   // two things left to turn on. That is a first launch, or near enough, and it
-  // is the one state where the sidebar has nothing else to say.
+  // is the one state where the sidebar has nothing else to say — except on the
+  // genuinely fresh install, where the walkthrough above has already opened
+  // and stamped this key: the page is the one door, and this toast is for the
+  // upgrade the page never opens for.
   const recommendedNoticeShown = (): boolean =>
     context.globalState.get<boolean>(RECOMMENDED_NOTICE_KEY) === true;
   setTimeout(() => {

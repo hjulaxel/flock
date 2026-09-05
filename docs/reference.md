@@ -48,10 +48,13 @@ Four rules it keeps:
 
 It is also **offered once, unprompted**, a few seconds after a window opens —
 but only on a tree with no projects at all and at least two things left to turn
-on, which is a first launch or near enough. Answering it either way is the end
-of it; dismissing it with the X asks again next time. The same shape as the tmux
-and branch-row notices, and whichever of them fires suppresses the others for
-that session.
+on, which is a first launch or near enough, and never on the launch that opened
+the walkthrough: a genuinely fresh install gets the walkthrough as its one front
+door, and the walkthrough's second step is this same checklist, so the toast is
+stamped as shown rather than stacked on top of the page. Answering it either way
+is the end of it; dismissing it with the X asks again next time. The same shape
+as the tmux and branch-row notices, and whichever of them fires suppresses the
+others for that session.
 
 ## How it works
 

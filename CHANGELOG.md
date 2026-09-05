@@ -99,6 +99,12 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Changed
 
+- **One front door on a fresh install.** A genuinely fresh install — no
+  projects, no session records — opens the walkthrough, as before; it no longer
+  also gets the recommended-setup toast a few seconds later, because the
+  walkthrough's second step is that same checklist. The toast still fires,
+  once, for the install the walkthrough never opens for: an upgrade with no
+  projects and two things left to turn on.
 - **The recommended setup asks four things.** Instant updates, the in-session
   verbs, your first project, and your history (when this machine has some) —
   the consent items and the two that put rows on the tree, all pre-ticked,
