@@ -1976,7 +1976,7 @@
         "lineage.runningBadge": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "Show the number of **running** sessions as a badge on the Flock icon in the activity bar.\n\nOff by default. The count is real and worth being able to see \u2014 \"no running process without a visible row\" is only an invariant you can trust if the processes are counted somewhere \u2014 but it changes every few seconds, and a number moving in the corner of your eye with nothing to do about it is not the same as information. The tree already says everything it does, in rows you can click."
+          "markdownDescription": "Show the number of **running** sessions as a badge on the Flock icon in the activity bar.\n\nOff by default. The count is real and worth being able to see — \"no running process without a visible row\" is only an invariant you can trust if the processes are counted somewhere — but it changes every few seconds, and a number moving in the corner of your eye with nothing to do about it is not the same as information. The tree already says everything it does, in rows you can click."
         },
         "lineage.showTokens": {
           "type": "boolean",
@@ -1994,7 +1994,7 @@
             "type": "string"
           },
           "default": [],
-          "markdownDescription": "Read only by `#lineage.git.branchDisplay#`'s `color` mode; `inline` tints nothing. Colours for the branch chips, in order — index 0 is the first branch under a project (usually `main`). Each entry is either a hex colour (`#7aa2f7`) or a VS Code theme colour id (`charts.blue`, `terminal.ansiCyan`). A short list fills the rest from the built-in muted palette; anything that is not one of those two shapes is ignored. Empty = the built-in palette, which is the **Source Control Graph's own branch colours** (`scmGraph.foreground1`\u20135), softened toward the editor foreground so the chips do not out-shout the status dots \u2014 so a branch reads as the same colour here and in the SCM view, and a theme that restyles the graph restyles these too."
+          "markdownDescription": "Read only by `#lineage.git.branchDisplay#`'s `color` mode; `inline` tints nothing. Colours for the branch chips, in order — index 0 is the first branch under a project (usually `main`). Each entry is either a hex colour (`#7aa2f7`) or a VS Code theme colour id (`charts.blue`, `terminal.ansiCyan`). A short list fills the rest from the built-in muted palette; anything that is not one of those two shapes is ignored. Empty = the built-in palette, which is the **Source Control Graph's own branch colours** (`scmGraph.foreground1`–5), softened toward the editor foreground so the chips do not out-shout the status dots — so a branch reads as the same colour here and in the SCM view, and a theme that restyles the graph restyles these too."
         },
         "lineage.git.pullRequests": {
           "type": "boolean",
@@ -2040,12 +2040,12 @@
         "lineage.git.newSessionInWorktree": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "The **`+` on a project row** cuts a **new worktree** first and starts the session there \u2014 one root session, one checkout, which is what keeps two sessions from ever switching branch under each other. The branch is minted from the session's name (`flock 3` \u2192 `flock-3`, with `#lineage.git.branchPrefix#` in front when set) and recorded as Flock's own, which is what later earns it the delete offer in **Remove Worktree**.\n\nNo dialog: `git worktree add -b` creates a directory and a fresh ref and touches nothing that exists \u2014 the status-bar receipt names both, and a project without a readable repository falls back to a plain session in the directory.\n\nTurn it **off** to make `+` start sessions in the project directory as before; **New Worktree\u2026** stays on the right-click either way, and `#lineage.git.worktreePath#` decides where the checkout goes. Does not need `#lineage.git.branches#` on."
+          "markdownDescription": "The **`+` on a project row** cuts a **new worktree** first and starts the session there — one root session, one checkout, which is what keeps two sessions from ever switching branch under each other. The branch is minted from the session's name (`flock 3` → `flock-3`, with `#lineage.git.branchPrefix#` in front when set) and recorded as Flock's own, which is what later earns it the delete offer in **Remove Worktree**.\n\nNo dialog: `git worktree add -b` creates a directory and a fresh ref and touches nothing that exists — the status-bar receipt names both, and a project without a readable repository falls back to a plain session in the directory.\n\nTurn it **off** to make `+` start sessions in the project directory as before; **New Worktree…** stays on the right-click either way, and `#lineage.git.worktreePath#` decides where the checkout goes. Does not need `#lineage.git.branches#` on."
         },
         "lineage.git.branchPrefix": {
           "type": "string",
           "default": "",
-          "markdownDescription": "What minted branch names start with \u2014 `axel/` puts every branch the `+` creates under your own namespace, the Claude Squad convention (`axel/flock-3`). Applies only where Flock names a branch itself; names typed into **New Worktree\u2026** are yours and get no prefix. Slashes make hierarchy; anything a ref cannot carry is replaced by `-`. Blank (the default) contributes nothing."
+          "markdownDescription": "What minted branch names start with — `axel/` puts every branch the `+` creates under your own namespace, the Claude Squad convention (`axel/flock-3`). Applies only where Flock names a branch itself; names typed into **New Worktree…** are yours and get no prefix. Slashes make hierarchy; anything a ref cannot carry is replaced by `-`. Blank (the default) contributes nothing."
         },
         "lineage.preview.directoryModel": {
           "type": "boolean",
@@ -2128,11 +2128,13 @@
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit -p . && tsc --noEmit -p tsconfig.test.json",
     "release": "node scripts/release.mjs",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:smoke": "node test/smoke/run.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
     "@types/vscode": "~1.94.0",
+    "@vscode/test-electron": "^3.1.0",
     "esbuild": "^0.25.0",
     "typescript": "^5.5.4",
     "vitest": "^2.1.9"
