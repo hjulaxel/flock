@@ -20,7 +20,6 @@
 // own refusal ("contains modified or untracked files, use --force to delete it")
 // which is the boundary the second confirmation stands at.
 
-import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -51,8 +50,7 @@ import {
   worktreeRemoveArgv,
 } from '../src/worktrees';
 import type { BranchStatus, GitCommandResult } from '../src/types';
-
-const ROOT = path.join(__dirname, '..');
+import { contributedSettings } from './manifest';
 
 const status = (over: Partial<BranchStatus> = {}): BranchStatus => ({
   ahead: 0,
@@ -146,14 +144,9 @@ describe('worktreePathFor', () => {
     // Two copies of a default is one copy too many; this is the cross-check that
     // keeps them equal. The pure builder cannot ask a workspace configuration
     // for it, which is why the constant exists at all.
-    const pkg = JSON.parse(
-      fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'),
-    ) as {
-      contributes: { configuration: { properties: Record<string, { default?: unknown }> } };
-    };
-    expect(
-      pkg.contributes.configuration.properties['lineage.git.worktreePath']?.default,
-    ).toBe(DEFAULT_WORKTREE_PATH_PATTERN);
+    expect(contributedSettings()['lineage.git.worktreePath']?.default).toBe(
+      DEFAULT_WORKTREE_PATH_PATTERN,
+    );
   });
 
   it('resolves a relative pattern against the repository, not the process', () => {

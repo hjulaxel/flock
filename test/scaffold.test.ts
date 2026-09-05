@@ -41,6 +41,7 @@ import {
   windowModelChoices,
 } from '../src/recommend';
 import { branchStateIcon } from '../src/viewmodel';
+import { contributedSettings } from './manifest';
 
 const ROOT = path.join(__dirname, '..');
 const FIXTURE_DIR = path.join(__dirname, 'fixtures', 'transcripts');
@@ -149,14 +150,7 @@ describe('scaffold: the shared types contract', () => {
   // unwritable — and an `off` value that is not the shipped default turns the
   // Hide half into a verb that leaves the tree somewhere nobody asked for.
   it('turns the branch feature on and off against settings that exist', () => {
-    const pkg = JSON.parse(
-      fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'),
-    ) as {
-      contributes: {
-        configuration: { properties: Record<string, { default?: unknown }> };
-      };
-    };
-    const properties = pkg.contributes.configuration.properties;
+    const properties = contributedSettings();
     expect(BRANCH_FEATURE_SWITCHES.length).toBe(4);
     for (const { key, on, off } of BRANCH_FEATURE_SWITCHES) {
       const full = `${CONFIG_SECTION}.${key}`;
@@ -183,19 +177,7 @@ describe('scaffold: the shared types contract', () => {
   // has to differ from the world it was offered in, which is `recommendedPlan`'s
   // own condition and is pinned in test/recommend.test.ts.
   it('recommends settings that exist, and values those settings accept', () => {
-    const pkg = JSON.parse(
-      fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'),
-    ) as {
-      contributes: {
-        configuration: {
-          properties: Record<
-            string,
-            { default?: unknown; type?: string; enum?: unknown[] }
-          >;
-        };
-      };
-    };
-    const properties = pkg.contributes.configuration.properties;
+    const properties = contributedSettings();
     // A world in which every settings-bearing step is on offer at once: tmux
     // installed but switched off, and a repository with more than one checkout
     // whose rows are not drawn.
@@ -255,12 +237,7 @@ describe('scaffold: the shared types contract', () => {
   // behind after a merge brought the other branch's in. Two documents claiming a
   // count means two documents to hold to it.
   it('documents every contributed setting in docs/settings.md, and counts them right', () => {
-    const pkg = JSON.parse(
-      fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'),
-    ) as {
-      contributes: { configuration: { properties: Record<string, unknown> } };
-    };
-    const contributed = Object.keys(pkg.contributes.configuration.properties);
+    const contributed = Object.keys(contributedSettings());
     const doc = fs.readFileSync(path.join(ROOT, 'docs', 'settings.md'), 'utf8');
     // Read ONLY the settings table, not every line in the file that happens to
     // look like one. The document has a second table further down — the

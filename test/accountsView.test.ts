@@ -45,6 +45,7 @@ import {
 } from '../src/accountsView';
 import type { AccountDeps, AccountRow } from '../src/accountsView';
 import { COMMANDS, CONFIG_KEYS, PROVIDER_MEDIA_DIR } from '../src/types';
+import { contributedSettings } from './manifest';
 import type {
   AccountProfile,
   LimitsReader,
@@ -778,9 +779,6 @@ interface PackageJson {
     views: Record<string, Array<{ id: string; when?: string }>>;
     commands: Array<{ command: string }>;
     menus: Record<string, Array<{ command?: string; when?: string }>>;
-    configuration: {
-      properties: Record<string, { type?: string; default?: unknown }>;
-    };
     viewsWelcome: Array<{ view: string; contents: string }>;
   };
 }
@@ -801,11 +799,7 @@ describe('package.json — the Accounts surface is wired, not just declared', ()
   });
 
   it('declares lineage.accounts.enabled as a boolean defaulting to true', () => {
-    const pkg = readPackageJson();
-    const prop =
-      pkg.contributes.configuration.properties[
-        `lineage.${CONFIG_KEYS.accountsEnabled}`
-      ];
+    const prop = contributedSettings()[`lineage.${CONFIG_KEYS.accountsEnabled}`];
     expect(prop, 'lineage.accounts.enabled not declared').toBeDefined();
     expect(prop?.type).toBe('boolean');
     expect(prop?.default).toBe(true);

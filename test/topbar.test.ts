@@ -40,6 +40,7 @@ import type {
   SessionNode,
 } from '../src/types';
 import * as vscodeMock from './mocks/vscode';
+import { contributedSettings } from './manifest';
 
 const ROOT = path.join(__dirname, '..');
 
@@ -1043,13 +1044,7 @@ describe('manifest: the Accounts section, and the row it costs', () => {
   // reads, or turning it off would silently do nothing for everyone who has ever
   // opened the sidebar.
   it('ships the section on by default', () => {
-    const props = (
-      pkg as unknown as {
-        contributes: {
-          configuration: { properties: Record<string, { default?: unknown }> };
-        };
-      }
-    ).contributes.configuration.properties;
+    const props = contributedSettings();
     expect(props['lineage.accounts.section'].default).toBe(true);
     expect(props['lineage.accounts.enabled'].default).toBe(true);
   });
