@@ -4,6 +4,21 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **The README says what each platform gets.** A Platforms section carries the
+  per-OS table: what native Windows loses without tmux, that opening the project
+  through WSL gives it the full tier, and that a Snap or Flatpak editor hides
+  your `PATH`, so `lineage.claudeBinary` has to be set there. The tmux install
+  block gained openSUSE, Alpine and Nix. **Install Instant-Update Hooks…** and
+  **Install In-Session Verbs…** no longer appear in the Command Palette on
+  Windows, where all they could do was refuse. **Reveal Worktree in Finder** is
+  now **Reveal Worktree in File Manager**: the verb was always VS Code's own
+  reveal, which opens Finder, File Explorer or the desktop's file manager as the
+  host dictates, and the title told two platforms out of three the wrong thing.
+
 ## [0.1.10] — 2026-08-31
 
 ### Fixed

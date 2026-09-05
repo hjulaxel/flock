@@ -180,6 +180,9 @@ brew install tmux          # macOS
 sudo apt install tmux      # Debian / Ubuntu
 sudo dnf install tmux      # Fedora
 sudo pacman -S tmux        # Arch
+sudo zypper install tmux   # openSUSE
+sudo apk add tmux          # Alpine
+nix-env -iA nixpkgs.tmux   # Nix
 ```
 
 Check it worked with `tmux -V`. That is all you have to do. Flock looks for tmux
@@ -194,8 +197,47 @@ Skip it and Flock still runs, but switching projects closes the other project's
 sessions instead of hiding them. They come back when you switch back, resumed
 from their transcripts. Anything a session was in the middle of is gone.
 
-Windows does not get this, sorry. Sessions there always close and resume.
+Windows does not get this natively: sessions there always close and resume.
+Open the project through WSL and it does — see [Platforms](#platforms).
 [Other platforms →](https://github.com/tmux/tmux/wiki/Installing)
+
+## Platforms
+
+Flock is one universal extension: no native modules, nothing platform-specific
+to download. What differs is what the machine underneath can offer it.
+
+| | macOS | Linux | Windows, native | Windows, via WSL |
+| --- | --- | --- | --- | --- |
+| Sessions, forks, the tree, attention, accounts, worktrees, projects | yes | yes | yes | yes |
+| Detach tier: parking, solo mode, Auto-switch, `/exit` to a shell, moving a live conversation between accounts in place | yes | yes | **no** — sessions close and resume from their transcripts | yes |
+| Instant-update hooks | yes | yes | not yet | yes |
+| In-session verbs — "fork this session", said to Claude | yes | yes | not yet | yes |
+| Fork edges for forks typed at the CLI (`claude --fork-session`) | yes | yes | drawn as roots | yes |
+| Reaping a closed session's MCP children; the phantom-row filter | yes | yes | not yet | yes |
+| Account usage meters | credentials file, then the keychain | credentials file | credentials file | credentials file |
+
+**Windows.** The full tier is one extension away: open the project through the
+[WSL extension](https://code.visualstudio.com/docs/remote/wsl) and Flock runs
+inside WSL, where tmux, `ps` and `/bin/sh` all exist and every row above reads
+*yes*. Native Windows works and is honest about what it lacks: each *no* and
+*not yet* above degrades to what its row says, and the two install verbs that
+could only refuse there are hidden from the Command Palette. Install the CLI
+with the [native installer](https://code.claude.com/docs/en/setup), which puts
+`claude.exe` on your `PATH`; Flock prefers it over the `.cmd` shim an npm
+install leaves, which needs a command processor between it and the terminal.
+
+**Linux.** Everything works. Two things to know. Paths compare
+case-insensitively, the way macOS and Windows compare them, so two directories
+whose names differ only in case group as one — a trade made so a project never
+fails to match its own sessions. And an editor installed as a **Snap** or a
+**Flatpak** does not see the `PATH` your shell has: a `claude` or `tmux`
+installed under your home directory is invisible to it. Set
+`lineage.claudeBinary` to the full path and install tmux system-wide. A Flatpak
+also sandboxes the editor away from host binaries altogether, so prefer the
+`.deb`, `.rpm` or tarball build.
+
+**Remote hosts.** Over Remote-SSH, in a Dev Container or a Codespace, Flock runs
+on the remote and gets that machine's tier. Install tmux there.
 
 ## Known limits
 

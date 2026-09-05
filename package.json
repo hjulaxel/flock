@@ -598,7 +598,7 @@
       },
       {
         "command": "lineage.revealBranch",
-        "title": "Reveal Worktree in Finder",
+        "title": "Reveal Worktree in File Manager",
         "category": "Flock"
       },
       {
@@ -1133,6 +1133,14 @@
         }
       ],
       "commandPalette": [
+        {
+          "command": "lineage.installHooks",
+          "when": "!isWindows"
+        },
+        {
+          "command": "lineage.installAgentVerbs",
+          "when": "!isWindows"
+        },
         {
           "command": "lineage.switchWorkspace",
           "when": "lineage.mode != 'folder'"
