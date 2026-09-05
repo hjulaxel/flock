@@ -223,61 +223,9 @@ describe('scaffold: the shared types contract', () => {
     }
   });
 
-  // docs/settings.md opens with "All N settings" over a table with one row per
-  // setting. Both drifted from the manifest silently — the table was two rows
-  // short and the header three behind the table — because nothing tied either
-  // to `contributes.configuration`. This asserts the SETS match (so a missing
-  // or stale row is named, not counted) and that the header's N is the real
-  // count. Deliberately no pinned number: two branches adding settings then
-  // merge without this test being a third count to resolve.
-  //
-  // The README's own "all N" is checked here too, and that is the whole reason
-  // it is: settings.md was tied to the manifest and the README was not, so a
-  // branch that counted its own settings correctly still shipped a README three
-  // behind after a merge brought the other branch's in. Two documents claiming a
-  // count means two documents to hold to it.
-  it('documents every contributed setting in docs/settings.md, and counts them right', () => {
-    const contributed = Object.keys(contributedSettings());
-    const doc = fs.readFileSync(path.join(ROOT, 'docs', 'settings.md'), 'utf8');
-    // Read ONLY the settings table, not every line in the file that happens to
-    // look like one. The document has a second table further down — the
-    // migration matrix for `lineage.mode` and the deprecated
-    // `lineage.workspaces.enabled` — whose own HEADER row is two settings keys
-    // in backticks, and a whole-file regex counts that header as a duplicate
-    // row for a setting that is already documented. The set comparison below
-    // survives that (a duplicate changes no set), which is precisely why it has
-    // to be fixed here rather than discovered later: the duplicate assertion
-    // added underneath would fail on a document that is perfectly correct.
-    // Bounded by the table's own header and the next section heading, so the
-    // rest of the page can grow tables freely.
-    const tableStart = doc.indexOf('| Setting | Default | What it does |');
-    expect(tableStart, 'the settings table header').toBeGreaterThan(-1);
-    const after = doc.indexOf('\n## ', tableStart);
-    const table = doc.slice(tableStart, after === -1 ? undefined : after);
-    const documented = [...table.matchAll(/^\| `(lineage\.[^`]+)` \|/gm)].map(
-      (m) => m[1] as string,
-    );
-    expect(documented.filter((k) => !contributed.includes(k))).toEqual([]);
-    expect(contributed.filter((k) => !documented.includes(k))).toEqual([]);
-    // One row per setting, not merely one row somewhere for every setting. Two
-    // rows for one key is two descriptions to keep true, and the reader meets
-    // whichever they scroll to first.
-    expect(
-      documented.filter((k, at) => documented.indexOf(k) !== at),
-      'settings documented twice',
-    ).toEqual([]);
-    const header = doc.match(/^All (\d+) settings, as contributed\./m);
-    expect(header, 'the "All N settings" opening line').not.toBeNull();
-    expect(Number(header?.[1])).toBe(contributed.length);
-
-    const readme = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
-    const pointer = readme.match(/all (\d+), with defaults\./);
-    expect(pointer, "the README's Settings pointer").not.toBeNull();
-    expect(Number(pointer?.[1])).toBe(contributed.length);
-  });
-
-  // The same reasoning one test up, applied to a document nothing else points
-  // at: a doc dropped from the README's index is a doc that silently rots. This
+  // The reasoning of test/manifest.test.ts's docs suite, applied to a document
+  // nothing else points at: a doc dropped from the README's index is a doc
+  // that silently rots. This
   // one in particular, because it is the only place the fork/compaction/resume
   // mechanics are written down with their numbers, and the file it describes
   // (the Claude CLI) ships several times a week — so the day it stops being

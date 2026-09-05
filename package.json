@@ -2361,6 +2361,8 @@
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit -p . && tsc --noEmit -p tsconfig.test.json",
     "release": "node scripts/release.mjs",
+    "docs:settings": "node scripts/settings-doc.mjs",
+    "docs:check": "node scripts/settings-doc.mjs --check",
     "test": "vitest run"
   },
   "devDependencies": {
