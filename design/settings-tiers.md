@@ -252,27 +252,33 @@ no projects and two or more steps are left, which is the same moment), and
 the tmux notice when tmux is missing. The checklist itself has up to eight
 steps, two of which are pickers.
 
-Proposed first run, in order of what the person can actually answer:
+The first run, as landed in step E (items 1–4 are *done*; item 5 is the
+platform branch's), in order of what the person can actually answer:
 
 1. **The walkthrough opens.** It is VS Code's own idiom for a first run and
    the one door the code already guarantees. Its second step launches the
-   checklist. **Drop the toast on the launch where the walkthrough opened**;
-   it is the same offer twice.
+   checklist. **The toast is dropped on the launch where the walkthrough
+   opened** — stamped as shown once the page has actually opened; it was the
+   same offer twice. — *done*
 2. **The checklist asks four things, all pre-ticked:** instant updates,
    in-session verbs, first project, import history (only when there is
    history). These are the consent items and the two that put rows on the
-   tree. A new user can say yes to all four without understanding Flock.
+   tree. A new user can say yes to all four without understanding Flock. The
+   tmux repair and the unticked branch rows still appear when they apply, and
+   a settled machine is told so instead of shown an empty picker. — *done*
 3. **The two taste questions leave the first run.** Nobody can answer "what
-   is a window" before they have lived in one. Ask them at the moment they
-   become real: the first time a session belonging to another project is
-   opened, offer the window-model picker once; the first time a second
-   session tab opens, offer the surface picker once. Both stay reachable from
-   the gear and the Status verb forever. Add "Choose Where Sessions
-   Open…" as a gear verb beside "Choose Window Model…".
-4. **tmux is a status line, not a toast.** Missing tmux is already a note in
-   the checklist receipt; the Status verb shows it permanently with the
-   install command for the host. Keep the one-time notice only where it is
-   contextual: the first workspace switch without tmux.
+   is a window" before they have lived in one. They are asked at the moment
+   they become real: the first time a folder-model window routes another
+   project's session to its own window, the window-model picker is offered
+   once; the first time a second session tab opens, the surface picker is
+   offered once (`windowModelOffer` / `surfaceOffer`, pure, in recommend.ts).
+   Both stay reachable from the gear and the Status verb forever, and
+   "Choose Where Sessions Open…" is a gear verb beside "Choose Window
+   Model…". — *done*
+4. **tmux is a status line, not a toast.** Missing tmux is a note in the
+   checklist receipt and a permanent row of the Status verb with the install
+   command for the host. The one-time notice fires only where it is
+   contextual: the first workspace switch attempted without tmux. — *done*
 5. **Windows hides what it cannot do.** The checklist already skips tmux on
    Windows; hooks and verbs need the same guard, and the gear entries a
    `!isWindows` clause. That work — the checklist guard and the gear clause
@@ -293,7 +299,7 @@ things and is asked no question they cannot answer yet.
 3. **The removals and folds from §2** (step D), one commit each, with the
    "old key still read" rule tested. 51 keys become 44.
 4. **Front-door changes from §5**, and the surface picker's fifth option
-   (`terminalLocation: newWindow`, step E).
+   (`terminalLocation: newWindow`, step E). — *done*
 5. **The editor adaptation and the two verbs from §4**: categories, order,
    tags, enum labels, "Flock Settings…" and "Flock: Status…".
 
@@ -366,4 +372,23 @@ plan.
   hide it from the gear; the log says so on activation. Folding a key that a
   when-clause read is the one case where "keeps working" is only partly
   reachable, and it is recorded here so the next fold checks for it first.
+- **Step E landed the front door as §5 describes**, with the refinements the
+  code forced. The window-model offer fires after `routeForeign` has routed —
+  whichever tier did it: the bound window, a window on the folder, or the
+  offer of a new one — and only when a project claims the routed session,
+  since "switch this window between projects" is false about a directory
+  nobody named. The surface offer counts the tabs bound in the window after
+  a launch lands in the fence funnel (`launchSession`), never on `onDidBind`,
+  so a reload's re-association and a workspace restore's relaunches — no
+  gesture — do not count; it fires on exactly the second tab, so a dismissal
+  with the X is not repeated on the third. Both pickers stamp their offer's
+  key when answered from the gear or the Status verb, so a question already
+  settled is never asked. The recommended-setup toast is stamped only after
+  the walkthrough has actually opened, so a page that failed to open leaves
+  the toast as the fallback door. The `install` tmux notice moved to
+  `noteMissingTmux`, run by the switch verb and the auto-switch just before
+  `switchTo`; the `enable` notice kept its activation timer, and the two
+  share one dismissal key. `surfaceChoices` gained `newWindow` as its fifth
+  row ("Its own window"), and the Status verb's row now reads it rather than
+  naming the arrangement in words of its own.
 

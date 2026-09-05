@@ -2300,7 +2300,7 @@
           {
             "id": "flock.setup",
             "title": "Turn on the parts that are off",
-            "description": "Some of the best of Flock is off until you ask, because turning it on writes files in your home directory. The checklist says what each one does, you tick what you want — and it asks the two questions nothing should answer for you: what a window is, and where sessions should open.\n[Recommended Setup...](command:lineage.recommendedSetup)",
+            "description": "Some of the best of Flock is off until you ask, because turning it on writes files in your home directory. The checklist asks four things — instant updates, in-session verbs, your first project, your history — says what each one writes, and you tick what you want. What a window is, and where sessions open, live in the gear and are asked once, when they become real.\n[Recommended Setup...](command:lineage.recommendedSetup)",
             "media": {
               "markdown": "media/walkthrough/setup.md"
             },

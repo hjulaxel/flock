@@ -31,6 +31,21 @@ Everything the checklist can offer:
 | **Let Claude fork its own sessions** | not installed | yes | a skill file and a small CLI |
 | **Show branch and worktree rows** | a repository of yours has ≥2 checkouts, rows off | **no** | `lineage.git.branches` alone |
 
+On a machine where all of that is already true it says so, notes included,
+instead of opening an empty picker.
+
+Two questions it deliberately does **not** ask: *what a window is* and *where
+sessions open*. Both are taste, and nobody can answer them before they have
+lived with the default, so they are verbs — **Flock: Choose Window Model…** and
+**Flock: Choose Where Sessions Open…**, in the gear's Setup group and behind the
+Status verb's rows, each entry naming the answer this window has today — and
+Flock offers each one once, at the moment it becomes real: the window-model
+picker the first time a window in the one-folder-per-project model sends another
+project's session to its own window, the surface picker the first time a
+window's second session tab opens. Each offer has **Choose…** and **Not now**;
+either button settles it for good, the X asks again next time, and answering the
+picker from the gear settles it too. Neither fires on activation or on a timer.
+
 Four rules it keeps:
 
 - **Nothing is written until you confirm**, and every line says what it writes
