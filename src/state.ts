@@ -623,6 +623,26 @@ export function mintedBranchKey(repoDir: string, branch: string): string {
   return `${pathKey(repoDir)}\n${branch}`;
 }
 
+/**
+ * The spellings a repository may be recorded under: today's `pathKey`, and —
+ * where that key preserves case — the folded form every build up to 0.1.10
+ * wrote. On macOS and Windows the two are the same string and this is one
+ * entry; on Linux a store written by an older build holds the lowercased key
+ * for a repository whose real path has capitals in it, and a reader that only
+ * tried the exact spelling would stop offering to delete branches Flock itself
+ * minted. A read-side fallback rather than a migration: nothing rewrites the
+ * user's state to suit a new build.
+ */
+export function mintedRepoSpellings(repoKey: string): string[] {
+  const folded = repoKey.toLowerCase();
+  return folded === repoKey ? [repoKey] : [repoKey, folded];
+}
+
+/** Every key `mintedBranchKey` may have produced for this pair, exact first. */
+export function mintedBranchKeys(repoKey: string, branch: string): string[] {
+  return mintedRepoSpellings(repoKey).map((repo) => `${repo}\n${branch}`);
+}
+
 function sanitizeMintedBranch(value: unknown): MintedBranchRecord | null {
   if (!isPlainObject(value)) return null;
   const repo = isNonEmptyString(value.repo) ? pathKey(value.repo) : '';
@@ -2067,9 +2087,9 @@ export class StateStore implements DisposableLike {
   isMintedBranch(repoDir: string, branch: string): boolean {
     const repo = pathKey(repoDir);
     if (repo === '' || branch === '') return false;
-    return (
-      this.memory.mintedBranches?.[mintedBranchKey(repo, branch)] !== undefined
-    );
+    const minted = this.memory.mintedBranches;
+    if (!minted) return false;
+    return mintedBranchKeys(repo, branch).some((key) => minted[key] !== undefined);
   }
 
   /** Drop the record — after the ref is deleted, or found already gone. */
@@ -2078,7 +2098,9 @@ export class StateStore implements DisposableLike {
     if (repo === '' || branch === '') return Promise.resolve();
     return this.enqueue((state) => {
       if (!isPlainObject(state.mintedBranches)) state.mintedBranches = {};
-      delete state.mintedBranches[mintedBranchKey(repo, branch)];
+      for (const key of mintedBranchKeys(repo, branch)) {
+        delete state.mintedBranches[key];
+      }
     });
   }
 
@@ -2095,8 +2117,9 @@ export class StateStore implements DisposableLike {
     const live = new Set(existing);
     return this.enqueue((state) => {
       if (!isPlainObject(state.mintedBranches)) state.mintedBranches = {};
+      const spellings = new Set(mintedRepoSpellings(repo));
       for (const [key, rec] of Object.entries(state.mintedBranches)) {
-        if (rec.repo === repo && !live.has(rec.branch)) {
+        if (spellings.has(rec.repo) && !live.has(rec.branch)) {
           delete state.mintedBranches[key];
         }
       }

@@ -28,6 +28,7 @@ import {
   findTmuxBinary,
   tmuxAdvice,
   tmuxInstallHint,
+  linuxTmuxInstallHint,
   killTmuxSessionTree,
   parseClientSessions,
   parsePanePid,
@@ -295,9 +296,22 @@ describe('resolveExitShell', () => {
   });
 
   it('falls back to the platform default rather than failing a launch', () => {
-    expect(resolveExitShell(undefined, 'darwin')).toBe('/bin/zsh');
-    expect(resolveExitShell(undefined, 'linux')).toBe('/bin/bash');
-    expect(resolveExitShell('', 'linux')).toBe('/bin/bash');
+    const has = () => true;
+    expect(resolveExitShell(undefined, 'darwin', has)).toBe('/bin/zsh');
+    expect(resolveExitShell(undefined, 'linux', has)).toBe('/bin/bash');
+    expect(resolveExitShell('', 'linux', has)).toBe('/bin/bash');
+  });
+
+  it('falls back to /bin/sh where the platform default is not installed', () => {
+    // NixOS has no /bin/bash; a hook that respawns a shell that is not there
+    // leaves the pane dead and the tab stuck.
+    const only = (p: string) => p === '/bin/sh';
+    expect(resolveExitShell(undefined, 'linux', only)).toBe('/bin/sh');
+    expect(resolveExitShell('bash', 'linux', only)).toBe('/bin/sh');
+    // A real $SHELL still wins — it is the user's, and it exists by definition.
+    expect(resolveExitShell('/run/current-system/sw/bin/zsh', 'linux', only)).toBe(
+      '/run/current-system/sw/bin/zsh',
+    );
     // Relative, or carrying something that cannot survive the conf: the
     // default is what the pty would have used anyway.
     expect(resolveExitShell('zsh', 'darwin')).toBe('/bin/zsh');
@@ -513,8 +527,30 @@ describe('tmuxAdvice', () => {
 
   it('hints the package manager, and nothing at all where it cannot help', () => {
     expect(tmuxInstallHint('darwin')).toBe('brew install tmux');
-    expect(tmuxInstallHint('linux')).toBe('sudo apt install tmux');
+    expect(tmuxInstallHint('linux', null)).toBe('sudo apt install tmux');
     expect(tmuxInstallHint('win32')).toBeUndefined();
+  });
+
+  it("names the Linux distribution's own package manager from os-release", () => {
+    const release = (id: string, like = ''): string =>
+      `NAME="x"\nID=${id}\n${like === '' ? '' : `ID_LIKE="${like}"\n`}VERSION_ID=1\n`;
+    expect(linuxTmuxInstallHint(release('ubuntu', 'debian'))).toBe('sudo apt install tmux');
+    expect(linuxTmuxInstallHint(release('fedora'))).toBe('sudo dnf install tmux');
+    expect(linuxTmuxInstallHint(release('arch'))).toBe('sudo pacman -S tmux');
+    expect(linuxTmuxInstallHint(release('"opensuse-tumbleweed"', 'opensuse suse'))).toBe(
+      'sudo zypper install tmux',
+    );
+    expect(linuxTmuxInstallHint(release('alpine'))).toBe('sudo apk add tmux');
+    expect(linuxTmuxInstallHint(release('nixos'))).toBe('nix-env -iA nixpkgs.tmux');
+    // Derivatives resolve through ID_LIKE: Pop!_OS is apt, Manjaro is pacman.
+    expect(linuxTmuxInstallHint(release('pop', 'ubuntu debian'))).toBe('sudo apt install tmux');
+    expect(linuxTmuxInstallHint(release('manjaro', 'arch'))).toBe('sudo pacman -S tmux');
+    // Unknown, empty and unreadable all fall back to the line it always gave.
+    expect(linuxTmuxInstallHint(release('gentoo'))).toBe('sudo apt install tmux');
+    expect(linuxTmuxInstallHint('')).toBe('sudo apt install tmux');
+    expect(linuxTmuxInstallHint(null)).toBe('sudo apt install tmux');
+    // Reading the real file on this machine never throws, whatever it holds.
+    expect(typeof tmuxInstallHint('linux')).toBe('string');
   });
 });
 

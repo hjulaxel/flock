@@ -4,6 +4,95 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **The instant-update hooks install on Windows.** The hook was a `/bin/sh`
+  one-liner, and Windows has no `/bin/sh`. Claude Code runs a shell-form hook
+  through `sh -c` on macOS and Linux, through Git Bash on Windows, and through
+  PowerShell on a Windows without Git Bash — and lets each hook name its shell.
+  So on Windows the plugin now carries a PowerShell one-liner with `shell:
+  "powershell"` beside it: the same v3 envelope, the same
+  `~/.lineage/events.ndjson`, appended with one write, no dependency beyond the
+  shell every Windows has. Two hooks landing in the same millisecond can still
+  interleave there, where the POSIX `printf` could not; a torn line is dropped,
+  not misread, and the poller covers what it would have said. The POSIX command
+  is untouched.
+- **The in-session verbs install on Windows.** "Fork this session", said to
+  Claude, works on native Windows now — the same skill, the same small CLI, the
+  same request directory under your home. What kept it off was one character:
+  the skill told Claude to run `node ~/.lineage/flock-verbs.mjs`, and a tilde is
+  the shell's to expand, which Git Bash does and PowerShell and `cmd.exe` — the
+  shells Claude Code falls back to on a Windows without Git — do not. The skill
+  now names the CLI by the absolute path the extension wrote it to, quoted the
+  one way all three shells agree on. Existing installs are rewritten on the
+  next activation (verbs v3); `node` still has to be on your `PATH`, on every
+  platform, as it always did.
+
+### Changed
+
+- **The README says what each platform gets.** A Platforms section carries the
+  per-OS table: what native Windows loses without tmux, that opening the project
+  through WSL gives it the full tier, and that a Snap or Flatpak editor hides
+  your `PATH`, so `lineage.claudeBinary` has to be set there. The tmux install
+  block gained openSUSE, Alpine and Nix. **Reveal Worktree in Finder** is
+  now **Reveal Worktree in File Manager**: the verb was always VS Code's own
+  reveal, which opens Finder, File Explorer or the desktop's file manager as the
+  host dictates, and the title told two platforms out of three the wrong thing.
+
+### Fixed
+
+- **Windows reads the process table.** Four things in Flock read it, and every
+  one did so by running `ps`, which Windows has not got: the descendant walk
+  that reaps a closed session's MCP children, the start-time check behind the
+  window-close orphan rescue, the parent walk that draws a fork typed at the
+  CLI under its parent, and the filter that keeps `claude bg-spare` off the
+  tree. Each short-circuited on Windows, so a closed session's children lived
+  on, a hand-typed fork drew as a root, and a warm spare was a row. They now
+  share one `Get-CimInstance Win32_Process` sweep through PowerShell — pid,
+  parent, creation date and command line in one answer, cached for a moment so
+  a tick's several questions cost one process. "Orphaned" changes meaning with
+  the platform: re-parented to PID 1 on POSIX, a parent that no longer exists
+  on Windows, which does not re-parent. POSIX keeps its `ps` calls untouched.
+- **A Windows `.cmd` shim launches through `cmd.exe`, quoted.** An npm install
+  puts `claude.cmd` on `PATH`, and a batch file is not something a terminal can
+  start: Windows only pretends, by silently prepending `cmd.exe` — the very
+  behaviour Node closed for CVE-2024-27980, and the reason the roster call
+  already wrapped the shim. The terminal launch handed the shim straight to the
+  pty with nothing quoted, so a session name with `&` in it was two commands.
+  It now runs `cmd /d /s /c` with the path and every argument quoted for cmd.
+  The native `claude.exe` never needed this and still gets none of it.
+- **Flock finds a CLI the editor's `PATH` does not show it.** The extension
+  host inherits the environment the editor was launched with, which on a Mac
+  opened from the Dock, a Snap, or a Windows whose installer edited `PATH` for
+  shells that open later, predates the line that adds the CLI. When the scan
+  of `PATH` misses, Flock now tries the directories the official installers
+  actually write to: `~/.local/bin` (the native installer, `claude.exe` on
+  Windows), `%APPDATA%\npm` (the npm shim), WinGet's portable links, the older
+  `~/.claude/local`, and Homebrew's two prefixes — for `claude` and for
+  `codex` alike. `lineage.claudeBinary` and `lineage.codexBinary` still win
+  when set, verbatim.
+- **Linux compares paths the way its filesystems do.** Every path comparison in
+  Flock folded case, because the two platforms it was written on — macOS and
+  Windows — do. On Linux that filed two directories whose names differ only in
+  case under one project, with no way for the tree to say which it meant. The
+  fold is now a platform decision: macOS and Windows keep it, Linux compares
+  exactly. The one place the folded key was written to disk — the record of
+  which branches Flock itself minted, which is what earns the delete offer when
+  a worktree is removed — is read under both spellings, so a Linux store an
+  older build wrote keeps answering for a repository with capitals in its path.
+  Nothing rewrites your state to suit the new build.
+- **The tmux notice names your distribution's package manager.** It said
+  `sudo apt install tmux` to every Linux. It now reads `/etc/os-release` and
+  says `dnf`, `pacman`, `zypper`, `apk` or `nix-env` where those are the
+  answer, and apt where it cannot tell.
+- **`/exit` finds a shell on a machine without `/bin/bash`.** The exit-to-shell
+  hook respawns your `$SHELL`, and fell back to `/bin/bash` (or `/bin/zsh` on
+  macOS) when that was unusable. NixOS has neither, and a hook that respawns a
+  shell that is not there leaves the pane dead and the tab stuck. The fallback
+  now checks the file exists and takes `/bin/sh` otherwise.
+
 ## [0.1.10] — 2026-08-31
 
 ### Fixed

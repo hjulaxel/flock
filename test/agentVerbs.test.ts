@@ -102,7 +102,7 @@ function makeManager(
 function writeVerbs(home: string): void {
   const dir = verbsSkillDir(home);
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'SKILL.md'), renderSkillMd());
+  fs.writeFileSync(path.join(dir, 'SKILL.md'), renderSkillMd(verbsScriptPath(home)));
   fs.mkdirSync(path.dirname(verbsScriptPath(home)), { recursive: true });
   fs.writeFileSync(verbsScriptPath(home), renderVerbScript());
 }
@@ -269,10 +269,22 @@ describe('clampForkCount', () => {
 
 describe('the rendered files', () => {
   it('the skill teaches the CLI invocation and carries our marker', () => {
-    const skill = renderSkillMd();
+    const skill = renderSkillMd('/home/u/.lineage/flock-verbs.mjs');
     expect(skill).toContain('name: flock');
-    expect(skill).toContain('flock-verbs.mjs fork');
+    expect(skill).toContain('flock-verbs.mjs" fork');
     expect(skill).toContain('Flock VS Code extension');
+  });
+
+  it('names the CLI by its absolute, quoted path — never a tilde', () => {
+    // A tilde is the shell's to expand, and PowerShell and cmd.exe — the shells
+    // Claude Code runs the Bash tool through on a Windows without Git — do
+    // not. The path the extension wrote the script to is right by
+    // construction, and double quotes are the one spelling every shell reads.
+    const posix = renderSkillMd('/Users/a b/.lineage/flock-verbs.mjs');
+    expect(posix).toContain('node "/Users/a b/.lineage/flock-verbs.mjs" fork --count <n>');
+    expect(posix).not.toContain('~/');
+    const win = renderSkillMd('C:\\Users\\a b\\.lineage\\flock-verbs.mjs');
+    expect(win).toContain('node "C:\\Users\\a b\\.lineage\\flock-verbs.mjs" fork');
   });
 
   it('the CLI enforces the same caps the watcher does', () => {

@@ -17,6 +17,8 @@ import {
   locationValueOf,
   mintSessionId,
   nodeIdOfTerminal,
+  quoteForCmd,
+  shimLaunch,
 } from '../src/terminals';
 import { ENV_NODE_ID, SESSION_ID_RE } from '../src/types';
 
@@ -240,6 +242,52 @@ describe('defaultTerminalName', () => {
 });
 
 // ------------------------------------------- the account environment: rules
+
+describe('shimLaunch (a Windows .cmd needs the command processor in front of it)', () => {
+  const ARGS = ['--session-id', 'abc', '--name', 'flock 3'];
+
+  it('is the identity off Windows, and for a real executable on it', () => {
+    expect(shimLaunch('/bin/claude', ARGS, 'darwin', undefined)).toEqual({
+      shellPath: '/bin/claude',
+      shellArgs: ARGS,
+    });
+    expect(shimLaunch('C:\\Users\\a\\.local\\bin\\claude.exe', ARGS, 'win32', 'C:\\Windows\\system32\\cmd.exe')).toEqual({
+      shellPath: 'C:\\Users\\a\\.local\\bin\\claude.exe',
+      shellArgs: ARGS,
+    });
+    // A .cmd on macOS is somebody's oddly named file, not a shim.
+    expect(shimLaunch('/opt/claude.cmd', ARGS, 'linux', undefined).shellPath).toBe('/opt/claude.cmd');
+  });
+
+  it('runs a .cmd or .bat through ComSpec with one quoted command line', () => {
+    const out = shimLaunch(
+      'C:\\Users\\a b\\AppData\\Roaming\\npm\\claude.cmd',
+      ARGS,
+      'win32',
+      'C:\\Windows\\system32\\cmd.exe',
+    );
+    expect(out.shellPath).toBe('C:\\Windows\\system32\\cmd.exe');
+    // A STRING, not an array: VS Code takes shell args in command-line form
+    // on Windows only, and that is the one way to hand cmd a /s /c line.
+    expect(out.shellArgs).toBe(
+      '/d /s /c ""C:\\Users\\a b\\AppData\\Roaming\\npm\\claude.cmd" --session-id abc --name "flock 3""',
+    );
+    expect(shimLaunch('C:\\x\\claude.BAT', [], 'win32', undefined).shellPath).toBe('cmd.exe');
+  });
+
+  it('quotes exactly what cmd would otherwise read as syntax', () => {
+    expect(quoteForCmd('abc')).toBe('abc');
+    expect(quoteForCmd('--session-id')).toBe('--session-id');
+    expect(quoteForCmd('')).toBe('""');
+    expect(quoteForCmd('two words')).toBe('"two words"');
+    // The character that turned one command into two through the implicit
+    // cmd.exe the shim used to ride.
+    expect(quoteForCmd('fix a & b')).toBe('"fix a & b"');
+    expect(quoteForCmd('a|b')).toBe('"a|b"');
+    expect(quoteForCmd('say "hi"')).toBe('"say \\"hi\\""');
+    expect(quoteForCmd('(x)')).toBe('"(x)"');
+  });
+});
 
 describe('launchEnv (cleans a chosen account\'s environment)', () => {
   it('passes through legal string entries untouched', () => {

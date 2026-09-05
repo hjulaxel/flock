@@ -14,8 +14,10 @@ import {
   fetchRoster,
   fetchRosterMulti,
   findClaudeBinary,
+  claudeFallbackBinDirs,
   isProcessAlive,
   isSpareCommand,
+  psCommands,
   normalizeStatus,
   parseRoster,
   reportsBusy,
@@ -23,6 +25,7 @@ import {
   rosterSignature,
   sameRoster,
 } from '../src/roster';
+import type { ProcessSnapshot } from '../src/processTable';
 import { isSessionId, type RosterEntry, type RosterResult } from '../src/types';
 
 /**
@@ -570,7 +573,9 @@ describe('findClaudeBinary', () => {
   it('returns null when PATH holds nothing named claude', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lineage-bin-'));
     process.env['PATH'] = dir;
-    expect(findClaudeBinary()).toBeNull();
+    // `home` is the empty temp dir too, or the fallback roots would find the
+    // claude this machine really has under ~/.local/bin.
+    expect(findClaudeBinary(undefined, { home: dir })).toBeNull();
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
@@ -578,8 +583,69 @@ describe('findClaudeBinary', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lineage-bin-'));
     fs.mkdirSync(path.join(dir, 'claude'));
     process.env['PATH'] = dir;
-    expect(findClaudeBinary()).toBeNull();
+    expect(findClaudeBinary(undefined, { home: dir })).toBeNull();
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('falls back to the native installer root when PATH has no claude', () => {
+    // The extension host's PATH often predates the shell profile that adds
+    // ~/.local/bin — an editor launched from the Dock, a Snap, a Windows
+    // PATH edit made by an installer that only reaches new shells.
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'lineage-home-'));
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'lineage-bin-'));
+    const bin = path.join(home, '.local', 'bin', 'claude');
+    fs.mkdirSync(path.dirname(bin), { recursive: true });
+    fs.writeFileSync(bin, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    expect(findClaudeBinary(undefined, { platform: 'darwin', env: { PATH: empty }, home })).toBe(bin);
+    // And an empty PATH is not a reason to give up either.
+    expect(findClaudeBinary(undefined, { platform: 'linux', env: {}, home })).toBe(bin);
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(empty, { recursive: true, force: true });
+  });
+
+  it('knows where each platform’s installers put the CLI', () => {
+    // Pure, so the Windows answer is testable from anywhere. Every entry is a
+    // directory a real installer writes to — see claudeFallbackBinDirs.
+    expect(
+      claudeFallbackBinDirs({
+        platform: 'win32',
+        env: { APPDATA: 'C:\\Users\\a\\AppData\\Roaming', LOCALAPPDATA: 'C:\\Users\\a\\AppData\\Local' },
+        home: 'C:\\Users\\a',
+      }),
+    ).toEqual([
+      path.join('C:\\Users\\a', '.local', 'bin'),
+      path.join('C:\\Users\\a\\AppData\\Roaming', 'npm'),
+      path.join('C:\\Users\\a\\AppData\\Local', 'Microsoft', 'WinGet', 'Links'),
+    ]);
+    // A Windows with neither variable set contributes fewer roots, not a throw.
+    expect(claudeFallbackBinDirs({ platform: 'win32', env: {}, home: 'C:\\Users\\a' })).toEqual([
+      path.join('C:\\Users\\a', '.local', 'bin'),
+    ]);
+    expect(claudeFallbackBinDirs({ platform: 'darwin', env: {}, home: '/Users/a' })).toEqual([
+      '/Users/a/.local/bin',
+      '/Users/a/.claude/local',
+      '/opt/homebrew/bin',
+      '/usr/local/bin',
+    ]);
+  });
+});
+
+describe('psCommands on Windows reads the shared process table', () => {
+  it('answers from the table, skipping pids it does not hold or has no line for', async () => {
+    const table = new Map([
+      [10, { pid: 10, ppid: 1, start: 's', command: 'claude.exe --bg-spare' }],
+      [11, { pid: 11, ppid: 1, start: 's', command: '' }],
+    ]);
+    const out = await psCommands([10, 11, 12], { platform: 'win32', windows: async () => table });
+    expect([...out.entries()]).toEqual([[10, 'claude.exe --bg-spare']]);
+    expect(isSpareCommand(out.get(10) ?? '')).toBe(true);
+  });
+
+  it('a table that cannot be read is an empty answer, so the spare stays a row', async () => {
+    const broken = async (): Promise<ProcessSnapshot> => {
+      throw new Error('no powershell');
+    };
+    expect((await psCommands([10], { platform: 'win32', windows: broken })).size).toBe(0);
   });
 });
 

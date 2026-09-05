@@ -11,11 +11,13 @@ import {
   descendantsOf,
   listDescendants,
   listPidFacts,
+  orphanedOnWindows,
   orphanRescueDecision,
   parsePsPidFacts,
   parsePsPpids,
   reapSurvivors,
 } from '../src/procs';
+import type { ProcessSnapshot } from '../src/processTable';
 
 describe('parsePsPpids', () => {
   it('reads the ragged whitespace ps actually prints', () => {
@@ -265,5 +267,105 @@ describe('orphanRescueDecision', () => {
       new Map([[101, { ppid: 1, start: START }]]),
     );
     expect(d.reap).toEqual([101]);
+  });
+});
+
+// ------------------------------------------------- the real ps, once each
+//
+// Everything above injects its `ps` output, which is what makes the ladder
+// testable — and what lets a machine whose `ps` rejects our flags pass every
+// test while reaping nothing. These run the REAL sweeps once, against this
+// process, so a `ps` that does not accept `-axo` (BusyBox on Alpine) or prints
+// `lstart` in a shape parsePsPidFacts cannot read fails here, on every OS in
+// the CI matrix that has a `ps`, instead of on a user's machine.
+
+describe('the ps sweeps, against this machine', () => {
+  const posix = process.platform === 'win32' ? it.skip : it;
+
+  posix('listDescendants walks the real table: this process hangs off its parent', async () => {
+    const kids = await listDescendants(process.ppid);
+    expect(kids).toContain(process.pid);
+  });
+
+  posix('listPidFacts reads a real start time and parent for this process', async () => {
+    const facts = await listPidFacts([process.pid]);
+    const fact = facts.get(process.pid);
+    expect(fact).toBeDefined();
+    expect(fact?.ppid).toBe(process.ppid);
+    expect((fact?.start ?? '').length).toBeGreaterThan(0);
+    // Two sweeps a moment apart must agree on the identity string, or the
+    // orphan rescue can never match a snapshot against a later verification.
+    const again = await listPidFacts([process.pid]);
+    expect(again.get(process.pid)?.start).toBe(fact?.start);
+  });
+});
+
+// ------------------------------------------------------------ the Windows route
+//
+// No `ps` on Windows. The same two sweeps read the shared CIM table
+// (src/processTable.ts) instead — injected here as a ready map, so the route is
+// tested on every OS in the matrix.
+
+describe('the sweeps on Windows read the process table, not ps', () => {
+  const START = '2026-09-05T18:05:47.1420000+02:00';
+  const table = new Map([
+    [800, { pid: 800, ppid: 4, start: 's0', command: 'cmd.exe' }],
+    [1200, { pid: 1200, ppid: 800, start: START, command: 'claude.exe --session-id abc' }],
+    [1300, { pid: 1300, ppid: 1200, start: 's2', command: 'node mcp-server.js' }],
+    [1400, { pid: 1400, ppid: 1300, start: 's3', command: 'uv run tool' }],
+  ]);
+  const windows = async () => table;
+  const noPs = async (): Promise<string> => {
+    throw new Error('ps must not be spawned on win32');
+  };
+
+  it('listDescendants walks the table', async () => {
+    const kids = await listDescendants(1200, { platform: 'win32', windows, exec: noPs });
+    expect(kids).toEqual([1300, 1400]);
+  });
+
+  it('listPidFacts reads parent and start string from the table', async () => {
+    const facts = await listPidFacts([1200, 9999], { platform: 'win32', windows, exec: noPs });
+    expect(facts.get(1200)).toEqual({ ppid: 800, start: START });
+    expect(facts.has(9999)).toBe(false);
+  });
+
+  it('a table that cannot be read yields nothing, never a throw', async () => {
+    const broken = async (): Promise<ProcessSnapshot> => {
+      throw new Error('no powershell');
+    };
+    await expect(listDescendants(1200, { platform: 'win32', windows: broken })).resolves.toEqual([]);
+    await expect(listPidFacts([1200], { platform: 'win32', windows: broken })).resolves.toEqual(new Map());
+  });
+
+  it('still takes the bare exec argument POSIX callers have always passed', async () => {
+    const kids = await listDescendants(100, async () => '100 1\n101 100\n');
+    expect(kids).toEqual([101]);
+  });
+});
+
+describe('orphanRescueDecision: what "orphaned" means is a platform fact', () => {
+  const START = 'Sat Aug 23 07:00:00 2026';
+  const saved = [{ pid: 101, start: START }];
+
+  it('POSIX: re-parented to PID 1', () => {
+    expect(orphanRescueDecision(saved, new Map([[101, { ppid: 1, start: START }]])).reap).toEqual([101]);
+    expect(orphanRescueDecision(saved, new Map([[101, { ppid: 55, start: START }]])).reap).toEqual([]);
+  });
+
+  it('Windows: the parent no longer exists — Windows does not re-parent', () => {
+    // The wiring passes orphanedOnWindows; here the predicate is stubbed so
+    // the decision's use of it is what is under test.
+    const gone = new Set([55]);
+    const orphaned = (ppid: number) => gone.has(ppid);
+    expect(orphanRescueDecision(saved, new Map([[101, { ppid: 55, start: START }]]), orphaned).reap).toEqual([101]);
+    const d = orphanRescueDecision(saved, new Map([[101, { ppid: 77, start: START }]]), orphaned);
+    expect(d).toEqual({ reap: [], ownerLikelyAlive: true });
+  });
+
+  it('orphanedOnWindows asks the kernel whether the parent pid is alive', () => {
+    expect(orphanedOnWindows(process.pid)).toBe(false); // our own parent-of-somebody: alive
+    expect(orphanedOnWindows(0)).toBe(true);
+    expect(orphanedOnWindows(2_147_400_000)).toBe(true); // nothing has this pid
   });
 });

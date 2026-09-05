@@ -26,6 +26,7 @@ import {
   codexSessionsDir,
   extractJsonString,
   findCodexBinary,
+  codexFallbackBinDirs,
   matchRollout,
   readRolloutMeta,
   scanRollouts,
@@ -353,6 +354,29 @@ describe('findCodexBinary', () => {
     // HAS codex is not this test's business.
     const found = findCodexBinary('   ');
     expect(found === null || path.isAbsolute(found)).toBe(true);
+  });
+
+  it('knows where each platform’s installers put the CLI', () => {
+    // Pure, so the Windows answer is testable from anywhere. The POSIX list
+    // also carries every nvm version, newest first, when ~/.nvm exists — this
+    // fake home has none, so only the fixed roots remain.
+    expect(
+      codexFallbackBinDirs({
+        platform: 'win32',
+        env: { APPDATA: 'C:\\Users\\a\\AppData\\Roaming', LOCALAPPDATA: 'C:\\Users\\a\\AppData\\Local' },
+        home: 'C:\\Users\\a',
+      }),
+    ).toEqual([
+      path.join('C:\\Users\\a', '.codex', 'bin'),
+      path.join('C:\\Users\\a\\AppData\\Roaming', 'npm'),
+      path.join('C:\\Users\\a\\AppData\\Local', 'Microsoft', 'WinGet', 'Links'),
+    ]);
+    expect(codexFallbackBinDirs({ platform: 'linux', env: {}, home: '/home/a' })).toEqual([
+      '/home/a/.codex/bin',
+      '/home/a/.local/bin',
+      '/opt/homebrew/bin',
+      '/usr/local/bin',
+    ]);
   });
 });
 

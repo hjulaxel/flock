@@ -17,8 +17,10 @@ import {
   mergeStates,
   migrateState,
   mintedBranchKey,
+  mintedBranchKeys,
   nowIso,
 } from '../src/state';
+import { PATHS_FOLD_CASE, pathKey } from '../src/projects';
 import {
   DISPATCH_DONE_TTL_MS,
   EXTENSION_ID,
@@ -1090,7 +1092,7 @@ describe('StateStore: projects', () => {
     await store.upsertProject('p1', {
       name: 'API',
       rootDir: '/code/api',
-      dirs: ['/code/api', '/CODE/API/', '/shared', '/shared'],
+      dirs: ['/code/api', PATHS_FOLD_CASE ? '/CODE/API/' : '/code/api/', '/shared', '/shared'],
     });
     expect(store.getProject('p1')?.dirs).toEqual(['/shared']);
   });
@@ -1353,8 +1355,9 @@ describe('StateStore: hidden folders', () => {
     await store.hideFolder('/tmp/junk/');
     expect(store.getHiddenFolders().map((f) => f.path)).toEqual(['/tmp/junk']);
 
-    // un-hiding matches case-insensitively, the same way hiding matches
-    await store.unhideFolder('/TMP/JUNK');
+    // un-hiding matches the way hiding matches: separators always, case where
+    // the platform folds it
+    await store.unhideFolder(PATHS_FOLD_CASE ? '/TMP/JUNK' : '/tmp//junk/');
     expect(store.getHiddenFolders()).toEqual([]);
 
     const reader = makeStore(dir);
@@ -2720,6 +2723,40 @@ describe('minted branches', () => {
     await store.load();
     await store.recordMintedBranch('/tmp/app/', 'x');
     expect(store.isMintedBranch('/tmp/app', 'x')).toBe(true);
+  });
+
+  it('still finds, forgets and prunes a record an older build keyed by the folded path', async () => {
+    // Every build up to 0.1.10 lowercased the repository key everywhere. On a
+    // platform that now preserves case, a store those builds wrote must keep
+    // answering for a repository whose real path has capitals in it — by
+    // reading the folded spelling as a fallback, never by rewriting the file.
+    const dir = tempDir();
+    const legacyRepo = '/home/x/code/app'; // what 0.1.10 wrote for /home/x/Code/App
+    fs.writeFileSync(
+      path.join(dir, 'state.json'),
+      JSON.stringify({
+        ...state(),
+        mintedBranches: {
+          [`${legacyRepo}\nold`]: { repo: legacyRepo, branch: 'old', mintedAt: nowIso() },
+          [`${legacyRepo}\nkept`]: { repo: legacyRepo, branch: 'kept', mintedAt: nowIso() },
+        },
+      }),
+    );
+    const store = makeStore(dir);
+    await store.load();
+    const exact = '/home/x/Code/App';
+    expect(store.isMintedBranch(exact, 'old')).toBe(true);
+    expect(store.isMintedBranch(exact, 'kept')).toBe(true);
+
+    await store.forgetMintedBranch(exact, 'old');
+    expect(store.isMintedBranch(exact, 'old')).toBe(false);
+    expect(store.isMintedBranch(exact, 'kept')).toBe(true);
+
+    await store.pruneMintedBranches(exact, []); // no refs left at all
+    expect(store.isMintedBranch(exact, 'kept')).toBe(false);
+    expect(mintedBranchKeys(pathKey('/home/x/Code/App'), 'b')).toEqual(
+      PATHS_FOLD_CASE ? ['/home/x/code/app\nb'] : ['/home/x/Code/App\nb', '/home/x/code/app\nb'],
+    );
   });
 
   it('forgets a record, and pruning sweeps only the named repository', async () => {

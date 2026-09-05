@@ -17,6 +17,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { SourceControlSync, planRepoOpen } from '../src/sourceControl';
+import { PATHS_FOLD_CASE } from '../src/projects';
 import type { GitHost } from '../src/sourceControl';
 
 /** A host double that opens what it is asked for and remembers the asking. */
@@ -43,10 +44,13 @@ describe('planRepoOpen', () => {
   });
 
   it('compares paths the way every other path rule here does', () => {
-    // The git extension reports `rootUri.fsPath` in git's own spelling, and a
-    // case difference is not a different repository on either platform this
-    // ships on.
-    expect(planRepoOpen(['/M/Mono-Feat-X/'], '/m/mono-feat-x')).toBe('');
+    // The git extension reports `rootUri.fsPath` in git's own spelling: a
+    // trailing separator is never a different repository, and neither is a
+    // case difference where the platform folds case.
+    expect(planRepoOpen(['/m/mono-feat-x/'], '/m/mono-feat-x')).toBe('');
+    if (PATHS_FOLD_CASE) {
+      expect(planRepoOpen(['/M/Mono-Feat-X/'], '/m/mono-feat-x')).toBe('');
+    }
   });
 
   it('is nothing for an empty target', () => {

@@ -420,6 +420,81 @@ export function locationValueOf(
   return undefined;
 }
 
+/** How a launch reaches `createTerminal`: the executable and its arguments,
+ *  the latter an array everywhere except through a Windows shim, where VS Code
+ *  takes a single command-line string (`TerminalOptions.shellArgs` allows a
+ *  string on Windows only, for exactly this). */
+export interface SpawnableLaunch {
+  shellPath: string;
+  shellArgs: string[] | string;
+}
+
+/**
+ * Pure. A launch made spawnable on this platform.
+ *
+ * THE WINDOWS SHIM. An npm install puts `claude.cmd` on PATH, a batch file
+ * that runs the real CLI. A batch file is not an executable: CreateProcess
+ * cannot start one, and only pretends to by silently prepending `cmd.exe` —
+ * the behaviour Node closed for CVE-2024-27980, which is why `fetchRoster`
+ * (roster.ts) already wraps the same shim in `cmd /d /s /c` for the `agents`
+ * call. The terminal launch handed the shim straight to the pty as
+ * `shellPath`, so it rode that implicit `cmd.exe`, with an argument vector
+ * nobody had quoted for it: a session name with `&` in it was two commands.
+ * This puts the command processor there explicitly and quotes for it.
+ *
+ * `/d` skips AutoRun, `/s` says the first and last quote of what follows `/c`
+ * are ours and everything between is the command — which is what makes a
+ * quoted executable path AND quoted arguments legal on one line. Each
+ * argument is quoted by `quoteForCmd`.
+ *
+ * WHAT THIS CANNOT DO: `%` is cmd's expansion character and there is no
+ * escape for it on a command line (`%%` works only inside a batch file), so
+ * an argument containing `%NAME%` for a set variable is expanded before the
+ * CLI sees it. A prompt that quotes an environment variable by name is the
+ * one input this mangles, and only through the shim. The native installer's
+ * `claude.exe` has none of this, which is why discovery prefers it and the
+ * README says to install that way.
+ *
+ * A terminal launched this way has `cmd.exe` as its process, so its
+ * `Terminal.processId` is not the CLI's — the same shape as a tmux client,
+ * and the same consequence: pid-keyed re-association after an app restart
+ * does not fire for it.
+ *
+ * Off the Windows-shim path this is the identity, so every other launch is
+ * untouched.
+ */
+export function shimLaunch(
+  binary: string,
+  args: readonly string[],
+  platform: string,
+  comSpec: string | undefined,
+): SpawnableLaunch {
+  if (platform !== 'win32' || !/\.(cmd|bat)$/i.test(binary)) {
+    return { shellPath: binary, shellArgs: [...args] };
+  }
+  const line = [binary, ...args].map(quoteForCmd).join(' ');
+  return {
+    shellPath: typeof comSpec === 'string' && comSpec !== '' ? comSpec : 'cmd.exe',
+    shellArgs: `/d /s /c "${line}"`,
+  };
+}
+
+/**
+ * Pure. One argument, spelled for a `cmd /s /c "…"` line.
+ *
+ * Wrapped in double quotes whenever it holds whitespace, a quote, or a
+ * character cmd would otherwise read as syntax (`& | < > ^ ( )`). An embedded
+ * `"` becomes `\"` — the escape the C runtime's argument parser reads on the
+ * other side, which is what the batch file's `%*` eventually hands to the real
+ * CLI. cmd itself only counts quotes for its own toggling, and a `\"` pair
+ * toggles twice, so the line stays balanced. A plain word passes untouched.
+ */
+export function quoteForCmd(arg: string): string {
+  if (arg === '') return '""';
+  if (!/[\s"&|<>^()]/.test(arg)) return arg;
+  return `"${arg.replace(/"/g, '\\"')}"`;
+}
+
 // ------------------------------------------------------------- the registry
 
 export class TerminalRegistry implements DisposableLike {
@@ -762,13 +837,19 @@ export class TerminalRegistry implements DisposableLike {
       shellPath = tmux.binary;
     }
 
+    // WINDOWS SHIM (see shimLaunch): a `.cmd` on PATH needs the command
+    // processor in front of it and its arguments quoted for cmd. Everywhere
+    // else this hands back exactly what went in. Applied AFTER the tmux
+    // branch, which never runs on Windows, so the two cannot meet.
+    const spawnable = shimLaunch(shellPath, shellArgs, process.platform, process.env['ComSpec']);
+
     let terminal: vscode.Terminal;
     this.claiming.add(sessionId);
     try {
       terminal = w.createTerminal({
         name,
-        shellPath,
-        shellArgs,
+        shellPath: spawnable.shellPath,
+        shellArgs: spawnable.shellArgs,
         cwd: opts.cwd,
         // The stamp that survives a window reload inside creationOptions, and
         // the account environment beside it. Both are reconstructed for a

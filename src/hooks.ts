@@ -135,6 +135,47 @@ export const HOOK_COMMAND =
   'printf "{\\"lineage_node_id\\":\\"%s\\",\\"payload\\":%s}\\n" ' +
   '"${LINEAGE_NODE_ID:-}" "$p" >> "$HOME/.lineage/events.ndjson"\'';
 
+/**
+ * The same append, for Windows, in PowerShell.
+ *
+ * WHY POWERSHELL. Claude Code runs a shell-form hook through `sh -c` on
+ * macOS and Linux, through Git Bash on Windows, and through PowerShell on a
+ * Windows without Git Bash — and each hook may name its shell (`"shell":
+ * "powershell"`), which `renderHooksJson` does for this one. PowerShell is
+ * the shell every Windows has; Git Bash is optional. So the Windows hook is
+ * written for the shell that is always there, and the `/bin/sh` line above
+ * stays exactly what it was.
+ *
+ * WHAT IT DOES, line for line: reads the payload from stdin (`null` when
+ * empty), makes `~/.lineage` (the profile folder is what `os.homedir()`
+ * returns on Windows, so the extension and the hook agree on the path),
+ * builds the same v3 envelope the POSIX command prints, and appends it with
+ * ONE write through a stream opened for shared read-write — the closest
+ * Windows comes to the atomic O_APPEND write the printf above relies on.
+ * Two hooks landing in the same millisecond can still interleave here, and a
+ * torn line is dropped by `parseEventLine` rather than misread; the poller
+ * covers whatever a dropped event would have said.
+ *
+ * NO DOUBLE QUOTES ANYWHERE IN IT, on purpose: the string travels from
+ * hooks.json into whatever argv the CLI builds for PowerShell, and a `"` is
+ * the one character every layer on that path has an opinion about. `[char]34`
+ * is the quote and `[char]10` the newline. The line ends in LF alone, which is
+ * what the reader splits on.
+ */
+export const HOOK_COMMAND_WINDOWS =
+  '$q=[char]34;$p=[Console]::In.ReadToEnd().Trim();if(-not $p){$p=\'null\'};' +
+  '$d=Join-Path ([Environment]::GetFolderPath(\'UserProfile\')) \'.lineage\';' +
+  'New-Item -ItemType Directory -Force -Path $d|Out-Null;' +
+  '$n=[string]$env:LINEAGE_NODE_ID;' +
+  '$b=[Text.Encoding]::UTF8.GetBytes(\'{\'+$q+\'lineage_node_id\'+$q+\':\'+$q+$n+$q+\',\'+$q+\'payload\'+$q+\':\'+$p+\'}\'+[char]10);' +
+  '$s=[IO.File]::Open((Join-Path $d \'events.ndjson\'),\'Append\',\'Write\',\'ReadWrite\');' +
+  'try{$s.Write($b,0,$b.Length)}finally{$s.Dispose()}';
+
+/** The hook command for a platform — `HOOK_COMMAND` everywhere but win32. */
+export function hookCommandFor(platform: string): string {
+  return platform === 'win32' ? HOOK_COMMAND_WINDOWS : HOOK_COMMAND;
+}
+
 /** The hook events we listen for. Every one is a pure accelerator.
  *  UserPromptSubmit (v3) is the freshness beat: it fires on every prompt, so
  *  a conversation whose id churned is re-keyed within one user action, which is
@@ -171,13 +212,17 @@ export function renderPluginJson(): string {
 }
 
 /** Every HOOK_EVENTS entry, each a single-element matcher-less array of
- *  {hooks:[{type:'command', command: HOOK_COMMAND}]}. */
-export function renderHooksJson(): string {
+ *  {hooks:[{type:'command', command}]} — the platform's command, and on win32
+ *  `shell: 'powershell'` beside it, so the CLI runs it through PowerShell
+ *  whether or not Git Bash is installed. Rendered per machine: the plugin
+ *  directory lives in the user's home, so a file written on Windows is only
+ *  ever read on Windows, and self-heal compares against the same rendering. */
+export function renderHooksJson(platform: string = process.platform): string {
+  const hook: Record<string, string> = { type: 'command', command: hookCommandFor(platform) };
+  if (platform === 'win32') hook['shell'] = 'powershell';
   const hooks: Record<string, unknown[]> = {};
   for (const event of HOOK_EVENTS) {
-    hooks[event] = [
-      { hooks: [{ type: 'command', command: HOOK_COMMAND }] },
-    ];
+    hooks[event] = [{ hooks: [hook] }];
   }
   return JSON.stringify({ hooks }, null, 2);
 }
@@ -336,14 +381,6 @@ export class HooksManager implements DisposableLike {
    *  ~/.claude/settings.json. */
   async install(): Promise<HookInstallState> {
     const stored = this.getState();
-    if (process.platform === 'win32') {
-      void showWarning(
-        'Flock hooks need a POSIX shell (/bin/sh) and are not supported on ' +
-          'Windows. Flock keeps updating by polling.',
-      );
-      log('hooks: install skipped (win32)');
-      return stored;
-    }
 
     const files = this.desiredFiles();
     if (files.every((f) => readTextSync(f.path) === f.text)) {
@@ -448,7 +485,6 @@ export class HooksManager implements DisposableLike {
   async selfHeal(): Promise<HookInstallState> {
     const stored = this.getState();
     if (!stored.installed) return stored;
-    if (process.platform === 'win32') return stored;
 
     const files = this.desiredFiles();
     const onDisk = files.map((f) => readTextSync(f.path));
@@ -595,7 +631,7 @@ export class HooksManager implements DisposableLike {
       '',
       'Each hook runs exactly this, and nothing else:',
       '',
-      `    ${HOOK_COMMAND}`,
+      `    ${hookCommandFor(process.platform)}`,
       '',
       `Session events are appended to ${this.eventsPath()}.`,
       '',
@@ -960,7 +996,12 @@ function carriesOurCommand(parsed: unknown): boolean {
       const commands = matcher['hooks'];
       if (!Array.isArray(commands)) continue;
       for (const command of commands) {
-        if (isRecord(command) && command['command'] === HOOK_COMMAND) {
+        // Either platform's command counts: a hooks.json written on Windows
+        // carries the PowerShell line, and verify() must not call that drift.
+        if (
+          isRecord(command) &&
+          (command['command'] === HOOK_COMMAND || command['command'] === HOOK_COMMAND_WINDOWS)
+        ) {
           return true;
         }
       }

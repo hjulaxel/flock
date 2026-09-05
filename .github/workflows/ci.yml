@@ -7,7 +7,16 @@ on:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    # Windows is new to the matrix. Until the suite has been triaged on a real
+    # run, a red Windows leg says "not yet looked at" rather than "broken", so
+    # it does not block a merge. Remove this line the day it is green.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -18,3 +27,30 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run compile
+
+  smoke:
+    name: smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run compile
+      # The VS Code download is ~150 MB per OS. Cached on the lockfile, which
+      # is what pins @vscode/test-electron and therefore which build it fetches.
+      - uses: actions/cache@v4
+        with:
+          path: .vscode-test
+          key: vscode-test-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - run: xvfb-run -a npm run test:smoke
+        if: runner.os == 'Linux'
+      - run: npm run test:smoke
+        if: runner.os != 'Linux'

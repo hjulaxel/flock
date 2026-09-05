@@ -28,6 +28,7 @@ import * as fs from 'node:fs/promises';
 
 import {
   listPidFacts,
+  orphanedOnWindows,
   orphanRescueDecision,
   reapSurvivors,
   type PersistedPidFact,
@@ -2216,7 +2217,13 @@ export async function activate(
           saved.length > 0
             ? await listPidFacts(saved.map((e) => e.pid))
             : new Map<number, { ppid: number; start: string }>();
-        const decision = orphanRescueDecision(saved, facts);
+        // "Orphaned" is a platform fact: re-parented to PID 1 on POSIX, a
+        // parent that no longer exists on Windows (see orphanedOnWindows).
+        const decision = orphanRescueDecision(
+          saved,
+          facts,
+          process.platform === 'win32' ? orphanedOnWindows : undefined,
+        );
         if (decision.reap.length > 0) {
           log(
             `bare rescue: ${name} left ${String(decision.reap.length)} ` +

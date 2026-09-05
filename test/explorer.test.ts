@@ -23,6 +23,7 @@ import {
   type ExplorerHost,
   type FolderSpec,
 } from '../src/explorer';
+import { PATHS_FOLD_CASE } from '../src/projects';
 import type { ProjectRecord } from '../src/types';
 
 const ANCHOR = '/Users/x/.lineage/anchor';
@@ -83,8 +84,11 @@ describe('explorer: isAnchored', () => {
     expect(isAnchored([anchorFolder, { path: '/a' }], ANCHOR)).toBe(true);
   });
 
-  it('ignores case and trailing separators, which the two sides spell differently', () => {
+  it('ignores trailing separators, which the two sides spell differently', () => {
     expect(isAnchored([{ path: `${ANCHOR}/` }], ANCHOR)).toBe(true);
+  });
+
+  it.runIf(PATHS_FOLD_CASE)('ignores case where the platform does', () => {
     expect(isAnchored([{ path: ANCHOR.toUpperCase() }], ANCHOR)).toBe(true);
   });
 
@@ -119,9 +123,11 @@ describe('explorer: nonAnchorFolders', () => {
     expect(
       nonAnchorFolders(ANCHOR, ['/a', `${ANCHOR}/`, '/b']),
     ).toEqual(['/a', '/b']);
-    expect(nonAnchorFolders(ANCHOR, [ANCHOR.toUpperCase(), '/a'])).toEqual([
-      '/a',
-    ]);
+    if (PATHS_FOLD_CASE) {
+      expect(nonAnchorFolders(ANCHOR, [ANCHOR.toUpperCase(), '/a'])).toEqual([
+        '/a',
+      ]);
+    }
   });
 
   it('drops junk entries and passes unconverted windows through unchanged', () => {
@@ -168,8 +174,14 @@ describe('explorer: desiredFolders', () => {
   });
 
   it('never emits the same directory twice — a duplicate URI makes the workbench reject the WHOLE splice', () => {
+    // Spelled with a trailing separator, which every platform folds; the
+    // case variant is a second duplicate only where the platform folds case.
     const rows = desiredFolders(
-      project({ dirs: ['/Users/x/code/web', '/Users/X/CODE/WEB'] }),
+      project({
+        dirs: PATHS_FOLD_CASE
+          ? ['/Users/x/code/web', '/Users/X/CODE/WEB']
+          : ['/Users/x/code/web', '/Users/x/code/web/'],
+      }),
       ANCHOR,
     );
     expect(rows).toHaveLength(1);
@@ -215,9 +227,11 @@ describe('explorer: desiredFolders under directory scope', () => {
     }
   });
 
-  it('matches the current directory the way every other path compare does', () => {
-    // pathKey, not string equality: on the two platforms this ships on the
-    // Explorer would otherwise re-root itself over a difference in case.
+  it.runIf(PATHS_FOLD_CASE)('matches the current directory the way every other path compare does', () => {
+    // pathKey, not string equality: on macOS and Windows the Explorer would
+    // otherwise re-root itself over a difference in case. Linux compares
+    // exactly, so there the two spellings ARE two directories and this
+    // expectation does not apply.
     expect(
       desiredFolders(web, ANCHOR, {
         scope: 'directory',

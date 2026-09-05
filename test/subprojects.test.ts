@@ -38,6 +38,7 @@ import {
   matchProject,
   projectSubtree,
   unbranchedRoots,
+  PATHS_FOLD_CASE,
 } from '../src/projects';
 import type { GroupingResult } from '../src/projects';
 import { MAX_PROJECT_DEPTH } from '../src/types';
@@ -1378,7 +1379,7 @@ describe('canonicalCheckoutPath', () => {
     ).toBe('');
   });
 
-  it('matches a checkout case-insensitively, the way every other path rule does', () => {
+  it.runIf(PATHS_FOLD_CASE)('matches a checkout case-insensitively, the way every other path rule does', () => {
     // macOS and Windows both have case-insensitive filesystems by default, so
     // /Code/App-Feat and /code/app-feat are one directory — see pathKey.
     expect(canonicalCheckoutPath(worktrees, '/Code/App-Feat/api')).toBe(
@@ -1469,7 +1470,7 @@ describe('inCheckout', () => {
     expect(back).toBe(cwd);
   });
 
-  it('matches a checkout case-insensitively, like every other path rule here', () => {
+  it.runIf(PATHS_FOLD_CASE)('matches a checkout case-insensitively, like every other path rule here', () => {
     expect(inCheckout(worktrees, feat, '/Code/App/API')).toBe(
       '/code/app-feat/API',
     );
