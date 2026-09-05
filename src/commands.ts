@@ -37,8 +37,16 @@ import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 
 import { log, logError } from './log';
-import { recommendedPlan, surfaceChoices, windowModelChoices } from './recommend';
+import {
+  recommendedPlan,
+  surfaceChoices,
+  windowModelChoices,
+  windowModelOffer,
+} from './recommend';
+import { ADVANCED_SETTINGS_QUERY, SETTINGS_QUERY, statusFacts } from './status';
+import type { StatusAction, StatusFact } from './status';
 import type {
+  ContextualOfferId,
   RecommendedSetting,
   RecommendedStep,
   RecommendedStepId,
@@ -50,6 +58,7 @@ import {
   COMMANDS,
   COMPACT_PROMPT,
   CONTEXT_HOOKS_INSTALLED,
+  DEFAULT_STALE_AFTER_HOURS,
   MAX_DISPATCH_PROMPT_CHARS,
   MAX_PROJECT_NAME_LEN,
   PROVIDERS,
@@ -1922,7 +1931,7 @@ interface RecommendedPick extends vscode.QuickPickItem {
  *
  * WHAT IS OFFERED IS NOT DECIDED HERE. `recommendedPlan` (src/recommend.ts) is
  * pure and tested and owns every sentence the user reads; this function is the
- * side effects — the picker, the seven ways of applying a step, and the receipt.
+ * side effects — the picker, the five ways of applying a step, and the receipt.
  *
  * NO CONFIRMATION MODAL OF ITS OWN, deliberately. The picker IS the choice, the
  * same way running `showBranchesAndWorktrees` is: every line says what it
@@ -1948,11 +1957,11 @@ export async function recommendedSetupFlow(deps: CommandDeps): Promise<void> {
 
   const plan = recommendedPlan(world);
   if (plan.steps.length === 0) {
-    // Defensive: the `surface` step is on every plan today, so this branch is
-    // unreachable — kept because recommendedPlan owns that fact, not this
-    // function, and a future plan with a genuinely empty answer should say
-    // this rather than open an empty picker. The notes (today: tmux is not
-    // installed) are the one thing left worth saying.
+    // A settled machine. Every step has an "already done" now that the two
+    // taste questions are verbs of their own rather than rows on every plan,
+    // so somebody who has everything is told so instead of being shown an
+    // empty picker. The notes (today: tmux is not installed) are the one thing
+    // left worth saying.
     void vscode.window.showInformationMessage(
       ['Flock: everything recommended is already set up.', ...plan.notes].join(' '),
     );
@@ -1984,7 +1993,7 @@ export async function recommendedSetupFlow(deps: CommandDeps): Promise<void> {
     if (!wanted.has(step.id)) continue;
     let done = false;
     try {
-      done = await applyRecommendedStep(deps, step, world, failed);
+      done = await applyRecommendedStep(deps, step, failed);
     } catch (err) {
       // Per step, so one thrown step cannot take the other five with it. The
       // top-level guard in `register` would have caught this and reported the
@@ -2015,13 +2024,11 @@ export async function recommendedSetupFlow(deps: CommandDeps): Promise<void> {
 }
 
 /** One step's side effect. Returns whether it actually landed — a declined
- *  consent dialog, a closed folder dialog and a cancelled surface picker all
- *  mean "no", and none is an error. Keys that could not be written are
- *  appended to `failed`. */
+ *  consent dialog and a closed folder dialog both mean "no", and neither is an
+ *  error. Keys that could not be written are appended to `failed`. */
 async function applyRecommendedStep(
   deps: CommandDeps,
   step: RecommendedStep,
-  world: RecommendedWorld,
   failed: string[],
 ): Promise<boolean> {
   // The settings steps first, and by their table rather than by their id: which
@@ -2072,27 +2079,6 @@ async function applyRecommendedStep(
       // the person was shown the door, which is what this step promised.
       await importSessionsFlow(deps);
       return true;
-    case 'surface':
-    case 'windowModel': {
-      // The explicit question the step promised. The choice writes; the tick
-      // did not — so a cancelled picker is "no" and costs nothing, exactly as
-      // recommend.ts's contract for a TASTE question requires. Both taste steps
-      // land here because they are the same shape of thing: open a picker, and
-      // write whatever the chosen option carries.
-      const choice =
-        step.id === 'surface'
-          ? await chooseSurface(world)
-          : await chooseWindowModel(world);
-      if (choice === undefined) return false;
-      const unwritable = (await deps.writeSettings?.(choice.settings)) ?? [
-        ...choice.settings.map((s) => s.key),
-      ];
-      if (unwritable.length > 0) {
-        failed.push(`${step.title} (${unwritable.join(', ')})`);
-        return false;
-      }
-      return true;
-    }
     default:
       return false;
   }
@@ -2186,6 +2172,73 @@ async function chooseSurface(
   world: RecommendedWorld,
 ): Promise<SurfaceChoice | undefined> {
   return chooseFromTaste(surfaceChoices(world), 'Where should sessions open?');
+}
+
+/** A choice's settings, written. `choice` is undefined for a cancelled
+ *  picker — "no", and nothing is written; `unwritable` names the keys the
+ *  wiring could not write (a read-only profile, a sync conflict), or every key
+ *  when there is no wiring to write with at all. Anything carrying `settings`
+ *  qualifies — a taste picker's row, a Status row's write — so there is one
+ *  place that turns a chosen table of keys into a report of what moved. */
+async function writeChoice<T extends { readonly settings: readonly RecommendedSetting[] }>(
+  deps: CommandDeps,
+  choice: T | undefined,
+): Promise<{ choice: T | undefined; unwritable: readonly string[] }> {
+  if (choice === undefined) return { choice, unwritable: [] };
+  const unwritable = (await deps.writeSettings?.(choice.settings)) ?? [
+    ...choice.settings.map((s) => s.key),
+  ];
+  return { choice, unwritable };
+}
+
+/**
+ * A taste picker as a VERB: read the world, ask, write what the chosen option
+ * carries, refresh, and say what changed — by the option's LABEL, never its
+ * value, because the receipt has to be readable by the same person the picker
+ * was. `Choose Window Model…` and `Choose Where Sessions Open…` are both this
+ * function; the words differ, the contract does not. A cancelled picker
+ * writes nothing and says nothing, and a key the wiring could not write is
+ * named, with the fact that nothing moved.
+ *
+ * THE ONLY ROUTE to either picker. The checklist used to carry both as rows
+ * on every plan, and they left it for the reason design/settings-tiers.md §5
+ * gives: nobody can answer "what is a window" before they have lived in one.
+ * The Status verb's rows run these two commands by id, so there is one
+ * picker per question in a codebase whose whole argument for
+ * `chooseFromTaste` was that there should not be two.
+ */
+async function tasteVerb<T extends TasteChoice>(
+  deps: CommandDeps,
+  /** The one-time offer this verb answers (`offerWindowModel`, and the
+   *  second-tab offer in extension.ts): a choice made from the gear or the
+   *  Status verb settles the question, so the offer must not ask it later. */
+  offer: ContextualOfferId,
+  ask: (world: RecommendedWorld) => Promise<T | undefined>,
+  words: {
+    /** Said when the wiring cannot supply the world. */
+    unavailable: string;
+    /** The tail of the warning when a key could not be written. */
+    unchanged: string;
+    /** The status-bar receipt, given the chosen label. */
+    receipt: (label: string) => string;
+  },
+): Promise<void> {
+  const world = await deps.recommendedWorld?.();
+  if (!world) {
+    void vscode.window.showInformationMessage(words.unavailable);
+    return;
+  }
+  const { choice, unwritable } = await writeChoice(deps, await ask(world));
+  if (choice === undefined) return;
+  if (unwritable.length > 0) {
+    void vscode.window.showWarningMessage(
+      `Flock: could not write ${unwritable.join(', ')}. ${words.unchanged}`,
+    );
+    return;
+  }
+  deps.refresh();
+  await deps.offers?.markAnswered(offer);
+  vscode.window.setStatusBarMessage(words.receipt(choice.label), 5000);
 }
 
 /**
@@ -4365,22 +4418,66 @@ async function routeForeign(
   const node = deps.getForest().nodes.get(sessionId);
   const cwd = node?.cwd ?? deps.getRecord(sessionId)?.cwd;
   if (!outsideScope(deps.scopeDirs?.(), cwd)) return false;
-  if (await deps.focusWindowFor(sessionId)) return true;
-  if ((await deps.focusWindowForDir?.(cwd ?? '', sessionId)) === true) {
-    return true;
+  const claimants = matchProjects(deps.allProjects(), cwd);
+  if (
+    !(await deps.focusWindowFor(sessionId)) &&
+    (await deps.focusWindowForDir?.(cwd ?? '', sessionId)) !== true
+  ) {
+    // outsideScope proved the cwd known, so openTargetFor can never answer ''.
+    const target = openTargetFor(claimants, cwd);
+    const label = node?.label ?? shortId(sessionId);
+    const OPEN = 'Open in New Window';
+    const choice = await vscode.window.showInformationMessage(
+      `Flock: "${label}" is in ${target} — outside this window's folder. ` +
+        'Open that folder in its own window to work on it; this window is ' +
+        'never rearranged.',
+      OPEN,
+    );
+    if (choice === OPEN) await deps.openProject(target, true);
   }
-  // outsideScope proved the cwd known, so openTargetFor can never answer ''.
-  const target = openTargetFor(matchProjects(deps.allProjects(), cwd), cwd);
-  const label = node?.label ?? shortId(sessionId);
-  const OPEN = 'Open in New Window';
-  const choice = await vscode.window.showInformationMessage(
-    `Flock: "${label}" is in ${target} — outside this window's folder. ` +
-      'Open that folder in its own window to work on it; this window is ' +
-      'never rearranged.',
-    OPEN,
-  );
-  if (choice === OPEN) await deps.openProject(target, true);
+  // AFTER the routing, whichever tier did it: the person has just watched the
+  // model cost them a click, which is the moment the question is real.
+  await offerWindowModel(deps, claimants.length > 0);
   return true;
+}
+
+/**
+ * "What is a window?", asked ONCE, at the moment it becomes real — a folder
+ * window has just sent a project's session elsewhere.
+ *
+ * `windowModelOffer` (src/recommend.ts) decides; this draws the message and
+ * acts on the answer, on the terms every notice here keeps: "Choose…" stamps
+ * and runs the picker, "Not now" stamps, the X stamps nothing and the question
+ * comes back with the next routed session. A wiring without `offers` — every
+ * unit double — reads as already answered, so nothing here speaks in a test
+ * that did not ask for it. The stamp is per install (globalState, extension.ts)
+ * and the picker itself stamps it too (see `tasteVerb`), so a person who found
+ * the verb in the gear first is never asked a question they have answered.
+ */
+async function offerWindowModel(
+  deps: CommandDeps,
+  claimed: boolean,
+): Promise<void> {
+  const verdict = windowModelOffer({
+    mode: deps.lineageMode?.(),
+    claimed,
+    answered: deps.offers?.answered('windowModel') ?? true,
+  });
+  if (verdict !== 'offer') return;
+  const CHOOSE = 'Choose…';
+  const NOT_NOW = 'Not now';
+  const answer = await vscode.window.showInformationMessage(
+    'Flock can switch this window between projects for you, or keep one ' +
+      'folder per window. Choose a window model?',
+    CHOOSE,
+    NOT_NOW,
+  );
+  if (answer === CHOOSE) {
+    await deps.offers?.markAnswered('windowModel');
+    await vscode.commands.executeCommand(COMMANDS.chooseWindowModel);
+  } else if (answer === NOT_NOW) {
+    await deps.offers?.markAnswered('windowModel');
+  }
 }
 
 export async function resumeFlow(
@@ -5868,7 +5965,7 @@ function noteRestoredWhileFiltered(
  * the note names it rather than enumerating the tree's five ways of hiding a
  * row. Every session in this list matched this project by directory, so it has
  * a claimant by construction — and the grouping applies folder-hiding and
- * `onlyProjectSessions` only to sessions NO project claims. The active-only
+ * `unclaimedSessions: hidden` only to sessions NO project claims. The active-only
  * filter is the one other reason a restored row can be missing, and it already
  * has its own sentence; the ids stranded here are withheld from it so that one
  * restore never produces two explanations of itself.
@@ -9384,10 +9481,11 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   });
 
   register(COMMANDS.deleteStale, 'archive stale sessions', async () => {
-    const hours = deps.staleAfterHours();
+    // A constant, not a setting: the age only decides which rows start
+    // ticked, and the dialog itself is where that answer gets corrected.
     const candidates = staleCandidates(
       deps.getForest(),
-      hours * 3_600_000,
+      DEFAULT_STALE_AFTER_HOURS * 3_600_000,
       Date.now(),
     );
     if (candidates.length === 0) {
@@ -9404,7 +9502,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       picked: c.stale,
     }));
     const chosen = await vscode.window.showQuickPick(items, {
-      title: `Archive stale sessions — pre-ticked at ${hours}h and older`,
+      title: `Archive stale sessions — pre-ticked at ${DEFAULT_STALE_AFTER_HOURS}h and older`,
       placeHolder: 'Tick every row to remove from the tree, then press Enter',
       canPickMany: true,
       matchOnDescription: true,
@@ -10722,41 +10820,134 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     await recommendedSetupFlow(deps);
   });
 
-  // THE WINDOW MODEL, on its own, without the checklist around it. The
-  // recommended setup asks this once, at the moment somebody meets the
-  // product; this is the verb for the other moment — when they have been
-  // living in one model for a month and want a different one. Reaching that
-  // through a settings dropdown means knowing the key is called `lineage.mode`
-  // and that `project` is spelled that way even though it means "auto-switch",
-  // which is knowledge the product should not require.
+  // THE TWO TASTE QUESTIONS, each on its own, without the checklist around
+  // them. These are the verbs for the moment after somebody has lived with an
+  // answer — a month in one window model, a week of sessions opening where
+  // the default put them — and wants a different one. Reaching either through
+  // the settings editor means knowing that the key is called `lineage.mode`
+  // and that `project` is spelled that way even though it means
+  // "auto-switch", or that where a session opens is three keys that have to
+  // move together, which is knowledge the product should not require.
   //
-  // Says what it did, and says the model by its LABEL rather than its value:
-  // the receipt has to be readable by the same person the picker was.
-  register(COMMANDS.chooseWindowModel, 'choose window model', async () => {
+  // Both are `tasteVerb` with different words, so they cannot drift in the one
+  // property that matters: a cancelled picker writes nothing and says nothing.
+  register(COMMANDS.chooseWindowModel, 'choose window model', () =>
+    tasteVerb(deps, 'windowModel', chooseWindowModel, {
+      unavailable: 'Flock: the window model picker is not available in this window.',
+      unchanged: 'The window model is unchanged.',
+      receipt: (label) => `Flock: this window is now “${label}”`,
+    }),
+  );
+
+  register(COMMANDS.chooseSurface, 'choose where sessions open', () =>
+    tasteVerb(deps, 'surface', chooseSurface, {
+      unavailable: 'Flock: the surface picker is not available in this window.',
+      unchanged: 'Sessions open where they did.',
+      receipt: (label) => `Flock: sessions now open as “${label}”`,
+    }),
+  );
+
+  // ------------------------------------------------- the settings editor
+  //
+  // No settings page of Flock's own. `contributes.configuration` is an array
+  // of titled categories with ordered rows, tagged and labelled, and the
+  // built-in editor draws it; these two verbs open that editor at the two
+  // filters the design names. See src/status.ts for the query strings.
+
+  register(COMMANDS.openSettings, 'open settings', async () => {
+    await vscode.commands.executeCommand(
+      'workbench.action.openSettings',
+      SETTINGS_QUERY,
+    );
+  });
+
+  register(COMMANDS.openAdvancedSettings, 'open advanced settings', async () => {
+    await vscode.commands.executeCommand(
+      'workbench.action.openSettings',
+      ADVANCED_SETTINGS_QUERY,
+    );
+  });
+
+  // ------------------------------------------------------------- status
+  //
+  // Read-only rows whose pick runs the verb that changes them. The facts are
+  // `statusFacts` (src/status.ts), decided from the same world the checklist
+  // reads plus the two binary probes every launch makes; this side draws the
+  // QuickPick and runs whichever existing flow the picked row names. Nothing
+  // is probed here that the checklist does not probe, and nothing is written
+  // until a row is picked.
+
+  register(COMMANDS.showStatus, 'status', async () => {
     const world = await deps.recommendedWorld?.();
     if (!world) {
       void vscode.window.showInformationMessage(
-        'Flock: the window model picker is not available in this window.',
+        'Flock: status is not available in this window.',
       );
       return;
     }
-    const choice = await chooseWindowModel(world);
-    if (choice === undefined) return;
-    const unwritable = (await deps.writeSettings?.(choice.settings)) ?? [
-      ...choice.settings.map((setting) => setting.key),
-    ];
-    if (unwritable.length > 0) {
-      void vscode.window.showWarningMessage(
-        `Flock: could not write ${unwritable.join(', ')}. The window model is unchanged.`,
-      );
-      return;
-    }
-    deps.refresh();
-    vscode.window.setStatusBarMessage(
-      `Flock: this window is now “${choice.label}”`,
-      5000,
+    const facts = statusFacts({
+      world,
+      cli: deps.cliBinaries?.(),
+      hasCodexAccount: (deps.accounts?.accounts() ?? []).some(
+        (profile) => profile.provider === 'codex',
+      ),
+    });
+    const items: (vscode.QuickPickItem & { fact: StatusFact })[] = facts.map(
+      (fact) => ({
+        label: `$(${fact.icon}) ${fact.label}`,
+        description: fact.value,
+        detail: fact.next,
+        fact,
+      }),
     );
+    const chosen = await vscode.window.showQuickPick(items, {
+      title: 'Flock — Status',
+      placeHolder: 'What this machine has and what this window is on — pick a row to change it',
+      matchOnDescription: true,
+      matchOnDetail: true,
+    });
+    if (!chosen) return;
+    await runStatusAction(chosen.fact.action);
   });
+
+  /** The picked row's verb. Every arm is an existing flow reached by its
+   *  existing route — the contributed command, the editor at a key, the
+   *  checklist's own settings write. */
+  async function runStatusAction(action: StatusAction): Promise<void> {
+    switch (action.kind) {
+      case 'command':
+        await vscode.commands.executeCommand(action.command);
+        return;
+      case 'openSetting':
+        await vscode.commands.executeCommand(
+          'workbench.action.openSettings',
+          action.key,
+        );
+        return;
+      case 'tmuxInstall':
+        // A package manager's job, not ours: say how, and no more.
+        void vscode.window.showInformationMessage(
+          'Flock: tmux is not installed. Without it, switching projects closes ' +
+            'the other project’s sessions instead of hiding them.' +
+            (action.hint === undefined
+              ? ' Install it with your package manager.'
+              : ` Install it with \`${action.hint}\`.`),
+        );
+        return;
+      case 'writeSettings': {
+        const { unwritable } = await writeChoice(deps, action);
+        if (unwritable.length > 0) {
+          void vscode.window.showWarningMessage(
+            `Flock: could not write ${unwritable.join(', ')}.`,
+          );
+          return;
+        }
+        deps.refresh();
+        vscode.window.setStatusBarMessage(action.receipt, 5000);
+        return;
+      }
+    }
+  }
 
   // --------------------------------------------------- the Accounts section
   //
@@ -10775,6 +10966,11 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   // it has to be as easy to find as it was to lose. Nothing about accounts stops
   // working — the ten verbs stay registered, routing and pinning are untouched —
   // so the wording says "section", never "accounts".
+  //
+  // Shells is the third view and carries the identical pair on
+  // `lineage.shells.section`. For a release it did not: Accounts had a gear
+  // entry and Shells only settings.json, for two sections that cost the same
+  // row. The gear groups the two pairs as "Sections" so they read as one choice.
 
   /**
    * The gear: everything the view title used to keep behind its `...`.
@@ -10810,6 +11006,24 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     // here as bare verbs, and a bare verb only helps somebody who already knows
     // what it does. This one says why before it asks.
     group('Setup');
+    // THE SETTINGS PAGE IS THE BUILT-IN EDITOR, filtered to Flock — its
+    // categories, order and tags are the manifest's — and this is its door.
+    // Top of the menu, above the checklist: the person who opens a gear is
+    // usually looking for a setting, and the checklist is for the person who
+    // does not yet know which.
+    items.push({
+      label: '$(settings-gear) Flock Settings...',
+      description: 'Every setting, by category, in the Settings editor',
+      command: COMMANDS.openSettings,
+    });
+    // The facts a settings page is opened to check — tmux, the two installs,
+    // the CLIs, the window model, where sessions open — with the verb that
+    // changes each one a pick away. Read-only until picked.
+    items.push({
+      label: '$(pulse) Status...',
+      description: 'tmux, hooks, verbs, the CLIs, and what this window is on',
+      command: COMMANDS.showStatus,
+    });
     items.push({
       label: '$(checklist) Recommended Setup...',
       description: 'What to turn on, and why — you tick what you want',
@@ -10832,6 +11046,27 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
           ? 'One folder per project, Flock only, or auto-switch'
           : `Currently “${modelNow}” — change it`,
       command: COMMANDS.chooseWindowModel,
+    });
+    // The other taste question, on the same terms: names where sessions open
+    // TODAY, through `surfaceChoices` — the function the picker itself uses —
+    // and falls back to listing the places when the wiring cannot say.
+    const surfaceNow = safeCall('menuSurface', () => deps.surface?.());
+    items.push({
+      label: '$(layout) Choose Where Sessions Open...',
+      description:
+        surfaceNow === undefined
+          ? 'One pinned tab, editor tabs, the Claude Code extension, the panel, or their own window'
+          : `Currently “${surfaceNow}” — change it`,
+      command: COMMANDS.chooseSurface,
+    });
+    // LAST in the group, and plainly named: the rows the manifest tags
+    // `advanced` — paths, timings, diagnostics, previews — are the ones a
+    // first-time reader is meant to be able to skip, so their door sits below
+    // everything a first-time reader is meant to find.
+    items.push({
+      label: '$(settings) Open Advanced Settings',
+      description: 'Paths, timings, diagnostics and previews',
+      command: COMMANDS.openAdvancedSettings,
     });
 
     group('Sessions');
@@ -10903,7 +11138,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       },
     );
 
-    group('Accounts');
+    group('Sections');
     if (state === undefined || !state.accountsSection) {
       items.push({
         label: '$(account) Show Accounts Section',
@@ -10916,6 +11151,20 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         label: '$(account) Hide Accounts Section',
         description: "Moves Flock's buttons up onto the FLOCK row",
         command: COMMANDS.hideAccountsSection,
+      });
+    }
+    if (state === undefined || !state.shellsSection) {
+      items.push({
+        label: '$(terminal) Show Shells Section',
+        description: 'One row per command your sessions are running',
+        command: COMMANDS.showShellsSection,
+      });
+    }
+    if (state === undefined || state.shellsSection) {
+      items.push({
+        label: '$(terminal) Hide Shells Section',
+        description: 'The list goes; what your sessions run does not change',
+        command: COMMANDS.hideShellsSection,
       });
     }
 
@@ -11002,6 +11251,22 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     await deps.setAccountsSection(false);
     vscode.window.setStatusBarMessage(
       'Flock: Accounts hidden — every account verb is still in the palette',
+      5000,
+    );
+  });
+
+  register(COMMANDS.showShellsSection, 'show the shells section', async () => {
+    await deps.setShellsSection(true);
+    vscode.window.setStatusBarMessage(
+      'Flock: Shells is back in the sidebar — one row per command your sessions run',
+      5000,
+    );
+  });
+
+  register(COMMANDS.hideShellsSection, 'hide the shells section', async () => {
+    await deps.setShellsSection(false);
+    vscode.window.setStatusBarMessage(
+      'Flock: Shells hidden — your sessions keep running everything they were',
       5000,
     );
   });

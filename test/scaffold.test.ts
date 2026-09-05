@@ -20,6 +20,7 @@ import {
   CONFIG_SECTION,
   DONE_COLOR_ID,
   EXTENSION_ID,
+  LEGACY_KEYS,
   PROVIDERS,
   PROVIDER_IDS,
   PROVIDER_MEDIA_DIR,
@@ -41,6 +42,7 @@ import {
   windowModelChoices,
 } from '../src/recommend';
 import { branchStateIcon } from '../src/viewmodel';
+import { contributedSettings } from './manifest';
 
 const ROOT = path.join(__dirname, '..');
 const FIXTURE_DIR = path.join(__dirname, 'fixtures', 'transcripts');
@@ -101,7 +103,7 @@ describe('scaffold: the shared types contract', () => {
     //
     // Bump it in the same commit as the verb, and check the new id reaches a
     // menu: a command nobody can invoke is not a feature.
-    expect(ids).toHaveLength(102);
+    expect(ids).toHaveLength(108);
     // Duplicate values would make one of them unreachable — the later key wins
     // at registration and the earlier verb's menu entry fires the wrong flow.
     expect(new Set(ids).size).toBe(ids.length);
@@ -149,14 +151,7 @@ describe('scaffold: the shared types contract', () => {
   // unwritable — and an `off` value that is not the shipped default turns the
   // Hide half into a verb that leaves the tree somewhere nobody asked for.
   it('turns the branch feature on and off against settings that exist', () => {
-    const pkg = JSON.parse(
-      fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'),
-    ) as {
-      contributes: {
-        configuration: { properties: Record<string, { default?: unknown }> };
-      };
-    };
-    const properties = pkg.contributes.configuration.properties;
+    const properties = contributedSettings();
     expect(BRANCH_FEATURE_SWITCHES.length).toBe(4);
     for (const { key, on, off } of BRANCH_FEATURE_SWITCHES) {
       const full = `${CONFIG_SECTION}.${key}`;
@@ -183,19 +178,7 @@ describe('scaffold: the shared types contract', () => {
   // has to differ from the world it was offered in, which is `recommendedPlan`'s
   // own condition and is pinned in test/recommend.test.ts.
   it('recommends settings that exist, and values those settings accept', () => {
-    const pkg = JSON.parse(
-      fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'),
-    ) as {
-      contributes: {
-        configuration: {
-          properties: Record<
-            string,
-            { default?: unknown; type?: string; enum?: unknown[] }
-          >;
-        };
-      };
-    };
-    const properties = pkg.contributes.configuration.properties;
+    const properties = contributedSettings();
     // A world in which every settings-bearing step is on offer at once: tmux
     // installed but switched off, and a repository with more than one checkout
     // whose rows are not drawn.
@@ -230,8 +213,16 @@ describe('scaffold: the shared types contract', () => {
     ];
     // The loop asserting nothing is the failure mode this guards against.
     expect(entries.length).toBeGreaterThan(0);
+    const retired = new Set<string>(Object.values(LEGACY_KEYS));
     for (const { key, value } of entries) {
       const full = `${CONFIG_SECTION}.${key}`;
+      // A retired key is the one thing a choice may name without the manifest
+      // declaring it, and only to DELETE it: the wiring lets that through and
+      // refuses a value, because VS Code does the same.
+      if (retired.has(key)) {
+        expect(value, `${full} may only be deleted`).toBeUndefined();
+        continue;
+      }
       const declared = properties[full];
       expect(declared, `${full} is not a contributed setting`).toBeDefined();
       expect(typeof value, `${full} type`).toBe(declared.type);
@@ -241,66 +232,9 @@ describe('scaffold: the shared types contract', () => {
     }
   });
 
-  // docs/settings.md opens with "All N settings" over a table with one row per
-  // setting. Both drifted from the manifest silently — the table was two rows
-  // short and the header three behind the table — because nothing tied either
-  // to `contributes.configuration`. This asserts the SETS match (so a missing
-  // or stale row is named, not counted) and that the header's N is the real
-  // count. Deliberately no pinned number: two branches adding settings then
-  // merge without this test being a third count to resolve.
-  //
-  // The README's own "all N" is checked here too, and that is the whole reason
-  // it is: settings.md was tied to the manifest and the README was not, so a
-  // branch that counted its own settings correctly still shipped a README three
-  // behind after a merge brought the other branch's in. Two documents claiming a
-  // count means two documents to hold to it.
-  it('documents every contributed setting in docs/settings.md, and counts them right', () => {
-    const pkg = JSON.parse(
-      fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'),
-    ) as {
-      contributes: { configuration: { properties: Record<string, unknown> } };
-    };
-    const contributed = Object.keys(pkg.contributes.configuration.properties);
-    const doc = fs.readFileSync(path.join(ROOT, 'docs', 'settings.md'), 'utf8');
-    // Read ONLY the settings table, not every line in the file that happens to
-    // look like one. The document has a second table further down — the
-    // migration matrix for `lineage.mode` and the deprecated
-    // `lineage.workspaces.enabled` — whose own HEADER row is two settings keys
-    // in backticks, and a whole-file regex counts that header as a duplicate
-    // row for a setting that is already documented. The set comparison below
-    // survives that (a duplicate changes no set), which is precisely why it has
-    // to be fixed here rather than discovered later: the duplicate assertion
-    // added underneath would fail on a document that is perfectly correct.
-    // Bounded by the table's own header and the next section heading, so the
-    // rest of the page can grow tables freely.
-    const tableStart = doc.indexOf('| Setting | Default | What it does |');
-    expect(tableStart, 'the settings table header').toBeGreaterThan(-1);
-    const after = doc.indexOf('\n## ', tableStart);
-    const table = doc.slice(tableStart, after === -1 ? undefined : after);
-    const documented = [...table.matchAll(/^\| `(lineage\.[^`]+)` \|/gm)].map(
-      (m) => m[1] as string,
-    );
-    expect(documented.filter((k) => !contributed.includes(k))).toEqual([]);
-    expect(contributed.filter((k) => !documented.includes(k))).toEqual([]);
-    // One row per setting, not merely one row somewhere for every setting. Two
-    // rows for one key is two descriptions to keep true, and the reader meets
-    // whichever they scroll to first.
-    expect(
-      documented.filter((k, at) => documented.indexOf(k) !== at),
-      'settings documented twice',
-    ).toEqual([]);
-    const header = doc.match(/^All (\d+) settings, as contributed\./m);
-    expect(header, 'the "All N settings" opening line').not.toBeNull();
-    expect(Number(header?.[1])).toBe(contributed.length);
-
-    const readme = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
-    const pointer = readme.match(/all (\d+), with defaults\./);
-    expect(pointer, "the README's Settings pointer").not.toBeNull();
-    expect(Number(pointer?.[1])).toBe(contributed.length);
-  });
-
-  // The same reasoning one test up, applied to a document nothing else points
-  // at: a doc dropped from the README's index is a doc that silently rots. This
+  // The reasoning of test/manifest.test.ts's docs suite, applied to a document
+  // nothing else points at: a doc dropped from the README's index is a doc
+  // that silently rots. This
   // one in particular, because it is the only place the fork/compaction/resume
   // mechanics are written down with their numbers, and the file it describes
   // (the Claude CLI) ships several times a week — so the day it stops being

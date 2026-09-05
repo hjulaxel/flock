@@ -24,10 +24,10 @@
   "keywords": [
     "claude",
     "claude code",
-    "codex",
     "agents",
     "sessions",
-    "orchestration"
+    "orchestration",
+    "codex"
   ],
   "main": "./dist/extension.js",
   "icon": "media/icon.png",
@@ -76,7 +76,7 @@
           "name": "Accounts",
           "icon": "media/flock.svg",
           "contextualTitle": "AI Accounts",
-          "when": "config.lineage.accounts.enabled && config.lineage.accounts.section",
+          "when": "config.lineage.accounts.section",
           "visibility": "collapsed"
         },
         {
@@ -469,6 +469,29 @@
         "icon": "$(window)"
       },
       {
+        "command": "lineage.chooseSurface",
+        "title": "Choose Where Sessions Open...",
+        "category": "Flock",
+        "icon": "$(layout)"
+      },
+      {
+        "command": "lineage.openSettings",
+        "title": "Open Settings",
+        "category": "Flock",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "lineage.openAdvancedSettings",
+        "title": "Open Advanced Settings",
+        "category": "Flock"
+      },
+      {
+        "command": "lineage.showStatus",
+        "title": "Status...",
+        "category": "Flock",
+        "icon": "$(pulse)"
+      },
+      {
         "command": "lineage.settingsMenu",
         "title": "Settings and Housekeeping...",
         "category": "Flock",
@@ -482,6 +505,16 @@
       {
         "command": "lineage.hideAccountsSection",
         "title": "Hide Accounts Section",
+        "category": "Flock"
+      },
+      {
+        "command": "lineage.showShellsSection",
+        "title": "Show Shells Section",
+        "category": "Flock"
+      },
+      {
+        "command": "lineage.hideShellsSection",
+        "title": "Hide Shells Section",
         "category": "Flock"
       },
       {
@@ -1679,8 +1712,8 @@
       },
       {
         "view": "lineageSessions",
-        "when": "lineage.onlyActive",
-        "contents": "No active Claude Code sessions. Closed ones are hidden by the session filter.\n[Show Closed Sessions Too](command:lineage.showAllSessions)\n[New Claude Session](command:lineage.newSession)"
+        "when": "!lineage.onlyActive",
+        "contents": "No Claude Code sessions here yet — Flock starts with a clean slate.\n[Recommended Setup...](command:lineage.recommendedSetup)\nA checklist of what a fresh install should turn on, with the reason on every line. You tick what you want; nothing is written until you do.\n[New Project](command:lineage.newProject)\n[New Claude Session](command:lineage.newSession)\nA project is a name and a directory; every session running in it groups under it. Add a second directory later and each one gets a row of its own.\n[Import Previous Sessions...](command:lineage.importSessions)\nSessions from before Flock — or running in some other terminal — stay off the tree until you import them, all at once or one folder at a time.\nIf sessions you started here are missing, set `lineage.claudeBinary` to the full path of your claude CLI."
       },
       {
         "view": "lineageAccounts",
@@ -1691,372 +1724,556 @@
         "contents": "Nothing is running.\n[New Session](command:lineage.newSession)\nThis lists the commands your sessions are running right now — every `Bash` call Claude has started and not yet got back from, with a clock on each, and every background job until it finishes, which is the one thing in a Claude session that is otherwise easy to lose track of. A command that ends leaves the list.\nIt covers every live session on this machine that Flock lists, not just this window's. Click a row to jump to the conversation that started it."
       }
     ],
-    "configuration": {
-      "title": "Flock",
-      "properties": {
-        "lineage.pollIntervalMs": {
-          "type": "number",
-          "default": 3000,
-          "minimum": 1000,
-          "maximum": 60000,
-          "description": "How often to poll `claude agents --json` (milliseconds)."
-        },
-        "lineage.claudeBinary": {
-          "type": "string",
-          "default": "",
-          "description": "Full path to the claude CLI. Empty = search PATH."
-        },
-        "lineage.codexBinary": {
-          "type": "string",
-          "default": "",
-          "description": "Full path to the codex CLI, used by sessions on a Codex / OpenAI account. Empty = search PATH, then the usual install roots (~/.codex/bin, the active nvm node version, ~/.local/bin, Homebrew). Worth setting explicitly if you use a node version manager, since VS Code often does not inherit its PATH."
-        },
-        "lineage.tmux": {
-          "type": "string",
-          "default": "auto",
-          "enum": [
-            "auto",
-            "off"
-          ],
-          "enumDescriptions": [
-            "Use tmux when it is installed (never on Windows). Sessions Flock launches run inside a private tmux server, invisible — no status bar, no prefix key.",
-            "Never use tmux. Sessions run as bare claude processes; workspace switches park them by closing and resume them from their transcripts."
-          ],
-          "description": "Run Flock-launched Claude sessions inside a private tmux server (`tmux -L lineage`). This upgrades workspace parking from close-and-resume to detach-and-reattach: switching away hides a session's tab while the conversation KEEPS RUNNING — busy ones too — and switching back reattaches it instantly, live state intact. Requires tmux on PATH; without it (and always on Windows) Flock falls back to close-and-resume. Sessions started outside Flock are never wrapped either way."
-        },
-        "lineage.exitToShell": {
-          "type": "boolean",
-          "default": true,
-          "description": "When you `/exit` a session Flock launched, leave a shell prompt in the tab instead of closing it — same tab, same directory — so you can start straight back up with `claude --resume`. Exiting that shell closes the tab as usual. Requires `lineage.tmux` and tmux on PATH: a bare session IS its terminal process, so there is nothing left to put a shell into. The setting is written into Flock's tmux conf, which tmux reads when its server starts, so a change applies to sessions started after every current one has ended."
-        },
-        "lineage.terminalLocation": {
-          "type": "string",
-          "default": "editor",
-          "enum": [
-            "editor",
-            "panel",
-            "newWindow"
-          ],
-          "enumDescriptions": [
-            "Open the session as a normal editor tab, alongside your files.",
-            "Open the session in the terminal panel at the bottom.",
-            "Open the session as an editor tab and immediately move it into its own window."
-          ],
-          "description": "Where a Claude session's terminal opens."
-        },
-        "lineage.soloSession": {
-          "type": "boolean",
-          "default": false,
-          "markdownDescription": "Keep at most **one** Claude session tab open in this window. Opening or focusing a session parks every other session tab: a tmux-wrapped one is DETACHED (the tab vanishes, the conversation keeps running, hidden), a bare one is closed and comes back with `--resume` when you click its row — a busy or waiting bare session is spared and keeps its tab. The open session's tab is pinned, so it sits at the left of its group and survives *Close Others*. Workspace switches restore only the session you were last using instead of the whole set. Off by default: this parks tabs you laid out yourself, which is a strong opinion — turn it on if many open sessions are eating memory or making switches slow."
-        },
-        "lineage.chat.autoCloseMinutes": {
-          "type": "number",
-          "default": 1440,
-          "minimum": 0,
-          "markdownDescription": "A project chat's tab closes on its own after this many minutes without use — **1440 is one day**. *Use* means either half of it: the chat said something, or you clicked on it. The conversation is kept — **Chat History…** on the project's row reopens it — so this tidies the tab, never the words. A chat that is busy or waiting is never touched, and neither is the tab you are looking at. `0` turns it off."
-        },
-        "lineage.session.closeAfterMinutes": {
-          "type": "number",
-          "default": 4320,
-          "minimum": 0,
-          "markdownDescription": "A session's tab closes on its own after this many minutes without use — **4320 is three days**. *Use* is the newer of two things: the last real turn in the transcript (never file timestamps), and the last time **you clicked on the session** — its row, its tab, its terminal. Clicking is the plainer signal of the two, and it is the one the age shown on the row does not report: that age is still \"when this last got an answer\", which is the question you are asking when you read the tree, not the question that decides what closes. The conversation is kept — its row stays in the tree as an archived session, and one click resumes it — so this tidies the process, never the words. A busy or waiting session is marked *close after this turn* instead and closes once idle; the tab you are looking at and any session pinned with **Keep Awake** are never touched. `0` turns it off."
-        },
-        "lineage.session.detachGraceMinutes": {
-          "type": "number",
-          "default": 10,
-          "minimum": 0,
-          "markdownDescription": "When a workspace switch (or solo mode) closes a tmux-wrapped session's tab, the process keeps running detached for this many minutes so switching back reattaches instantly. Its row stays in the tree and its hover says how long is left. At the deadline an idle session is closed to an archived row; a busy one closes after its turn ends. At most 8 sessions run detached at once; overflow closes the oldest idle one first. `0` disables the grace — the tab still closes instantly, and the process is ended by the next sweep within a minute."
-        },
-        "lineage.session.reloadGraceSeconds": {
-          "type": "number",
-          "default": 45,
-          "minimum": 0,
-          "maximum": 60,
-          "markdownDescription": "How many seconds a session may keep running after the window that owned it closed. This is a measurement, not a reprieve: VS Code reports a window **reload** and a window **close** identically, so the only way to tell them apart is to wait — a reload comes back and reattaches, a close never does. At the deadline the session settles to an archived row you can resume, because a folder no window has open should have nothing running in it. Keep this low; raise it only if reloads on this machine are slow enough to lose sessions. `0` ends sessions the moment the window goes, which also means every reload loses them."
-        },
-        "lineage.fork.notifyParent": {
-          "type": "boolean",
-          "default": false,
-          "markdownDescription": "After a fork, type **one sentence into the parent conversation** saying that a branch was made, what it is called and — when you gave the fork an opening prompt — what it is for.\n\n**This is new, not something being switched on.** Flock has no session-to-session messaging and never has had: the in-session verbs channel runs one way, session → Flock, and the only text that has ever gone the other way is a fork's opening prompt, delivered once when the branch starts. This note rides the one channel that can reach a conversation already running — the same one the **Wrap Up Session** prompt uses — which **types into the terminal**. It costs the parent a real turn, and if you have half a message typed in that input box the note is appended to it and sent with it.\n\n**It only works while the parent's tab is open in this window.** A parent that is closed, hosted by another VS Code window, running outside Flock, or parked detached by a workspace switch cannot be typed into, and in all four cases **nothing is queued and nothing is retried** — the note simply does not happen, with one line in the **Flock** output channel. Those are the ordinary cases, not the exotic ones. The tree already shows you the fork either way.\n\nNot sent when **Claude itself** asked for the fork (\"fork this session\", the in-session verb): the verbs CLI already reports the new branches into that same turn, and a second copy typed into the terminal would both duplicate it and land keystrokes mid-turn. A branch renamed on its row in the inline sidebar is announced under its **generated** name — the note goes out while the rename editor is still open."
-        },
-        "lineage.close.summaryMode": {
-          "type": "string",
-          "default": "compact-and-tell-parent",
-          "enum": [
-            "compact-and-tell-parent",
-            "compact-only",
-            "ask-me",
-            "off"
-          ],
-          "enumDescriptions": [
-            "Send /compact, keep the summary the Claude CLI writes, type a short form of it into the parent conversation, then close. One to three minutes; Claude only; needs the session's tab open in this window.",
-            "The same, but tell nobody: the summary is recorded on the row and the parent is left alone.",
-            "The old behaviour: an input box asking you to type the summary yourself.",
-            "Close with no summary at all — exactly what Close Session does."
-          ],
-          "markdownDescription": "What **Close with Summary** does.\n\n**How the summary is produced, precisely.** Flock cannot ask a model for a summary: it has no API client, and it can only speak to a running conversation by typing into its terminal. So the two compacting modes **send `/compact`** — a command the Claude CLI interprets — and then **read back the summary the CLI wrote** into the transcript. The words are genuinely the model's; the driving is a keystroke. It is not a scrape of the last exchange, and it is not something Flock wrote.\n\n**What that costs.** A compaction takes roughly **one to three minutes**, during which a progress notification with a **Cancel** button is shown. It **squashes the branch's own context** — acceptable only because the branch is being closed in the same breath, so if you cancel or it times out, you are left with a compacted branch. It is **Claude only**: a Codex session is offered the plain close by name instead. It needs the session's **tab open in this window**; a closed row, a session another window hosts, a foreign process and a session parked by a workspace switch are all refused **before** anything is typed. And if no summary comes back, **nothing is closed** — the session is mid-turn and cutting it off would lose the compaction too.\n\n`compact-and-tell-parent` (the default) also types a short form of the summary into the **parent** conversation, over the same channel and with the same limits as `#lineage.fork.notifyParent#`: only while the parent's tab is open here, nothing queued otherwise.\n\n`ask-me` is the behaviour this replaced, kept by name so it can be chosen deliberately. It is also what every refusal above falls back to when you pick **Type a Summary…**."
-        },
-        "lineage.launch.mode": {
-          "type": "string",
-          "default": "flock",
-          "enum": [
-            "flock",
-            "claudeExtension"
-          ],
-          "enumDescriptions": [
-            "Flock opens the session itself, in a tmux-backed terminal it owns. Every verb applies.",
-            "Hand new conversations to the official Claude Code extension (claude-vscode.newConversation). Requires that extension; without it Flock falls back to opening the session itself."
-          ],
-          "markdownDescription": "Who opens a conversation.\n\n`flock` opens it here, in a terminal Flock owns. `claudeExtension` hands it to the official Claude Code extension: a **new** conversation runs its **New Conversation** command (opening in your `claudeCode.preferredLocation` — sidebar or editor) and is adopted onto a tree row once `claude agents --json` reports it; clicking a closed row **reopens the conversation in the extension's UI** instead of a terminal, and clicking a live one it hosts reveals or offers to open its panel.\n\nIn `claudeExtension` mode Flock does not own the process, so these stop working for sessions started that way: **tmux parking** (a workspace switch closes the session instead of hiding it), **Close** and **Close with Summary**, **account pinning** (the launch runs under the extension's own login), the **wrap prompt**, and **Flock-named tabs**. Per-account **routing** is honoured by falling back instead: a conversation routed to another provider's CLI, or to a Claude account with its own config directory, opens in Flock's own terminal — the extension, on the machine's default login, could not host it — and the status bar says so. The tree row, the fork edge, the age, the status dot, the bell, project membership, branch colours, **Fork** and **Copy Session ID** all keep working.\n\n**Fork is never delegated.** `--fork-session` is a launch-time CLI flag no command the extension contributes carries, so a fork always opens Flock's own terminal — which is also the only way it can inherit the parent's history. A conversation **pinned to an account** with its own config directory also keeps Flock's terminal on resume: the extension runs on the machine's own login and would not find that transcript. Picking an account by hand (**New Session From…**) overrides the mode the same way."
-        },
-        "lineage.sessionSwitching": {
-          "type": "string",
-          "enum": [
-            "flock",
-            "claude"
-          ],
-          "enumDescriptions": [
-            "Flock's tree is the session switcher: the row of whatever conversation is in front stays selected, and alt+left over the Claude Code extension puts the keyboard on that row so the arrows move between sessions.",
-            "Leave the Claude Code extension's own agent list alone. Flock stops following the conversation in front and contributes no alt+left binding."
-          ],
-          "default": "flock",
-          "markdownDescription": "Where you switch between conversations.\n\n`flock` makes the tree the switcher. The row of whatever conversation is in front stays **selected**, so the sidebar always already says where you are — and `alt+left`, while the Claude Code extension has focus, puts the **keyboard** on that row, so the up and down arrows move you between sessions from there.\n\nThat binding exists because of the back arrow at the top of the Claude Code extension's panel, which leaves your conversation for an agent list that knows nothing about forks, projects or worktrees, and is very easy to hit by accident. **Flock cannot intercept that arrow**: it is a route change inside another extension's webview and produces no tab, title, command or context key on the outside. What it can do is make sure the tree never lost your place, and give the same gesture somewhere better to go.\n\n`claude` turns both halves off and leaves the agent list alone."
-        },
-        "lineage.groupByFolder": {
-          "type": "boolean",
-          "default": true,
-          "description": "Group sessions that no project claims by their working directory."
-        },
-        "lineage.onlyProjectSessions": {
-          "type": "boolean",
-          "default": false,
-          "description": "Show only sessions that belong to one of your projects. The roster is machine-wide, so this is the fastest way to stop seeing every directory anyone ever ran claude in. Ignored while you have no projects."
-        },
-        "lineage.showForeignSessions": {
-          "type": "boolean",
-          "default": false,
-          "markdownDescription": "Show live sessions Flock does not own — `claude` running in some other terminal, another editor, a script. Off (the default), the tree holds only what you told Flock about: sessions launched here, bound to one of its terminals, or added with **Add Existing Session…** / **Import Previous Sessions…** — and a session with no row can never light the bell or write itself into your tree. Turn it on to watch everything on the machine, the way Flock used to; finished turns then stamp those sessions into the tree as they always did."
-        },
-        "lineage.onlyActiveSessions": {
-          "type": "boolean",
-          "default": false,
-          "description": "Show only sessions that are still running. Closed, exited and inferred-ancestor rows are filtered out of the tree — nothing is archived or removed, and a live session forked from a closed one keeps its place. This is the \"Show Only Active Sessions\" toggle in the view title."
-        },
-        "lineage.showGhosts": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show exited ancestor sessions that live sessions were forked from."
-        },
-        "lineage.showArchived": {
-          "type": "boolean",
-          "default": false,
-          "description": "Show ALL closed sessions found in ~/.claude/projects, even ones this tree never knew. Off by default: your own sessions already stay in the tree after their tab closes (as dimmed, resumable inactive rows, until you archive them) — this switch only adds foreign history on top. This is NOT the archive: sessions you archived are behind \"Archived Sessions...\" on the project's row."
-        },
-        "lineage.showPhantomRows": {
-          "type": "boolean",
-          "default": false,
-          "description": "Show roster rows that are not sessions: entries whose process has exited but that `claude agents --json` never reaped, and `claude bg-spare` daemon warm-spares (pre-forked processes waiting to be claimed, which report an inherited name and a frozen status). Off by default — these cannot be focused, forked or resumed, and a stuck spare will pin the attention badge on the view indefinitely. Turn on to debug the roster."
-        },
-        "lineage.staleAfterHours": {
-          "type": "number",
-          "default": 48,
-          "minimum": 1,
-          "description": "Age at which \"Archive Stale Sessions...\" pre-ticks a session. This never removes anything on its own — it only decides which checkboxes start ticked in that command."
-        },
-        "lineage.busyStaleMinutes": {
-          "type": "number",
-          "default": 5,
-          "minimum": 1,
-          "description": "How long a session may keep the CLI's \"busy\" status with an untouched transcript before Flock stops drawing the running (amber) dot and shows it as idle. `claude agents --json` sometimes freezes a session's status at `busy` after its turn actually ended (most often an interactive session you finished with); a genuinely working session writes its transcript within seconds, so silence this long means it is done. Raise it if a long single tool call briefly flips to idle; turn on \"Show Phantom Rows\" to see the raw, uncorrected status."
-        },
-        "lineage.hooks.enabled": {
-          "type": "boolean",
-          "default": false,
-          "description": "Read the hook event stream for instant updates — Claude Code's and Codex's, one file. \"Install Instant-Update Hooks…\" (Claude) and \"Install Codex Hooks…\" each set this for you: installing only makes the CLI write the events, this is the switch that makes Flock read them. The Claude plugin lives in a skills directory and never edits ~/.claude/settings.json; the Codex entries are merged into ~/.codex/hooks.json and stripped back out on removal, and Codex runs them only once you have trusted them (/hooks in a Codex session)."
-        },
-        "lineage.verbs.enabled": {
-          "type": "boolean",
-          "default": false,
-          "description": "Read fork requests written by Claude sessions, so \"fork this session\" typed to Claude runs the same fork the sidebar button runs. \"Install In-Session Verbs…\" sets this for you — installing the skill only lets Claude write a request into ~/.lineage/requests, this is the switch that makes Flock windows act on one. Nothing leaves your machine."
-        },
-        "lineage.notifications.enabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "Track finished sessions: a session that completes a turn while you are elsewhere gets a green dot (also on its project row) until you look at it, and appears under the bell in the sidebar title. Turn off to go back to the plain waiting-only dot. Per-session override: right-click a session → Mute / Unmute Notifications."
-        },
-        "lineage.notifications.popup": {
-          "type": "boolean",
-          "default": false,
-          "description": "Also show a toast with a Focus button when a session finishes a turn while you are not looking at it. Off by default — with many parallel sessions the bell and the dots carry the same information without the interruptions."
-        },
-        "lineage.mode": {
-          "type": "string",
-          "enum": [
-            "folder",
-            "root",
-            "project"
-          ],
-          "enumItemLabels": [
-            "One folder per project",
-            "Root (Flock only)",
-            "Auto-switch"
-          ],
-          "enumDescriptions": [
-            "Native VS Code: a window is the folder you opened. The sidebar shows the sessions under that folder, grouped by the projects that claim them; other projects' work routes to their own windows. Nothing rearranges itself and file tabs are never touched. Needs no tmux and no window management; costs a window per project, and alt-tab is your switcher.",
-            "The window is Flock's: no folder is opened, nothing scopes the tree, and the sidebar holds everything on the machine — you open a session's own window when you want its files. In-window switching is still there when you ask for it, but nothing ever switches by itself and no workspace item appears in the status bar. Costs you that window, and a sidebar with nothing narrowing it.",
-            "One window follows you: work in another project's session and the window switches there, saving the layout you leave and restoring the target's. The most convenient of the three and the hardest to keep straight — it wants tmux, so the sessions you switch away from keep running, and one reload (Flock: Follow the Session I Am In) before the file tree follows you too — down to the session's own subproject directory, in the git worktree that session is checked out in, with Source Control showing that same checkout."
-          ],
-          "default": "folder",
-          "markdownDescription": "What a window **is** — three answers, from the window that holds one thing to the window that follows you. **One folder per project** (`folder`, the default): the window is the folder you opened, the tree scopes itself to sessions under it, and working on another project means going to that project's own window. **Root**, i.e. Flock only (`root`): the window is Flock's — nothing fenced, nothing scoped, nothing rearranging itself, and you open a window on a session when you want its files. **Auto-switch** (`project`): one window spans many projects and switches between them as your attention moves. Navigation never changes a session's lifecycle in any of the three: a closed tab keeps its row under a detach grace (the hover says how long is left), then archives to a click-to-resume row. Run **Flock: Choose Window Model…** to pick one with what it costs written beside it — the picker is also the only thing that clears the deprecated `lineage.workspaces.enabled` below."
-        },
-        "lineage.workspaces.enabled": {
-          "type": "boolean",
-          "default": true,
-          "markdownDeprecationMessage": "Superseded by `#lineage.mode#`, and still honoured: while this is `false` and the mode is `project`, this window resolves to the **Root** (Flock only) model — which is what that pair has always actually meant. Set `#lineage.mode#` to the model you want, or run **Flock: Choose Window Model…**, which writes both; then this key can go.",
-          "description": "Show the workspace switcher in the status bar. A workspace scopes this window to one project: switching saves the current tab layout under the project you leave, hides what does not belong to the target, and restores the target's saved layout. Foreign session tabs close under a detach grace: with tmux installed (see `lineage.tmux`) the conversation keeps running detached for `lineage.session.detachGraceMinutes` — its row stays in the tree, its hover says how long is left, click to reattach — and archives to a click-to-resume row after that; without tmux the terminal closes and the conversation resumes from its transcript, in which case busy sessions are never closed. Unsaved editors and terminals Flock does not own are never touched. The terminal panel is never used."
-        },
-        "lineage.workspaces.resumeSessions": {
-          "type": "boolean",
-          "default": true,
-          "description": "When switching to a project workspace, resume its parked sessions from their transcripts (up to 8 per switch). Parking closes a session's terminal when you switch away, so with this OFF nothing is parked at all — foreign session tabs stay open instead."
-        },
-        "lineage.workspaces.autoSwitch": {
-          "type": "boolean",
-          "default": true,
-          "description": "Focus follows project: when you start working in a session that belongs to another project, the window switches to that project's workspace by itself — the layout you leave is saved, foreign tabs hide, the project's saved layout comes back. Nothing is stopped and nothing asks a question. Turn off to switch only via the status bar / command."
-        },
-        "lineage.explorer.followProject": {
-          "type": "boolean",
-          "default": true,
-          "description": "The Explorer follows the session you are working in: the file tree roots itself at that session's subproject directory, inside the git worktree the session is actually checked out in. Auto-switch only — the other two window models never move the tree. Requires running \"Flock: Follow the Session I Am In\" once per window, which converts it to a Flock workspace (one reload, then following is instant and no terminal is lost). Turning it off leaves you in the auto-switch model with the file tree where you put it: tabs still switch, the status-bar line still says where you are, and Source Control still follows the session's checkout — none of which reroots a tree you asked to be left alone."
-        },
-        "lineage.explorer.scope": {
-          "type": "string",
-          "enum": [
-            "directory",
-            "project"
-          ],
-          "enumDescriptions": [
-            "One root: the directory you are working in — the session's subproject directory inside the session's own checkout. The Project view lists the rest — click one to send the tree there.",
-            "Every connected directory as its own collapsible root, the main one on top. The shape Flock shipped before this setting existed — and the shape in which the tree does NOT follow you, because a scope that expands every directory into a root has nothing left to narrow."
-          ],
-          "default": "directory",
-          "markdownDescription": "How much of the active project the Explorer shows. `directory` keeps the file tree to the one directory you are in, the way a plain folder window does; `project` shows every connected directory as its own root. Only applies when `#lineage.explorer.followProject#` is on, and only in the **Auto-switch** window model (`#lineage.mode#`). Following the session is a `directory` behaviour by construction — under `project` the folder tree stops moving on its own and only a switch reshapes it, while Source Control goes on following the session's checkout either way. Takes effect on the next focus change — no reload."
-        },
-        "lineage.accounts.enabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show the Accounts view, where each AI subscription you can launch sessions on gets a row: which plan it is, how much of its five-hour and weekly windows is gone — for a Claude plan and for a ChatGPT / Codex plan alike — and which one new sessions use by default. Each account keeps its own config directory, so signing in to one never signs you out of another, and a session stays on the account it started on for life — resuming or forking it re-uses that account whatever the routing says today. Turn off if you only ever use one account; nothing about how sessions launch changes, the view just stops taking up sidebar space. The section is also gated on lineage.accounts.section, which is on by default and is the switch to reach for if you would rather have Flock's buttons on the FLOCK row."
-        },
-        "lineage.accounts.section": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "Draw **Accounts** as a second section of the Flock sidebar. On by default: the accounts are worth a row of their own.\n\nThe only reason to turn it off is the top bar. VS Code merges a view's buttons into the container header — the row that reads **FLOCK** — only while that container shows exactly one section, so while Accounts is drawn the bell, New Project, `+`, fork and the gear sit on the **SESSIONS** row just below it instead. Off moves them up one row, and costs you the Accounts section.\n\nNothing about accounts stops working while it is off. Usage is still read, new sessions are still routed, a session is still pinned to its account for life, and every account verb — **Add Account…**, **Sign In**, **Set Default Account**, **Set Project Account…** — is in the Command Palette under **Flock**. The switch is also in the gear menu at the top of the sidebar."
-        },
-        "lineage.shells.section": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "Draw **Shells** as a section of the Flock sidebar: the commands your sessions are running right now — every `Bash` call Claude has started and not yet got back from, with a live clock on each, and every backgrounded job until it finishes, with **Open Output** on its menu for the file the CLI is writing its stdout to. A command that ends leaves the list: this is the CLI's own running-shell indicator, across every session at once, not a history. A command waiting for your permission is listed too, marked as awaiting approval, and is not counted as running.\n\nIt ships collapsed, and the section's badge counts what is running — so a script that is still going is visible without opening it.\n\n**Every live session on this machine** that Flock lists, not only this window's: the facts come from the transcripts on disk, so a command running in a session another window launched is a row here like any other. Clicking a row focuses the conversation that started it.\n\nLike **Accounts**, drawing a second section moves Flock's top-bar buttons down onto the **SESSIONS** row; see `lineage.accounts.section`."
-        },
-        "lineage.accounts.offerSwitchAtLimit": {
-          "type": "boolean",
-          "default": false,
-          "markdownDescription": "Offer to **move a running conversation to another account** when the account it is on uses up its five-hour window.\n\nFlock already reads every account's meters — Claude's and Codex's — so it knows the moment one fills, and that is the moment somebody with a second subscription wants the conversation they were in the middle of moved. When this is on, a session hosted by this window whose account has just run out gets one notification naming the account with the most room, and a button that starts the ordinary **Move to Account...** flow with that account already chosen. The confirmation still appears: what the move costs — the CLI restarts, the turn in flight is cut off, and the prompt cache does not follow — is the same however the flow was reached.\n\nWhen no account on the **same** CLI has room — the default roster of one Claude login and one Codex login never does — the button offers **Continue on** the other CLI's account instead: a new session there, briefed on the transcript, the same **Continue on Another CLI...** the row menu has. Named as a continuation, never as a move, because that is what it is.\n\n**Off by default.** The offer proposes an interruption, so it is only welcome to somebody who decided in advance that they would rather be asked. With it off nothing is lost: both verbs are in every session row's context menu whenever the roster holds somewhere to go, and in the Command Palette under **Flock**.\n\nOne offer per five-hour window, per session, so a meter that re-reads on a timer cannot turn into a repeating prompt. The window resetting starts a fresh one."
-        },
-        "lineage.viewStyle": {
-          "type": "string",
-          "enum": [
-            "inline",
-            "native"
-          ],
-          "enumDescriptions": [
-            "Rename a session in place on its row, the way the Explorer renames a file. The sidebar is drawn by the extension.",
-            "Use the built-in VS Code tree. Rename opens a box at the top of the window, because the tree API has no editable row."
-          ],
-          "default": "inline",
-          "markdownDescription": "How the Sessions view is drawn. `inline` renames on the row like the Explorer; `native` uses the built-in tree widget. Takes effect on the next window reload."
-        },
-        "lineage.runningBadge": {
-          "type": "boolean",
-          "default": false,
-          "markdownDescription": "Show the number of **running** sessions as a badge on the Flock icon in the activity bar.\n\nOff by default. The count is real and worth being able to see — \"no running process without a visible row\" is only an invariant you can trust if the processes are counted somewhere — but it changes every few seconds, and a number moving in the corner of your eye with nothing to do about it is not the same as information. The tree already says everything it does, in rows you can click."
-        },
-        "lineage.showTokens": {
-          "type": "boolean",
-          "default": false,
-          "markdownDescription": "Show how many tokens a session is carrying, left of the time-since-active. The number is the context the last assistant turn ran with (prompt + cache + output), read from the transcript — so it matches what `/context` reports and grows as the conversation does. Off by default: it is a second number on every row."
-        },
-        "lineage.groupSessionsByBranch": {
-          "type": "boolean",
-          "default": false,
-          "markdownDescription": "Nest a project's sessions under the git branch they are running on, instead of listing the branches and then the sessions. Each branch row becomes a container you can fold shut, with a `+` that starts a session in that worktree. Only applies to a project with two or more worktrees; a session that no shown branch accounts for stays directly under the project. Off by default."
-        },
-        "lineage.branchColors": {
-          "type": "array",
-          "items": {
-            "type": "string"
+    "configuration": [
+      {
+        "title": "Sessions",
+        "order": 1,
+        "properties": {
+          "lineage.tmux": {
+            "type": "string",
+            "default": "auto",
+            "order": 1,
+            "enum": [
+              "auto",
+              "off"
+            ],
+            "enumItemLabels": [
+              "Use tmux when installed",
+              "Never use tmux"
+            ],
+            "enumDescriptions": [
+              "Use tmux when it is installed (never on Windows). Sessions Flock launches run inside a private tmux server, invisible — no status bar, no prefix key.",
+              "Never use tmux. Sessions run as bare claude processes; workspace switches park them by closing and resume them from their transcripts."
+            ],
+            "description": "Run Flock-launched Claude sessions inside a private tmux server (`tmux -L lineage`). This upgrades workspace parking from close-and-resume to detach-and-reattach: switching away hides a session's tab while the conversation KEEPS RUNNING — busy ones too — and switching back reattaches it instantly, live state intact. Requires tmux on PATH; without it (and always on Windows) Flock falls back to close-and-resume. Sessions started outside Flock are never wrapped either way."
           },
-          "default": [],
-          "markdownDescription": "Read only by `#lineage.git.branchDisplay#`'s `color` mode; `inline` tints nothing. Colours for the branch chips, in order — index 0 is the first branch under a project (usually `main`). Each entry is either a hex colour (`#7aa2f7`) or a VS Code theme colour id (`charts.blue`, `terminal.ansiCyan`). A short list fills the rest from the built-in muted palette; anything that is not one of those two shapes is ignored. Empty = the built-in palette, which is the **Source Control Graph's own branch colours** (`scmGraph.foreground1`–5), softened toward the editor foreground so the chips do not out-shout the status dots — so a branch reads as the same colour here and in the SCM view, and a theme that restyles the graph restyles these too."
-        },
-        "lineage.git.pullRequests": {
-          "type": "boolean",
-          "default": false,
-          "markdownDescription": "**The one thing in Flock that reaches the network.** With this on, Flock runs `gh pr list --state all --limit 100 --json ...` in each project's repository and shows the pull request on each branch row — number, state and check rollup as a small chip, with **Open Pull Request in Browser** on the row's menu. It shells out to the [`gh` CLI](https://cli.github.com) you installed and authenticated: Flock makes no HTTP requests of its own, bundles no API client and never sees a token. Polled only while the Sessions view is visible, at most once every five minutes per repository, and cached. If `gh` is missing, not signed in, or the repository has no GitHub remote, the rows render exactly as they do with this off and one line goes to the **Flock** output channel. Off by default, because everything else in Flock is local."
-        },
-        "lineage.git.branches": {
-          "type": "boolean",
-          "default": false,
-          "markdownDescription": "Show a project’s **git branches** as rows, with the worktree verbs (*New Worktree*, *Remove Worktree*), the per-branch colours and the pull-request chip.\n\nOff by default. The feature works, but it is a lot of rows in a sidebar that has to stay readable — turn it on if you run one agent per worktree.\n\nThis does not change which project a session belongs to: a session in a linked checkout stays under the project that owns the repository either way."
-        },
-        "lineage.git.branchDisplay": {
-          "type": "string",
-          "default": "inline",
-          "enum": [
-            "inline",
-            "color"
-          ],
-          "enumDescriptions": [
-            "The branch is written under the session — ⎇ feat/search-ranking ↑4 * — and the name goes back to the theme's colour. Says which checkout, and carries the state tokens on the row. Costs a row's height.",
-            "The session's name takes its branch's colour, and the project's branch rows are the key to it. Costs no width; says which sessions share a checkout, never which checkout. Ahead/behind, dirt and the pull request are in the hover."
-          ],
-          "markdownDescription": "**How a session says which worktree it is running in.** Two ways of answering one question, both complete — the branch rows, the worktree verbs and the pull-request lookup are the same either way. Needs `#lineage.git.branches#` on; with that off there is nothing to display.\n\n**`inline` is the default.** The branch is written under the session, the way a git prompt or the SCM view says it — `⎇ feat/search-ranking ↑4 *` — and the name keeps the theme's own colour. It answers *which* checkout, and carries the state tokens where they can be read without hovering. It costs **height**: twelve sessions become twenty-four rows' worth. Because nothing needs decoding, the branch rows are **shut by default** here and reached from a project's right-click — see **Show Branches**.\n\n`color` is what Flock shipped, and it is denser. The session's name is tinted from a per-branch palette (`#lineage.branchColors#`) and the project's branch rows are the legend, so they are **open by default**. It costs no width at all and answers *are these two on the same thing* down a whole column at a glance. What it cannot say is *which* thing, and everything a colour cannot carry — `↑4 ↓3 *`, the request — moves into the hover.\n\nA line is drawn only where it says something new: on a session whose worktree differs from the one above it, in a project with more than one checkout. A fork made in its parent's worktree gets none. See `#lineage.git.sessionBranchDetail#` for how much it says."
-        },
-        "lineage.git.sessionBranchDetail": {
-          "type": "string",
-          "default": "standard",
-          "enum": [
-            "standard",
-            "detailed"
-          ],
-          "enumDescriptions": [
-            "The branch name and where the checkout stands: ↑4 ahead, ↓3 behind, * uncommitted. Local files only.",
-            "Also the pull request — #128, with ✓ ✕ • for its checks and the state in its colour. Needs `lineage.git.pullRequests`."
-          ],
-          "markdownDescription": "How much the line under a session says, in `inline` mode — see `#lineage.git.branchDisplay#`. Colour mode has no line, so this does nothing there.\n\n`standard` is the vocabulary git prompts and the SCM view already use — `↑4 ↓3 *` and nothing else — so it reads without anybody learning it, and it touches nothing but local files.\n\n`detailed` adds the **pull request** — the number, one glyph for its checks, and its state in the chip's colour — and nothing else. It needs `#lineage.git.pullRequests#` on as well, since that is what fills the cache it reads. The arrows are the same arrows at either level: a branch that tracks nothing gets no word for it, because never-pushed is where every branch starts, and the row's hover says `no upstream branch` for the case where you want it in letters."
-        },
-        "lineage.git.worktreePath": {
-          "type": "string",
-          "default": "../${repo}-${branch}",
-          "markdownDescription": "Where **New Worktree…** puts a new checkout. `${repo}` is the repository directory's name and `${branch}` the branch name with anything a path cannot carry replaced by `-`. A relative pattern is resolved against the repository's main worktree, so the default puts `feat/x` of `~/code/app` at `~/code/app-feat-x`. An absolute path is used as written, and a leading `~/` expands. Must contain `${branch}`, or every branch would resolve to the same directory. Flock always shows the exact `git worktree add` command before running it."
-        },
-        "lineage.git.newSessionInWorktree": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "The **`+` on a project row** cuts a **new worktree** first and starts the session there — one root session, one checkout, which is what keeps two sessions from ever switching branch under each other. The branch is minted from the session's name (`flock 3` → `flock-3`, with `#lineage.git.branchPrefix#` in front when set) and recorded as Flock's own, which is what later earns it the delete offer in **Remove Worktree**.\n\nNo dialog: `git worktree add -b` creates a directory and a fresh ref and touches nothing that exists — the status-bar receipt names both, and a project without a readable repository falls back to a plain session in the directory.\n\nTurn it **off** to make `+` start sessions in the project directory as before; **New Worktree…** stays on the right-click either way, and `#lineage.git.worktreePath#` decides where the checkout goes. Does not need `#lineage.git.branches#` on."
-        },
-        "lineage.git.branchPrefix": {
-          "type": "string",
-          "default": "",
-          "markdownDescription": "What minted branch names start with — `axel/` puts every branch the `+` creates under your own namespace, the Claude Squad convention (`axel/flock-3`). Applies only where Flock names a branch itself; names typed into **New Worktree…** are yours and get no prefix. Slashes make hierarchy; anything a ref cannot carry is replaced by `-`. Blank (the default) contributes nothing."
-        },
-        "lineage.preview.directoryModel": {
-          "type": "boolean",
-          "default": false,
-          "markdownDescription": "PREVIEW. Hang the branch rows off a **directory** instead of off the project, and list **every local branch** of that directory’s repository rather than only the checked-out ones.\n\nA project’s directories are its subprojects, and a directory is exactly one git repository (or none) — so the directory is the row a branch belongs under. A project spanning three repositories no longer shows three branches called `main` with no way to tell which is which.\n\nOutside the fold: the directory’s **own checkout**, and any branch with a **session running on it**. Everything else — including a worktree with nothing running in it — goes in one **Branches (N)** row, newest commit first, **shut by default**. That is what makes listing a 180-branch repository cost one row.\n\nNeeds `#lineage.git.branches#`. Draws in the inline sidebar (`#lineage.viewStyle#`: `inline`, the default); the native tree keeps the rows it has today."
+          "lineage.exitToShell": {
+            "type": "boolean",
+            "default": true,
+            "order": 2,
+            "description": "When you `/exit` a session Flock launched, leave a shell prompt in the tab instead of closing it — same tab, same directory — so you can start straight back up with `claude --resume`. Exiting that shell closes the tab as usual. Requires `lineage.tmux` and tmux on PATH: a bare session IS its terminal process, so there is nothing left to put a shell into. The setting is written into Flock's tmux conf, which tmux reads when its server starts, so a change applies to sessions started after every current one has ended."
+          },
+          "lineage.terminalLocation": {
+            "type": "string",
+            "default": "editor",
+            "order": 3,
+            "enum": [
+              "editor",
+              "panel",
+              "newWindow"
+            ],
+            "enumItemLabels": [
+              "Editor tab",
+              "Terminal panel",
+              "Own window"
+            ],
+            "enumDescriptions": [
+              "Open the session as a normal editor tab, alongside your files.",
+              "Open the session in the terminal panel at the bottom.",
+              "Open the session as an editor tab and immediately move it into its own window."
+            ],
+            "description": "Where a Claude session's terminal opens."
+          },
+          "lineage.soloSession": {
+            "type": "boolean",
+            "default": false,
+            "order": 4,
+            "markdownDescription": "Keep at most **one** Claude session tab open in this window. Opening or focusing a session parks every other session tab: a tmux-wrapped one is DETACHED (the tab vanishes, the conversation keeps running, hidden), a bare one is closed and comes back with `--resume` when you click its row — a busy or waiting bare session is spared and keeps its tab. The open session's tab is pinned, so it sits at the left of its group and survives *Close Others*. Workspace switches restore only the session you were last using instead of the whole set. Off by default: this parks tabs you laid out yourself, which is a strong opinion — turn it on if many open sessions are eating memory or making switches slow."
+          },
+          "lineage.launch.mode": {
+            "type": "string",
+            "default": "flock",
+            "order": 5,
+            "enum": [
+              "flock",
+              "claudeExtension"
+            ],
+            "enumItemLabels": [
+              "Flock's own terminal",
+              "Claude Code extension"
+            ],
+            "enumDescriptions": [
+              "Flock opens the session itself, in a tmux-backed terminal it owns. Every verb applies.",
+              "Hand new conversations to the official Claude Code extension (claude-vscode.newConversation). Requires that extension; without it Flock falls back to opening the session itself."
+            ],
+            "markdownDescription": "Who opens a conversation.\n\n`flock` opens it here, in a terminal Flock owns. `claudeExtension` hands it to the official Claude Code extension: a **new** conversation runs its **New Conversation** command (opening in your `claudeCode.preferredLocation` — sidebar or editor) and is adopted onto a tree row once `claude agents --json` reports it; clicking a closed row **reopens the conversation in the extension's UI** instead of a terminal, and clicking a live one it hosts reveals or offers to open its panel.\n\nIn `claudeExtension` mode Flock does not own the process, so these stop working for sessions started that way: **tmux parking** (a workspace switch closes the session instead of hiding it), **Close** and **Close with Summary**, **account pinning** (the launch runs under the extension's own login), the **wrap prompt**, and **Flock-named tabs**. Per-account **routing** is honoured by falling back instead: a conversation routed to another provider's CLI, or to a Claude account with its own config directory, opens in Flock's own terminal — the extension, on the machine's default login, could not host it — and the status bar says so. The tree row, the fork edge, the age, the status dot, the bell, project membership, branch colours, **Fork** and **Copy Session ID** all keep working.\n\n**Fork is never delegated.** `--fork-session` is a launch-time CLI flag no command the extension contributes carries, so a fork always opens Flock's own terminal — which is also the only way it can inherit the parent's history. A conversation **pinned to an account** with its own config directory also keeps Flock's terminal on resume: the extension runs on the machine's own login and would not find that transcript. Picking an account by hand (**New Session From…**) overrides the mode the same way."
+          },
+          "lineage.sessionSwitching": {
+            "type": "string",
+            "enum": [
+              "flock",
+              "claude"
+            ],
+            "enumItemLabels": [
+              "Flock's tree",
+              "Claude Code's agent list"
+            ],
+            "enumDescriptions": [
+              "Flock's tree is the session switcher: the row of whatever conversation is in front stays selected, and alt+left over the Claude Code extension puts the keyboard on that row so the arrows move between sessions.",
+              "Leave the Claude Code extension's own agent list alone. Flock stops following the conversation in front and contributes no alt+left binding."
+            ],
+            "default": "flock",
+            "order": 6,
+            "markdownDescription": "Where you switch between conversations.\n\n`flock` makes the tree the switcher. The row of whatever conversation is in front stays **selected**, so the sidebar always already says where you are — and `alt+left`, while the Claude Code extension has focus, puts the **keyboard** on that row, so the up and down arrows move you between sessions from there.\n\nThat binding exists because of the back arrow at the top of the Claude Code extension's panel, which leaves your conversation for an agent list that knows nothing about forks, projects or worktrees, and is very easy to hit by accident. **Flock cannot intercept that arrow**: it is a route change inside another extension's webview and produces no tab, title, command or context key on the outside. What it can do is make sure the tree never lost your place, and give the same gesture somewhere better to go.\n\n`claude` turns both halves off and leaves the agent list alone.",
+            "tags": [
+              "advanced"
+            ]
+          }
+        }
+      },
+      {
+        "title": "Attention",
+        "order": 2,
+        "properties": {
+          "lineage.notifications.enabled": {
+            "type": "boolean",
+            "default": true,
+            "order": 1,
+            "description": "Track finished sessions: a session that completes a turn while you are elsewhere gets a green dot (also on its project row) until you look at it, and appears under the bell in the sidebar title. Turn off to go back to the plain waiting-only dot. Per-session override: right-click a session → Mute / Unmute Notifications."
+          },
+          "lineage.notifications.popup": {
+            "type": "boolean",
+            "default": false,
+            "order": 2,
+            "description": "Also show a toast with a Focus button when a session finishes a turn while you are not looking at it. Off by default — with many parallel sessions the bell and the dots carry the same information without the interruptions."
+          },
+          "lineage.showTokens": {
+            "type": "boolean",
+            "default": false,
+            "order": 3,
+            "markdownDescription": "Show how many tokens a session is carrying, left of the time-since-active. The number is the context the last assistant turn ran with (prompt + cache + output), read from the transcript — so it matches what `/context` reports and grows as the conversation does. Off by default: it is a second number on every row."
+          },
+          "lineage.runningBadge": {
+            "type": "boolean",
+            "default": false,
+            "order": 4,
+            "markdownDescription": "Show the number of **running** sessions as a badge on the Flock icon in the activity bar.\n\nOff by default. The count is real and worth being able to see — \"no running process without a visible row\" is only an invariant you can trust if the processes are counted somewhere — but it changes every few seconds, and a number moving in the corner of your eye with nothing to do about it is not the same as information. The tree already says everything it does, in rows you can click.",
+            "tags": [
+              "advanced"
+            ]
+          }
+        }
+      },
+      {
+        "title": "Forking and closing",
+        "order": 3,
+        "properties": {
+          "lineage.fork.notifyParent": {
+            "type": "boolean",
+            "default": false,
+            "order": 1,
+            "markdownDescription": "After a fork, type **one sentence into the parent conversation** saying that a branch was made, what it is called and — when you gave the fork an opening prompt — what it is for.\n\n**This is new, not something being switched on.** Flock has no session-to-session messaging and never has had: the in-session verbs channel runs one way, session → Flock, and the only text that has ever gone the other way is a fork's opening prompt, delivered once when the branch starts. This note rides the one channel that can reach a conversation already running — the same one the **Wrap Up Session** prompt uses — which **types into the terminal**. It costs the parent a real turn, and if you have half a message typed in that input box the note is appended to it and sent with it.\n\n**It only works while the parent's tab is open in this window.** A parent that is closed, hosted by another VS Code window, running outside Flock, or parked detached by a workspace switch cannot be typed into, and in all four cases **nothing is queued and nothing is retried** — the note simply does not happen, with one line in the **Flock** output channel. Those are the ordinary cases, not the exotic ones. The tree already shows you the fork either way.\n\nNot sent when **Claude itself** asked for the fork (\"fork this session\", the in-session verb): the verbs CLI already reports the new branches into that same turn, and a second copy typed into the terminal would both duplicate it and land keystrokes mid-turn. A branch renamed on its row in the inline sidebar is announced under its **generated** name — the note goes out while the rename editor is still open."
+          },
+          "lineage.close.summaryMode": {
+            "type": "string",
+            "default": "compact-and-tell-parent",
+            "order": 2,
+            "enum": [
+              "compact-and-tell-parent",
+              "compact-only",
+              "ask-me",
+              "off"
+            ],
+            "enumItemLabels": [
+              "Compact and tell the parent",
+              "Compact only",
+              "Ask me to type it",
+              "No summary"
+            ],
+            "enumDescriptions": [
+              "Send /compact, keep the summary the Claude CLI writes, type a short form of it into the parent conversation, then close. One to three minutes; Claude only; needs the session's tab open in this window.",
+              "The same, but tell nobody: the summary is recorded on the row and the parent is left alone.",
+              "The old behaviour: an input box asking you to type the summary yourself.",
+              "Close with no summary at all — exactly what Close Session does."
+            ],
+            "markdownDescription": "What **Close with Summary** does.\n\n**How the summary is produced, precisely.** Flock cannot ask a model for a summary: it has no API client, and it can only speak to a running conversation by typing into its terminal. So the two compacting modes **send `/compact`** — a command the Claude CLI interprets — and then **read back the summary the CLI wrote** into the transcript. The words are genuinely the model's; the driving is a keystroke. It is not a scrape of the last exchange, and it is not something Flock wrote.\n\n**What that costs.** A compaction takes roughly **one to three minutes**, during which a progress notification with a **Cancel** button is shown. It **squashes the branch's own context** — acceptable only because the branch is being closed in the same breath, so if you cancel or it times out, you are left with a compacted branch. It is **Claude only**: a Codex session is offered the plain close by name instead. It needs the session's **tab open in this window**; a closed row, a session another window hosts, a foreign process and a session parked by a workspace switch are all refused **before** anything is typed. And if no summary comes back, **nothing is closed** — the session is mid-turn and cutting it off would lose the compaction too.\n\n`compact-and-tell-parent` (the default) also types a short form of the summary into the **parent** conversation, over the same channel and with the same limits as `#lineage.fork.notifyParent#`: only while the parent's tab is open here, nothing queued otherwise.\n\n`ask-me` is the behaviour this replaced, kept by name so it can be chosen deliberately. It is also what every refusal above falls back to when you pick **Type a Summary…**."
+          }
+        }
+      },
+      {
+        "title": "Worktrees and branches",
+        "order": 4,
+        "properties": {
+          "lineage.git.newSessionInWorktree": {
+            "type": "boolean",
+            "default": true,
+            "order": 1,
+            "markdownDescription": "The **`+` on a project row** cuts a **new worktree** first and starts the session there — one root session, one checkout, which is what keeps two sessions from ever switching branch under each other. The branch is minted from the session's name (`flock 3` → `flock-3`, with `#lineage.git.branchPrefix#` in front when set) and recorded as Flock's own, which is what later earns it the delete offer in **Remove Worktree**.\n\nNo dialog: `git worktree add -b` creates a directory and a fresh ref and touches nothing that exists — the status-bar receipt names both, and a project without a readable repository falls back to a plain session in the directory.\n\nTurn it **off** to make `+` start sessions in the project directory as before; **New Worktree…** stays on the right-click either way, and `#lineage.git.worktreePath#` decides where the checkout goes. Does not need `#lineage.git.branches#` on."
+          },
+          "lineage.git.branchPrefix": {
+            "type": "string",
+            "default": "",
+            "order": 2,
+            "markdownDescription": "What minted branch names start with — `axel/` puts every branch the `+` creates under your own namespace, the Claude Squad convention (`axel/flock-3`). Applies only where Flock names a branch itself; names typed into **New Worktree…** are yours and get no prefix. Slashes make hierarchy; anything a ref cannot carry is replaced by `-`. Blank (the default) contributes nothing."
+          },
+          "lineage.git.branches": {
+            "type": "boolean",
+            "default": false,
+            "order": 3,
+            "markdownDescription": "Show a project’s **git branches** as rows, with the worktree verbs (*New Worktree*, *Remove Worktree*), the per-branch colours and the pull-request chip.\n\nOff by default. The feature works, but it is a lot of rows in a sidebar that has to stay readable — turn it on if you run one agent per worktree.\n\nThis does not change which project a session belongs to: a session in a linked checkout stays under the project that owns the repository either way."
+          },
+          "lineage.git.branchDisplay": {
+            "type": "string",
+            "default": "inline",
+            "order": 4,
+            "enum": [
+              "inline",
+              "color"
+            ],
+            "enumItemLabels": [
+              "Branch under the session",
+              "Colour by branch"
+            ],
+            "enumDescriptions": [
+              "The branch is written under the session — ⎇ feat/search-ranking ↑4 * — and the name goes back to the theme's colour. Says which checkout, and carries the state tokens on the row. Costs a row's height.",
+              "The session's name takes its branch's colour, and the project's branch rows are the key to it. Costs no width; says which sessions share a checkout, never which checkout. Ahead/behind, dirt and the pull request are in the hover."
+            ],
+            "markdownDescription": "**How a session says which worktree it is running in.** Two ways of answering one question, both complete — the branch rows, the worktree verbs and the pull-request lookup are the same either way. Needs `#lineage.git.branches#` on; with that off there is nothing to display.\n\n**`inline` is the default.** The branch is written under the session, the way a git prompt or the SCM view says it — `⎇ feat/search-ranking ↑4 *` — and the name keeps the theme's own colour. It answers *which* checkout, and carries the state tokens where they can be read without hovering. It costs **height**: twelve sessions become twenty-four rows' worth. Because nothing needs decoding, the branch rows are **shut by default** here and reached from a project's right-click — see **Show Branches**.\n\n`color` is what Flock shipped, and it is denser. The session's name is tinted from a per-branch palette (`#lineage.branchColors#`) and the project's branch rows are the legend, so they are **open by default**. It costs no width at all and answers *are these two on the same thing* down a whole column at a glance. What it cannot say is *which* thing, and everything a colour cannot carry — `↑4 ↓3 *`, the request — moves into the hover.\n\nA line is drawn only where it says something new: on a session whose worktree differs from the one above it, in a project with more than one checkout. A fork made in its parent's worktree gets none. See `#lineage.git.sessionBranchDetail#` for how much it says."
+          },
+          "lineage.git.pullRequests": {
+            "type": "boolean",
+            "default": false,
+            "order": 5,
+            "markdownDescription": "**The one thing in Flock that reaches the network.** With this on, Flock runs `gh pr list --state all --limit 100 --json ...` in each project's repository and shows the pull request on each branch row — number, state and check rollup as a small chip, with **Open Pull Request in Browser** on the row's menu. It shells out to the [`gh` CLI](https://cli.github.com) you installed and authenticated: Flock makes no HTTP requests of its own, bundles no API client and never sees a token. Polled only while the Sessions view is visible, at most once every five minutes per repository, and cached. If `gh` is missing, not signed in, or the repository has no GitHub remote, the rows render exactly as they do with this off and one line goes to the **Flock** output channel. Off by default, because everything else in Flock is local.",
+            "tags": [
+              "usesOnlineServices"
+            ]
+          },
+          "lineage.git.worktreePath": {
+            "type": "string",
+            "default": "../${repo}-${branch}",
+            "order": 6,
+            "markdownDescription": "Where **New Worktree…** puts a new checkout. `${repo}` is the repository directory's name and `${branch}` the branch name with anything a path cannot carry replaced by `-`. A relative pattern is resolved against the repository's main worktree, so the default puts `feat/x` of `~/code/app` at `~/code/app-feat-x`. An absolute path is used as written, and a leading `~/` expands. Must contain `${branch}`, or every branch would resolve to the same directory. Flock always shows the exact `git worktree add` command before running it.",
+            "tags": [
+              "advanced"
+            ]
+          },
+          "lineage.git.sessionBranchDetail": {
+            "type": "string",
+            "default": "standard",
+            "order": 7,
+            "enum": [
+              "standard",
+              "detailed"
+            ],
+            "enumItemLabels": [
+              "Branch and local state",
+              "Also the pull request"
+            ],
+            "enumDescriptions": [
+              "The branch name and where the checkout stands: ↑4 ahead, ↓3 behind, * uncommitted. Local files only.",
+              "Also the pull request — #128, with ✓ ✕ • for its checks and the state in its colour. Needs `lineage.git.pullRequests`."
+            ],
+            "markdownDescription": "How much the line under a session says, in `inline` mode — see `#lineage.git.branchDisplay#`. Colour mode has no line, so this does nothing there.\n\n`standard` is the vocabulary git prompts and the SCM view already use — `↑4 ↓3 *` and nothing else — so it reads without anybody learning it, and it touches nothing but local files.\n\n`detailed` adds the **pull request** — the number, one glyph for its checks, and its state in the chip's colour — and nothing else. It needs `#lineage.git.pullRequests#` on as well, since that is what fills the cache it reads. The arrows are the same arrows at either level: a branch that tracks nothing gets no word for it, because never-pushed is where every branch starts, and the row's hover says `no upstream branch` for the case where you want it in letters.",
+            "tags": [
+              "advanced"
+            ]
+          },
+          "lineage.groupSessionsByBranch": {
+            "type": "boolean",
+            "default": false,
+            "order": 8,
+            "markdownDescription": "Nest a project's sessions under the git branch they are running on, instead of listing the branches and then the sessions. Each branch row becomes a container you can fold shut, with a `+` that starts a session in that worktree. Only applies to a project with two or more worktrees; a session that no shown branch accounts for stays directly under the project. Off by default.",
+            "tags": [
+              "advanced"
+            ]
+          },
+          "lineage.branchColors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [],
+            "order": 9,
+            "markdownDescription": "Read only by `#lineage.git.branchDisplay#`'s `color` mode; `inline` tints nothing. Colours for the branch chips, in order — index 0 is the first branch under a project (usually `main`). Each entry is either a hex colour (`#7aa2f7`) or a VS Code theme colour id (`charts.blue`, `terminal.ansiCyan`). A short list fills the rest from the built-in muted palette; anything that is not one of those two shapes is ignored. Empty = the built-in palette, which is the **Source Control Graph's own branch colours** (`scmGraph.foreground1`–5), softened toward the editor foreground so the chips do not out-shout the status dots — so a branch reads as the same colour here and in the SCM view, and a theme that restyles the graph restyles these too.",
+            "tags": [
+              "advanced"
+            ]
+          },
+          "lineage.preview.directoryModel": {
+            "type": "boolean",
+            "default": false,
+            "order": 10,
+            "markdownDescription": "PREVIEW. Hang the branch rows off a **directory** instead of off the project, and list **every local branch** of that directory’s repository rather than only the checked-out ones.\n\nA project’s directories are its subprojects, and a directory is exactly one git repository (or none) — so the directory is the row a branch belongs under. A project spanning three repositories no longer shows three branches called `main` with no way to tell which is which.\n\nOutside the fold: the directory’s **own checkout**, and any branch with a **session running on it**. Everything else — including a worktree with nothing running in it — goes in one **Branches (N)** row, newest commit first, **shut by default**. That is what makes listing a 180-branch repository cost one row.\n\nNeeds `#lineage.git.branches#`. Draws in the inline sidebar (`#lineage.viewStyle#`: `inline`, the default); the native tree keeps the rows it has today.",
+            "tags": [
+              "preview",
+              "advanced"
+            ]
+          }
+        }
+      },
+      {
+        "title": "Accounts and sections",
+        "order": 5,
+        "properties": {
+          "lineage.accounts.section": {
+            "type": "boolean",
+            "default": true,
+            "order": 1,
+            "markdownDescription": "Draw **Accounts** as a second section of the Flock sidebar, where each AI subscription you can launch sessions on gets a row: which plan it is, how much of its five-hour and weekly windows is gone — for a Claude plan and for a ChatGPT / Codex plan alike — and which one new sessions use by default. On by default: the accounts are worth a row of their own.\n\nThe only reason to turn it off is the top bar. VS Code merges a view's buttons into the container header — the row that reads **FLOCK** — only while that container shows exactly one section, so while Accounts is drawn the bell, New Project, `+`, fork and the gear sit on the **SESSIONS** row just below it instead. Off moves them up one row, and costs you the Accounts section.\n\nNothing about accounts stops working while it is off. Usage is still read, new sessions are still routed, a session is still pinned to its account for life, and every account verb — **Add Account…**, **Sign In**, **Set Default Account**, **Set Project Account…** — is in the Command Palette under **Flock**. The switch is also in the gear menu at the top of the sidebar."
+          },
+          "lineage.shells.section": {
+            "type": "boolean",
+            "default": true,
+            "order": 2,
+            "markdownDescription": "Draw **Shells** as a section of the Flock sidebar: the commands your sessions are running right now — every `Bash` call Claude has started and not yet got back from, with a live clock on each, and every backgrounded job until it finishes, with **Open Output** on its menu for the file the CLI is writing its stdout to. A command that ends leaves the list: this is the CLI's own running-shell indicator, across every session at once, not a history. A command waiting for your permission is listed too, marked as awaiting approval, and is not counted as running.\n\nIt ships collapsed, and the section's badge counts what is running — so a script that is still going is visible without opening it.\n\n**Every live session on this machine** that Flock lists, not only this window's: the facts come from the transcripts on disk, so a command running in a session another window launched is a row here like any other. Clicking a row focuses the conversation that started it.\n\nLike **Accounts**, drawing a second section moves Flock's top-bar buttons down onto the **SESSIONS** row; see `lineage.accounts.section`. The switch is also in the gear menu at the top of the sidebar."
+          },
+          "lineage.accounts.offerSwitchAtLimit": {
+            "type": "boolean",
+            "default": false,
+            "order": 3,
+            "markdownDescription": "Offer to **move a running conversation to another account** when the account it is on uses up its five-hour window.\n\nFlock already reads every account's meters — Claude's and Codex's — so it knows the moment one fills, and that is the moment somebody with a second subscription wants the conversation they were in the middle of moved. When this is on, a session hosted by this window whose account has just run out gets one notification naming the account with the most room, and a button that starts the ordinary **Move to Account...** flow with that account already chosen. The confirmation still appears: what the move costs — the CLI restarts, the turn in flight is cut off, and the prompt cache does not follow — is the same however the flow was reached.\n\nWhen no account on the **same** CLI has room — the default roster of one Claude login and one Codex login never does — the button offers **Continue on** the other CLI's account instead: a new session there, briefed on the transcript, the same **Continue on Another CLI...** the row menu has. Named as a continuation, never as a move, because that is what it is.\n\n**Off by default.** The offer proposes an interruption, so it is only welcome to somebody who decided in advance that they would rather be asked. With it off nothing is lost: both verbs are in every session row's context menu whenever the roster holds somewhere to go, and in the Command Palette under **Flock**.\n\nOne offer per five-hour window, per session, so a meter that re-reads on a timer cannot turn into a repeating prompt. The window resetting starts a fresh one."
+          }
+        }
+      },
+      {
+        "title": "Window",
+        "order": 6,
+        "properties": {
+          "lineage.mode": {
+            "type": "string",
+            "enum": [
+              "folder",
+              "root",
+              "project"
+            ],
+            "enumItemLabels": [
+              "One folder per project",
+              "Root (Flock only)",
+              "Auto-switch"
+            ],
+            "enumDescriptions": [
+              "Native VS Code: a window is the folder you opened. The sidebar shows the sessions under that folder, grouped by the projects that claim them; other projects' work routes to their own windows. Nothing rearranges itself and file tabs are never touched. Needs no tmux and no window management; costs a window per project, and alt-tab is your switcher.",
+              "The window is Flock's: no folder is opened, nothing scopes the tree, and the sidebar holds everything on the machine — you open a session's own window when you want its files. In-window switching is still there when you ask for it, but nothing ever switches by itself and no workspace item appears in the status bar. Costs you that window, and a sidebar with nothing narrowing it.",
+              "One window follows you: work in another project's session and the window switches there, saving the layout you leave and restoring the target's. The most convenient of the three and the hardest to keep straight — it wants tmux, so the sessions you switch away from keep running, and one reload (Flock: Follow the Session I Am In) before the file tree follows you too — down to the session's own subproject directory, in the git worktree that session is checked out in, with Source Control showing that same checkout."
+            ],
+            "default": "folder",
+            "order": 1,
+            "markdownDescription": "What a window **is** — three answers, from the window that holds one thing to the window that follows you. **One folder per project** (`folder`, the default): the window is the folder you opened, the tree scopes itself to sessions under it, and working on another project means going to that project's own window. **Root**, i.e. Flock only (`root`): the window is Flock's — nothing fenced, nothing scoped, nothing rearranging itself, and you open a window on a session when you want its files. **Auto-switch** (`project`): one window spans many projects and switches between them as your attention moves. Navigation never changes a session's lifecycle in any of the three: a closed tab keeps its row under a detach grace (the hover says how long is left), then archives to a click-to-resume row. Run **Flock: Choose Window Model…** to pick one with what it costs written beside it — the picker is also the only thing that clears the deprecated `lineage.workspaces.enabled` below."
+          },
+          "lineage.workspaces.enabled": {
+            "type": "boolean",
+            "default": true,
+            "order": 2,
+            "markdownDeprecationMessage": "Superseded by `#lineage.mode#`, and still honoured: while this is `false` and the mode is `project`, this window resolves to the **Root** (Flock only) model — which is what that pair has always actually meant. Set `#lineage.mode#` to the model you want, or run **Flock: Choose Window Model…**, which writes both; then this key can go.",
+            "description": "Show the workspace switcher in the status bar. A workspace scopes this window to one project: switching saves the current tab layout under the project you leave, hides what does not belong to the target, and restores the target's saved layout. Foreign session tabs close under a detach grace: with tmux installed (see `lineage.tmux`) the conversation keeps running detached for `lineage.session.detachGraceMinutes` — its row stays in the tree, its hover says how long is left, click to reattach — and archives to a click-to-resume row after that; without tmux the terminal closes and the conversation resumes from its transcript, in which case busy sessions are never closed. Unsaved editors and terminals Flock does not own are never touched. The terminal panel is never used."
+          },
+          "lineage.workspaces.resumeSessions": {
+            "type": "boolean",
+            "default": true,
+            "order": 3,
+            "description": "When switching to a project workspace, resume its parked sessions from their transcripts (up to 8 per switch). Parking closes a session's terminal when you switch away, so with this OFF nothing is parked at all — foreign session tabs stay open instead.",
+            "tags": [
+              "advanced"
+            ]
+          },
+          "lineage.explorer.followProject": {
+            "type": "boolean",
+            "default": true,
+            "order": 4,
+            "description": "The Explorer follows the session you are working in: the file tree roots itself at that session's subproject directory, inside the git worktree the session is actually checked out in. Auto-switch only — the other two window models never move the tree. Requires running \"Flock: Follow the Session I Am In\" once per window, which converts it to a Flock workspace (one reload, then following is instant and no terminal is lost). Turning it off leaves you in the auto-switch model with the file tree where you put it: tabs still switch, the status-bar line still says where you are, and Source Control still follows the session's checkout — none of which reroots a tree you asked to be left alone.",
+            "tags": [
+              "advanced"
+            ]
+          },
+          "lineage.explorer.scope": {
+            "type": "string",
+            "enum": [
+              "directory",
+              "project"
+            ],
+            "enumItemLabels": [
+              "The directory you are in",
+              "Every project directory"
+            ],
+            "enumDescriptions": [
+              "One root: the directory you are working in — the session's subproject directory inside the session's own checkout. The Project view lists the rest — click one to send the tree there.",
+              "Every connected directory as its own collapsible root, the main one on top. The shape Flock shipped before this setting existed — and the shape in which the tree does NOT follow you, because a scope that expands every directory into a root has nothing left to narrow."
+            ],
+            "default": "directory",
+            "order": 5,
+            "markdownDescription": "How much of the active project the Explorer shows. `directory` keeps the file tree to the one directory you are in, the way a plain folder window does; `project` shows every connected directory as its own root. Only applies when `#lineage.explorer.followProject#` is on, and only in the **Auto-switch** window model (`#lineage.mode#`). Following the session is a `directory` behaviour by construction — under `project` the folder tree stops moving on its own and only a switch reshapes it, while Source Control goes on following the session's checkout either way. Takes effect on the next focus change — no reload.",
+            "tags": [
+              "advanced"
+            ]
+          }
+        }
+      },
+      {
+        "title": "What the tree shows",
+        "order": 7,
+        "properties": {
+          "lineage.showForeignSessions": {
+            "type": "boolean",
+            "default": false,
+            "order": 1,
+            "markdownDescription": "Show live sessions Flock does not own — `claude` running in some other terminal, another editor, a script. Off (the default), the tree holds only what you told Flock about: sessions launched here, bound to one of its terminals, or added with **Add Existing Session…** / **Import Previous Sessions…** — and a session with no row can never light the bell or write itself into your tree. Turn it on to watch everything on the machine, the way Flock used to; finished turns then stamp those sessions into the tree as they always did."
+          },
+          "lineage.unclaimedSessions": {
+            "type": "string",
+            "enum": [
+              "grouped",
+              "flat",
+              "hidden"
+            ],
+            "enumItemLabels": [
+              "Grouped by folder",
+              "Flat",
+              "Hidden"
+            ],
+            "enumDescriptions": [
+              "Sessions no project claims are filed under a row for their working directory.",
+              "Sessions no project claims are listed one by one, beside the project rows.",
+              "Only sessions that belong to one of your projects are shown. Ignored while you have no projects, so the tree is never empty for want of one."
+            ],
+            "default": "grouped",
+            "order": 2,
+            "markdownDescription": "What to do with sessions **no project claims**. `grouped` (the default) files them under a row for their working directory; `flat` lists them one by one beside the project rows; `hidden` shows only sessions that belong to one of your projects — the roster is machine-wide, so this is the fastest way to stop seeing every directory anyone ever ran claude in. `hidden` is ignored while you have no projects, or the tree would be empty, and it never hides a running session: that files into the collapsed **Still running** group instead, because a view preference must not hide a process this window owns. Replaces `lineage.groupByFolder` and `lineage.onlyProjectSessions`, which are still honoured when they are all you have set."
+          },
+          "lineage.onlyActiveSessions": {
+            "type": "boolean",
+            "default": false,
+            "order": 3,
+            "description": "Show only sessions that are still running. Closed, exited and inferred-ancestor rows are filtered out of the tree — nothing is archived or removed, and a live session forked from a closed one keeps its place. This is the \"Show Only Active Sessions\" toggle in the view title."
+          },
+          "lineage.showArchived": {
+            "type": "boolean",
+            "default": false,
+            "order": 4,
+            "description": "Show ALL closed sessions found in ~/.claude/projects, even ones this tree never knew. Off by default: your own sessions already stay in the tree after their tab closes (as dimmed, resumable inactive rows, until you archive them) — this switch only adds foreign history on top. This is NOT the archive: sessions you archived are behind \"Archived Sessions...\" on the project's row.",
+            "tags": [
+              "advanced"
+            ]
+          },
+          "lineage.showPhantomRows": {
+            "type": "boolean",
+            "default": false,
+            "order": 5,
+            "description": "Show roster rows that are not sessions: entries whose process has exited but that `claude agents --json` never reaped, and `claude bg-spare` daemon warm-spares (pre-forked processes waiting to be claimed, which report an inherited name and a frozen status). Off by default — these cannot be focused, forked or resumed, and a stuck spare will pin the attention badge on the view indefinitely. Turn on to debug the roster.",
+            "tags": [
+              "advanced"
+            ]
+          },
+          "lineage.viewStyle": {
+            "type": "string",
+            "enum": [
+              "inline",
+              "native"
+            ],
+            "enumItemLabels": [
+              "Inline (rename on the row)",
+              "Native tree"
+            ],
+            "enumDescriptions": [
+              "Rename a session in place on its row, the way the Explorer renames a file. The sidebar is drawn by the extension.",
+              "Use the built-in VS Code tree. Rename opens a box at the top of the window, because the tree API has no editable row."
+            ],
+            "default": "inline",
+            "order": 6,
+            "markdownDescription": "How the Sessions view is drawn. `inline` renames on the row like the Explorer; `native` uses the built-in tree widget. Takes effect on the next window reload.",
+            "tags": [
+              "advanced"
+            ]
+          }
+        }
+      },
+      {
+        "title": "Housekeeping",
+        "order": 8,
+        "properties": {
+          "lineage.session.closeAfterMinutes": {
+            "type": "number",
+            "default": 4320,
+            "order": 1,
+            "minimum": 0,
+            "markdownDescription": "A session's tab closes on its own after this many minutes without use — **4320 is three days**. *Use* is the newer of two things: the last real turn in the transcript (never file timestamps), and the last time **you clicked on the session** — its row, its tab, its terminal. Clicking is the plainer signal of the two, and it is the one the age shown on the row does not report: that age is still \"when this last got an answer\", which is the question you are asking when you read the tree, not the question that decides what closes. The conversation is kept — its row stays in the tree as an archived session, and one click resumes it — so this tidies the process, never the words. A busy or waiting session is marked *close after this turn* instead and closes once idle; the tab you are looking at and any session pinned with **Keep Awake** are never touched. `0` turns it off."
+          },
+          "lineage.chat.autoCloseMinutes": {
+            "type": "number",
+            "default": 1440,
+            "order": 2,
+            "minimum": 0,
+            "markdownDescription": "A project chat's tab closes on its own after this many minutes without use — **1440 is one day**. *Use* means either half of it: the chat said something, or you clicked on it. The conversation is kept — **Chat History…** on the project's row reopens it — so this tidies the tab, never the words. A chat that is busy or waiting is never touched, and neither is the tab you are looking at. `0` turns it off.",
+            "tags": [
+              "advanced"
+            ]
+          },
+          "lineage.session.detachGraceMinutes": {
+            "type": "number",
+            "default": 10,
+            "order": 3,
+            "minimum": 0,
+            "markdownDescription": "When a workspace switch (or solo mode) closes a tmux-wrapped session's tab, the process keeps running detached for this many minutes so switching back reattaches instantly. Its row stays in the tree and its hover says how long is left. At the deadline an idle session is closed to an archived row; a busy one closes after its turn ends. At most 8 sessions run detached at once; overflow closes the oldest idle one first. `0` disables the grace — the tab still closes instantly, and the process is ended by the next sweep within a minute.",
+            "tags": [
+              "advanced"
+            ]
+          },
+          "lineage.session.reloadGraceSeconds": {
+            "type": "number",
+            "default": 45,
+            "order": 4,
+            "minimum": 0,
+            "maximum": 60,
+            "markdownDescription": "How many seconds a session may keep running after the window that owned it closed. This is a measurement, not a reprieve: VS Code reports a window **reload** and a window **close** identically, so the only way to tell them apart is to wait — a reload comes back and reattaches, a close never does. At the deadline the session settles to an archived row you can resume, because a folder no window has open should have nothing running in it. Keep this low; raise it only if reloads on this machine are slow enough to lose sessions. `0` ends sessions the moment the window goes, which also means every reload loses them.",
+            "tags": [
+              "advanced"
+            ]
+          },
+          "lineage.busyStaleMinutes": {
+            "type": "number",
+            "default": 5,
+            "order": 5,
+            "minimum": 1,
+            "description": "How long a session may keep the CLI's \"busy\" status with an untouched transcript before Flock stops drawing the running (amber) dot and shows it as idle. `claude agents --json` sometimes freezes a session's status at `busy` after its turn actually ended (most often an interactive session you finished with); a genuinely working session writes its transcript within seconds, so silence this long means it is done. Raise it if a long single tool call briefly flips to idle; turn on \"Show Phantom Rows\" to see the raw, uncorrected status.",
+            "tags": [
+              "advanced"
+            ]
+          }
+        }
+      },
+      {
+        "title": "CLI",
+        "order": 9,
+        "properties": {
+          "lineage.claudeBinary": {
+            "type": "string",
+            "default": "",
+            "order": 1,
+            "description": "Full path to the claude CLI. Empty = search PATH.",
+            "tags": [
+              "advanced"
+            ]
+          },
+          "lineage.codexBinary": {
+            "type": "string",
+            "default": "",
+            "order": 2,
+            "description": "Full path to the codex CLI, used by sessions on a Codex / OpenAI account. Empty = search PATH, then the usual install roots (~/.codex/bin, the active nvm node version, ~/.local/bin, Homebrew). Worth setting explicitly if you use a node version manager, since VS Code often does not inherit its PATH.",
+            "tags": [
+              "advanced"
+            ]
+          }
+        }
+      },
+      {
+        "title": "Hooks and verbs",
+        "order": 10,
+        "properties": {
+          "lineage.hooks.enabled": {
+            "type": "boolean",
+            "default": false,
+            "order": 1,
+            "description": "Read the hook event stream for instant updates — Claude Code's and Codex's, one file. \"Install Instant-Update Hooks…\" (Claude) and \"Install Codex Hooks…\" each set this for you: installing only makes the CLI write the events, this is the switch that makes Flock read them. The Claude plugin lives in a skills directory and never edits ~/.claude/settings.json; the Codex entries are merged into ~/.codex/hooks.json and stripped back out on removal, and Codex runs them only once you have trusted them (/hooks in a Codex session)."
+          },
+          "lineage.verbs.enabled": {
+            "type": "boolean",
+            "default": false,
+            "order": 2,
+            "description": "Read fork requests written by Claude sessions, so \"fork this session\" typed to Claude runs the same fork the sidebar button runs. \"Install In-Session Verbs…\" sets this for you — installing the skill only lets Claude write a request into ~/.lineage/requests, this is the switch that makes Flock windows act on one. Nothing leaves your machine."
+          }
         }
       }
-    },
+    ],
     "keybindings": [
       {
         "command": "lineage.renameSession",
@@ -2094,7 +2311,7 @@
           {
             "id": "flock.setup",
             "title": "Turn on the parts that are off",
-            "description": "Some of the best of Flock is off until you ask, because turning it on writes files in your home directory. The checklist says what each one does, you tick what you want — and it asks the two questions nothing should answer for you: what a window is, and where sessions should open.\n[Recommended Setup...](command:lineage.recommendedSetup)",
+            "description": "Some of the best of Flock is off until you ask, because turning it on writes files in your home directory. The checklist asks four things — instant updates, in-session verbs, your first project, your history — says what each one writes, and you tick what you want. What a window is, and where sessions open, live in the gear and are asked once, when they become real.\n[Recommended Setup...](command:lineage.recommendedSetup)",
             "media": {
               "markdown": "media/walkthrough/setup.md"
             },
@@ -2131,15 +2348,17 @@
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit -p . && tsc --noEmit -p tsconfig.test.json",
     "release": "node scripts/release.mjs",
+    "docs:settings": "node scripts/settings-doc.mjs",
+    "docs:check": "node scripts/settings-doc.mjs --check",
     "test": "vitest run",
     "test:smoke": "node test/smoke/run.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
     "@types/vscode": "~1.94.0",
-    "@vscode/test-electron": "^3.1.0",
     "esbuild": "^0.25.0",
     "typescript": "^5.5.4",
-    "vitest": "^2.1.9"
+    "vitest": "^2.1.9",
+    "@vscode/test-electron": "^3.1.0"
   }
 }

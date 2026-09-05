@@ -95,6 +95,21 @@ try {
 const counts = /Tests\s+(\d+) passed\s+\((\d+)\)/.exec(testOut);
 ok(counts ? `${counts[1]}/${counts[2]} tests pass` : 'tests pass');
 
+// 4b. The settings table in docs/settings.md is generated from the manifest,
+//     and a release whose docs describe the previous release's settings is the
+//     drift the generator exists to end. The check never writes; it only says
+//     whether `npm run docs:settings` was run after the last manifest edit.
+step('generated docs…');
+try {
+  execFileSync('npm', ['run', 'docs:check'], { stdio: 'pipe' });
+} catch {
+  die(
+    'docs/settings.md is behind package.json.',
+    'npm run docs:settings, then commit the result',
+  );
+}
+ok('docs/settings.md matches the manifest');
+
 // 5. Package. `vsce` runs vscode:prepublish itself, which is the production
 //    esbuild build.
 const vsix = `${name}-${version}.vsix`;

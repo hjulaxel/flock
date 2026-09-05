@@ -24,6 +24,7 @@ import {
   CLAUDE_CONFIG_DIR_ENV,
   CODEX_HOME_ENV,
   accountEnvKeys,
+  accountsSectionDrawn,
   canHostSession,
   canHandOff,
   canSwitchAccounts,
@@ -1107,5 +1108,31 @@ describe('accounts: switchMovesNothing', () => {
     expect(
       switchMovesNothing({ fromDir: '', toDir: '', from: null, to: null }),
     ).toBe(false);
+  });
+});
+
+describe('accounts: accountsSectionDrawn', () => {
+  it('follows the section switch when the retired key says nothing', () => {
+    // The population that never wrote `accounts.enabled`: their settings file
+    // has no such key, so the raw read is undefined and the section decides.
+    expect(accountsSectionDrawn(true, undefined)).toBe(true);
+    expect(accountsSectionDrawn(false, undefined)).toBe(false);
+    expect(accountsSectionDrawn(true, true)).toBe(true);
+  });
+
+  it('still honours an explicit legacy false', () => {
+    // The one value somebody wrote on purpose. Folding the key must not switch
+    // their list back on, and the wiring says so in the log rather than
+    // rewriting their settings.
+    expect(accountsSectionDrawn(true, false)).toBe(false);
+    expect(accountsSectionDrawn(false, false)).toBe(false);
+  });
+
+  it('treats anything but a literal false as no opinion', () => {
+    // A string 'false', a number, null: not a boolean anybody set through the
+    // editor, and not a reason to hide a list the section says to draw.
+    expect(accountsSectionDrawn(true, 'false')).toBe(true);
+    expect(accountsSectionDrawn(true, 0)).toBe(true);
+    expect(accountsSectionDrawn(true, null)).toBe(true);
   });
 });

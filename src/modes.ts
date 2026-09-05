@@ -31,7 +31,9 @@
 // gave a window with no auto-switch, no status-bar button and no fence — which
 // is exactly Flock-only — but you had to compute it from two keys to know that,
 // and a model you cannot name is a model nobody chooses. `resolveMode` below
-// folds that pair once, so the truth table becomes a value.
+// folds that pair once, so the truth table becomes a value. The retired
+// `lineage.workspaces.autoSwitch: false` was a THIRD spelling of the same
+// window — auto-switch with the auto taken out — and folds the same way.
 //
 // NOT "LEVELS", here or anywhere user-facing. `design/levels-and-modes.md`
 // numbers the SESSION LIFECYCLE — open, closed, archived — one to three, and
@@ -104,7 +106,8 @@ export function normalizeMode(raw: unknown): LineageMode {
 }
 
 /**
- * THE MIGRATION, and the only reader of `lineage.workspaces.enabled` left.
+ * THE MIGRATION, and the only reader of `lineage.workspaces.enabled` — and of
+ * the retired `lineage.workspaces.autoSwitch` — left.
  *
  * `(mode: project, workspaces.enabled: false)` IS the Flock-only model today —
  * no auto-switch, no status-bar button, no scope fence, tree holds everything,
@@ -120,6 +123,14 @@ export function normalizeMode(raw: unknown): LineageMode {
  * "this caller has no opinion", and an absent opinion must not silently demote
  * somebody's auto-switching window to Flock-only.
  *
+ * `workspacesAutoSwitch` is the same fold for the key that used to switch the
+ * auto-switch off on its own: `(project, autoSwitch: false)` was a window that
+ * never rearranged itself and kept the switch verb — Flock-only, plus a
+ * status-bar item that model is defined by not having. Two spellings of one
+ * model, so it resolves to the model's name. Optional, and only a literal
+ * `false` counts, for exactly the reason above: every caller that predates the
+ * fold, and every double, hands in "no opinion".
+ *
  * NOT A ONE-SHOT SETTINGS WRITE, deliberately, and this is the alternative that
  * was rejected: an activation that rewrites a `settings.json` nobody asked it
  * to touch is a worse citizen than one that keeps reading an old key, and
@@ -132,9 +143,15 @@ export function normalizeMode(raw: unknown): LineageMode {
 export function resolveMode(
   rawMode: unknown,
   workspacesEnabled: boolean,
+  workspacesAutoSwitch?: boolean,
 ): LineageMode {
   const named = normalizeMode(rawMode);
-  if (named === 'project' && workspacesEnabled === false) return 'root';
+  if (
+    named === 'project' &&
+    (workspacesEnabled === false || workspacesAutoSwitch === false)
+  ) {
+    return 'root';
+  }
   return named;
 }
 

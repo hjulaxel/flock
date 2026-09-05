@@ -1365,6 +1365,14 @@ export const COMMANDS = {
    *  writes `lineage.accounts.section`. */
   showAccountsSection: 'lineage.showAccountsSection',
   hideAccountsSection: 'lineage.hideAccountsSection',
+  /** The Shells SECTION's switch — the same pair, for the same layout reason,
+   *  on `lineage.shells.section`. Until this pair existed the only way to fold
+   *  the Shells list away was settings.json while Accounts had a gear entry,
+   *  and two sections that cost the same row should be flipped the same way.
+   *  Hides the list only: what the sessions run is untouched, and the two row
+   *  verbs stay registered. */
+  showShellsSection: 'lineage.showShellsSection',
+  hideShellsSection: 'lineage.hideShellsSection',
   /** The two DISPLAY MODES, said in the gear menu rather than only in settings.
    *  Two ids for one setting, the same shape the filter above uses: each command
    *  knows the mode it means, and the state the user reads back is which of the
@@ -1414,8 +1422,9 @@ export const COMMANDS = {
    *  offer, so every line has to carry its own reason and its own cost — and
    *  the answer has to be theirs, per line, before anything is written. */
   recommendedSetup: 'lineage.recommendedSetup',
-  /** WHICH OF THE THREE WINDOW MODELS this window is in — the same picker the
-   *  recommended setup's `windowModel` step opens, reachable on its own.
+  /** WHICH OF THE THREE WINDOW MODELS this window is in, as a picker with the
+   *  current one marked — in the gear, behind the Status verb's row, and in
+   *  the palette.
    *
    *  A VERB rather than "open the settings UI and find the dropdown", because
    *  the dropdown is where the choice went unfound: it is one of forty-odd
@@ -1430,6 +1439,33 @@ export const COMMANDS = {
    *  person who needs to find this, and hiding it in some models would be the
    *  same mistake the dropdown made. */
   chooseWindowModel: 'lineage.chooseWindowModel',
+  /** WHERE SESSIONS OPEN — one pinned tab, editor tabs, the Claude Code
+   *  extension, the terminal panel, or a window of their own — as a picker
+   *  with the current arrangement marked. `chooseWindowModel`'s twin: the
+   *  other taste question
+   *  nobody can answer before they have lived with the default, asked as a
+   *  verb rather than as three settings rows (`terminalLocation`,
+   *  `soloSession`, `launch.mode`) that have to be moved together to mean
+   *  anything. In the gear beside the window-model picker, behind the Status
+   *  verb's "Where sessions open" row, and in the palette. */
+  chooseSurface: 'lineage.chooseSurface',
+  /** The built-in Settings editor, filtered to Flock. There is no settings
+   *  page of Flock's own: the manifest's categories, order, tags and enum
+   *  labels ARE the page, and this verb is the door to it. A verb rather than
+   *  "open Settings and type flock", because the gear is where a person looks
+   *  for settings and the palette is where they look for a verb. */
+  openSettings: 'lineage.openSettings',
+  /** The same editor, narrowed to the rows the manifest tags `advanced`:
+   *  paths, timings, diagnostics, previews, and anything that needs a reload.
+   *  The tag is what makes this a filter rather than a second page. */
+  openAdvancedSettings: 'lineage.openAdvancedSettings',
+  /** What this machine has and what this window is on, as read-only rows
+   *  whose pick runs the verb that changes them — tmux installed and on, the
+   *  hooks and verbs installed, which `claude` and `codex` were found, which
+   *  window model this is, where sessions open. The facts are decided by
+   *  src/status.ts, pure, from the same world the checklist reads; nothing
+   *  here probes anything the checklist does not. */
+  showStatus: 'lineage.showStatus',
   /** The gear at the end of the view title, and everything that used to be
    *  behind the `...` beside it.
    *
@@ -1503,7 +1539,6 @@ export type CommandId = (typeof COMMANDS)[keyof typeof COMMANDS];
 
 export const CONFIG_SECTION = 'lineage';
 export const CONFIG_KEYS = {
-  pollIntervalMs: 'pollIntervalMs',
   claudeBinary: 'claudeBinary',
   /** The Codex CLI, for sessions launched on a Codex/OpenAI account. Its own
    *  key rather than a per-provider map because the two binaries are found by
@@ -1518,8 +1553,13 @@ export const CONFIG_KEYS = {
    *  detach tier — a wrapped pane is the only one something can be put back
    *  into — so it is silently inert when `tmux` is off or tmux is absent. */
   exitToShell: 'exitToShell',
-  groupByFolder: 'groupByFolder',
-  showGhosts: 'showGhosts',
+  /** What the tree does with sessions NO project claims: `grouped` under a
+   *  folder row (the default), `flat` beside the projects, or `hidden`. One
+   *  question that used to be two booleans (`groupByFolder`,
+   *  `onlyProjectSessions`, both in LEGACY_KEYS); projects.resolveUnclaimed
+   *  folds the three reads into this value and projects.unclaimedFlags splits
+   *  it back into the two flags computeGrouping has always taken. */
+  unclaimedSessions: 'unclaimedSessions',
   showArchived: 'showArchived',
   /** Hide every session that is over — closed, exited, or an inferred
    *  ancestor — leaving only what is still running. A FILTER, not a delete:
@@ -1633,7 +1673,6 @@ export const CONFIG_KEYS = {
   /** WHERE you switch conversations: Flock's tree, or the Claude Code
    *  extension's own agent list. See SessionSwitching. */
   sessionSwitching: 'sessionSwitching',
-  onlyProjectSessions: 'onlyProjectSessions',
   /** Show live sessions Flock does not own — `claude` running in some other
    *  terminal, another editor, a script. OFF by default: the roster is
    *  machine-wide, and a tree that fills itself with every session anyone ever
@@ -1760,7 +1799,6 @@ export const CONFIG_KEYS = {
    * nothing there regresses and nothing is half-rendered.
    */
   previewDirectoryModel: 'preview.directoryModel',
-  staleAfterHours: 'staleAfterHours',
   busyStaleMinutes: 'busyStaleMinutes',
   // Notifications
   notificationsEnabled: 'notifications.enabled',
@@ -1795,7 +1833,6 @@ export const CONFIG_KEYS = {
    *  settings file nobody asked it to touch. */
   workspacesEnabled: 'workspaces.enabled',
   workspacesResumeSessions: 'workspaces.resumeSessions',
-  workspacesAutoSwitch: 'workspaces.autoSwitch',
   // The Explorer follows the project
   explorerFollowProject: 'explorer.followProject',
   /** How much of the project the Explorer shows: `directory` (the one you are
@@ -1803,19 +1840,22 @@ export const CONFIG_KEYS = {
    *  root). Read fresh on every sync — see ExplorerHost.scope — so flipping it
    *  takes effect on the next switch rather than on the next reload. */
   explorerScope: 'explorer.scope',
-  /** Show the Accounts view. The VERBS stay registered when this is off —
-   *  turning it off means "I do not want a second list in my sidebar", not
-   *  "unregister ten commands so the palette reports them missing". The
-   *  manifest's view contribution matches on `config.lineage.accounts.enabled`,
-   *  which is this key spelled the way a when-clause spells it. */
-  accountsEnabled: 'accounts.enabled',
-  /** Draw Accounts as a SECTION of the Flock container. OFF by default, and
-   *  that default is the reason the bell sits on the FLOCK row: a container
-   *  showing two views gives each of them a header of its own, so every button
-   *  landed a row lower behind an overflow `...`. AND-ed with `accountsEnabled`
-   *  in the view's when-clause — `accountsEnabled` stays the feature's off
-   *  switch, this only decides whether the list is drawn in the sidebar. */
+  /** Draw Accounts as a SECTION of the Flock container — the one switch the
+   *  view has, since `accounts.enabled` folded into it (LEGACY_KEYS). The
+   *  manifest's view contribution matches on `config.lineage.accounts.section`,
+   *  which is this key spelled the way a when-clause spells it. ON by default,
+   *  which is why the bell sits on the SESSIONS row rather than FLOCK: a
+   *  container showing two views gives each of them a header of its own. The
+   *  VERBS stay registered when this is off — turning it off means "I do not
+   *  want a second list in my sidebar", not "unregister ten commands so the
+   *  palette reports them missing". */
   accountsSection: 'accounts.section',
+  /** Draw Shells as a section of the Flock container — one row per `Bash`
+   *  call a session is running. ON by default, like Accounts. The view's
+   *  `when` clause read this key alone for a release and nothing in the source
+   *  named it; the gear pair that flips it needs the spelling here so that the
+   *  write and the manifest cannot drift apart. */
+  shellsSection: 'shells.section',
   /** Offer to move a conversation when the account it is on runs out of its
    *  five-hour window. OFF by default, and that default is the point: the
    *  switch is a real interruption — the CLI restarts and the prompt cache does
@@ -1823,6 +1863,43 @@ export const CONFIG_KEYS = {
    *  who has decided in advance that they would rather be asked. Everyone else
    *  gets the verb in the row's menu and no opinions. */
   offerSwitchAtLimit: 'accounts.offerSwitchAtLimit',
+} as const;
+
+/**
+ * Settings the manifest NO LONGER CONTRIBUTES but the source still reads.
+ *
+ * The rule for a retired key: a value somebody still has in settings.json
+ * keeps doing what it did, or does nothing — it never breaks, and it is never
+ * rewritten for them. This extension writes a setting only behind the user's
+ * own gesture; an activation that edits a settings.json nobody asked it to
+ * touch is the alternative that was rejected (see modes.resolveMode), and
+ * Settings Sync would carry such an edit to every machine.
+ *
+ * Kept apart from CONFIG_KEYS on purpose. That table IS the manifest — a test
+ * holds the two to each other in both directions — and the table-driven
+ * setter (`CommandDeps.writeSettings`) refuses anything outside it. A key here
+ * can therefore be read but never written; the one exception is DELETING it,
+ * which VS Code permits for an unregistered key, and which happens only inside
+ * the gesture that states the new answer — the gear's Accounts section verbs,
+ * and the window-model picker's Auto-switch choice.
+ */
+export const LEGACY_KEYS = {
+  /** `lineage.accounts.enabled`, folded into `accounts.section`. An explicit
+   *  `false` still keeps the Accounts list from being registered
+   *  (accounts.accountsSectionDrawn); anything else defers to the section. */
+  accountsEnabled: 'accounts.enabled',
+  /** `lineage.workspaces.autoSwitch`, folded into `mode`: `project` with the
+   *  auto-switch off was the Root model under another name, so a `false` here
+   *  resolves to `root` (modes.resolveMode) and the window-model picker deletes
+   *  the key when somebody chooses auto-switch. */
+  workspacesAutoSwitch: 'workspaces.autoSwitch',
+  /** `lineage.groupByFolder`, folded into `unclaimedSessions`: an explicit
+   *  `false` still reads as `flat` when the new key is unset. */
+  groupByFolder: 'groupByFolder',
+  /** `lineage.onlyProjectSessions`, folded into `unclaimedSessions`: an
+   *  explicit `true` still reads as `hidden` when the new key is unset, and
+   *  outranks a legacy `groupByFolder: false` beside it. */
+  onlyProjectSessions: 'onlyProjectSessions',
 } as const;
 
 /**
@@ -1857,7 +1934,9 @@ export const BRANCH_FEATURE_SWITCHES: readonly {
 ] as const;
 
 /** Age past which `lineage.deleteStale` pre-selects a session. Not a filter —
- *  nothing is ever removed without the user ticking it. */
+ *  nothing is ever removed without the user ticking it — which is also why it
+ *  stopped being a setting: a number that only decides which checkboxes start
+ *  ticked, in a dialog that lets you untick them, is not worth a row. */
 export const DEFAULT_STALE_AFTER_HOURS = 48;
 
 /** Minutes a roster row may keep the CLI's `busy` status with a SILENT
@@ -2086,6 +2165,12 @@ export interface RecommendedWorld {
    *  reason; absent reads as not installed, which only matters when the step
    *  is available. */
   readonly codexHooksInstalled?: boolean;
+  /** The retired `lineage.workspaces.autoSwitch`, raw — undefined when the
+   *  settings file never had it, which is nearly everyone. The third input to
+   *  `resolveMode`: a `false` folds a `project` window to Root exactly as
+   *  `workspacesEnabled: false` does. Optional so every wiring and double that
+   *  predates the fold reads as "no opinion". */
+  readonly workspacesAutoSwitch?: boolean;
 }
 
 // ------------------------------------------------------------------ lineage results
@@ -3489,6 +3574,9 @@ export interface TreeDeps {
    *  neither view resolves the other drops. `ParentSource` keeps its 'reparent'
    *  member: state files written before this still carry those edges, and they
    *  go on resolving exactly as they did. */
+  /** `lineage.unclaimedSessions` is not `flat` — the first of the two flags
+   *  computeGrouping takes (projects.unclaimedFlags); the renderers never see
+   *  the enum. */
   groupByFolder(): boolean;
   // ---- projects, visibility and selection -----------------------------
   /** EVERY project, hidden ones included, name-sorted. `computeGrouping` does
@@ -3498,7 +3586,7 @@ export interface TreeDeps {
   projects(): ProjectRecord[];
   /** Normalized paths the user removed from view. */
   hiddenFolders(): string[];
-  /** Only show sessions that belong to a project (config). */
+  /** `lineage.unclaimedSessions` is `hidden` — the second flag, same source. */
   onlyProjectSessions(): boolean;
   /** FOLDER MODE's scope: every REAL folder this window opened (the Flock
    *  anchor excluded), or undefined/empty when nothing is scoped (project
@@ -4426,8 +4514,6 @@ export interface CommandDeps {
   hiddenFolders(): HiddenFolder[];
   hideFolder(dir: string): Promise<void>;
   unhideFolder(dir: string): Promise<void>;
-  /** `lineage.staleAfterHours` — only ever pre-ticks a checkbox. */
-  staleAfterHours(): number;
   /** The pool the Add Session and Import pickers draw from: every session this
    *  machine knows about that has no row right now — live foreign ones and
    *  recordless transcripts alike, chain-collapsed to one entry per
@@ -4499,6 +4585,11 @@ export interface CommandDeps {
    *  and the state the user reads is which of the two the gear menu is
    *  offering, which the view's own `when` clause decides. */
   setAccountsSection(on: boolean): Promise<void>;
+  // ---- the Shells section -------------------------------------------------
+  /** Write `lineage.shells.section`. The same shape as `setAccountsSection`,
+   *  for the same reason: each of the two commands knows the value it means,
+   *  and the state the user reads back is which half the gear menu offers. */
+  setShellsSection(on: boolean): Promise<void>;
   // ---- the branch line ----------------------------------------------------
   /** Write `lineage.git.branchDisplay` — which of the two ways a session says
    *  the worktree it is in. A setter and no getter, like the two above: each of
@@ -4547,6 +4638,17 @@ export interface CommandDeps {
    *  has the command registered and reporting that it is unavailable in this
    *  window, which is true and actionable, rather than throwing. */
   recommendedWorld?(): Promise<RecommendedWorld>;
+  /** The two CLI probes every launch makes — `findClaudeBinary` and
+   *  `findCodexBinary` with their settings applied — plus whether the codex
+   *  key is set at all, for the Status verb's two binary rows. One member for
+   *  three answers because they are read together, once, when the picker is
+   *  built. Optional: a wiring without it draws no CLI rows, which is honest,
+   *  rather than "not found" about a machine nothing looked at. */
+  cliBinaries?(): {
+    claude: string | null;
+    codex: string | null;
+    codexConfigured: boolean;
+  };
   /** Write the settings a recommended step names, returning the keys it could
    *  NOT write (a read-only profile, a sync conflict) so the flow can say which
    *  ones are still where they were.
@@ -4560,9 +4662,12 @@ export interface CommandDeps {
    *  Keys are section-relative — `git.branches`, the spelling `CONFIG_KEYS`
    *  uses — and every write goes to the GLOBAL target: a recommendation is
    *  about this person's editor, not about the folder they happen to have
-   *  open. */
+   *  open. A value of `undefined` DELETES the key, and the wiring allows that
+   *  for a `LEGACY_KEYS` entry alone: a retired key is never given a value,
+   *  but a choice that supersedes it may take the old spelling away so it
+   *  cannot fold the new answer back. */
   writeSettings?(
-    entries: readonly { key: string; value: boolean | string }[],
+    entries: readonly { key: string; value: boolean | string | undefined }[],
   ): Promise<readonly string[]>;
   // ---- the gear menu ------------------------------------------------------
   /** The state the gear menu labels itself with, read when it opens.
@@ -4591,10 +4696,33 @@ export interface CommandDeps {
    *  — and every unit double — gets the old static description rather than a
    *  claim it cannot support. */
   windowModel?(): string | undefined;
+  /** The LABEL of the arrangement sessions open in today — "Editor tabs",
+   *  "One pinned session tab" — for the gear's Choose Where Sessions Open…
+   *  entry, on the same terms as `windowModel` above: read through
+   *  `surfaceChoices`, the function the picker itself uses, so the sentence in
+   *  the menu and the "(current)" mark one click later cannot disagree.
+   *  Optional for the same reason. */
+  surface?(): string | undefined;
+  /** The two contextual one-time offers — the window-model picker, offered
+   *  the first time a folder-model window routes another project's session
+   *  away; the surface picker, offered when a window's second session tab
+   *  opens. `windowModelOffer` / `surfaceOffer` (src/recommend.ts) decide;
+   *  this is the stamp behind each, once per install in globalState, set by
+   *  an answer — the offer's own buttons, or the picker behind it being
+   *  answered from anywhere, the gear included — and never by the X.
+   *
+   *  Optional: a wiring without it — every unit double — reads as already
+   *  answered and never offers, which is what the routing tests rely on. The
+   *  union is spelled out because types.ts imports nothing. */
+  offers?: {
+    answered(offer: 'windowModel' | 'surface'): boolean;
+    markAnswered(offer: 'windowModel' | 'surface'): Promise<void>;
+  };
   menuState?(): {
     hooksInstalled: boolean;
     onlyActive: boolean;
     accountsSection: boolean;
+    shellsSection: boolean;
     /** `lineage.git.branchDisplay`. Optional so a wiring that predates the two
      *  modes offers both halves rather than claiming one of them. */
     branchDisplay?: BranchDisplay;

@@ -8,6 +8,69 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Added
 
+- **The two taste questions are asked once, when they become real.** Nobody
+  can answer "what is a window" before they have lived in one, so instead of
+  sitting on the first-run checklist the two pickers are offered at the moment
+  each question first costs something, and at most once per install. The
+  first time a window in the one-folder-per-project model sends another
+  project's session to its own window, one message asks whether Flock should
+  switch this window between projects for you or keep one folder per window —
+  **Choose…** opens **Choose Window Model…**, **Not now** closes the question
+  for good. The first time a window's second session tab opens, one message
+  asks where sessions should open — **Choose…** opens **Choose Where Sessions
+  Open…**. Neither fires on activation or on a timer; dismissing either with
+  the X asks again next time, as every Flock notice does; and answering the
+  picker from the gear settles the question, so it is never asked afterwards.
+- **Choose Where Sessions Open… is a verb, and it has a fifth answer.** The
+  surface picker — one pinned session tab, editor tabs, the Claude Code
+  extension, the bottom terminal panel, or **Its own window** (each session as
+  a tab in a separate window, which is `lineage.terminalLocation: newWindow`,
+  a value the picker used to be unable to mark current) — with where sessions
+  open today marked, used to be reachable only as
+  a row of the Recommended Setup checklist. It is now **Flock: Choose Where
+  Sessions Open…** in the Command Palette and in the gear's Setup group, right
+  after **Choose Window Model…**, and the gear entry says which arrangement you
+  are on before you open it, the way the window-model entry does. The Status
+  verb's *Where sessions open* row runs the same command. Choosing an option
+  writes `lineage.terminalLocation`, `lineage.soloSession` and
+  `lineage.launch.mode` together; cancelling writes nothing.
+- **The Settings editor is Flock's settings page.** There is no page of Flock's
+  own and none is coming: VS Code's built-in editor now draws Flock's settings
+  in ten titled categories — Sessions, Attention, Forking and closing,
+  Worktrees and branches, Accounts and sections, Window, What the tree shows,
+  Housekeeping, CLI, Hooks and verbs — each row in a chosen order with the
+  advanced ones last, so a category reads top to bottom the way the design
+  lists it. The rows that are paths, timings, diagnostics, previews or need a
+  reload carry VS Code's `advanced` tag; `lineage.git.pullRequests` carries
+  `usesOnlineServices`, the editor's own mark for a setting that reaches the
+  network, and `lineage.preview.directoryModel` carries `preview`, so the editor
+  draws its own badge. Every dropdown now reads in words — *Use tmux when
+  installed*, *Compact and tell the parent*, *Colour by branch* — the same words
+  the gear's pickers use. No key is renamed, retyped or given a new default.
+- **Flock Settings…, Status…, and Open Advanced Settings in the gear.** The
+  gear's Setup group now opens with **Flock Settings…**, the editor filtered to
+  Flock, and **Status…**: read-only rows saying whether tmux is installed and
+  on (and where), whether the instant-update hooks — and, where there is a
+  Codex to hook, the Codex hooks — and the in-session verbs are installed, which `claude` — and, for a Codex account, which `codex` —
+  was found and where, which window model this window is on, and where
+  sessions open. Picking a row runs the verb that changes it: the install or
+  its removal, the one write that turns tmux back on, the two pickers —
+  **Choose Window Model…** and **Choose Where Sessions Open…** — or the
+  Settings editor at the one key. The facts come from the world the
+  checklist already reads and the probes every
+  launch already makes; nothing new is looked at, and nothing is written until
+  a row is picked. **Open Advanced Settings** closes the group: the editor
+  narrowed to the rows tagged *advanced*. All three are in the Command Palette
+  under **Flock**.
+- **The gear menu can fold the Shells section away, and bring it back.** The
+  Accounts section has had its *Show / Hide Accounts Section* pair since the
+  gear existed; Shells, which costs the same row of the sidebar, could only be
+  folded from `settings.json`. The gear now has a **Sections** group holding
+  both pairs, each labelled with the direction it goes — *Hide Shells Section*
+  while the list is drawn, never both — and the two verbs are in the Command
+  Palette under **Flock**. Hiding the section hides a list, nothing more: the
+  commands your sessions run are untouched.
+
 - **Codex sessions get the same treatment as Claude ones.** Four things a
   Codex row could not do, and now does, each from a real source rather than a
   guess:
@@ -69,11 +132,88 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Changed
 
+- **The missing-tmux notice waits for the moment it matters.** It used to fire
+  a few seconds after activation whenever tmux was not installed. It now fires
+  the first time a project switch is attempted without tmux — by the verb or by
+  the auto-switch — which is the moment the missing detach tier costs
+  something: that switch closes the other project's sessions instead of hiding
+  them. Still once per install, still dismissible for good; the notice for tmux
+  installed-but-switched-off stays where it was. In between, **Status…** shows
+  *tmux: not installed* with the install line for your platform.
+- **One front door on a fresh install.** A genuinely fresh install — no
+  projects, no session records — opens the walkthrough, as before; it no longer
+  also gets the recommended-setup toast a few seconds later, because the
+  walkthrough's second step is that same checklist. The toast still fires,
+  once, for the install the walkthrough never opens for: an upgrade with no
+  projects and two things left to turn on.
+- **The recommended setup asks four things.** Instant updates — Claude's, and
+  Codex's where there is a Codex to hook — the in-session verbs, your first
+  project, and your history (when this machine has some): the consent items
+  and the two that put rows on the tree, all pre-ticked, every one of which a
+  new user can say yes to without understanding Flock; plus the tmux repair
+  when tmux is installed but switched off, and the branch rows, offered
+  unticked, when a repository has two checkouts. The two taste questions —
+  *what a window is* and *where sessions open* — have left the checklist:
+  nobody can answer them before they have lived with the default, so they are
+  the gear's **Choose Window Model…** and **Choose Where Sessions Open…**
+  instead. On a machine where everything is already true the checklist now
+  says so rather than opening a picker with nothing on it. - **One description
+  per setting.** `docs/settings.md` used to carry a hand-kept table beside the
+  descriptions `package.json` already holds for the Settings editor, and the
+  two drifted: the table ran short, its header quoted a count from three
+  settings ago. The table is now generated from the manifest by `npm run
+  docs:settings` — one table per category, in the editor's order, each
+  dropdown's values beside the words the editor shows for them, advanced and
+  deprecated rows marked — and `npm run docs:check` gates the release on it
+  being current. The README, the walkthrough and the settings page stop
+  quoting a settings count that the next removal would have made wrong.
+
 - The accounts welcome text, the setting descriptions for `lineage.hooks.enabled`,
-  `lineage.accounts.enabled` and `lineage.accounts.offerSwitchAtLimit`, the
+  `lineage.accounts.section` and `lineage.accounts.offerSwitchAtLimit`, the
   README, the reference and the setup walkthrough now describe what a Codex
   row gets and where each fact comes from. No new setting: the hook reader's
   one switch covers both CLIs.
+
+### Removed
+
+- **`lineage.showGhosts`.** Exited ancestors — the sessions your live ones were
+  forked from — are always drawn. They are what keeps the tree's ancestry
+  honest, and a switch that could hide them was a knob nobody should turn. A
+  value left in `settings.json` does nothing.
+- **`lineage.staleAfterHours`.** **Archive Stale Sessions…** pre-ticks rows
+  older than 48 hours, as it did by default. The number only ever decided which
+  checkboxes started ticked in a dialog that lets you untick them, which is not
+  worth a row in the editor. A value left in `settings.json` does nothing.
+- **`lineage.pollIntervalMs`.** The roster is polled every three seconds, as it
+  was by default. With the instant-update hooks installed the poll is a
+  fallback, and without them three seconds is the tempo the tree was built
+  around; a tuning knob for it was one more row nobody should turn. A value
+  left in `settings.json` does nothing.
+- **`lineage.accounts.enabled`**, folded into `lineage.accounts.section`. Both
+  had to be on to draw one view, and only the section had a gear verb; the
+  section setting is the one switch now and its description says what the
+  other used to. An old `accounts.enabled: false` left in `settings.json` is
+  still honoured — the Accounts list is not registered, and the log says so —
+  though the section's collapsed header stays in the sidebar, since a view's
+  `when` clause can only read a setting that exists. Either half of the gear's
+  **Show / Hide Accounts Section** pair clears the old key, since after that
+  gesture the section setting states the answer, and the header follows it.
+- **`lineage.workspaces.autoSwitch`**, folded into `lineage.mode`. Auto-switch
+  with the auto-switch turned off was the **Root** model under another name —
+  a window that never rearranges itself and keeps the switch verb — so it is
+  that model now: an old `false` left in `settings.json` resolves a `project`
+  window to Root exactly as `workspaces.enabled: false` always has, on read,
+  with nothing rewritten. **Flock: Choose Window Model…** removes the old key
+  when you choose Auto-switch, so it cannot fold your choice straight back.
+- **`lineage.groupByFolder` and `lineage.onlyProjectSessions`**, folded into
+  one dropdown: **`lineage.unclaimedSessions`** — *Grouped by folder* (the
+  default), *Flat*, or *Hidden*. The two switches were one question asked
+  twice — what to do with sessions no project claims — and the dropdown asks it
+  once, in the **What the tree shows** category. The old keys are still read
+  when the new one is unset: `onlyProjectSessions: true` is *Hidden*,
+  `groupByFolder: false` is *Flat*, and *Hidden* is still ignored while you
+  have no projects. Nothing is rewritten, and the tree is byte-identical for
+  everyone who never touched either key.
 
 ## [0.1.11] — 2026-09-05
 

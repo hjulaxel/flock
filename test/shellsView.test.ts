@@ -20,6 +20,7 @@ import {
 } from '../src/shellsView';
 import type { ShellRow } from '../src/shellsView';
 import type { ShellRun } from '../src/toolShells';
+import { contributedSettings } from './manifest';
 
 const A = '0f00000a-0000-4000-8000-00000000000a';
 const B = '0f00000b-0000-4000-8000-00000000000b';
@@ -228,12 +229,6 @@ describe('package.json — the Shells surface is wired, not just declared', () =
       viewsWelcome: { view: string; contents: string }[];
       commands: { command: string; title: string }[];
       menus: Record<string, { command: string; when?: string; group?: string }[]>;
-      configuration: {
-        properties: Record<
-          string,
-          { type?: string; default?: unknown; markdownDescription?: string }
-        >;
-      };
     };
   };
 
@@ -257,8 +252,7 @@ describe('package.json — the Shells surface is wired, not just declared', () =
   // so a `visibility` default never reaches an existing profile and the setting
   // has to be the thing the view actually reads.
   it('declares lineage.shells.section as a boolean defaulting to true', () => {
-    const prop =
-      pkg.contributes.configuration.properties['lineage.shells.section'];
+    const prop = contributedSettings()['lineage.shells.section'];
     expect(prop, 'lineage.shells.section not declared').toBeDefined();
     expect(prop?.type).toBe('boolean');
     expect(prop?.default).toBe(true);
@@ -268,8 +262,7 @@ describe('package.json — the Shells surface is wired, not just declared', () =
   // because it listed `vscode.Terminal` objects, and now reads transcripts off
   // disk. The setting's own text is where a user finds that out.
   it('says in the setting that it covers the whole machine', () => {
-    const prop =
-      pkg.contributes.configuration.properties['lineage.shells.section'];
+    const prop = contributedSettings()['lineage.shells.section'];
     expect(prop?.markdownDescription).toContain('Every live session on this machine');
   });
 

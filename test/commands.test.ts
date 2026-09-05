@@ -1019,11 +1019,11 @@ function chatDeps(
     hiddenFolders: () => [],
     hideFolder: async () => undefined,
     unhideFolder: async () => undefined,
-    staleAfterHours: () => 24,
     markSeen: async () => undefined,
     notificationsEnabled: () => true,
     setOnlyActiveSessions: async () => undefined,
     setAccountsSection: async () => undefined,
+    setShellsSection: async () => undefined,
     setBranchDisplay: async () => undefined,
     selectedSessions: () => [],
     switchWorkspace: async () => undefined,
@@ -1597,6 +1597,7 @@ describe('archivedSessionsFlow', () => {
       hooksInstalled: false,
       onlyActive: true,
       accountsSection: false,
+      shellsSection: false,
     });
     await archivedSessionsFlow(deps, 'p1');
     delete (mockWindow as StatusHost).setStatusBarMessage;
@@ -1717,6 +1718,7 @@ describe('archivedSessionsFlow', () => {
       hooksInstalled: false,
       onlyActive: true,
       accountsSection: false,
+      shellsSection: false,
     });
     deps.getForest = () => forestOf([node(A, { status: 'busy' })]);
     await archivedSessionsFlow(deps, 'p1');
@@ -5852,7 +5854,7 @@ describe('the add / import flows', () => {
     infos: string[];
     warnings: string[];
     /** The recommended setup's two side effects, in the order they landed. */
-    settings: { key: string; value: boolean | string }[];
+    settings: { key: string; value: boolean | string | undefined }[];
     installs: string[];
     projectDirs: string[];
   }
@@ -5954,12 +5956,12 @@ describe('the add / import flows', () => {
       hiddenFolders: () => [],
       hideFolder: async () => undefined,
       unhideFolder: async () => undefined,
-      staleAfterHours: () => 48,
       unlistedSessions: () => over.pool ?? [],
       markSeen: async () => undefined,
       notificationsEnabled: () => true,
       setOnlyActiveSessions: async () => undefined,
       setAccountsSection: async () => undefined,
+      setShellsSection: async () => undefined,
       setBranchDisplay: async () => undefined,
       selectedSessions: () => [],
       switchWorkspace: async () => undefined,
@@ -6069,9 +6071,8 @@ describe('the add / import flows', () => {
     over: Partial<UnlistedSession> = {},
   ): UnlistedSession => ({ sessionId: id, live: false, ...over });
 
-  /** A machine with nothing left to recommend — except the surface question,
-   *  which is on every plan. Each setup test moves exactly the fields it is
-   *  about, so what it is testing is what it changed. */
+  /** A machine with nothing left to recommend. Each setup test moves exactly
+   *  the fields it is about, so what it is testing is what it changed. */
   const settledWorld: RecommendedWorld = {
     platform: 'darwin',
     tmuxBinary: '/opt/homebrew/bin/tmux',
@@ -6268,19 +6269,23 @@ describe('the add / import flows', () => {
     const VERBS = 'Let Claude fork its own sessions';
     const PROJECT = 'Make your first project';
     const BRANCHES = 'Show branch and worktree rows';
-    const SURFACE = 'Choose where sessions open';
-    const WINDOW_MODEL = 'Choose what a window is';
 
     beforeEach(() => {
       // newProjectFlow names the project it just made, and falls back to this
       // command when there is no inline rename to run.
       (mockCommands as { executeCommand?: unknown }).executeCommand =
         async () => undefined;
+      // The two taste verbs leave a status-bar receipt; a host without the
+      // API would throw inside the handler. Tests that read the receipt
+      // install their own collector over this.
+      (mockWindow as StatusHost).setStatusBarMessage = () => undefined;
     });
 
     afterEach(() => {
       delete (mockCommands as { executeCommand?: unknown }).executeCommand;
+      delete (mockCommands as { registerCommand?: unknown }).registerCommand;
       delete (mockWindow as { showOpenDialog?: unknown }).showOpenDialog;
+      delete (mockWindow as StatusHost).setStatusBarMessage;
     });
 
     it('says so, and asks nothing, where the wiring cannot answer', async () => {
@@ -6292,26 +6297,33 @@ describe('the add / import flows', () => {
       expect(calls.settings).toEqual([]);
     });
 
-    it('still asks the two taste questions on a machine with nothing else to do, and the receipt carries the notes', async () => {
-      // The old "everything recommended is already set up" outcome is gone on
-      // purpose: neither taste step has an "already done", so even a settled
-      // machine is offered the checklist — with exactly those two rows on it —
-      // and the notes ride the receipt.
+    it('says everything is set up on a settled machine, and still carries the notes', async () => {
+      // Every step has an "already done" now that the two taste questions are
+      // verbs of their own, so a settled machine is told so — no picker opens,
+      // nothing is written — and the one thing it cannot do for you is still
+      // said.
       const { deps, calls } = poolDeps({
         world: { ...settledWorld, tmuxBinary: null },
       });
-      const asked = scriptPicks([SURFACE], 'Editor tabs (current)');
+      const asked = scriptPicks();
       await recommendedSetupFlow(deps);
-      expect(asked.offered[0]).toEqual([SURFACE, WINDOW_MODEL]);
-      // Choosing an option — even the current one — writes it, explicitly.
-      expect(calls.settings).toEqual([
-        { key: 'terminalLocation', value: 'editor' },
-        { key: 'soloSession', value: false },
-        { key: 'launch.mode', value: 'flock' },
-      ]);
-      // The one thing it cannot do for you is still said.
+      expect(asked.offered).toEqual([]);
+      expect(calls.settings).toEqual([]);
+      expect(saidInfo.join(' ')).toContain('everything recommended is already set up');
       expect(saidInfo.join(' ')).toContain('tmux is not installed');
-      expect(saidInfo.join(' ')).toContain('choose differently');
+    });
+
+    it('asks neither taste question — where sessions open and what a window is are verbs', async () => {
+      // Nobody can answer "what is a window" before they have lived in one:
+      // the two pickers are `Choose Window Model…` and `Choose Where Sessions
+      // Open…`, offered once when they become real, never rows on the
+      // first-run checklist.
+      const { deps } = poolDeps({
+        world: { ...settledWorld, hooksInstalled: false, hasProjects: false },
+      });
+      const asked = scriptPicks(undefined);
+      await recommendedSetupFlow(deps);
+      expect(asked.offered[0]).toEqual([PROJECT, HOOKS]);
     });
 
     it('ticks what recommendedPlan recommends, and leaves the rest alone', async () => {
@@ -6321,20 +6333,20 @@ describe('the add / import flows', () => {
       const asked = scriptPicks(undefined);
       await recommendedSetupFlow(deps);
       expect(asked.many).toEqual([true]);
-      expect(asked.offered[0]).toEqual([SURFACE, WINDOW_MODEL, HOOKS, BRANCHES]);
-      expect(asked.picked[0]).toEqual([SURFACE, WINDOW_MODEL, HOOKS]);
+      expect(asked.offered[0]).toEqual([HOOKS, BRANCHES]);
+      expect(asked.picked[0]).toEqual([HOOKS]);
     });
 
     it('opens the three window models, cursor on the one you are in', async () => {
-      // The taste contract again: the tick opens the question, the OPTION
-      // writes. `folder` alone here, because that is the whole of what the
-      // Flock-only and one-folder-per-project answers move.
+      // The taste contract: the picker asks, the OPTION writes. `folder` alone
+      // here, because that is the whole of what the Flock-only and
+      // one-folder-per-project answers move.
       const { deps, calls } = poolDeps({
         world: { ...settledWorld, mode: 'root' },
       });
-      const asked = scriptPicks([WINDOW_MODEL], 'One folder per project');
-      await recommendedSetupFlow(deps);
-      expect(asked.offered[1]).toEqual([
+      const asked = scriptPicks('One folder per project');
+      await withRegisteredCommands(deps).run(COMMANDS.chooseWindowModel);
+      expect(asked.offered[0]).toEqual([
         'One folder per project',
         'Flock only (current)',
         'Auto-switch',
@@ -6346,33 +6358,34 @@ describe('the add / import flows', () => {
       // A user carrying `workspaces.enabled: false` is shown as Flock only —
       // which is what their window has always been — and choosing Auto-switch
       // has to write BOTH keys, or `resolveMode` would fold them straight back
-      // with nothing on screen to explain it.
+      // with nothing on screen to explain it. The retired `autoSwitch` key
+      // folds the same way, so the same choice deletes it (value undefined).
       const { deps, calls } = poolDeps({
         world: { ...settledWorld, mode: 'project', workspacesEnabled: false },
       });
-      const asked = scriptPicks([WINDOW_MODEL], 'Auto-switch');
-      await recommendedSetupFlow(deps);
-      expect(asked.offered[1]).toContain('Flock only (current)');
+      const asked = scriptPicks('Auto-switch');
+      await withRegisteredCommands(deps).run(COMMANDS.chooseWindowModel);
+      expect(asked.offered[0]).toContain('Flock only (current)');
       expect(calls.settings).toEqual([
         { key: 'mode', value: 'project' },
         { key: 'workspaces.enabled', value: true },
+        { key: 'workspaces.autoSwitch', value: undefined },
       ]);
     });
 
-    it('writes nothing for a ticked window-model step whose picker was cancelled', async () => {
+    it('writes nothing, and says nothing, when the window-model picker is cancelled', async () => {
       const { deps, calls } = poolDeps({ world: settledWorld });
-      scriptPicks([WINDOW_MODEL], undefined);
-      await recommendedSetupFlow(deps);
+      scriptPicks(undefined);
+      await withRegisteredCommands(deps).run(COMMANDS.chooseWindowModel);
       expect(calls.settings).toEqual([]);
-      expect(saidInfo.join(' ')).toContain('nothing was changed');
+      expect(saidInfo).toEqual([]);
     });
 
-    it('is also a verb of its own, with a receipt naming the model', async () => {
-      // The checklist asks this once, when somebody meets the product. The
-      // standalone command is for the other moment — a month in, wanting a
-      // different model — and it is the one that matters more, because the
-      // route it replaces is knowing that the key is called `lineage.mode` and
-      // that `project` is spelled that way while meaning "auto-switch".
+    it('says what it did, by the model’s label', async () => {
+      // The route this verb replaces is knowing that the key is called
+      // `lineage.mode` and that `project` is spelled that way while meaning
+      // "auto-switch" — so the receipt has to be readable by the same person
+      // the picker was.
       const said: string[] = [];
       (
         mockWindow as { setStatusBarMessage?: (t: string, ms?: number) => void }
@@ -6382,7 +6395,16 @@ describe('the add / import flows', () => {
       try {
         const { deps, calls } = poolDeps({ world: settledWorld });
         const asked = scriptPicks('Flock only');
-        const harness = withRegisteredCommands(deps);
+        const marked: string[] = [];
+        const harness = withRegisteredCommands({
+          ...deps,
+          offers: {
+            answered: () => false,
+            markAnswered: async (offer) => {
+              marked.push(offer);
+            },
+          },
+        });
         await harness.run(COMMANDS.chooseWindowModel);
         expect(asked.offered[0]).toEqual([
           'One folder per project (current)',
@@ -6394,6 +6416,9 @@ describe('the add / import flows', () => {
         // same person the picker was.
         expect(said.join(' ')).toContain('Flock only');
         expect(calls.refreshes).toBeGreaterThan(0);
+        // A choice made here settles the question the one-time offer would
+        // ask after a routed session: stamped, so it never asks.
+        expect(marked).toEqual(['windowModel']);
       } finally {
         delete (mockWindow as { setStatusBarMessage?: unknown })
           .setStatusBarMessage;
@@ -6401,40 +6426,74 @@ describe('the add / import flows', () => {
       }
     });
 
-    it('writes nothing for a ticked surface step whose picker was cancelled', async () => {
-      // The tick opened the question; only an ANSWER writes. Escape on the
-      // four-way picker is "no", not an error, and the receipt says nothing
-      // happened.
-      const { deps, calls } = poolDeps({ world: settledWorld });
-      scriptPicks([SURFACE], undefined);
-      await recommendedSetupFlow(deps);
-      expect(calls.settings).toEqual([]);
-      expect(saidInfo.join(' ')).toContain('nothing was changed');
+    it('is a verb of its own too — Choose Where Sessions Open…, with a receipt naming the place', async () => {
+      // `chooseWindowModel`'s twin, on the same contract: the world is read,
+      // the picker marks where sessions open today, the OPTION writes its
+      // three keys together, and the receipt says the label rather than the
+      // values behind it.
+      const said: string[] = [];
+      (
+        mockWindow as { setStatusBarMessage?: (t: string, ms?: number) => void }
+      ).setStatusBarMessage = (text) => {
+        said.push(text);
+      };
+      try {
+        const { deps, calls } = poolDeps({
+          world: { ...settledWorld, soloSession: true },
+        });
+        const asked = scriptPicks('Bottom terminal panel');
+        const marked: string[] = [];
+        const harness = withRegisteredCommands({
+          ...deps,
+          offers: {
+            answered: () => false,
+            markAnswered: async (offer) => {
+              marked.push(offer);
+            },
+          },
+        });
+        await harness.run(COMMANDS.chooseSurface);
+        expect(asked.offered[0]).toEqual([
+          'One pinned session tab (current)',
+          'Editor tabs',
+          'Claude Code extension',
+          'Bottom terminal panel',
+          'Its own window',
+        ]);
+        expect(calls.settings).toEqual([
+          { key: 'terminalLocation', value: 'panel' },
+          { key: 'soloSession', value: false },
+          { key: 'launch.mode', value: 'flock' },
+        ]);
+        expect(said.join(' ')).toContain('Bottom terminal panel');
+        expect(calls.refreshes).toBeGreaterThan(0);
+        // Settles the second-tab offer too: answered from the gear is
+        // answered.
+        expect(marked).toEqual(['surface']);
+
+        // Cancelled: nothing written, nothing said — the same silence the
+        // window-model verb keeps.
+        const quiet = poolDeps({ world: settledWorld });
+        scriptPicks(undefined);
+        await withRegisteredCommands(quiet.deps).run(COMMANDS.chooseSurface);
+        expect(quiet.calls.settings).toEqual([]);
+        expect(saidInfo).toEqual([]);
+      } finally {
+        delete (mockWindow as { setStatusBarMessage?: unknown })
+          .setStatusBarMessage;
+        delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+      }
     });
 
     it('writes launch.mode ALONE for the extension option, installed or not', async () => {
       const { deps, calls } = poolDeps({ world: settledWorld });
-      const asked = scriptPicks([SURFACE], 'Claude Code extension');
-      await recommendedSetupFlow(deps);
+      const asked = scriptPicks('Claude Code extension');
+      await withRegisteredCommands(deps).run(COMMANDS.chooseSurface);
       // The row is on offer even though the extension is missing — the
       // description says so, and the launcher already falls back.
-      expect(asked.offered[1]).toContain('Claude Code extension');
+      expect(asked.offered[0]).toContain('Claude Code extension');
       expect(calls.settings).toEqual([
         { key: 'launch.mode', value: 'claudeExtension' },
-      ]);
-    });
-
-    it('suffixes the current arrangement, and moves off it when asked', async () => {
-      const { deps, calls } = poolDeps({
-        world: { ...settledWorld, soloSession: true },
-      });
-      const asked = scriptPicks([SURFACE], 'Bottom terminal panel');
-      await recommendedSetupFlow(deps);
-      expect(asked.offered[1]).toContain('One pinned session tab (current)');
-      expect(calls.settings).toEqual([
-        { key: 'terminalLocation', value: 'panel' },
-        { key: 'soloSession', value: false },
-        { key: 'launch.mode', value: 'flock' },
       ]);
     });
 
@@ -6555,14 +6614,20 @@ describe('folder mode: foreign rows route to their own window', () => {
     choose?: string;
     focusWindowFor?: (id: string) => Promise<boolean>;
     focusWindowForDir?: (dir: string, id?: string) => Promise<boolean>;
+    /** Wires the one-time offers' stamp, reporting this answer; absent is a
+     *  wiring without them, which is what every other test here is. */
+    offerAnswered?: boolean;
   }): {
     told: string[];
     opened: Array<[string, boolean]>;
+    /** Offers stamped as answered. */
+    marked: string[];
     calls: ChatCalls;
     run: (command: string, arg: string) => Promise<void>;
   } {
     const told: string[] = [];
     const opened: Array<[string, boolean]> = [];
+    const marked: string[] = [];
     (
       mockWindow as {
         showInformationMessage?: (
@@ -6596,8 +6661,18 @@ describe('folder mode: foreign rows route to their own window', () => {
         opened.push([fsPath, newWindow]);
       },
       markSeen: async () => undefined,
+      ...(over.offerAnswered === undefined
+        ? {}
+        : {
+            offers: {
+              answered: () => over.offerAnswered === true,
+              markAnswered: async (offer: string) => {
+                marked.push(offer);
+              },
+            },
+          }),
     });
-    return { told, opened, calls, run: (c, a) => harness.run(c, a) };
+    return { told, opened, marked, calls, run: (c, a) => harness.run(c, a) };
   }
 
   it('routes to the window that has the session bound, and stops', async () => {
@@ -6671,6 +6746,79 @@ describe('folder mode: foreign rows route to their own window', () => {
     // exactly as it does without a mode.
     expect(routed).toEqual([]);
     expect(h.told[0]).toContain('outside Flock');
+  });
+
+  // THE ONE-TIME WINDOW-MODEL OFFER hangs off this routing: the click has just
+  // cost the person a window, which is the first moment "what is a window" is
+  // a question they can answer (design/settings-tiers.md §5). The decision is
+  // `windowModelOffer` (test/recommend.test.ts); what is under test here is
+  // that it speaks after the routing, once, on the notice rules every toast
+  // here keeps — and never in a wiring that has no stamp to keep.
+  describe('offers the window-model picker, once, after routing', () => {
+    afterEach(() => {
+      delete (mockCommands as { executeCommand?: unknown }).executeCommand;
+    });
+
+    it('asks after the route lands, and "Not now" stamps the install', async () => {
+      const h = routeHarness({
+        focusWindowForDir: async () => true,
+        offerAnswered: false,
+        choose: 'Not now',
+      });
+      await h.run(COMMANDS.focusSession, SESSION);
+      expect(h.told).toHaveLength(1);
+      expect(h.told[0]).toContain('Choose a window model?');
+      expect(h.marked).toEqual(['windowModel']);
+      expect(h.calls.launches).toEqual([]);
+    });
+
+    it('runs Choose Window Model… on "Choose…", and stamps', async () => {
+      const executed: string[] = [];
+      (mockCommands as { executeCommand?: unknown }).executeCommand = async (
+        id: string,
+      ) => {
+        executed.push(id);
+      };
+      const h = routeHarness({
+        focusWindowForDir: async () => true,
+        offerAnswered: false,
+        choose: 'Choose…',
+      });
+      await h.run(COMMANDS.focusSession, SESSION);
+      expect(executed).toEqual([COMMANDS.chooseWindowModel]);
+      expect(h.marked).toEqual(['windowModel']);
+    });
+
+    it('stamps nothing when dismissed with the X — it asks again next time', async () => {
+      const h = routeHarness({
+        focusWindowForDir: async () => true,
+        offerAnswered: false,
+      });
+      await h.run(COMMANDS.focusSession, SESSION);
+      expect(h.told).toHaveLength(1);
+      expect(h.marked).toEqual([]);
+    });
+
+    it('never asks twice, and never for a session no project claims', async () => {
+      const answered = routeHarness({
+        focusWindowForDir: async () => true,
+        offerAnswered: true,
+      });
+      await answered.run(COMMANDS.focusSession, SESSION);
+      expect(answered.told).toEqual([]);
+
+      // Routed all the same — the fence is about the folder, not the project
+      // — but "switch this window between projects" would be a false offer
+      // about a directory nobody named.
+      const unclaimed = routeHarness({
+        cwd: '/elsewhere/task',
+        focusWindowForDir: async () => true,
+        offerAnswered: false,
+      });
+      await unclaimed.run(COMMANDS.focusSession, SESSION);
+      expect(unclaimed.told).toEqual([]);
+      expect(unclaimed.marked).toEqual([]);
+    });
   });
 });
 
@@ -8252,5 +8400,329 @@ describe('archiving the last session in a minted worktree offers the cleanup', (
     const h = offerHarness({ minted: false });
     await h.run(COMMANDS.deleteSession, S1);
     expect(h.infos).toHaveLength(1);
+  });
+});
+
+// The gear is built when it opens so that each toggle can carry the direction
+// it goes — a claim the manifest cannot check, since nothing there declares the
+// menu. These read it the way a person does: the unit double has no
+// QuickPickItemKind, so the separators are not emitted and the list is flat,
+// and the codicon prefix is stripped so the assertions name the titles shown.
+describe('the gear menu offers each section switch one way round', () => {
+  type MenuState = ReturnType<NonNullable<CommandDeps['menuState']>>;
+
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockCommands as CommandHost).executeCommand;
+    delete (mockWindow as QuickPickHost).showQuickPick;
+    delete (mockWindow as StatusHost).setStatusBarMessage;
+  });
+
+  /** Opens the gear against a wiring that reports `state` — undefined being a
+   *  wiring with no menuState at all — answers the pick with the row titled
+   *  `choose` (undefined dismisses), and returns the titles offered and the
+   *  commands that ran. */
+  async function openGear(
+    state: MenuState | undefined,
+    choose?: string,
+  ): Promise<{ offered: string[]; ran: string[] }> {
+    const { deps } = chatDeps(projectOf());
+    const { accounts } = fakeAccountDeps([]);
+    const wired: AccountCommandDeps = { ...deps, accounts };
+    if (state !== undefined) wired.menuState = () => state;
+    const offered: string[] = [];
+    const ran: string[] = [];
+    (mockWindow as QuickPickHost).showQuickPick = async (items) => {
+      const rows = (items as { label: string; kind?: number }[]).filter(
+        (i) => i.kind === undefined,
+      );
+      const titles = rows.map((r) => r.label.replace(/^\$\([^)]+\) /, ''));
+      offered.push(...titles);
+      if (choose === undefined) return undefined;
+      const at = titles.indexOf(choose);
+      return at === -1 ? undefined : rows[at];
+    };
+    (mockCommands as CommandHost).executeCommand = async (id) => {
+      ran.push(id);
+      return undefined;
+    };
+    const harness = withRegisteredCommands(wired);
+    await harness.run(COMMANDS.settingsMenu);
+    return { offered, ran };
+  }
+
+  const known = (over: Partial<MenuState> = {}): MenuState => ({
+    hooksInstalled: true,
+    onlyActive: false,
+    accountsSection: true,
+    shellsSection: true,
+    ...over,
+  });
+
+  it('offers Hide Accounts Section, and not Show, while the section is drawn', async () => {
+    const { offered } = await openGear(known({ accountsSection: true }));
+    expect(offered).toContain('Hide Accounts Section');
+    expect(offered).not.toContain('Show Accounts Section');
+  });
+
+  it('offers Show Accounts Section, and not Hide, while it is folded away', async () => {
+    const { offered } = await openGear(known({ accountsSection: false }));
+    expect(offered).toContain('Show Accounts Section');
+    expect(offered).not.toContain('Hide Accounts Section');
+  });
+
+  it('does the same for Shells', async () => {
+    const drawn = await openGear(known({ shellsSection: true }));
+    expect(drawn.offered).toContain('Hide Shells Section');
+    expect(drawn.offered).not.toContain('Show Shells Section');
+
+    const folded = await openGear(known({ shellsSection: false }));
+    expect(folded.offered).toContain('Show Shells Section');
+    expect(folded.offered).not.toContain('Hide Shells Section');
+  });
+
+  it('keeps the two pairs together, Accounts first, as one Sections group', async () => {
+    const { offered } = await openGear(known());
+    const accounts = offered.indexOf('Hide Accounts Section');
+    expect(accounts).toBeGreaterThan(-1);
+    expect(offered[accounts + 1]).toBe('Hide Shells Section');
+  });
+
+  it('offers both halves of each pair when the wiring cannot say which way it goes', async () => {
+    // Absent state must not guess: the wrong label on a toggle is worse than
+    // two entries.
+    const { offered } = await openGear(undefined);
+    for (const title of [
+      'Show Accounts Section',
+      'Hide Accounts Section',
+      'Show Shells Section',
+      'Hide Shells Section',
+    ]) {
+      expect(offered).toContain(title);
+    }
+  });
+
+  it('runs the command behind the row that was picked', async () => {
+    const shells = await openGear(known(), 'Hide Shells Section');
+    expect(shells.ran).toEqual([COMMANDS.hideShellsSection]);
+
+    const accounts = await openGear(
+      known({ accountsSection: false }),
+      'Show Accounts Section',
+    );
+    expect(accounts.ran).toEqual([COMMANDS.showAccountsSection]);
+  });
+
+  it('runs nothing when the menu is dismissed', async () => {
+    const { ran } = await openGear(known());
+    expect(ran).toEqual([]);
+  });
+
+  // The Setup group is the top of the menu, and its order is an argument: the
+  // settings page for the person who knows what they want, the status for the
+  // person checking, the checklist for the person who does not know yet, the
+  // model picker, and the advanced rows last because they are the ones a
+  // first-time reader is meant to be able to skip.
+  it('opens with the Setup group in the order the design reads', async () => {
+    const { offered } = await openGear(known());
+    expect(offered.slice(0, 6)).toEqual([
+      'Flock Settings...',
+      'Status...',
+      'Recommended Setup...',
+      'Choose Window Model...',
+      'Choose Where Sessions Open...',
+      'Open Advanced Settings',
+    ]);
+  });
+
+  it('runs the settings verbs behind the rows that open them', async () => {
+    const settings = await openGear(known(), 'Flock Settings...');
+    expect(settings.ran).toEqual([COMMANDS.openSettings]);
+    const status = await openGear(known(), 'Status...');
+    expect(status.ran).toEqual([COMMANDS.showStatus]);
+    const surface = await openGear(known(), 'Choose Where Sessions Open...');
+    expect(surface.ran).toEqual([COMMANDS.chooseSurface]);
+    const advanced = await openGear(known(), 'Open Advanced Settings');
+    expect(advanced.ran).toEqual([COMMANDS.openAdvancedSettings]);
+  });
+
+  // Both taste entries answer "which am I on?" without being opened, and both
+  // read their answer through the picker's own function — so the sentence in
+  // the menu and the "(current)" mark one click later cannot disagree. A
+  // wiring that cannot say falls back to listing the choices.
+  it('names the current window model and surface in the two picker entries', async () => {
+    const { deps } = chatDeps(projectOf());
+    const { accounts } = fakeAccountDeps([]);
+    const described: Record<string, string | undefined> = {};
+    (mockWindow as QuickPickHost).showQuickPick = async (items) => {
+      for (const row of items as { label: string; description?: string; kind?: number }[]) {
+        if (row.kind !== undefined) continue;
+        described[row.label.replace(/^\$\([^)]+\) /, '')] = row.description;
+      }
+      return undefined;
+    };
+    const harness = withRegisteredCommands({
+      ...deps,
+      accounts,
+      windowModel: () => 'Flock only',
+      surface: () => 'One pinned session tab',
+    });
+    await harness.run(COMMANDS.settingsMenu);
+    expect(described['Choose Window Model...']).toBe('Currently “Flock only” — change it');
+    expect(described['Choose Where Sessions Open...']).toBe(
+      'Currently “One pinned session tab” — change it',
+    );
+
+    const bare = withRegisteredCommands({ ...deps, accounts });
+    await bare.run(COMMANDS.settingsMenu);
+    expect(described['Choose Window Model...']).not.toContain('Currently');
+    expect(described['Choose Where Sessions Open...']).not.toContain('Currently');
+  });
+});
+
+// The two settings verbs open the BUILT-IN editor at a filter — there is no
+// page of Flock's own — and the Status verb draws facts whose pick runs an
+// existing flow. These check the door, not the room: the query handed to the
+// workbench, and that a picked row reaches the verb the fact names.
+describe('the settings editor verbs and the Status picker', () => {
+  type World = Awaited<ReturnType<NonNullable<CommandDeps['recommendedWorld']>>>;
+
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockCommands as CommandHost).executeCommand;
+    delete (mockWindow as QuickPickHost).showQuickPick;
+    delete (mockWindow as QuickPickHost).showInformationMessage;
+    delete (mockWindow as StatusHost).setStatusBarMessage;
+  });
+
+  /** tmux installed and on, hooks not yet, verbs in, a claude on PATH and no
+   *  codex anywhere — a machine with exactly one thing left to fix. */
+  const world: World = {
+    platform: 'darwin',
+    tmuxBinary: '/opt/homebrew/bin/tmux',
+    tmuxMode: 'auto',
+    hooksInstalled: false,
+    verbsInstalled: true,
+    verbsAvailable: true,
+    hasProjects: true,
+    unlistedCount: 0,
+    branchRowsEnabled: false,
+    maxWorktrees: 1,
+    terminalLocation: 'editor',
+    soloSession: false,
+    launchMode: 'flock',
+    claudeExtensionInstalled: false,
+    mode: undefined,
+    workspacesEnabled: true,
+  };
+
+  function harnessWith(over: Partial<AccountCommandDeps> = {}): {
+    run: (id: string, ...args: unknown[]) => Promise<void>;
+    executed: { id: string; args: unknown[] }[];
+  } {
+    const { deps } = chatDeps(projectOf());
+    const { accounts } = fakeAccountDeps([]);
+    const executed: { id: string; args: unknown[] }[] = [];
+    (mockCommands as CommandHost).executeCommand = async (id, ...args) => {
+      executed.push({ id, args });
+      return undefined;
+    };
+    const harness = withRegisteredCommands({ ...deps, accounts, ...over });
+    return { run: harness.run, executed };
+  }
+
+  it('opens the editor filtered to Flock, and to the advanced rows', async () => {
+    const { run, executed } = harnessWith();
+    await run(COMMANDS.openSettings);
+    await run(COMMANDS.openAdvancedSettings);
+    expect(executed).toEqual([
+      { id: 'workbench.action.openSettings', args: ['@ext:hjulaxel.flock'] },
+      {
+        id: 'workbench.action.openSettings',
+        args: ['@ext:hjulaxel.flock @tag:advanced'],
+      },
+    ]);
+  });
+
+  it('draws the facts as rows and runs the verb behind the one picked', async () => {
+    const offered: { label: string; description?: string }[] = [];
+    (mockWindow as QuickPickHost).showQuickPick = async (items) => {
+      const rows = items as { label: string; description?: string }[];
+      offered.push(...rows);
+      return rows.find((r) => r.label.endsWith('Instant-update hooks'));
+    };
+    const { run, executed } = harnessWith({
+      recommendedWorld: async () => world,
+      cliBinaries: () => ({
+        claude: '/usr/local/bin/claude',
+        codex: null,
+        codexConfigured: false,
+      }),
+    });
+    await run(COMMANDS.showStatus);
+    const titles = offered.map((r) => r.label.replace(/^\$\([^)]+\) /, ''));
+    expect(titles).toEqual([
+      'tmux',
+      'Instant-update hooks',
+      'In-session verbs',
+      'claude CLI',
+      'Window model',
+      'Where sessions open',
+    ]);
+    expect(offered[0]?.description).toBe('installed at /opt/homebrew/bin/tmux, on');
+    expect(offered[1]?.description).toBe('not installed');
+    // Picking the hooks row runs the install — the same contributed command
+    // the gear and the palette run, by id.
+    expect(executed.map((e) => e.id)).toEqual([COMMANDS.installHooks]);
+  });
+
+  it('runs the surface verb, not a picker of its own, when Where sessions open is picked', async () => {
+    (mockWindow as QuickPickHost).showQuickPick = async (items) =>
+      (items as { label: string }[]).find((r) => r.label.endsWith('Where sessions open'));
+    const { run, executed } = harnessWith({ recommendedWorld: async () => world });
+    await run(COMMANDS.showStatus);
+    expect(executed.map((e) => e.id)).toEqual([COMMANDS.chooseSurface]);
+  });
+
+  it('opens the editor at the key when a binary row is picked', async () => {
+    (mockWindow as QuickPickHost).showQuickPick = async (items) =>
+      (items as { label: string }[]).find((r) => r.label.endsWith('claude CLI'));
+    const { run, executed } = harnessWith({
+      recommendedWorld: async () => world,
+      cliBinaries: () => ({ claude: null, codex: null, codexConfigured: false }),
+    });
+    await run(COMMANDS.showStatus);
+    expect(executed).toEqual([
+      { id: 'workbench.action.openSettings', args: ['lineage.claudeBinary'] },
+    ]);
+  });
+
+  it('says so, and runs nothing, in a window without the world', async () => {
+    const said: string[] = [];
+    (mockWindow as QuickPickHost).showInformationMessage = async (message) => {
+      said.push(message);
+      return undefined;
+    };
+    const { run, executed } = harnessWith();
+    await run(COMMANDS.showStatus);
+    expect(said).toEqual(['Flock: status is not available in this window.']);
+    expect(executed).toEqual([]);
+  });
+
+  it('the Shells pair writes the value each half names, through the wiring', async () => {
+    const wrote: boolean[] = [];
+    const { deps } = chatDeps(projectOf());
+    const { accounts } = fakeAccountDeps([]);
+    (mockWindow as StatusHost).setStatusBarMessage = () => undefined;
+    const harness = withRegisteredCommands({
+      ...deps,
+      accounts,
+      setShellsSection: async (on) => {
+        wrote.push(on);
+      },
+    });
+    await harness.run(COMMANDS.hideShellsSection);
+    await harness.run(COMMANDS.showShellsSection);
+    expect(wrote).toEqual([false, true]);
   });
 });

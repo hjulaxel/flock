@@ -34,6 +34,27 @@ import {
 } from './types';
 import type { AccountProfile, ProviderId } from './types';
 
+// --------------------------------------------------------------- section
+
+/**
+ * Is the Accounts SECTION drawn — its list registered, the gear offering to
+ * hide rather than show it?
+ *
+ * `section` is `lineage.accounts.section`, the switch. `legacyEnabled` is the
+ * retired `lineage.accounts.enabled`, read RAW and consulted for one value
+ * only: a literal `false` is the one thing somebody wrote on purpose, and the
+ * fold must not switch their list back on. Everything else — `undefined` from
+ * a settings file that never had the key, `true`, a unit double with no
+ * opinion — defers to the section, which is what the fold means: one key with
+ * the answer, the other honoured only where it still says something.
+ */
+export function accountsSectionDrawn(
+  section: boolean,
+  legacyEnabled: unknown,
+): boolean {
+  return section && legacyEnabled !== false;
+}
+
 // ------------------------------------------------------------------- env
 
 /** Claude Code's config root override. */

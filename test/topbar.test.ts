@@ -40,6 +40,7 @@ import type {
   SessionNode,
 } from '../src/types';
 import * as vscodeMock from './mocks/vscode';
+import { contributedSettings } from './manifest';
 
 const ROOT = path.join(__dirname, '..');
 
@@ -163,11 +164,11 @@ function depsOf(
     hiddenFolders: () => [],
     hideFolder: nope,
     unhideFolder: nope,
-    staleAfterHours: () => 48,
     markSeen: nope,
     notificationsEnabled: () => true,
     setOnlyActiveSessions: nope,
     setAccountsSection: nope,
+    setShellsSection: nope,
     setBranchDisplay: nope,
     selectedSessions: () => [],
     switchWorkspace: nope,
@@ -677,6 +678,12 @@ describe('manifest: the view title contributions', () => {
   it('contributes every verb the gear menu delegates to', () => {
     const declared = new Set(pkg.contributes.commands.map((c) => c.command));
     for (const id of [
+      'lineage.openSettings',
+      'lineage.showStatus',
+      'lineage.recommendedSetup',
+      'lineage.chooseWindowModel',
+      'lineage.chooseSurface',
+      'lineage.openAdvancedSettings',
       'lineage.showOnlyActiveSessions',
       'lineage.showAllSessions',
       'lineage.showHidden',
@@ -687,6 +694,8 @@ describe('manifest: the view title contributions', () => {
       'lineage.reopenProject',
       'lineage.showAccountsSection',
       'lineage.hideAccountsSection',
+      'lineage.showShellsSection',
+      'lineage.hideShellsSection',
       'lineage.installHooks',
       'lineage.removeHooks',
       'lineage.refresh',
@@ -1021,12 +1030,16 @@ describe('manifest: one row never offers two verbs the same slot', () => {
 describe('manifest: the Accounts section, and the row it costs', () => {
   // The bell only reaches the container header while the container has ONE
   // visible view, so this when-clause is load-bearing for the whole top bar.
-  it('gates the Accounts view on both of its settings', () => {
+  // The section key ALONE: `accounts.enabled` folded into it, and a when-clause
+  // could not have kept honouring the old key anyway — the language cannot
+  // tell an unset boolean from `false`, so `config.x` on a key most people
+  // never wrote would hide the view for all of them. The wiring reads the
+  // retired key instead (accounts.accountsSectionDrawn).
+  it('gates the Accounts view on the section setting alone', () => {
     const accounts = pkg.contributes.views['lineage'].find(
       (v) => v.id === 'lineageAccounts',
     );
-    expect(accounts?.when).toContain('config.lineage.accounts.enabled');
-    expect(accounts?.when).toContain('config.lineage.accounts.section');
+    expect(accounts?.when).toBe('config.lineage.accounts.section');
   });
 
   // ON by default, which means the buttons sit on the SESSIONS row rather than
@@ -1040,14 +1053,7 @@ describe('manifest: the Accounts section, and the row it costs', () => {
   // reads, or turning it off would silently do nothing for everyone who has ever
   // opened the sidebar.
   it('ships the section on by default', () => {
-    const props = (
-      pkg as unknown as {
-        contributes: {
-          configuration: { properties: Record<string, { default?: unknown }> };
-        };
-      }
-    ).contributes.configuration.properties;
+    const props = contributedSettings();
     expect(props['lineage.accounts.section'].default).toBe(true);
-    expect(props['lineage.accounts.enabled'].default).toBe(true);
   });
 });

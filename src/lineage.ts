@@ -572,6 +572,9 @@ export interface BuildForestInput {
     status: SessionStatus,
   ) => CompactionPhase | undefined;
   opts?: {
+    /** Whether exited ancestors get rows. Not a setting any more — the wiring
+     *  always passes true, since ghosts are what keep the ancestry honest —
+     *  but kept as a parameter so the ghost rules can be tested in isolation. */
     showGhosts?: boolean; // default true
     now?: number;         // default Date.now()
     /** `lineage.notifications.enabled` — the global default a per-record
@@ -1042,7 +1045,7 @@ export function buildForest(input: BuildForestInput): SessionForest {
   // ghost is the visible root of its subtree, and grouping keys entirely off
   // the root's cwd. Without this a fork of a just-closed parent falls out of
   // its project row into "(no directory)", or disappears altogether under
-  // `lineage.onlyProjectSessions`. Forks inherit the parent's directory, so
+  // `lineage.unclaimedSessions: hidden`. Forks inherit the parent's directory, so
   // the child's cwd is the right answer rather than a guess.
   //
   // Two children can disagree — one was forked after a cd, or resumed in

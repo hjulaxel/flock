@@ -60,9 +60,9 @@ import {
   DEFAULT_CLOSE_SUMMARY_MODE,
   DEFAULT_PROVIDER,
   DEFAULT_SESSION_SWITCHING,
-  DEFAULT_STALE_AFTER_HOURS,
   ENV_NODE_ID,
   EXTENSION_ID,
+  LEGACY_KEYS,
   isCloseSummaryMode,
   isProviderId,
   isSessionId,
@@ -119,6 +119,8 @@ import {
   projectDirs,
   projectReach,
   providerOfProject,
+  resolveUnclaimed,
+  unclaimedFlags,
   validateProjectName,
 } from './projects';
 import {
@@ -197,7 +199,13 @@ import {
   describeForkEdge,
 } from './daemon';
 import { BranchListCache } from './branchList';
-import { recommendedNotice, windowModelChoices } from './recommend';
+import {
+  recommendedNotice,
+  surfaceChoices,
+  surfaceOffer,
+  windowModelChoices,
+} from './recommend';
+import type { ContextualOfferId } from './recommend';
 import { chatAutoCloseVictims } from './chatAutoClose';
 import { frontSession, mayFollowSelection } from './switcher';
 import { type WhereAmI, whereAmI } from './whereami';
@@ -256,6 +264,7 @@ import type { ProjectViewController } from './projectview';
 // are joined up — the views and the verbs only ever see the interfaces.
 import {
   accountEnvKeys,
+  accountsSectionDrawn,
   canHandOff,
   canSwitchAccounts,
   configDirForProfile,
@@ -326,6 +335,10 @@ import { HooksManager } from './hooks';
 import { STATE_FILE_NAME, resolveStateDir } from './stateHome';
 import { AgentVerbsManager } from './agentVerbs';
 
+/** How often the roster is polled. A constant, not a setting: with the hooks
+ *  installed the poll is a fallback, and without them three seconds is the
+ *  tempo the tree was designed around — a knob here could only make the tree
+ *  slower or the CLI busier, so it was a knob nobody should turn. */
 const DEFAULT_POLL_INTERVAL_MS = 3000;
 /** workspaceState key holding this window's active project workspace. */
 const ACTIVE_WORKSPACE_KEY = 'lineage.activeWorkspace';
@@ -350,6 +363,16 @@ const RECOMMENDED_NOTICE_KEY = 'lineage.recommendedNoticeShown';
 /** globalState once more: the walkthrough front door is decided once per
  *  install — opened or judged unnecessary — and either verdict is final. */
 const WALKTHROUGH_KEY = 'lineage.walkthroughOpened';
+/** globalState, one key per contextual offer (`ContextualOfferId`): the
+ *  window-model question, asked the first time a folder-model window routes
+ *  another project's session away, and the surface question, asked when a
+ *  window's second session tab opens. Each is set by an answer — the offer's
+ *  buttons, or the picker behind it being answered from anywhere — never by
+ *  the X, and never on activation or a timer. */
+const OFFER_KEYS: Record<ContextualOfferId, string> = {
+  windowModel: 'lineage.windowModelOfferAnswered',
+  surface: 'lineage.surfaceOfferAnswered',
+};
 /** What `workbench.action.openWalkthrough` takes: publisher.name#walkthroughId.
  *  The id half is `EXTENSION_ID`, which a test holds equal to the manifest;
  *  the fragment is the walkthrough's `id` in package.json. A walkthrough
@@ -415,6 +438,19 @@ export async function activate(
     const v = cfg().get<number>(key);
     return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : dflt;
   };
+  /** `lineage.unclaimedSessions`, with the two booleans it replaced still read
+   *  where they are all somebody has set (projects.resolveUnclaimed), and split
+   *  back into the two flags the grouping code has always taken. Re-read per
+   *  call like every setting here; the configuration listener's rebuild is
+   *  what makes a flip show. */
+  const unclaimed = (): ReturnType<typeof unclaimedFlags> =>
+    unclaimedFlags(
+      resolveUnclaimed(
+        cfg().get<string>(CONFIG_KEYS.unclaimedSessions),
+        cfg().get<unknown>(LEGACY_KEYS.groupByFolder),
+        cfg().get<unknown>(LEGACY_KEYS.onlyProjectSessions),
+      ),
+    );
   /** The detach grace window (minutes). Not numCfg: 0 is a real value here —
    *  "no grace, the sweep kills on its next tick" — not an unset. Shared by
    *  the workspace switch's detach tier and the window-close stamp below. */
@@ -432,18 +468,20 @@ export async function activate(
     return Math.min(v, 60);
   };
   /** WHICH OF THE THREE WINDOW MODELS this window is in, resolved
-   *  (src/modes.ts) — the mode string and the legacy `lineage.workspaces.enabled`
-   *  folded into one value here, so no surface downstream can compute the model
-   *  differently from another. The single reader of that deprecated key.
+   *  (src/modes.ts) — the mode string, the legacy `lineage.workspaces.enabled`
+   *  and the retired `lineage.workspaces.autoSwitch` folded into one value
+   *  here, so no surface downstream can compute the model differently from
+   *  another. The single reader of both old keys.
    *
    *  Re-read on every call like every other setting here, and safely: the
-   *  configuration listener below already fires on both keys and already calls
-   *  `syncModeContext()` unconditionally, so a change to either one repaints the
-   *  when-clause key, the status bar and the forest with no reload. */
+   *  configuration listener below already fires on all three keys and already
+   *  calls `syncModeContext()` unconditionally, so a change to any one repaints
+   *  the when-clause key, the status bar and the forest with no reload. */
   const lineageMode = (): LineageMode =>
     resolveMode(
       cfg().get<string>(CONFIG_KEYS.mode),
       boolCfg(CONFIG_KEYS.workspacesEnabled, true),
+      cfg().get<boolean>(LEGACY_KEYS.workspacesAutoSwitch),
     );
 
   /** The Flock anchor's path (src/explorer.ts owns its identity): the empty
@@ -555,14 +593,62 @@ export async function activate(
   const tmuxSpawn = (): TmuxSpawn | null =>
     resolveTmuxSpawn(cfg().get<string>(CONFIG_KEYS.tmux), tmuxConfPath);
 
-  // One-time nudge about the detach tier. Deferred off the activation path: it
-  // is advice, and nothing about startup should wait on a toast. The decision
-  // itself is `tmuxAdvice` in src/tmux.ts, which is pure and tested; this only
-  // supplies the world and acts on the answer.
+  // One-time nudges about the detach tier. The decision is `tmuxAdvice` in
+  // src/tmux.ts, pure and tested; this only supplies the world and acts on the
+  // answer. TWO moments, one per verdict:
+  //
+  //   * 'enable' — tmux is here and switched off by hand — is said once, a few
+  //     seconds after activation, deferred off the activation path because it
+  //     is advice and nothing about startup should wait on a toast.
+  //   * 'install' — no tmux at all — is said at the first PROJECT SWITCH
+  //     attempted without it (`noteMissingTmux`, run by the verb and by the
+  //     auto-switch alike), which is the moment the missing tier costs
+  //     something: the switch about to happen closes the other project's
+  //     sessions instead of hiding them. Said at activation it was a warning
+  //     about a feature the person might never use; the Status verb carries
+  //     the fact permanently, install line included, for the time in between.
+  //
+  // One dismissal key for both: "Don't remind me" about tmux is one answer,
+  // whichever sentence it was given to.
   const tmuxNoticeShown = (): boolean =>
     context.globalState.get<boolean>(TMUX_NOTICE_KEY) === true;
   const suppressTmuxNotice = (): void => {
     void context.globalState.update(TMUX_NOTICE_KEY, true);
+  };
+  const tmuxVerdict = (): TmuxAdvice =>
+    tmuxAdvice({
+      platform: process.platform,
+      mode: cfg().get<string>(CONFIG_KEYS.tmux),
+      binary: findTmuxBinary(),
+      dismissed: tmuxNoticeShown(),
+    });
+  const NEVER_REMIND = "Don't remind me";
+  const noteMissingTmux = (): void => {
+    try {
+      if (tmuxVerdict() !== 'install') return;
+    } catch (err) {
+      logError('tmux.notice', err);
+      return;
+    }
+    const hint = tmuxInstallHint(process.platform);
+    const HOW = 'How to install';
+    void vscode.window
+      .showWarningMessage(
+        'Flock needs tmux. Without it, switching projects closes the other ' +
+          'project’s sessions instead of hiding them, and anything a session ' +
+          'was in the middle of is lost.' +
+          (hint === undefined ? '' : ` Run: ${hint}`),
+        HOW,
+        NEVER_REMIND,
+      )
+      .then((choice) => {
+        if (choice === HOW) {
+          void vscode.env.openExternal(vscode.Uri.parse(TMUX_INSTALL_URL));
+          suppressTmuxNotice();
+        } else if (choice === NEVER_REMIND) {
+          suppressTmuxNotice();
+        }
+      });
   };
   /** Set by the recommended-setup notice, four seconds earlier, when it speaks.
    *  Not persisted and not a dismissal: it silences the tmux notice for THIS
@@ -574,56 +660,28 @@ export async function activate(
     if (recommendedNoticeOffered) return;
     let advice: TmuxAdvice;
     try {
-      advice = tmuxAdvice({
-        platform: process.platform,
-        mode: cfg().get<string>(CONFIG_KEYS.tmux),
-        binary: findTmuxBinary(),
-        dismissed: tmuxNoticeShown(),
-      });
+      advice = tmuxVerdict();
     } catch (err) {
       logError('tmux.notice', err);
       return;
     }
-    if (advice === 'none') return;
+    // 'install' is not this timer's to say — see noteMissingTmux above.
+    if (advice !== 'enable') return;
 
-    const NEVER = "Don't remind me";
-    if (advice === 'enable') {
-      const TURN_ON = 'Turn it on';
-      void vscode.window
-        .showWarningMessage(
-          'Flock needs tmux to keep sessions running while you work elsewhere. ' +
-            'You have tmux, but it is switched off, so switching projects ' +
-            'closes the other project’s sessions instead of hiding them.',
-          TURN_ON,
-          NEVER,
-        )
-        .then((choice) => {
-          if (choice === TURN_ON) {
-            void cfg().update(CONFIG_KEYS.tmux, 'auto', vscode.ConfigurationTarget.Global);
-            suppressTmuxNotice();
-          } else if (choice === NEVER) {
-            suppressTmuxNotice();
-          }
-        });
-      return;
-    }
-
-    const hint = tmuxInstallHint(process.platform);
-    const HOW = 'How to install';
+    const TURN_ON = 'Turn it on';
     void vscode.window
       .showWarningMessage(
-        'Flock needs tmux. Without it, switching projects closes the other ' +
-          'project’s sessions instead of hiding them, and anything a session ' +
-          'was in the middle of is lost.' +
-          (hint === undefined ? '' : ` Run: ${hint}`),
-        HOW,
-        NEVER,
+        'Flock needs tmux to keep sessions running while you work elsewhere. ' +
+          'You have tmux, but it is switched off, so switching projects ' +
+          'closes the other project’s sessions instead of hiding them.',
+        TURN_ON,
+        NEVER_REMIND,
       )
       .then((choice) => {
-        if (choice === HOW) {
-          void vscode.env.openExternal(vscode.Uri.parse(TMUX_INSTALL_URL));
+        if (choice === TURN_ON) {
+          void cfg().update(CONFIG_KEYS.tmux, 'auto', vscode.ConfigurationTarget.Global);
           suppressTmuxNotice();
-        } else if (choice === NEVER) {
+        } else if (choice === NEVER_REMIND) {
           suppressTmuxNotice();
         }
       });
@@ -1512,7 +1570,12 @@ export async function activate(
       compactionOf: (id, status) =>
         compaction.phaseOf(chainAliases(id), compactionNow, status === 'busy'),
       opts: {
-        showGhosts: boolCfg(CONFIG_KEYS.showGhosts, true),
+        // Always. Ghost ancestors — the exited sessions live ones were forked
+        // from — are what keep the tree's ancestry honest, and a toggle that
+        // could hide them was a setting nobody should turn; the parameter
+        // stays on buildForest so the ghost rules remain testable in
+        // isolation.
+        showGhosts: true,
         notificationsDefault: boolCfg(CONFIG_KEYS.notificationsEnabled, true),
         onlyActive: boolCfg(CONFIG_KEYS.onlyActiveSessions, false),
       },
@@ -2767,11 +2830,12 @@ export async function activate(
     // edge, and a drag onto a folder row erased one. Retired — lineage is not
     // something a gesture may state, see WebtreeDeps and webtree.onDrop. The
     // store still READS the 'reparent' edges it wrote; nothing writes new ones.
-    groupByFolder: () => boolCfg(CONFIG_KEYS.groupByFolder, true),
+    // Both halves of `lineage.unclaimedSessions`: the renderers never learn
+    // the enum, so neither did their signatures.
+    groupByFolder: () => unclaimed().groupByFolder,
     projects: allProjects,
     hiddenFolders: () => store.getHiddenFolders().map((f) => f.path),
-    onlyProjectSessions: () =>
-      boolCfg(CONFIG_KEYS.onlyProjectSessions, false),
+    onlyProjectSessions: () => unclaimed().onlyProjectSessions,
     // Folder mode's fence, undefined whenever nothing is fenced. The same
     // answer the command layer's scopeDirs dep gives, so the rows a window
     // draws and the sessions its verbs will act on in place are one set.
@@ -3101,7 +3165,7 @@ export async function activate(
       void store.appendChainMember(e.nodeId, e.sessionId);
     }
     // Stop is the turn ending, right now — the poll transition would say
-    // the same thing up to pollIntervalMs later. (`Notification` is claude
+    // the same thing up to one poll interval later. (`Notification` is claude
     // asking for the user, same urgency; `PermissionRequest` is Codex asking,
     // the same thing under the other CLI's name.)
     if (
@@ -3679,7 +3743,7 @@ export async function activate(
   // routing.ts that neither of the two view layers may import directly.
   //
   // Everything below is wired unconditionally except the VIEW, which
-  // `lineage.accounts.enabled` gates. The verbs stay registered either way:
+  // `lineage.accounts.section` gates. The verbs stay registered either way:
   // turning the view off is "I do not want a second list in my sidebar", not
   // "unregister ten commands so the palette reports them missing".
 
@@ -4322,6 +4386,20 @@ export async function activate(
 
   let accountsViewController: AccountsViewController | undefined;
 
+  /** The retired `lineage.accounts.enabled`, raw. Only a literal `false`
+   *  still means anything (accounts.accountsSectionDrawn). Read fresh on every
+   *  call, so deleting the key by hand takes effect on the next configuration
+   *  event rather than the next reload. */
+  const legacyAccountsEnabled = (): unknown =>
+    cfg().get<unknown>(LEGACY_KEYS.accountsEnabled);
+  /** Whether the Accounts list should be registered: the section switch, with
+   *  the folded key honoured where it still says `false`. */
+  const accountsSectionOn = (): boolean =>
+    accountsSectionDrawn(
+      boolCfg(CONFIG_KEYS.accountsSection, true),
+      legacyAccountsEnabled(),
+    );
+
   const accountDeps: AccountDeps = {
     accounts: () => store.getAccounts(),
     getAccount: (id) => store.getAccount(id),
@@ -4421,9 +4499,18 @@ export async function activate(
     formatUsage: (snapshot) => formatUsageSummary(snapshot),
   };
 
-  if (boolCfg(CONFIG_KEYS.accountsEnabled, true)) {
+  if (accountsSectionOn()) {
     accountsViewController = registerAccountsView(accountDeps);
     context.subscriptions.push(accountsViewController);
+  } else if (legacyAccountsEnabled() === false) {
+    // Said once, here, because the Settings editor no longer can: the key is
+    // gone from the manifest, so nothing else on screen explains why the list
+    // is missing. Only the section key can hide the header now, and only the
+    // user's own gear gesture writes it.
+    log(
+      'accounts: lineage.accounts.enabled is retired but still honoured — it is false here, so the Accounts list is not registered.',
+      'lineage.accounts.section is the switch now; Hide Accounts Section in the gear writes it and clears the old key.',
+    );
   }
 
   // ------------------------------------------------------------ 6c. shells
@@ -5252,8 +5339,11 @@ export async function activate(
   // the project's saved layout comes back. "When we are in a certain project,
   // we only see that project's tabs" without ever hunting for a verb. The
   // auto path never interrupts: busy foreign sessions stay open (no modal)
-  // and the summary goes to the status bar. `lineage.workspaces.autoSwitch`
-  // (default true) turns it off; the explicit command remains either way.
+  // and the summary goes to the status bar. There is no separate off switch:
+  // a window that should not switch by itself is the Root model, and the
+  // retired `lineage.workspaces.autoSwitch: false` resolves to it
+  // (modes.resolveMode). The explicit command remains in every model but
+  // `folder`.
   context.subscriptions.push(
     registry.onDidChangeActive((sessionId) => {
       try {
@@ -5268,7 +5358,6 @@ export async function activate(
         // Flock-only model keeps the switch VERB but never fires it for you —
         // that difference is the whole of what separates the two.
         if (!projectSwitchingOn(lineageMode())) return;
-        if (!boolCfg(CONFIG_KEYS.workspacesAutoSwitch, true)) return;
         const tip = chainIndex.tipOf(sessionId);
         const cwd =
           forest.nodes.get(tip)?.cwd ??
@@ -5294,6 +5383,10 @@ export async function activate(
         // takes the front of its editor group — so without naming it here the
         // switch ends on whichever session came home last. That is the "clicked
         // progress, landed on update-specs, clicked again and it worked" bug.
+        //
+        // The first switch without tmux is the moment the missing detach tier
+        // costs something — said here, once, and never at activation.
+        noteMissingTmux();
         void workspaceManager.switchTo(match.project.id, {
           auto: true,
           focusSessionId: sessionId,
@@ -5374,13 +5467,14 @@ export async function activate(
         preferred !== null && preferred.project.hidden !== true
           ? preferred
           : null;
-      if (
-        claimant !== null &&
-        claimant.project.id !== activeId &&
-        boolCfg(CONFIG_KEYS.workspacesAutoSwitch, true)
-      ) {
-        return;
-      }
+      // Another project's session in front is the AUTO-SWITCH's case, not
+      // this one's: in the one model where this runs the window is about to
+      // move to that project and follow from there, and rooting the tree
+      // first would show a directory the switch is about to leave. (A
+      // separate auto-switch-off setting used to let the follow proceed here
+      // instead; that window is the Root model now, which never reaches this
+      // line.)
+      if (claimant !== null && claimant.project.id !== activeId) return;
       const project = claimant?.project ?? null;
       const plan = planFollow({
         sessionId: front,
@@ -5796,6 +5890,70 @@ export async function activate(
   // defer: a poke before construction is a poke about an empty queue.
   let dispatchHost: DispatchHost | undefined;
 
+  /** Whether the official Claude Code extension is installed — probed by the
+   *  same extension id `resolveLaunchMode`'s installed callback gets at every
+   *  launch, so the surface picker, the gear's entry for it and the launcher
+   *  cannot disagree about whether the delegate is really there. */
+  const claudeExtensionInstalled = (): boolean => {
+    const delegate = delegateFor('claudeExtension');
+    return (
+      delegate !== undefined &&
+      vscode.extensions?.getExtension(delegate.extensionId) !== undefined
+    );
+  };
+
+  // THE TWO CONTEXTUAL OFFERS' stamps. Once per install, the way every notice
+  // here is; the decisions are `windowModelOffer` and `surfaceOffer` in
+  // src/recommend.ts, and the two verbs stamp these too when answered from
+  // the gear, so a question already settled is never asked.
+  const offerAnswered = (offer: ContextualOfferId): boolean =>
+    context.globalState.get<boolean>(OFFER_KEYS[offer]) === true;
+  const markOfferAnswered = async (offer: ContextualOfferId): Promise<void> => {
+    await context.globalState.update(OFFER_KEYS[offer], true);
+  };
+
+  /** "Where should sessions open?", asked ONCE, at the moment it becomes real:
+   *  the second session tab in a window. `surfaceOffer` decides; this draws
+   *  the message and acts on the answer on the terms every notice here keeps
+   *  — "Choose…" stamps and runs the picker, "Not now" stamps, the X stamps
+   *  nothing. Called from the launch funnel below and nowhere else: never
+   *  from activation, never from a timer, never from a reload's
+   *  re-association, so the tabs counted are tabs a gesture opened. The
+   *  window-model twin lives in commands.ts beside the routing it hangs off. */
+  const offerSurfaceOnSecondTab = (): void => {
+    try {
+      const verdict = surfaceOffer({
+        boundTabs: registry.boundSessionIds().length,
+        answered: offerAnswered('surface'),
+      });
+      if (verdict !== 'offer') return;
+      const CHOOSE = 'Choose…';
+      const NOT_NOW = 'Not now';
+      void vscode.window
+        .showInformationMessage(
+          'Flock: that is your second session tab. Sessions can open as ' +
+            'editor tabs, one pinned tab at a time, in the terminal panel, ' +
+            'in a window of their own, or in the Claude Code extension. ' +
+            'Choose where they open?',
+          CHOOSE,
+          NOT_NOW,
+        )
+        .then(
+          async (answer) => {
+            if (answer === CHOOSE) {
+              await markOfferAnswered('surface');
+              await vscode.commands.executeCommand(COMMANDS.chooseSurface);
+            } else if (answer === NOT_NOW) {
+              await markOfferAnswered('surface');
+            }
+          },
+          (err) => logError('surface.offer', err),
+        );
+    } catch (err) {
+      logError('surface.offer', err);
+    }
+  };
+
   const commandDeps: AccountCommandDeps = {
     // The whole accounts surface, as ONE optional member: the verbs guard
     // on its presence, so a build without it behaves exactly as this extension
@@ -6077,6 +6235,11 @@ export async function activate(
       // for.
       const spawnedAt = Date.now();
       const binding = await registry.launch(launchOpts);
+      // The second tab in a window is the moment the surface question becomes
+      // real (`offerSurfaceOnSecondTab`); a launch that never started is not a
+      // tab. Here and not on `onDidBind`, because binds also arrive from a
+      // reload's re-association and from adoptions — none of them a gesture.
+      if (binding) offerSurfaceOnSecondTab();
       // A launch that never started must not leave an optimistic row standing
       // for the whole TTL: the terminal failed loudly, and a row for a session
       // that does not exist is worse than no row.
@@ -6579,8 +6742,6 @@ export async function activate(
     hiddenFolders: () => store.getHiddenFolders(),
     hideFolder: (dir) => store.hideFolder(dir),
     unhideFolder: (dir) => store.unhideFolder(dir),
-    staleAfterHours: () =>
-      numCfg(CONFIG_KEYS.staleAfterHours, DEFAULT_STALE_AFTER_HOURS),
     // The Add Session / Import pool: what this machine knows that the tree is
     // not showing. Snapshots of caches the rebuild already maintains — the
     // last roster tick and the archive index — so opening a picker costs no
@@ -6701,6 +6862,21 @@ export async function activate(
           on,
           vscode.ConfigurationTarget.Global,
         );
+        // The same gesture retires the folded key. Whichever way the section
+        // was just set, the new key states the answer now, and an old
+        // `accounts.enabled: false` left beside it would go on hiding a list
+        // the person just asked for. Deleted rather than rewritten — VS Code
+        // permits removing a key it no longer knows — and only here, under
+        // the user's own hand; activation never touches it.
+        if (
+          cfg().inspect(LEGACY_KEYS.accountsEnabled)?.globalValue !== undefined
+        ) {
+          await cfg().update(
+            LEGACY_KEYS.accountsEnabled,
+            undefined,
+            vscode.ConfigurationTarget.Global,
+          );
+        }
       } catch (err) {
         // Same failure mode as the filter above, and the same reason to say so
         // out loud: silently leaving the section where it was would read as a
@@ -6708,6 +6884,24 @@ export async function activate(
         logError('extension.setAccountsSection', err);
         void vscode.window.showWarningMessage(
           'Flock: could not save the Accounts section setting — check that ' +
+            'settings are writable.',
+        );
+      }
+    },
+
+    // The Shells section: the same write as Accounts, for the same reason —
+    // its `when` clause is a `config.` clause the workbench re-evaluates itself.
+    setShellsSection: async (on) => {
+      try {
+        await cfg().update(
+          CONFIG_KEYS.shellsSection,
+          on,
+          vscode.ConfigurationTarget.Global,
+        );
+      } catch (err) {
+        logError('extension.setShellsSection', err);
+        void vscode.window.showWarningMessage(
+          'Flock: could not save the Shells section setting — check that ' +
             'settings are writable.',
         );
       }
@@ -6795,10 +6989,6 @@ export async function activate(
         }
         if (maxWorktrees >= 2) break;
       }
-      // Probed by the same extension id `resolveLaunchMode`'s installed
-      // callback gets at every launch, so the surface picker and the launcher
-      // cannot disagree about whether the delegate is really there.
-      const claudeDelegate = delegateFor('claudeExtension');
       return {
         platform: process.platform,
         tmuxBinary: findTmuxBinary(),
@@ -6825,25 +7015,29 @@ export async function activate(
         // is the model the user is actually in and not the string they typed.
         mode: cfg().get<string>(CONFIG_KEYS.mode),
         workspacesEnabled: boolCfg(CONFIG_KEYS.workspacesEnabled, true),
-        claudeExtensionInstalled:
-          claudeDelegate !== undefined &&
-          vscode.extensions?.getExtension(claudeDelegate.extensionId) !==
-            undefined,
+        workspacesAutoSwitch: cfg().get<boolean>(LEGACY_KEYS.workspacesAutoSwitch),
+        claudeExtensionInstalled: claudeExtensionInstalled(),
       };
     },
 
     // The table-driven setter behind the recommended steps. Two guards, and the
     // first is the one that matters: `update()` on a key the manifest does not
     // declare throws, so an entry that is not a contributed setting is refused
-    // by name here rather than reported as a mysterious failure. Writes keep
-    // going after one fails, exactly as setBranchAndWorktreeFeatures does — a
-    // half-written plan the person is told about beats an abandoned one they
-    // are not.
+    // by name here rather than reported as a mysterious failure. The one
+    // exception is DELETING a retired key: VS Code permits removing a key it no
+    // longer knows, and a choice that supersedes an old spelling takes it away
+    // so it cannot fold the new answer back — never given a value, only
+    // removed, and only inside the user's own gesture. Writes keep going after
+    // one fails, exactly as setBranchAndWorktreeFeatures does — a half-written
+    // plan the person is told about beats an abandoned one they are not.
     writeSettings: async (entries) => {
       const declared = new Set<string>(Object.values(CONFIG_KEYS));
+      const retired = new Set<string>(Object.values(LEGACY_KEYS));
       const unwritable: string[] = [];
       for (const entry of entries) {
-        if (!declared.has(entry.key)) {
+        const deletesRetired =
+          retired.has(entry.key) && entry.value === undefined;
+        if (!declared.has(entry.key) && !deletesRetired) {
           logError(
             'extension.writeSettings',
             new Error(`${entry.key} is not a contributed setting`),
@@ -6865,6 +7059,16 @@ export async function activate(
       return unwritable;
     },
 
+    // The Status verb's two binary rows: the same probes every launch makes,
+    // with the same settings applied, so a row saying "found at" names the
+    // binary a launch would actually run.
+    cliBinaries: () => ({
+      claude: claudeBin(),
+      codex: codexBin(),
+      codexConfigured:
+        (cfg().get<string>(CONFIG_KEYS.codexBinary) ?? '').trim() !== '',
+    }),
+
     // What the gear menu labels itself with. Read here, together, at the moment
     // the menu opens — the same three facts the `when` clauses this replaced read
     // off two context keys and one configuration value. `hookState` is the live
@@ -6879,7 +7083,18 @@ export async function activate(
       windowModelChoices({
         mode: cfg().get<string>(CONFIG_KEYS.mode),
         workspacesEnabled: boolCfg(CONFIG_KEYS.workspacesEnabled, true),
+        workspacesAutoSwitch: cfg().get<boolean>(LEGACY_KEYS.workspacesAutoSwitch),
       }).find((c) => c.current)?.label,
+    // The same four reads the checklist's world makes for the surface
+    // question, and nothing else — no worktree probe behind opening a menu.
+    surface: () =>
+      surfaceChoices({
+        terminalLocation: terminalLocation(),
+        soloSession: boolCfg(CONFIG_KEYS.soloSession, false),
+        launchMode: cfg().get<string>(CONFIG_KEYS.launchMode),
+        claudeExtensionInstalled: claudeExtensionInstalled(),
+      }).find((c) => c.current)?.label,
+    offers: { answered: offerAnswered, markAnswered: markOfferAnswered },
 
     menuState: () => ({
       hooksInstalled: store.getHookState().installed === true,
@@ -6888,6 +7103,7 @@ export async function activate(
       codexHooksAvailable: codexHooksAvailable(),
       onlyActive: boolCfg(CONFIG_KEYS.onlyActiveSessions, false),
       accountsSection: boolCfg(CONFIG_KEYS.accountsSection, true),
+      shellsSection: boolCfg(CONFIG_KEYS.shellsSection, true),
       branchDisplay: isBranchDisplay(
         cfg().get<string>(CONFIG_KEYS.gitBranchDisplay, DEFAULT_BRANCH_DISPLAY),
       )
@@ -6898,8 +7114,12 @@ export async function activate(
         : DEFAULT_BRANCH_DISPLAY,
     }),
 
-    // Project workspaces
-    switchWorkspace: (projectId) => workspaceManager.switchTo(projectId),
+    // Project workspaces. The first switch to a project without tmux is the
+    // moment the missing detach tier costs something — see noteMissingTmux.
+    switchWorkspace: (projectId) => {
+      if (projectId !== null) noteMissingTmux();
+      return workspaceManager.switchTo(projectId);
+    },
     activeWorkspace: () => workspaceManager.activeProjectId(),
 
     // The Explorer follows the project. Both verbs reload the window —
@@ -7063,6 +7283,16 @@ export async function activate(
           'workbench.action.openWalkthrough',
           WALKTHROUGH_REF,
         );
+        // ONE DOOR. The walkthrough's second step offers the checklist the
+        // recommended-setup toast below would offer, so on the launch that
+        // opened the page the toast is stamped as shown rather than fired a
+        // few seconds later on top of it — the same offer twice is a first
+        // impression worth avoiding. Stamped AFTER the open, so a page that
+        // failed to open leaves the toast as the fallback door; and stamped
+        // for good, because this install has now been shown the offer, by the
+        // page. The toast stays for the install the page never opens for: an
+        // upgrade with no projects and two things left to turn on.
+        await context.globalState.update(RECOMMENDED_NOTICE_KEY, true);
       } catch (err) {
         logError('walkthrough.frontDoor', err);
       }
@@ -7078,7 +7308,10 @@ export async function activate(
   //
   // It is deliberately hard to trigger: a tree with NO PROJECTS and at least
   // two things left to turn on. That is a first launch, or near enough, and it
-  // is the one state where the sidebar has nothing else to say.
+  // is the one state where the sidebar has nothing else to say — except on the
+  // genuinely fresh install, where the walkthrough above has already opened
+  // and stamped this key: the page is the one door, and this toast is for the
+  // upgrade the page never opens for.
   const recommendedNoticeShown = (): boolean =>
     context.globalState.get<boolean>(RECOMMENDED_NOTICE_KEY) === true;
   setTimeout(() => {
@@ -7582,11 +7815,7 @@ export async function activate(
     return { ...result, entries: await rosterFilter.apply(result.entries) };
   };
 
-  poller = new RosterPoller(
-    fetchFiltered,
-    onResult,
-    numCfg(CONFIG_KEYS.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS),
-  );
+  poller = new RosterPoller(fetchFiltered, onResult, DEFAULT_POLL_INTERVAL_MS);
   context.subscriptions.push(poller);
   // start() already performs the immediate first fetch — a separate first tick
   // would only be coalesced away.
@@ -7601,7 +7830,6 @@ export async function activate(
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (!e.affectsConfiguration(CONFIG_SECTION)) return;
-      poller?.setIntervalMs(numCfg(CONFIG_KEYS.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS));
       syncHookWatcher();
       syncVerbsWatcher();
       // Flipping showArchived on must populate the index immediately rather
@@ -7638,14 +7866,18 @@ export async function activate(
       ) {
         pokeNow();
       }
-      // The status bar's visibility follows the resolved window model, so both
-      // keys `resolveMode` reads have to wake it: the mode itself, and the
-      // deprecated `workspaces.enabled` that still folds a `project` window
-      // down to `flock`. Watching only the mode would leave somebody who
-      // deleted the old key looking at a stale button until their next reload.
+      // The status bar's visibility follows the resolved window model, so every
+      // key `resolveMode` reads has to wake it: the mode itself, the deprecated
+      // `workspaces.enabled` and the retired `workspaces.autoSwitch`, either of
+      // which still folds a `project` window down to `root`. Watching only the
+      // mode would leave somebody who deleted an old key looking at a stale
+      // button until their next reload.
       if (
         e.affectsConfiguration(
           `${CONFIG_SECTION}.${CONFIG_KEYS.workspacesEnabled}`,
+        ) ||
+        e.affectsConfiguration(
+          `${CONFIG_SECTION}.${LEGACY_KEYS.workspacesAutoSwitch}`,
         ) ||
         e.affectsConfiguration(`${CONFIG_SECTION}.${CONFIG_KEYS.mode}`)
       ) {
@@ -7677,18 +7909,23 @@ export async function activate(
         refreshViews();
       }
       // The accounts view is contributed under a `config.` when-clause, so
-      // turning the setting on reveals a view whose provider does not exist yet
-      // — the workbench then renders "no data provider registered" until a
+      // turning the section on reveals a view whose provider does not exist
+      // yet — the workbench then renders "no data provider registered" until a
       // reload. Registering it here on the way up closes that gap. There is no
       // way down: a TreeView cannot be un-registered without leaking the old
-      // one, and the when-clause has already hidden it, so turning the setting
+      // one, and the when-clause has already hidden it, so turning the section
       // off simply leaves an invisible provider that nothing ever resolves.
+      // The retired key is watched too: deleting an old `accounts.enabled:
+      // false` by hand is the other way the answer flips to "draw it".
       if (
-        e.affectsConfiguration(
-          `${CONFIG_SECTION}.${CONFIG_KEYS.accountsEnabled}`,
-        ) &&
+        (e.affectsConfiguration(
+          `${CONFIG_SECTION}.${CONFIG_KEYS.accountsSection}`,
+        ) ||
+          e.affectsConfiguration(
+            `${CONFIG_SECTION}.${LEGACY_KEYS.accountsEnabled}`,
+          )) &&
         accountsViewController === undefined &&
-        boolCfg(CONFIG_KEYS.accountsEnabled, true)
+        accountsSectionOn()
       ) {
         try {
           accountsViewController = registerAccountsView(accountDeps);
@@ -7700,8 +7937,8 @@ export async function activate(
       // The filter can also be flipped from settings.json, and the title button
       // is a picture of the setting — it has to follow either way in.
       void syncOnlyActiveContext();
-      // showGhosts, onlyActiveSessions and notifications.enabled are read per
-      // buildForest, groupByFolder per getChildren — a rebuild covers them all.
+      // onlyActiveSessions and notifications.enabled are read per buildForest,
+      // unclaimedSessions per getChildren — a rebuild covers them all.
       if (haveRoster) void scheduleRebuild(lastEntries);
       else refreshViews();
     }),

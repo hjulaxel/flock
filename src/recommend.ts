@@ -1,8 +1,9 @@
 // src/recommend.ts — what a fresh install should turn on, and why.
 //
-// THE PROBLEM THIS FILE EXISTS TO FIX. Flock contributes forty settings and
-// seventeen of them are booleans that ship OFF. They are off for four different
-// reasons, and exactly one of those reasons is "you probably do not want this":
+// THE PROBLEM THIS FILE EXISTS TO FIX. Flock contributes dozens of settings
+// and a good many of them are booleans that ship OFF. They are off for four
+// different reasons, and exactly one of those reasons is "you probably do not
+// want this":
 //
 //   CONSENT     `hooks.enabled` and `verbs.enabled` are off because turning
 //               them on writes files under the user's home directory. Both are
@@ -11,7 +12,7 @@
 //               reachable only by somebody who already knew they existed. This
 //               is the group a recommended setup is FOR.
 //   POLICY      `showForeignSessions`, `showArchived`, `showPhantomRows` and
-//               `onlyProjectSessions` ARE the clean slate. Flipping any of them
+//               `unclaimedSessions` ARE the clean slate. Flipping any of them
 //               for somebody undoes the thing that made their first launch
 //               quiet, so nothing here may touch them, ever.
 //   ROW BUDGET  the branch block works and costs rows in a 250px sidebar. That
@@ -22,14 +23,17 @@
 //               direction; they stay in the settings UI where they belong.
 //               TWO taste questions ARE worth asking out loud, because a
 //               person who has never met the keys behind them cannot ask them
-//               of themselves. Where sessions open (`terminalLocation` +
-//               `soloSession` + `launch.mode`) is the `surface` step; what a
-//               WINDOW is (`mode`, and the legacy `workspaces.enabled` it
-//               supersedes) is the `windowModel` step. Both are explicit
-//               questions, never pre-ticked checkboxes that write settings:
-//               the steps themselves carry no settings at all, the writes
-//               belong to whichever option is CHOSEN in the picker
-//               (`surfaceChoices` / `windowModelChoices` below), and
+//               of themselves: where sessions open (`terminalLocation` +
+//               `soloSession` + `launch.mode`) and what a WINDOW is (`mode`,
+//               and the legacy `workspaces.enabled` it supersedes). They are
+//               NOT checklist steps. Nobody can answer "what is a window"
+//               before they have lived in one, so each is a verb of its own
+//               (`Flock: Choose Window Model…`, `Flock: Choose Where Sessions
+//               Open…`), offered ONCE at the moment it becomes real rather
+//               than on the first run — `windowModelOffer` and `surfaceOffer`
+//               at the end of this file decide when (design/settings-tiers.md
+//               §5). The writes belong to whichever option is CHOSEN in the
+//               picker (`surfaceChoices` / `windowModelChoices` below), and
 //               cancelling either writes nothing.
 //
 // A "recommended setup" is only honest if it moves the first group, asks about
@@ -50,7 +54,7 @@
 import { resolveLaunchMode } from './hosts';
 import { resolveMode } from './modes';
 import { tmuxInstallHint } from './tmux';
-import { CONFIG_KEYS } from './types';
+import { CONFIG_KEYS, LEGACY_KEYS } from './types';
 import type { RecommendedWorld } from './types';
 
 export type { RecommendedWorld };
@@ -60,8 +64,6 @@ export type { RecommendedWorld };
  *  tree live, then the optional rows. */
 export const RECOMMENDED_STEP_IDS = [
   'tmux',
-  'surface',
-  'windowModel',
   'project',
   'import',
   'hooks',
@@ -74,11 +76,20 @@ export type RecommendedStepId = (typeof RECOMMENDED_STEP_IDS)[number];
 
 /** One setting write, section-relative (`git.branches`, not
  *  `lineage.git.branches`) — the spelling `CONFIG_KEYS` uses and the one a
- *  configuration scoped to `lineage` takes. */
+ *  configuration scoped to `lineage` takes. `undefined` DELETES the key: the
+ *  one write a retired key (`LEGACY_KEYS`) may receive, and only from a choice
+ *  the user made that the old key would otherwise fold straight back. */
 export interface RecommendedSetting {
   readonly key: string;
-  readonly value: boolean | string;
+  readonly value: boolean | string | undefined;
 }
+
+/** The one write that turns tmux back on — `lineage.tmux: auto`, the default.
+ *  Both the checklist's `tmux` step and the Status verb's tmux row carry it,
+ *  so it is spelled here once rather than agreed on twice. */
+export const TMUX_ON_SETTINGS: readonly RecommendedSetting[] = [
+  { key: CONFIG_KEYS.tmux, value: 'auto' },
+];
 
 export interface RecommendedStep {
   readonly id: RecommendedStepId;
@@ -161,73 +172,12 @@ export function recommendedPlan(world: RecommendedWorld): RecommendedPlan {
         writes: 'sets lineage.tmux back to auto',
         undo: 'set lineage.tmux to off again',
         recommended: true,
-        settings: [{ key: CONFIG_KEYS.tmux, value: 'auto' }],
+        settings: TMUX_ON_SETTINGS,
       });
     } else {
       done.push('tmux');
     }
   }
-
-  // ---- where sessions open --------------------------------------------------
-  //
-  // ALWAYS OFFERED, which makes it the one step with no `done` arm: a choice
-  // has no "already done". Every other line here repairs or enables something,
-  // so "already true" retires it; this one is a question, and the defaults
-  // being AN answer is not the same as the person having been asked.
-  //
-  // It is TASTE, so it is ASKED — a FLOW step whose tick opens an explicit
-  // four-way picker (commands.ts) — and never pre-answered: the step itself
-  // writes nothing, and confirming the checklist with it ticked still writes
-  // nothing until an option is chosen in that picker. The four options and
-  // their writes are `surfaceChoices` below, so the sentence a person reads
-  // and the keys it moves live in the same file.
-  steps.push({
-    id: 'surface',
-    title: 'Choose where sessions open',
-    why:
-      'Four places a session can live: one pinned tab at a time, a tab per ' +
-      'session beside your files, the official Claude Code extension’s own ' +
-      'UI, or the terminal panel under your editor. The default is fine; the ' +
-      'point is that it was never YOUR answer until you give it.',
-    writes: 'opens a picker of the four — nothing until you choose one there',
-    undo: 'run Recommended Setup again and choose differently',
-    recommended: true,
-    settings: [],
-  });
-
-  // ---- what a window is -----------------------------------------------------
-  //
-  // ALWAYS OFFERED, the second step with no `done` arm, and for exactly the
-  // reason the one above has none: this is a question, and the default being AN
-  // answer is not the same as the person having been asked. It is a stronger
-  // case than `surface`, if anything — `lineage.mode` decides what a window IS,
-  // and until now the only route to it was a dropdown among forty-odd settings
-  // whose values read `folder` / `flock` / `project` rather than in words
-  // anybody uses. A three-way choice nobody can find is not a choice.
-  //
-  // It writes nothing itself: the tick opens `windowModelChoices`'s picker
-  // (commands.ts, the same plumbing `surface` uses) and the OPTION writes, so a
-  // cancelled picker is "no" and costs nothing.
-  //
-  // The default stays `folder` whatever anybody picks here — that is the point
-  // of asking rather than flipping. Somebody who wants the auto-switching window
-  // gets it because they chose it, and their choice also retires the legacy
-  // `workspaces.enabled` key on their machine, which no activation of ours is
-  // ever going to do for them.
-  steps.push({
-    id: 'windowModel',
-    title: 'Choose what a window is',
-    why:
-      'Three ways to live: one folder per project, where a window is the ' +
-      'folder you opened; Flock only, where the window is the sidebar and you ' +
-      'open a window when you want files; or auto-switch, where one window ' +
-      'follows whichever project you are working in. Each costs something ' +
-      'different, and the default was never your answer.',
-    writes: 'opens a picker of the three — nothing until you choose one there',
-    undo: 'run Recommended Setup again, or Flock: Choose Window Model…',
-    recommended: true,
-    settings: [],
-  });
 
   // ---- a project ----------------------------------------------------------
   if (world.hasProjects) {
@@ -379,11 +329,16 @@ export function recommendedPlan(world: RecommendedWorld): RecommendedPlan {
 
 // ---------------------------------------------------------- where sessions open
 
-export type SurfaceChoiceId = 'pinnedTab' | 'editorTabs' | 'claudeExtension' | 'panel';
+export type SurfaceChoiceId =
+  | 'pinnedTab'
+  | 'editorTabs'
+  | 'claudeExtension'
+  | 'panel'
+  | 'newWindow';
 
-/** One of the four places a session can open — a row of the picker the
- *  `surface` step runs. The settings are written all together when THIS option
- *  is chosen there, and not a moment sooner. */
+/** One of the five places a session can open — a row of the picker
+ *  `Flock: Choose Where Sessions Open…` runs. The settings are written all
+ *  together when THIS option is chosen there, and not a moment sooner. */
 export interface SurfaceChoice {
   readonly id: SurfaceChoiceId;
   /** The picker label. */
@@ -393,13 +348,13 @@ export interface SurfaceChoice {
   /** Section-relative, `RecommendedSetting`'s own contract. */
   readonly settings: readonly RecommendedSetting[];
   /** Where sessions open TODAY, so the picker can say "(current)" and start
-   *  the cursor there. At most one is current; a `newWindow` world marks none,
-   *  because a fifth place is not one of these four. */
+   *  the cursor there. Exactly one is current: once the launch mode has been
+   *  resolved, every legal `terminalLocation` is one of these five. */
   readonly current: boolean;
 }
 
 /**
- * The four places, with the current one marked.
+ * The five places, with the current one marked.
  *
  * CURRENT IS DERIVED, launch mode first: `resolveLaunchMode` — the exact
  * function every launch runs — decides whether `launch.mode` actually lands in
@@ -411,12 +366,22 @@ export interface SurfaceChoice {
  * absence said in its description instead of the row hidden: the setting is
  * legal to want first and install second, and the launcher already falls back
  * to Flock's own terminal (with a note) until the extension arrives. What the
- * three Flock-side options write includes `launch.mode: flock` for the same
+ * four Flock-side options write includes `launch.mode: flock` for the same
  * honesty in reverse — picked from extension mode, they must actually move you.
  * The extension option writes `launch.mode` ALONE, leaving the Flock-side
  * arrangement where it was for whenever the person comes back.
  */
-export function surfaceChoices(world: RecommendedWorld): SurfaceChoice[] {
+export function surfaceChoices(
+  /** The FOUR fields this actually reads, rather than the whole world — the
+   *  narrowing `windowModelChoices` makes, for the same reason: the gear menu
+   *  names the current arrangement in its entry, and assembling a full
+   *  `RecommendedWorld` for that would probe every project's worktrees behind
+   *  opening a menu. Every existing caller passes a full world. */
+  world: Pick<
+    RecommendedWorld,
+    'terminalLocation' | 'soloSession' | 'launchMode' | 'claudeExtensionInstalled'
+  >,
+): SurfaceChoice[] {
   const resolved = resolveLaunchMode(
     world.launchMode,
     () => world.claudeExtensionInstalled,
@@ -426,11 +391,11 @@ export function surfaceChoices(world: RecommendedWorld): SurfaceChoice[] {
       ? 'claudeExtension'
       : world.terminalLocation === 'panel'
         ? 'panel'
-        : world.terminalLocation === 'editor'
-          ? world.soloSession
+        : world.terminalLocation === 'newWindow'
+          ? 'newWindow'
+          : world.soloSession
             ? 'pinnedTab'
-            : 'editorTabs'
-          : undefined;
+            : 'editorTabs';
 
   return [
     {
@@ -481,6 +446,21 @@ export function surfaceChoices(world: RecommendedWorld): SurfaceChoice[] {
       ],
       current: current === 'panel',
     },
+    // The fifth place. `terminalLocation: newWindow` was a legal value the
+    // picker could not mark current, so a person living there was shown four
+    // rows none of which was theirs; the value is kept and named instead
+    // (design/settings-tiers.md, decisions log).
+    {
+      id: 'newWindow',
+      label: 'Its own window',
+      description: 'Each session opens as a tab in a separate window.',
+      settings: [
+        { key: CONFIG_KEYS.terminalLocation, value: 'newWindow' },
+        { key: CONFIG_KEYS.soloSession, value: false },
+        { key: CONFIG_KEYS.launchMode, value: 'flock' },
+      ],
+      current: current === 'newWindow',
+    },
   ];
 }
 
@@ -488,8 +468,8 @@ export function surfaceChoices(world: RecommendedWorld): SurfaceChoice[] {
 
 export type WindowModelId = 'folder' | 'root' | 'project';
 
-/** One of the three window models — a row of the picker the `windowModel` step
- *  runs, and of `Flock: Choose Window Model…`. Shaped exactly like
+/** One of the three window models — a row of the picker
+ *  `Flock: Choose Window Model…` runs. Shaped exactly like
  *  `SurfaceChoice` because it IS the same question in a different subject: a
  *  taste choice whose settings are written all together when this option is
  *  chosen, and not a moment sooner. */
@@ -522,24 +502,34 @@ export interface WindowModelChoice {
  * where they are, and that is precisely the confusion this whole change exists
  * to end. Same contract as `surfaceChoices` and `resolveLaunchMode` above.
  *
- * AUTO-SWITCH WRITES TWO KEYS. `folder` and `flock` write `lineage.mode` alone;
- * `project` also writes `lineage.workspaces.enabled: true`, because without it a
- * user with the old `false` sitting in their settings would choose Auto-switch,
- * watch `resolveMode` fold them straight back to Flock only, and have no way to
- * see why. This is the only place the deprecated key is ever written, and it is
- * written by somebody's own choice — which is the only way this extension
- * touches a settings file.
+ * AUTO-SWITCH WRITES THREE KEYS. `folder` and `flock` write `lineage.mode`
+ * alone; `project` also writes `lineage.workspaces.enabled: true` and DELETES
+ * the retired `lineage.workspaces.autoSwitch`, because without those a user
+ * with an old `false` sitting in their settings would choose Auto-switch, watch
+ * `resolveMode` fold them straight back to Flock only, and have no way to see
+ * why. These are the only places either old key is ever touched, and both
+ * happen by somebody's own choice — which is the only way this extension
+ * touches a settings file. The retired key is deleted rather than set: the
+ * manifest no longer declares it, and VS Code refuses a value on a key it does
+ * not know but permits removing one.
  */
 export function windowModelChoices(
-  /** The TWO fields this actually reads, rather than the whole world. Narrowed
-   *  so a caller that only wants to name the current model — the gear menu's
-   *  preview — does not have to build (or await) the rest of it: assembling a
-   *  `RecommendedWorld` probes every project's worktrees, which is far too much
-   *  work to put behind opening a menu. Every existing caller passes a full
-   *  world and is unaffected. */
-  world: Pick<RecommendedWorld, 'mode' | 'workspacesEnabled'>,
+  /** The THREE fields this actually reads, rather than the whole world.
+   *  Narrowed so a caller that only wants to name the current model — the gear
+   *  menu's preview — does not have to build (or await) the rest of it:
+   *  assembling a `RecommendedWorld` probes every project's worktrees, which is
+   *  far too much work to put behind opening a menu. Every existing caller
+   *  passes a full world and is unaffected. */
+  world: Pick<
+    RecommendedWorld,
+    'mode' | 'workspacesEnabled' | 'workspacesAutoSwitch'
+  >,
 ): WindowModelChoice[] {
-  const current = resolveMode(world.mode, world.workspacesEnabled);
+  const current = resolveMode(
+    world.mode,
+    world.workspacesEnabled,
+    world.workspacesAutoSwitch,
+  );
 
   return [
     {
@@ -576,6 +566,7 @@ export function windowModelChoices(
       settings: [
         { key: CONFIG_KEYS.mode, value: 'project' },
         { key: CONFIG_KEYS.workspacesEnabled, value: true },
+        { key: LEGACY_KEYS.workspacesAutoSwitch, value: undefined },
       ],
       current: current === 'project',
     },
@@ -605,14 +596,70 @@ export function recommendedNotice(opts: {
   if (opts.dismissed) return 'none';
   if (opts.world.hasProjects) return 'none';
   const plan = recommendedPlan(opts.world);
-  // The `surface` and `windowModel` steps are on EVERY plan by design — a
-  // choice has no "already done" — so counting them would quietly lower the
-  // threshold to "anybody with no projects", the exact firing this threshold
-  // exists to stop. Two always-offered steps rather than one makes this
-  // subtraction load-bearing rather than merely correct: without it the
-  // threshold of two would be met by them alone.
-  const recommended = plan.steps.filter(
-    (s) => s.recommended && s.id !== 'surface' && s.id !== 'windowModel',
-  ).length;
+  // Recommended steps only: the branch rows are offered unticked, so a person
+  // with two checkouts and one thing to do is still a person with one thing to
+  // do. Every step left on a plan has an "already done" — the two taste
+  // questions, which had none and would have met this threshold by
+  // themselves, are verbs now rather than steps — so the count needs no
+  // subtraction to stay honest.
+  const recommended = plan.steps.filter((s) => s.recommended).length;
   return recommended >= 2 ? 'offer' : 'none';
+}
+
+// ------------------------------------------------ the two contextual offers
+
+/** The two taste questions the checklist no longer asks, each offered ONCE, at
+ *  the moment it becomes real. "Once" is once per install: the stamp behind
+ *  each is a globalState key (extension.ts), set by an answer — "Choose…",
+ *  "Not now", or the picker itself being answered from anywhere, the gear
+ *  included — and never by a dismissal with the X, which asks again next time,
+ *  the rule every notice in this extension follows. */
+export type ContextualOfferId = 'windowModel' | 'surface';
+
+/**
+ * Should a folder-model window that has just ROUTED a foreign session offer
+ * the window-model picker?
+ *
+ * "What is a window" becomes a real question the first time a window in the
+ * one-folder-per-project model meets a session it cannot show: the click has
+ * just gone to another window (or offered to open one), and the person has now
+ * lived the cost of the model without ever having chosen it. Three things have
+ * to hold — the window IS in the folder model (the other two never route), a
+ * project of theirs claims the session (a session in some folder nobody named
+ * is not a project to switch between), and this install has not answered or
+ * declined the question already.
+ */
+export function windowModelOffer(opts: {
+  /** The resolved model of the window that routed — `deps.lineageMode()`;
+   *  undefined is a wiring with no mode machinery, which never routes. */
+  mode: 'folder' | 'root' | 'project' | undefined;
+  /** Whether a project of the user's claims the routed session's directory. */
+  claimed: boolean;
+  /** The stamp: answered, declined, or the picker already run. */
+  answered: boolean;
+}): 'offer' | 'none' {
+  if (opts.answered) return 'none';
+  if (opts.mode !== 'folder') return 'none';
+  return opts.claimed ? 'offer' : 'none';
+}
+
+/**
+ * Should the session tab that has just opened offer the surface picker?
+ *
+ * One tab is a terminal; two is an arrangement, and the second is the first
+ * moment "where should these open" can be answered from experience rather than
+ * from a description. EXACTLY the second, not every tab after it: an offer
+ * dismissed with the X is not repeated on the third and the fourth in the same
+ * window, and comes back with the next window that reaches two. Counted over
+ * the tabs bound in THIS window once a launch has landed — a reload that
+ * revives two tabs at once is no launch and no gesture, and never counts.
+ */
+export function surfaceOffer(opts: {
+  /** Session tabs bound in this window, the one that just opened included. */
+  boundTabs: number;
+  /** The stamp, as above. */
+  answered: boolean;
+}): 'offer' | 'none' {
+  if (opts.answered) return 'none';
+  return opts.boundTabs === 2 ? 'offer' : 'none';
 }

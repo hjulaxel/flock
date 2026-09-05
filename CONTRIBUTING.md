@@ -26,6 +26,12 @@ somewhere on the machine. The session roster is machine-wide, not per-workspace.
 
 `npm run typecheck` and `npm test` must both be green before a pull request.
 
+A setting is described in `package.json` and nowhere else. The table in
+`docs/settings.md` is generated from `contributes.configuration` — after
+changing a setting, run `npm run docs:settings` and commit the result. `npm run
+docs:check` says whether the table is behind (the test suite runs it too), and
+the release script runs it as a gate after the tests.
+
 ## Things that are deliberate
 
 A few constraints look like oversights and are not:
@@ -71,6 +77,7 @@ A few constraints look like oversights and are not:
 
 `npm run release` is the release path. It refuses to package a dirty tree or a
 non-`main` branch, refuses a version that has already been tagged, runs the
-typecheck and the tests, builds the VSIX, and tags the commit locally. Nothing
+typecheck, the tests and `npm run docs:check`, builds the VSIX, and tags the
+commit locally. Nothing
 leaves the machine: it prints the upload and `git push --tags` steps for you to
 run deliberately.

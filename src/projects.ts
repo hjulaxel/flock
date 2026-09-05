@@ -1915,6 +1915,64 @@ export function branchIndexForCwd(
 
 // ---------------------------------------------------------------- grouping
 
+/** `lineage.unclaimedSessions` — what the tree does with sessions no project
+ *  claims: filed under their working directory, listed loose, or not shown. */
+export type UnclaimedSessions = 'grouped' | 'flat' | 'hidden';
+
+export const DEFAULT_UNCLAIMED_SESSIONS: UnclaimedSessions = 'grouped';
+
+/**
+ * THE FOLD of `lineage.groupByFolder` and `lineage.onlyProjectSessions` into
+ * one value, on the read side — the same shape as modes.resolveMode, for the
+ * same reason: nothing is rewritten for anybody, the old keys keep meaning
+ * what they meant, and there is exactly one place that says how.
+ *
+ * An explicit new value wins outright: somebody who set `unclaimedSessions`
+ * has answered the question in its current spelling, and an old boolean left
+ * beside it must not override that. Otherwise the two retired keys are read in
+ * the order their effects used to apply — `onlyProjectSessions: true` first,
+ * because hiding the unclaimed made grouping them moot, then
+ * `groupByFolder: false` — and anything else is the default. Only the LITERAL
+ * `true` and `false` count; `undefined` from a settings file that never had a
+ * key, or a double with no opinion, is not a preference.
+ */
+export function resolveUnclaimed(
+  newValue: unknown,
+  legacyGroupByFolder: unknown,
+  legacyOnlyProject: unknown,
+): UnclaimedSessions {
+  if (newValue === 'grouped' || newValue === 'flat' || newValue === 'hidden') {
+    return newValue;
+  }
+  if (legacyOnlyProject === true) return 'hidden';
+  if (legacyGroupByFolder === false) return 'flat';
+  return DEFAULT_UNCLAIMED_SESSIONS;
+}
+
+/**
+ * The two flags `computeGrouping` takes, from the one value. The grouping
+ * rules and both renderers keep their boolean inputs — a signature change in
+ * three modules for a setting whose three answers map onto the pairs they
+ * already accept would be churn — so the wiring folds here and splits here.
+ *
+ * `hidden` keeps `groupByFolder` on: the drop is ignored while there are no
+ * projects (see GroupingInput.onlyProjectSessions), and what is left in that
+ * case should still be filed the default way rather than fall loose.
+ */
+export function unclaimedFlags(value: UnclaimedSessions): {
+  readonly groupByFolder: boolean;
+  readonly onlyProjectSessions: boolean;
+} {
+  switch (value) {
+    case 'flat':
+      return { groupByFolder: false, onlyProjectSessions: false };
+    case 'hidden':
+      return { groupByFolder: true, onlyProjectSessions: true };
+    default:
+      return { groupByFolder: true, onlyProjectSessions: false };
+  }
+}
+
 export interface GroupingInput {
   /** forest.visibleRoots, in tree order. */
   visibleRootIds: readonly string[];
@@ -1990,10 +2048,11 @@ export interface GroupingInput {
    * is the previous behaviour exactly.
    */
   rowlessRunningIds?: readonly string[];
-  /** lineage.groupByFolder — applies to what is left over after projects. */
+  /** `lineage.unclaimedSessions` is not `flat` (see unclaimedFlags) — file
+   *  what is left over after projects under a row per working directory. */
   groupByFolder: boolean;
-  /** lineage.onlyProjectSessions — drop everything no project claims. Ignored
-   *  when no project exists, or the tree would just be empty. */
+  /** `lineage.unclaimedSessions` is `hidden` — drop everything no project
+   *  claims. Ignored when no project exists, or the tree would just be empty. */
   onlyProjectSessions: boolean;
   /**
    * The git worktrees visible from `dir`, or [] for a directory that is
@@ -2120,7 +2179,7 @@ export interface GroupingResult {
    * The "Still running" group, or null when no view preference dropped a
    * running root. The visibility half of the levels invariant: a RUNNING
    * session whose every claiming project is closed, whose folder the user hid,
-   * or that onlyProjectSessions would drop is a session THIS window owns — it
+   * or that `unclaimedSessions: hidden` would drop is a session THIS window owns — it
    * is inside `scopeDirs`, its verbs work here, and it spends this machine's
    * memory. Dropping it would leave a running process with no row in the very
    * window that owns it, so instead it files into this one collapsed appendix.
@@ -2222,7 +2281,8 @@ function sameBranches(
  *      show its sessions through a project that explicitly lists it — the
  *      explicit statement outranks the blanket one;
  *   2. then folder-hiding removes what is left in a hidden directory;
- *   3. then onlyProjectSessions (if any project exists) removes the rest.
+ *   3. then `onlyProjectSessions` — the `hidden` answer to
+ *      `lineage.unclaimedSessions` — removes the rest, if any project exists.
  *
  * No rule, however, ever removes a root whose subtree still has a RUNNING
  * process: those file into the "Still running" appendix instead (see

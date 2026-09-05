@@ -621,7 +621,7 @@ export class LineageTreeProvider
    * `forest.attentionCount` cannot answer this: buildForest is never given the
    * projects or the hidden-folder list, so it counts every waiting session,
    * including the ones a hidden folder, a hidden project or
-   * `lineage.onlyProjectSessions` removes from the tree. Badging those leaves
+   * `lineage.unclaimedSessions: hidden` removes from the tree. Badging those leaves
    * a permanent count with no row anywhere to open or dismiss — and hiding a
    * noisy folder is exactly when a user reaches for that setting.
    */

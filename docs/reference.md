@@ -16,7 +16,7 @@ one of them means "you probably do not want this":
 | Why it ships off | Settings | What the checklist does |
 | --- | --- | --- |
 | **Consent** — turning it on writes files in your home directory | `hooks.enabled`, `verbs.enabled` | Offers them, ticked. This is the group it is for. |
-| **Policy** — it *is* the clean slate | `showForeignSessions`, `showArchived`, `showPhantomRows`, `onlyProjectSessions` | Never touches them. |
+| **Policy** — it *is* the clean slate | `showForeignSessions`, `showArchived`, `showPhantomRows`, `unclaimedSessions` | Never touches them. |
 | **Row budget** — it works, and it costs rows | `git.branches` and the five beside it | Offers `git.branches`, unticked, and only when one of your repositories actually has two checkouts. |
 | **Taste** | `soloSession`, `showTokens`, `notifications.popup`, the previews, `accounts.offerSwitchAtLimit` | Leaves them in the settings UI. |
 
@@ -30,6 +30,21 @@ Everything the checklist can offer:
 | **Instant updates (hooks)** | not installed | yes | a plugin directory under `~/.claude/skills` |
 | **Let Claude fork its own sessions** | not installed | yes | a skill file and a small CLI |
 | **Show branch and worktree rows** | a repository of yours has ≥2 checkouts, rows off | **no** | `lineage.git.branches` alone |
+
+On a machine where all of that is already true it says so, notes included,
+instead of opening an empty picker.
+
+Two questions it deliberately does **not** ask: *what a window is* and *where
+sessions open*. Both are taste, and nobody can answer them before they have
+lived with the default, so they are verbs — **Flock: Choose Window Model…** and
+**Flock: Choose Where Sessions Open…**, in the gear's Setup group and behind the
+Status verb's rows, each entry naming the answer this window has today — and
+Flock offers each one once, at the moment it becomes real: the window-model
+picker the first time a window in the one-folder-per-project model sends another
+project's session to its own window, the surface picker the first time a
+window's second session tab opens. Each offer has **Choose…** and **Not now**;
+either button settles it for good, the X asks again next time, and answering the
+picker from the gear settles it too. Neither fires on activation or on a timer.
 
 Four rules it keeps:
 
@@ -48,10 +63,13 @@ Four rules it keeps:
 
 It is also **offered once, unprompted**, a few seconds after a window opens —
 but only on a tree with no projects at all and at least two things left to turn
-on, which is a first launch or near enough. Answering it either way is the end
-of it; dismissing it with the X asks again next time. The same shape as the tmux
-and branch-row notices, and whichever of them fires suppresses the others for
-that session.
+on, which is a first launch or near enough, and never on the launch that opened
+the walkthrough: a genuinely fresh install gets the walkthrough as its one front
+door, and the walkthrough's second step is this same checklist, so the toast is
+stamped as shown rather than stacked on top of the page. Answering it either way
+is the end of it; dismissing it with the X asks again next time. The same shape
+as the tmux and branch-row notices, and whichever of them fires suppresses the
+others for that session.
 
 ## How it works
 
@@ -663,12 +681,14 @@ shipped default is *One folder per project*, where a window simply is the folder
 you opened and none of this runs. [The three window models
 →](settings.md#the-three-window-models)
 
-Inside Auto-switch, the workspace **follows your focus** by default: start
-working in a session that belongs to another project and the window switches to
-that project's workspace by itself — nothing is stopped and nothing asks a
-question. Turn that off with `lineage.workspaces.autoSwitch`. You
-can always switch explicitly from the palette (**Flock: Switch Workspace…**) or
-a project row's context menu — and, in the auto-switch model, from the
+Inside Auto-switch, the workspace **follows your focus**: start working in a
+session that belongs to another project and the window switches to that
+project's workspace by itself — nothing is stopped and nothing asks a question.
+A window that should switch only when you ask is the **Root** model
+(`lineage.mode: root`), which keeps the verb and never fires it for you; the
+old `lineage.workspaces.autoSwitch: false` resolves to exactly that. You can
+always switch explicitly from the palette (**Flock: Switch Workspace…**) or a
+project row's context menu — and, in the auto-switch model, from the
 `$(layers)` status-bar item, which that model is the only one to draw.
 
 ### Where you are
@@ -682,7 +702,8 @@ one project — which is not a workspace switch at all — is visible. The Explo
 **Project** view carries the same answer as a row of its own, untruncated.
 
 When the window and the keyboard disagree — you focused a conversation belonging
-to another project, with auto-switching off — the line carries both names
+to another project and the window did not follow, a hidden project's say — the
+line carries both names
 (`App → API`) and clicking it switches straight to the one you are in. A project
 you have **closed** is never named there: putting one away removes its rows, and
 this must not become the one place it comes back.
@@ -908,8 +929,11 @@ are never wrapped either way.
 Windows always uses the fallback. `findTmuxBinary` returns null there no matter
 what. Set `lineage.tmux` to `off` to force the fallback anywhere else.
 
-Flock says this once, in a notice you can dismiss, if it finds you without tmux
-while workspaces are on. It never asks twice.
+Flock says this once, in a notice you can dismiss, the first time a project
+switch is attempted without tmux — the moment the missing tier would cost you
+something, rather than at startup about a feature you might never use. It never
+asks twice. In between, **Flock: Status…** shows the fact, with the install line
+for your platform, for as long as it is true.
 
 ### `/exit` leaves you at a shell
 
@@ -1163,7 +1187,7 @@ the age and the directory, restoring as many as you tick in one press of Enter.
 **Restore Archived Session…** is the same thing for the whole machine — the
 door for a session whose directory no project claims, or whose project you
 cannot remember. **Archive Stale Sessions…** is the bulk form: oldest-first,
-pre-ticked at `lineage.staleAfterHours`, undoable the same way, and with no
+pre-ticked at 48 hours, undoable the same way, and with no
 second dialog, because the checklist you just filled in was the question.
 
 Nothing here touches a transcript. Any session that ever ran is still resumable
@@ -1297,14 +1321,27 @@ from the palette. Forking the wrong thread leaves you a branch of a conversation
 you were not in, sitting next to the one you meant, so it guesses only where the
 evidence is singular. It disappears while the tree is empty.
 
-The **gear** opens a menu holding everything that used to be behind the `...`:
-the active-sessions filter, **Show Closed Projects and Hidden Folders…**, **Mark
-All Notifications as Read**, **Restore Archived Session…**, **Archive Stale
-Sessions…**, **New Project…**, the closed-projects list, the Accounts section
-switch, the hooks pair, and **Refresh**. Each toggle is labelled with the
-direction it goes — you get *Hide Accounts Section* when the section is showing,
-never both — which is why it is built when it opens rather than declared in the
-manifest.
+The **gear** opens a menu that starts with setup and holds everything that used
+to be behind the `...`. First **Flock Settings…**, which opens VS Code's own
+Settings editor filtered to Flock — there is no settings page of Flock's own; the
+editor draws the settings in ten categories, in the order they are worth
+reading, with the advanced rows last in each. Then **Status…**: what this machine
+has and what this window is on — is tmux installed and on, are the hooks (and,
+where there is a Codex to hook, the Codex hooks) and the in-session verbs
+installed, which `claude` and `codex` were found and where, which window model
+this is, where sessions open — as read-only rows, each of which runs
+the verb that changes it when picked (the install, the picker, the setting).
+Then **Recommended Setup…**, **Choose Window Model…**, **Choose Where Sessions
+Open…** — the two taste questions, each entry naming the answer this window has
+today — and **Open Advanced Settings**, which is the same editor narrowed to the
+rows tagged *advanced*: paths, timings, diagnostics, previews. Below that group:
+the active-sessions
+filter, **Show Closed Projects and Hidden Folders…**, **Mark All Notifications
+as Read**, **Restore Archived Session…**, **Archive Stale Sessions…**, **New
+Project…**, the closed-projects list, the Accounts and Shells section switches,
+the hooks pair, and **Refresh**. Each toggle is labelled with the direction it
+goes — you get *Hide Accounts Section* when the section is showing, never both —
+which is why it is built when it opens rather than declared in the manifest.
 
 > Where the buttons sit, and why it is a choice. VS Code has no menu id for a view
 > container's title bar — there is `view/title` and no `viewsContainer/title` — so
@@ -1313,11 +1350,12 @@ manifest.
 > merges that view's buttons into the container header and draws no separate
 > section header.
 >
-> Flock has two views, Sessions and Accounts, so by default the buttons sit on the
-> SESSIONS row just below the name. Turn **Accounts** off
-> (`lineage.accounts.section`, or the gear menu) and they move up onto the FLOCK
-> row. That is the entire trade, and it is settled in favour of Accounts: a list of
-> subscriptions on screen is worth more than one row of height. Nothing about
+> Flock has three views — Sessions, Accounts and Shells — so by default the buttons
+> sit on the SESSIONS row just below the name. Turn **Accounts** and **Shells** off
+> (`lineage.accounts.section` and `lineage.shells.section`, or their pairs in the
+> gear menu) and they move up onto the FLOCK row. That is the entire trade, and it
+> is settled in favour of the sections: a list of subscriptions on screen is worth
+> more than one row of height. Nothing about
 > accounts stops working either way — usage is still read, new sessions are still
 > routed, a session is still pinned to its account for life, and every account verb
 > is in the Command Palette under **Flock**.
