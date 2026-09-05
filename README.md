@@ -212,8 +212,8 @@ to download. What differs is what the machine underneath can offer it.
 | Detach tier: parking, solo mode, Auto-switch, `/exit` to a shell, moving a live conversation between accounts in place | yes | yes | **no** — sessions close and resume from their transcripts | yes |
 | Instant-update hooks | yes | yes | not yet | yes |
 | In-session verbs — "fork this session", said to Claude | yes | yes | yes, with `node` on `PATH` | yes |
-| Fork edges for forks typed at the CLI (`claude --fork-session`) | yes | yes | drawn as roots | yes |
-| Reaping a closed session's MCP children; the phantom-row filter | yes | yes | not yet | yes |
+| Fork edges for forks typed at the CLI (`claude --fork-session`) | yes | yes | yes, via PowerShell | yes |
+| Reaping a closed session's MCP children; the phantom-row filter | yes | yes | yes, via PowerShell | yes |
 | Account usage meters | credentials file, then the keychain | credentials file | credentials file | credentials file |
 
 **Windows.** The full tier is one extension away: open the project through the
@@ -221,7 +221,9 @@ to download. What differs is what the machine underneath can offer it.
 inside WSL, where tmux, `ps` and `/bin/sh` all exist and every row above reads
 *yes*. Native Windows works and is honest about what it lacks: each *no* and
 *not yet* above degrades to what its row says, and an install verb that could
-only refuse there is hidden from the Command Palette. Install the CLI
+only refuse there is hidden from the Command Palette. Where the table says *via
+PowerShell*, Flock reads the process table through one `Get-CimInstance
+Win32_Process` sweep per tick instead of `ps`. Install the CLI
 with the [native installer](https://code.claude.com/docs/en/setup), which puts
 `claude.exe` on your `PATH`. Flock prefers it over the `.cmd` shim an npm
 install leaves: the shim is a batch file, so Flock runs it through `cmd.exe`

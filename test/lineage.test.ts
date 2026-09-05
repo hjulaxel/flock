@@ -17,6 +17,7 @@ import {
   subagentsWorking,
   type ResolverIO,
 } from '../src/lineage';
+import type { ProcessSnapshot } from '../src/processTable';
 import { normalizeStatus } from '../src/roster';
 import {
   MAX_GHOST_DEPTH,
@@ -86,15 +87,30 @@ describe('psPpidCommand', () => {
     });
   });
 
-  it.skipIf(process.platform === 'win32')(
-    'reads a real ppid and command line for this process',
-    async () => {
-      const { ppid, command } = await psPpidCommand(process.pid);
-      expect(typeof ppid).toBe('number');
-      expect(ppid).toBeGreaterThan(0);
-      expect(command.length).toBeGreaterThan(0);
-    },
-  );
+  it('reads a real ppid and command line for this process', async () => {
+    // On POSIX this runs the real `ps`; on Windows the real PowerShell sweep.
+    // Either way the answer has to be about THIS process.
+    const { ppid, command } = await psPpidCommand(process.pid);
+    expect(typeof ppid).toBe('number');
+    expect(ppid).toBeGreaterThan(0);
+    expect(command.length).toBeGreaterThan(0);
+  });
+
+  it('on Windows, reads the shared process table instead of spawning ps', async () => {
+    const table = new Map([
+      [1200, { pid: 1200, ppid: 800, start: 's', command: 'claude.exe --fork-session --resume ' + PARENT }],
+    ]);
+    const out = await psPpidCommand(1200, { platform: 'win32', windows: async () => table });
+    expect(out).toEqual({ ppid: 800, command: 'claude.exe --fork-session --resume ' + PARENT });
+    expect(await psPpidCommand(1, { platform: 'win32', windows: async () => table })).toEqual({
+      ppid: null,
+      command: '',
+    });
+    const broken = async (): Promise<ProcessSnapshot> => {
+      throw new Error('no powershell');
+    };
+    expect(await psPpidCommand(1200, { platform: 'win32', windows: broken })).toEqual({ ppid: null, command: '' });
+  });
 });
 
 describe('parentFromForkArgv', () => {

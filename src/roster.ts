@@ -19,6 +19,8 @@ import * as path from 'node:path';
 import * as process from 'node:process';
 
 import { log, logError } from './log';
+import { sharedWindowsProcessTable } from './processTable';
+import type { ProcessSnapshot } from './processTable';
 import {
   DEFAULT_BUSY_STALE_MINUTES,
   isSessionId,
@@ -327,12 +329,24 @@ export function isSpareCommand(command: string): boolean {
  */
 export function psCommands(
   pids: readonly number[],
+  deps: { platform?: string; windows?: () => Promise<ProcessSnapshot> } = {},
 ): Promise<Map<number, string>> {
   const out = new Map<number, string>();
-  // No `ps` contract on Windows — the filter's spare branch does not exist
-  // there, exactly like the argv walk in lineage.ts.
-  if (process.platform === 'win32' || pids.length === 0) {
-    return Promise.resolve(out);
+  if (pids.length === 0) return Promise.resolve(out);
+  // On Windows the command lines come out of the shared CIM sweep
+  // (src/processTable.ts), the same one the reap and the parent walk read.
+  if ((deps.platform ?? process.platform) === 'win32') {
+    const table = deps.windows ?? (() => sharedWindowsProcessTable().snapshot());
+    return table().then(
+      (snapshot) => {
+        for (const pid of pids) {
+          const fact = snapshot.get(pid);
+          if (fact !== undefined && fact.command !== '') out.set(pid, fact.command);
+        }
+        return out;
+      },
+      () => out,
+    );
   }
   return new Promise((resolve) => {
     let settled = false;

@@ -33,6 +33,8 @@
 import { execFile } from 'node:child_process';
 
 import { logError } from './log';
+import { sharedWindowsProcessTable } from './processTable';
+import type { ProcessSnapshot } from './processTable';
 
 /** Injectable `execFile` — resolves stdout, rejects on error. */
 export type ExecFn = (
@@ -40,6 +42,15 @@ export type ExecFn = (
   args: readonly string[],
   timeoutMs: number,
 ) => Promise<string>;
+
+/** The machine facts the two sweeps below read. Injectable so the Windows
+ *  route is testable from anywhere; production passes nothing. */
+export interface ProcessTableDeps {
+  exec?: ExecFn;
+  platform?: string;
+  /** The Windows table to read. Absent = the shared, cached one. */
+  windows?: () => Promise<ProcessSnapshot>;
+}
 
 const defaultExec: ExecFn = (cmd, args, timeoutMs) =>
   new Promise((resolve, reject) => {
@@ -112,16 +123,36 @@ export function descendantsOf(
  */
 export async function listDescendants(
   rootPid: number,
-  exec: ExecFn = defaultExec,
+  deps: ExecFn | ProcessTableDeps = {},
 ): Promise<number[]> {
   if (!Number.isInteger(rootPid) || rootPid <= 0) return [];
+  const d = normalizeDeps(deps);
   try {
-    const stdout = await exec('ps', ['-axo', 'pid=,ppid='], 5_000);
+    if (d.platform === 'win32') {
+      // One CIM sweep (src/processTable.ts) stands in for `ps`: the same
+      // pid → ppid map, walked the same way.
+      const table = await d.windows();
+      const ppids = new Map<number, number>();
+      for (const [pid, fact] of table) ppids.set(pid, fact.ppid);
+      return descendantsOf(rootPid, ppids);
+    }
+    const stdout = await d.exec('ps', ['-axo', 'pid=,ppid='], 5_000);
     return descendantsOf(rootPid, parsePsPpids(stdout));
   } catch (err) {
     logError('procs.listDescendants', err);
     return [];
   }
+}
+
+/** The old positional `exec` argument and the new deps object, folded into
+ *  one shape with the platform's defaults filled in. */
+function normalizeDeps(deps: ExecFn | ProcessTableDeps): Required<ProcessTableDeps> {
+  const d: ProcessTableDeps = typeof deps === 'function' ? { exec: deps } : deps;
+  return {
+    exec: d.exec ?? defaultExec,
+    platform: d.platform ?? process.platform,
+    windows: d.windows ?? (() => sharedWindowsProcessTable().snapshot()),
+  };
 }
 
 /** The effects `reapSurvivors` performs, injectable for tests. `kill` throws
@@ -274,17 +305,20 @@ export function parsePsPidFacts(
  */
 export async function listPidFacts(
   pids: readonly number[],
-  exec: ExecFn = defaultExec,
+  deps: ExecFn | ProcessTableDeps = {},
 ): Promise<Map<number, { ppid: number; start: string }>> {
   const wanted = new Set(pids.filter((p) => Number.isInteger(p) && p > 0));
   if (wanted.size === 0) return new Map();
+  const d = normalizeDeps(deps);
   try {
-    const stdout = await exec('ps', ['-axo', 'pid=,ppid=,lstart='], 5_000);
-    const all = parsePsPidFacts(stdout);
+    const all =
+      d.platform === 'win32'
+        ? await d.windows()
+        : parsePsPidFacts(await d.exec('ps', ['-axo', 'pid=,ppid=,lstart='], 5_000));
     const out = new Map<number, { ppid: number; start: string }>();
     for (const pid of wanted) {
       const fact = all.get(pid);
-      if (fact !== undefined) out.set(pid, fact);
+      if (fact !== undefined) out.set(pid, { ppid: fact.ppid, start: fact.start });
     }
     return out;
   } catch (err) {
@@ -306,6 +340,11 @@ export async function listPidFacts(
 export function orphanRescueDecision(
   saved: readonly PersistedPidFact[],
   live: ReadonlyMap<number, { ppid: number; start: string }>,
+  /** Whether a parent pid means "orphaned". POSIX re-parents an orphan to
+   *  PID 1, so the default asks exactly that. Windows has no PID 1 and never
+   *  re-parents: an orphan keeps its dead parent's pid, so there the wiring
+   *  passes "is that parent gone" — see `orphanedOnWindows`. */
+  isOrphanPpid: (ppid: number) => boolean = (ppid) => ppid === 1,
 ): { reap: number[]; ownerLikelyAlive: boolean } {
   const reap: number[] = [];
   let ownerLikelyAlive = false;
@@ -318,8 +357,21 @@ export function orphanRescueDecision(
     const fact = live.get(entry.pid);
     if (fact === undefined) continue; // exited — the outcome we wanted
     if (fact.start !== entry.start) continue; // recycled pid — not ours
-    if (fact.ppid === 1) reap.push(entry.pid);
+    if (isOrphanPpid(fact.ppid)) reap.push(entry.pid);
     else ownerLikelyAlive = true;
   }
   return { reap, ownerLikelyAlive };
+}
+
+/**
+ * The Windows orphan test: the parent pid no longer names a live process.
+ * Windows does not re-parent, so a child whose parent died keeps the dead
+ * pid in its record; `kill(pid, 0)` on it says ESRCH. Pid reuse — a new
+ * process minted onto the dead parent's number — reads as "not orphaned" and
+ * spares the child, which is the safe direction: the rescue's failure mode
+ * is under-reaping, never a signal to a stranger. The same residual the
+ * POSIX rule already accepts, in the other order.
+ */
+export function orphanedOnWindows(ppid: number): boolean {
+  return ppid <= 0 || !isPidAlive(ppid);
 }

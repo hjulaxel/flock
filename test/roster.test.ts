@@ -17,6 +17,7 @@ import {
   claudeFallbackBinDirs,
   isProcessAlive,
   isSpareCommand,
+  psCommands,
   normalizeStatus,
   parseRoster,
   reportsBusy,
@@ -24,6 +25,7 @@ import {
   rosterSignature,
   sameRoster,
 } from '../src/roster';
+import type { ProcessSnapshot } from '../src/processTable';
 import { isSessionId, type RosterEntry, type RosterResult } from '../src/types';
 
 /**
@@ -625,6 +627,25 @@ describe('findClaudeBinary', () => {
       '/opt/homebrew/bin',
       '/usr/local/bin',
     ]);
+  });
+});
+
+describe('psCommands on Windows reads the shared process table', () => {
+  it('answers from the table, skipping pids it does not hold or has no line for', async () => {
+    const table = new Map([
+      [10, { pid: 10, ppid: 1, start: 's', command: 'claude.exe --bg-spare' }],
+      [11, { pid: 11, ppid: 1, start: 's', command: '' }],
+    ]);
+    const out = await psCommands([10, 11, 12], { platform: 'win32', windows: async () => table });
+    expect([...out.entries()]).toEqual([[10, 'claude.exe --bg-spare']]);
+    expect(isSpareCommand(out.get(10) ?? '')).toBe(true);
+  });
+
+  it('a table that cannot be read is an empty answer, so the spare stays a row', async () => {
+    const broken = async (): Promise<ProcessSnapshot> => {
+      throw new Error('no powershell');
+    };
+    expect((await psCommands([10], { platform: 'win32', windows: broken })).size).toBe(0);
   });
 });
 

@@ -30,6 +30,8 @@ import * as process from 'node:process';
 
 import { transcriptFallbackName } from './archive';
 import { log, logError } from './log';
+import { sharedWindowsProcessTable } from './processTable';
+import type { ProcessSnapshot } from './processTable';
 import { forkParentFromTranscript } from './transcript';
 import {
   FORK_ARGV_MAXDEPTH,
@@ -84,18 +86,39 @@ export function resumeTarget(cmd: string): string | null {
   return null;
 }
 
+/** The machine facts the parent walk reads. Injectable so the Windows route
+ *  is testable from anywhere; production passes nothing. */
+export interface PpidDeps {
+  platform?: string;
+  /** The Windows table to read. Absent = the shared, cached one. */
+  windows?: () => Promise<ProcessSnapshot>;
+}
+
 /**
- * Exact port of `_ps_ppid_command`: (ppid, command) for a pid via macOS `ps`
- * (there is no /proc here). Any error -> {ppid: null, command: ''}.
- * Short-circuits to the failure value on win32 without spawning.
+ * Exact port of `_ps_ppid_command`: (ppid, command) for a pid via `ps`
+ * (there is no /proc on macOS). Any error -> {ppid: null, command: ''}.
+ *
+ * On win32 the same two facts come out of the shared CIM sweep
+ * (src/processTable.ts) — one PowerShell per tick, however many hops the
+ * walk takes, because the table is cached across them.
  */
 export function psPpidCommand(
   pid: number,
+  deps: PpidDeps = {},
 ): Promise<{ ppid: number | null; command: string }> {
   const failure = { ppid: null, command: '' };
-  if (process.platform === 'win32') return Promise.resolve({ ...failure });
   if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) {
     return Promise.resolve({ ...failure });
+  }
+  if ((deps.platform ?? process.platform) === 'win32') {
+    const table = deps.windows ?? (() => sharedWindowsProcessTable().snapshot());
+    return table().then(
+      (snapshot) => {
+        const fact = snapshot.get(pid);
+        return fact === undefined ? { ...failure } : { ppid: fact.ppid, command: fact.command };
+      },
+      () => ({ ...failure }),
+    );
   }
   return new Promise((resolve) => {
     let settled = false;
@@ -158,9 +181,6 @@ export async function parentFromForkArgv(
   maxdepth: number = FORK_ARGV_MAXDEPTH,
 ): Promise<ArgvScanResult> {
   let forkGateSeen = false;
-  // No /proc on macOS and no `ps` contract on Windows: the walk simply does
-  // not exist there, and those sessions degrade to flat roots.
-  if (process.platform === 'win32') return { parentId: null, forkGateSeen };
   if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) {
     return { parentId: null, forkGateSeen };
   }

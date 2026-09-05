@@ -34,6 +34,18 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Fixed
 
+- **Windows reads the process table.** Four things in Flock read it, and every
+  one did so by running `ps`, which Windows has not got: the descendant walk
+  that reaps a closed session's MCP children, the start-time check behind the
+  window-close orphan rescue, the parent walk that draws a fork typed at the
+  CLI under its parent, and the filter that keeps `claude bg-spare` off the
+  tree. Each short-circuited on Windows, so a closed session's children lived
+  on, a hand-typed fork drew as a root, and a warm spare was a row. They now
+  share one `Get-CimInstance Win32_Process` sweep through PowerShell — pid,
+  parent, creation date and command line in one answer, cached for a moment so
+  a tick's several questions cost one process. "Orphaned" changes meaning with
+  the platform: re-parented to PID 1 on POSIX, a parent that no longer exists
+  on Windows, which does not re-parent. POSIX keeps its `ps` calls untouched.
 - **A Windows `.cmd` shim launches through `cmd.exe`, quoted.** An npm install
   puts `claude.cmd` on `PATH`, and a batch file is not something a terminal can
   start: Windows only pretends, by silently prepending `cmd.exe` — the very
