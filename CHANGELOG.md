@@ -54,14 +54,14 @@ All notable changes to Flock are recorded here. The format follows
   are installed, which `claude` — and, for a Codex account, which `codex` —
   was found and where, which window model this window is on, and where
   sessions open. Picking a row runs the verb that changes it: the install or
-  its removal, the window-model picker, the same *where should sessions open*
-  picker the checklist asks with, or the Settings editor at the one key. The
-  facts come from the world the checklist already reads and the probes every
+  its removal, the one write that turns tmux back on, the two pickers —
+  **Choose Window Model…** and **Choose Where Sessions Open…** — or the
+  Settings editor at the one key. The facts come from the world the
+  checklist already reads and the probes every
   launch already makes; nothing new is looked at, and nothing is written until
   a row is picked. **Open Advanced Settings** closes the group: the editor
   narrowed to the rows tagged *advanced*. All three are in the Command Palette
   under **Flock**.
-
 - **The gear menu can fold the Shells section away, and bring it back.** The
   Accounts section has had its *Show / Hide Accounts Section* pair since the
   gear existed; Shells, which costs the same row of the sidebar, could only be
@@ -70,45 +70,6 @@ All notable changes to Flock are recorded here. The format follows
   while the list is drawn, never both — and the two verbs are in the Command
   Palette under **Flock**. Hiding the section hides a list, nothing more: the
   commands your sessions run are untouched.
-
-### Removed
-
-- **`lineage.showGhosts`.** Exited ancestors — the sessions your live ones were
-  forked from — are always drawn. They are what keeps the tree's ancestry
-  honest, and a switch that could hide them was a knob nobody should turn. A
-  value left in `settings.json` does nothing.
-- **`lineage.staleAfterHours`.** **Archive Stale Sessions…** pre-ticks rows
-  older than 48 hours, as it did by default. The number only ever decided which
-  checkboxes started ticked in a dialog that lets you untick them, which is not
-  worth a row in the editor. A value left in `settings.json` does nothing.
-- **`lineage.pollIntervalMs`.** The roster is polled every three seconds, as it
-  was by default. With the instant-update hooks installed the poll is a
-  fallback, and without them three seconds is the tempo the tree was built
-  around; a tuning knob for it was one more row nobody should turn. A value
-  left in `settings.json` does nothing.
-- **`lineage.accounts.enabled`**, folded into `lineage.accounts.section`. Both
-  had to be on to draw one view, and only the section had a gear verb; the
-  section setting is the one switch now and its description says what the
-  other used to. An old `accounts.enabled: false` left in `settings.json` is
-  still honoured — the Accounts list is not registered, and the log says so —
-  and either half of the gear's **Show / Hide Accounts Section** pair clears
-  the old key, since after that gesture the section setting states the answer.
-- **`lineage.workspaces.autoSwitch`**, folded into `lineage.mode`. Auto-switch
-  with the auto-switch turned off was the **Root** model under another name —
-  a window that never rearranges itself and keeps the switch verb — so it is
-  that model now: an old `false` left in `settings.json` resolves a `project`
-  window to Root exactly as `workspaces.enabled: false` always has, on read,
-  with nothing rewritten. **Flock: Choose Window Model…** removes the old key
-  when you choose Auto-switch, so it cannot fold your choice straight back.
-- **`lineage.groupByFolder` and `lineage.onlyProjectSessions`**, folded into
-  one dropdown: **`lineage.unclaimedSessions`** — *Grouped by folder* (the
-  default), *Flat*, or *Hidden*. The two switches were one question asked
-  twice — what to do with sessions no project claims — and the dropdown asks it
-  once, in the **What the tree shows** category. The old keys are still read
-  when the new one is unset: `onlyProjectSessions: true` is *Hidden*,
-  `groupByFolder: false` is *Flat*, and *Hidden* is still ignored while you
-  have no projects. Nothing is rewritten, and the tree is byte-identical for
-  everyone who never touched either key.
 
 ### Changed
 
@@ -146,6 +107,47 @@ All notable changes to Flock are recorded here. The format follows
   and deprecated rows marked — and `npm run docs:check` gates the release on it
   being current. The README, the walkthrough and the settings page stop quoting
   a settings count that the next removal would have made wrong.
+
+### Removed
+
+- **`lineage.showGhosts`.** Exited ancestors — the sessions your live ones were
+  forked from — are always drawn. They are what keeps the tree's ancestry
+  honest, and a switch that could hide them was a knob nobody should turn. A
+  value left in `settings.json` does nothing.
+- **`lineage.staleAfterHours`.** **Archive Stale Sessions…** pre-ticks rows
+  older than 48 hours, as it did by default. The number only ever decided which
+  checkboxes started ticked in a dialog that lets you untick them, which is not
+  worth a row in the editor. A value left in `settings.json` does nothing.
+- **`lineage.pollIntervalMs`.** The roster is polled every three seconds, as it
+  was by default. With the instant-update hooks installed the poll is a
+  fallback, and without them three seconds is the tempo the tree was built
+  around; a tuning knob for it was one more row nobody should turn. A value
+  left in `settings.json` does nothing.
+- **`lineage.accounts.enabled`**, folded into `lineage.accounts.section`. Both
+  had to be on to draw one view, and only the section had a gear verb; the
+  section setting is the one switch now and its description says what the
+  other used to. An old `accounts.enabled: false` left in `settings.json` is
+  still honoured — the Accounts list is not registered, and the log says so —
+  though the section's collapsed header stays in the sidebar, since a view's
+  `when` clause can only read a setting that exists. Either half of the gear's
+  **Show / Hide Accounts Section** pair clears the old key, since after that
+  gesture the section setting states the answer, and the header follows it.
+- **`lineage.workspaces.autoSwitch`**, folded into `lineage.mode`. Auto-switch
+  with the auto-switch turned off was the **Root** model under another name —
+  a window that never rearranges itself and keeps the switch verb — so it is
+  that model now: an old `false` left in `settings.json` resolves a `project`
+  window to Root exactly as `workspaces.enabled: false` always has, on read,
+  with nothing rewritten. **Flock: Choose Window Model…** removes the old key
+  when you choose Auto-switch, so it cannot fold your choice straight back.
+- **`lineage.groupByFolder` and `lineage.onlyProjectSessions`**, folded into
+  one dropdown: **`lineage.unclaimedSessions`** — *Grouped by folder* (the
+  default), *Flat*, or *Hidden*. The two switches were one question asked
+  twice — what to do with sessions no project claims — and the dropdown asks it
+  once, in the **What the tree shows** category. The old keys are still read
+  when the new one is unset: `onlyProjectSessions: true` is *Hidden*,
+  `groupByFolder: false` is *Flat*, and *Hidden* is still ignored while you
+  have no projects. Nothing is rewritten, and the tree is byte-identical for
+  everyone who never touched either key.
 
 ## [0.1.10] — 2026-08-31
 
