@@ -1134,10 +1134,6 @@
       ],
       "commandPalette": [
         {
-          "command": "lineage.installHooks",
-          "when": "!isWindows"
-        },
-        {
           "command": "lineage.switchWorkspace",
           "when": "lineage.mode != 'folder'"
         },

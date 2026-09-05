@@ -210,7 +210,7 @@ to download. What differs is what the machine underneath can offer it.
 | --- | --- | --- | --- | --- |
 | Sessions, forks, the tree, attention, accounts, worktrees, projects | yes | yes | yes | yes |
 | Detach tier: parking, solo mode, Auto-switch, `/exit` to a shell, moving a live conversation between accounts in place | yes | yes | **no** — sessions close and resume from their transcripts | yes |
-| Instant-update hooks | yes | yes | not yet | yes |
+| Instant-update hooks | yes | yes | yes, via PowerShell | yes |
 | In-session verbs — "fork this session", said to Claude | yes | yes | yes, with `node` on `PATH` | yes |
 | Fork edges for forks typed at the CLI (`claude --fork-session`) | yes | yes | yes, via PowerShell | yes |
 | Reaping a closed session's MCP children; the phantom-row filter | yes | yes | yes, via PowerShell | yes |
@@ -219,11 +219,12 @@ to download. What differs is what the machine underneath can offer it.
 **Windows.** The full tier is one extension away: open the project through the
 [WSL extension](https://code.visualstudio.com/docs/remote/wsl) and Flock runs
 inside WSL, where tmux, `ps` and `/bin/sh` all exist and every row above reads
-*yes*. Native Windows works and is honest about what it lacks: each *no* and
-*not yet* above degrades to what its row says, and an install verb that could
-only refuse there is hidden from the Command Palette. Where the table says *via
-PowerShell*, Flock reads the process table through one `Get-CimInstance
-Win32_Process` sweep per tick instead of `ps`. Install the CLI
+*yes*. Native Windows works and is honest about the one thing it lacks: without tmux
+a session cannot be hidden while it runs, so parking closes it and resumes it
+from its transcript, and everything built on the detach tier is absent with it.
+Where the table says *via PowerShell*, Flock uses the shell every Windows has:
+the hooks append through it, and the process table is read through one
+`Get-CimInstance Win32_Process` sweep per tick instead of `ps`. Install the CLI
 with the [native installer](https://code.claude.com/docs/en/setup), which puts
 `claude.exe` on your `PATH`. Flock prefers it over the `.cmd` shim an npm
 install leaves: the shim is a batch file, so Flock runs it through `cmd.exe`

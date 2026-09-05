@@ -8,6 +8,17 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Added
 
+- **The instant-update hooks install on Windows.** The hook was a `/bin/sh`
+  one-liner, and Windows has no `/bin/sh`. Claude Code runs a shell-form hook
+  through `sh -c` on macOS and Linux, through Git Bash on Windows, and through
+  PowerShell on a Windows without Git Bash — and lets each hook name its shell.
+  So on Windows the plugin now carries a PowerShell one-liner with `shell:
+  "powershell"` beside it: the same v3 envelope, the same
+  `~/.lineage/events.ndjson`, appended with one write, no dependency beyond the
+  shell every Windows has. Two hooks landing in the same millisecond can still
+  interleave there, where the POSIX `printf` could not; a torn line is dropped,
+  not misread, and the poller covers what it would have said. The POSIX command
+  is untouched.
 - **The in-session verbs install on Windows.** "Fork this session", said to
   Claude, works on native Windows now — the same skill, the same small CLI, the
   same request directory under your home. What kept it off was one character:
@@ -25,9 +36,7 @@ All notable changes to Flock are recorded here. The format follows
   per-OS table: what native Windows loses without tmux, that opening the project
   through WSL gives it the full tier, and that a Snap or Flatpak editor hides
   your `PATH`, so `lineage.claudeBinary` has to be set there. The tmux install
-  block gained openSUSE, Alpine and Nix. **Install Instant-Update Hooks…** and
-  **Install In-Session Verbs…** no longer appear in the Command Palette on
-  Windows, where all they could do was refuse. **Reveal Worktree in Finder** is
+  block gained openSUSE, Alpine and Nix. **Reveal Worktree in Finder** is
   now **Reveal Worktree in File Manager**: the verb was always VS Code's own
   reveal, which opens Finder, File Explorer or the desktop's file manager as the
   host dictates, and the title told two platforms out of three the wrong thing.

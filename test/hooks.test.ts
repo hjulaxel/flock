@@ -16,6 +16,8 @@ import * as vscodeMock from 'vscode';
 
 import {
   HOOK_COMMAND,
+  HOOK_COMMAND_WINDOWS,
+  hookCommandFor,
   HooksManager,
   PLUGIN_NAME,
   PLUGIN_VERSION,
@@ -139,7 +141,7 @@ afterEach(() => {
 
 describe('hooks: generated plugin files', () => {
   it('renders exactly the six events, each running HOOK_COMMAND', () => {
-    const parsed = JSON.parse(renderHooksJson()) as {
+    const parsed = JSON.parse(renderHooksJson('linux')) as {
       hooks: Record<string, Array<{ hooks: Array<Record<string, string>> }>>;
     };
     expect(Object.keys(parsed.hooks).sort()).toEqual(
@@ -162,7 +164,46 @@ describe('hooks: generated plugin files', () => {
       expect(matchers[0]!.hooks).toHaveLength(1);
       expect(matchers[0]!.hooks[0]!.type).toBe('command');
       expect(matchers[0]!.hooks[0]!.command).toBe(HOOK_COMMAND);
+      // No `shell` field: the CLI's default (sh -c) is the one we wrote for.
+      expect(matchers[0]!.hooks[0]!['shell']).toBeUndefined();
     }
+  });
+
+  it('on Windows renders the PowerShell command and names its shell', () => {
+    const parsed = JSON.parse(renderHooksJson('win32')) as {
+      hooks: Record<string, Array<{ hooks: Array<Record<string, string>> }>>;
+    };
+    expect(Object.keys(parsed.hooks)).toHaveLength(6);
+    for (const matchers of Object.values(parsed.hooks)) {
+      const hook = matchers[0]!.hooks[0]!;
+      expect(hook.type).toBe('command');
+      expect(hook.command).toBe(HOOK_COMMAND_WINDOWS);
+      // Without this the CLI would hand the line to Git Bash where it has one.
+      expect(hook['shell']).toBe('powershell');
+    }
+    expect(hookCommandFor('win32')).toBe(HOOK_COMMAND_WINDOWS);
+    expect(hookCommandFor('darwin')).toBe(HOOK_COMMAND);
+    // The platform default is whichever this test host is.
+    expect(renderHooksJson()).toBe(renderHooksJson(process.platform));
+  });
+
+  it('the Windows command carries no double quote and the same envelope', () => {
+    // A `"` is the one character every layer between hooks.json and
+    // PowerShell's argv has an opinion about; [char]34 stands in for it.
+    expect(HOOK_COMMAND_WINDOWS).not.toContain('"');
+    expect(HOOK_COMMAND_WINDOWS).toContain('[char]34');
+    expect(HOOK_COMMAND_WINDOWS).toContain('lineage_node_id');
+    expect(HOOK_COMMAND_WINDOWS).toContain('LINEAGE_NODE_ID');
+    expect(HOOK_COMMAND_WINDOWS).toContain("'null'");
+    expect(HOOK_COMMAND_WINDOWS).toContain("'.lineage'");
+    expect(HOOK_COMMAND_WINDOWS).toContain("'events.ndjson'");
+    // The profile folder — what os.homedir() returns on Windows — never an
+    // extension install path.
+    expect(HOOK_COMMAND_WINDOWS).toContain("GetFolderPath('UserProfile')");
+    expect(HOOK_COMMAND_WINDOWS).not.toMatch(/extensions?[/\\]/i);
+    // One write of the whole line, LF-terminated.
+    expect(HOOK_COMMAND_WINDOWS.split('.Write(').length).toBe(2);
+    expect(HOOK_COMMAND_WINDOWS).toContain('[char]10');
   });
 
   it('keeps the hook command PATH-resolved and $HOME-relative', () => {
@@ -304,8 +345,10 @@ describe('hooks: parseEventLine', () => {
   });
 });
 
-// install() is POSIX-only by design (the hook command is /bin/sh).
-const posix = process.platform === 'win32' ? it.skip : it;
+// install() used to be POSIX-only (the hook command was /bin/sh). It renders
+// the platform's own command now, so these run everywhere; `posix` keeps its
+// name so the diff that lifted the gate stays readable.
+const posix = it;
 
 describe('hooks: install writes the plugin after exactly one confirmation', () => {
   const manifestOf = (home: string): string =>
