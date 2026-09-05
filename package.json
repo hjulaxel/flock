@@ -1138,10 +1138,6 @@
           "when": "!isWindows"
         },
         {
-          "command": "lineage.installAgentVerbs",
-          "when": "!isWindows"
-        },
-        {
           "command": "lineage.switchWorkspace",
           "when": "lineage.mode != 'folder'"
         },

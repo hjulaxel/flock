@@ -6,6 +6,19 @@ All notable changes to Flock are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **The in-session verbs install on Windows.** "Fork this session", said to
+  Claude, works on native Windows now — the same skill, the same small CLI, the
+  same request directory under your home. What kept it off was one character:
+  the skill told Claude to run `node ~/.lineage/flock-verbs.mjs`, and a tilde is
+  the shell's to expand, which Git Bash does and PowerShell and `cmd.exe` — the
+  shells Claude Code falls back to on a Windows without Git — do not. The skill
+  now names the CLI by the absolute path the extension wrote it to, quoted the
+  one way all three shells agree on. Existing installs are rewritten on the
+  next activation (verbs v3); `node` still has to be on your `PATH`, on every
+  platform, as it always did.
+
 ### Changed
 
 - **The README says what each platform gets.** A Platforms section carries the

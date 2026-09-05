@@ -55,8 +55,14 @@ import { log, logError } from './log';
 export const VERBS_SKILL_NAME = 'flock';
 /** Bumped whenever the generated files change; drives silent self-heal, the
  *  same contract as hooks.PLUGIN_VERSION.
- *  v2: `--name` — the model can title each fork from the user's own words. */
-export const VERBS_VERSION = 2;
+ *  v2: `--name` — the model can title each fork from the user's own words.
+ *  v3: the skill names the CLI by its ABSOLUTE path instead of `~/…`. A tilde
+ *  is the shell's to expand, and only some shells do: Git Bash and every POSIX
+ *  shell yes, PowerShell and cmd.exe — the shells Claude Code runs the Bash
+ *  tool through on a Windows without Git — no. The rendered path is the one
+ *  the extension itself wrote the script to, so it is right by construction,
+ *  and it is what lets the install run on Windows at all. */
+export const VERBS_VERSION = 3;
 
 const SCRIPT_BASENAME = 'flock-verbs.mjs';
 const REQUESTS_DIR_BASENAME = 'requests';
@@ -117,9 +123,17 @@ export function requestsDir(home?: string): string {
 // plugin files. The scripts avoid backticks and `${` on purpose: they live
 // inside TypeScript template literals.
 
-/** The skill Claude reads. The description is the retrieval surface — it has
- *  to contain the words a user actually says. */
-export function renderSkillMd(): string {
+/**
+ * The skill Claude reads. The description is the retrieval surface — it has
+ * to contain the words a user actually says.
+ *
+ * `scriptPath` is where THIS install put the CLI (`verbsScriptPath`), spelled
+ * absolutely and double-quoted in the invocation, which is the one quoting
+ * bash, PowerShell and cmd.exe all agree on for a path with a space in it.
+ * Never `~`: see VERBS_VERSION v3.
+ */
+export function renderSkillMd(scriptPath: string): string {
+  const invoke = `node "${scriptPath}" fork`;
   return [
     '---',
     `name: ${VERBS_SKILL_NAME}`,
@@ -134,7 +148,7 @@ export function renderSkillMd(): string {
     'the current conversation exactly the way its Fork button does. Ask it',
     'with:',
     '',
-    '    node ~/.lineage/flock-verbs.mjs fork --count <n>',
+    `    ${invoke} --count <n>`,
     '',
     '- `--count <n>` — how many forks, 1 to 8. Omit it for one.',
     '- `--name "<title>"` — a name for a fork, repeatable: give one per fork,',
@@ -508,14 +522,6 @@ export class AgentVerbsManager implements DisposableLike {
    *  nothing sits between the user clicking Install and the bytes landing. */
   async install(): Promise<HookInstallState> {
     const stored = this.getState();
-    if (process.platform === 'win32') {
-      void showWarning(
-        'Flock in-session verbs need a POSIX home layout and are not ' +
-          'supported on Windows yet.',
-      );
-      log('verbs: install skipped (win32)');
-      return stored;
-    }
 
     const files = this.desiredFiles();
     if (files.every((f) => readTextSync(f.path) === f.text)) {
@@ -626,7 +632,6 @@ export class AgentVerbsManager implements DisposableLike {
   async selfHeal(): Promise<HookInstallState> {
     const stored = this.getState();
     if (!stored.installed) return stored;
-    if (process.platform === 'win32') return stored;
 
     const files = this.desiredFiles();
     const onDisk = files.map((f) => readTextSync(f.path));
@@ -715,7 +720,7 @@ export class AgentVerbsManager implements DisposableLike {
 
   private desiredFiles(): DesiredFile[] {
     return [
-      { path: this.skillPath(), text: renderSkillMd(), label: 'skill' },
+      { path: this.skillPath(), text: renderSkillMd(this.scriptFile()), label: 'skill' },
       { path: this.scriptFile(), text: renderVerbScript(), label: 'verb CLI' },
     ];
   }
