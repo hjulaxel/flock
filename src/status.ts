@@ -17,7 +17,7 @@
 // the test that holds the query to the manifest read the same string.
 
 import type { RecommendedSetting } from './recommend';
-import { surfaceChoices, windowModelChoices } from './recommend';
+import { TMUX_ON_SETTINGS, surfaceChoices, windowModelChoices } from './recommend';
 import { tmuxInstallHint } from './tmux';
 import { COMMANDS, CONFIG_KEYS, CONFIG_SECTION, EXTENSION_ID } from './types';
 import type { RecommendedWorld } from './types';
@@ -128,7 +128,7 @@ export function statusFacts(input: StatusInput): StatusFact[] {
       next: 'Turn it back on — sets lineage.tmux to auto',
       action: {
         kind: 'writeSettings',
-        settings: [{ key: CONFIG_KEYS.tmux, value: 'auto' }],
+        settings: TMUX_ON_SETTINGS,
         receipt: 'Flock: tmux is back on — sessions started from now on are wrapped',
       },
     });

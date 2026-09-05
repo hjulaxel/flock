@@ -1847,7 +1847,8 @@ export const CONFIG_KEYS = {
  * setter (`CommandDeps.writeSettings`) refuses anything outside it. A key here
  * can therefore be read but never written; the one exception is DELETING it,
  * which VS Code permits for an unregistered key, and which happens only inside
- * the gesture that states the new answer (the gear's section verbs).
+ * the gesture that states the new answer — the gear's Accounts section verbs,
+ * and the window-model picker's Auto-switch choice.
  */
 export const LEGACY_KEYS = {
   /** `lineage.accounts.enabled`, folded into `accounts.section`. An explicit

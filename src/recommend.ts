@@ -83,6 +83,13 @@ export interface RecommendedSetting {
   readonly value: boolean | string | undefined;
 }
 
+/** The one write that turns tmux back on — `lineage.tmux: auto`, the default.
+ *  Both the checklist's `tmux` step and the Status verb's tmux row carry it,
+ *  so it is spelled here once rather than agreed on twice. */
+export const TMUX_ON_SETTINGS: readonly RecommendedSetting[] = [
+  { key: CONFIG_KEYS.tmux, value: 'auto' },
+];
+
 export interface RecommendedStep {
   readonly id: RecommendedStepId;
   /** The checklist label. */
@@ -164,7 +171,7 @@ export function recommendedPlan(world: RecommendedWorld): RecommendedPlan {
         writes: 'sets lineage.tmux back to auto',
         undo: 'set lineage.tmux to off again',
         recommended: true,
-        settings: [{ key: CONFIG_KEYS.tmux, value: 'auto' }],
+        settings: TMUX_ON_SETTINGS,
       });
     } else {
       done.push('tmux');

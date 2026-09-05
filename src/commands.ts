@@ -2164,11 +2164,13 @@ async function chooseSurface(
   return chooseFromTaste(surfaceChoices(world), 'Where should sessions open?');
 }
 
-/** A taste picker's answer, written. `choice` is undefined for a cancelled
+/** A choice's settings, written. `choice` is undefined for a cancelled
  *  picker — "no", and nothing is written; `unwritable` names the keys the
  *  wiring could not write (a read-only profile, a sync conflict), or every key
- *  when there is no wiring to write with at all. */
-async function writeChoice<T extends TasteChoice>(
+ *  when there is no wiring to write with at all. Anything carrying `settings`
+ *  qualifies — a taste picker's row, a Status row's write — so there is one
+ *  place that turns a chosen table of keys into a report of what moved. */
+async function writeChoice<T extends { readonly settings: readonly RecommendedSetting[] }>(
   deps: CommandDeps,
   choice: T | undefined,
 ): Promise<{ choice: T | undefined; unwritable: readonly string[] }> {
@@ -10911,9 +10913,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         );
         return;
       case 'writeSettings': {
-        const unwritable = (await deps.writeSettings?.(action.settings)) ?? [
-          ...action.settings.map((s) => s.key),
-        ];
+        const { unwritable } = await writeChoice(deps, action);
         if (unwritable.length > 0) {
           void vscode.window.showWarningMessage(
             `Flock: could not write ${unwritable.join(', ')}.`,
