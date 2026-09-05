@@ -1024,6 +1024,7 @@ function chatDeps(
     notificationsEnabled: () => true,
     setOnlyActiveSessions: async () => undefined,
     setAccountsSection: async () => undefined,
+    setShellsSection: async () => undefined,
     setBranchDisplay: async () => undefined,
     selectedSessions: () => [],
     switchWorkspace: async () => undefined,
@@ -1597,6 +1598,7 @@ describe('archivedSessionsFlow', () => {
       hooksInstalled: false,
       onlyActive: true,
       accountsSection: false,
+      shellsSection: false,
     });
     await archivedSessionsFlow(deps, 'p1');
     delete (mockWindow as StatusHost).setStatusBarMessage;
@@ -1717,6 +1719,7 @@ describe('archivedSessionsFlow', () => {
       hooksInstalled: false,
       onlyActive: true,
       accountsSection: false,
+      shellsSection: false,
     });
     deps.getForest = () => forestOf([node(A, { status: 'busy' })]);
     await archivedSessionsFlow(deps, 'p1');
@@ -5958,6 +5961,7 @@ describe('the add / import flows', () => {
       notificationsEnabled: () => true,
       setOnlyActiveSessions: async () => undefined,
       setAccountsSection: async () => undefined,
+      setShellsSection: async () => undefined,
       setBranchDisplay: async () => undefined,
       selectedSessions: () => [],
       switchWorkspace: async () => undefined,
@@ -8250,5 +8254,138 @@ describe('archiving the last session in a minted worktree offers the cleanup', (
     const h = offerHarness({ minted: false });
     await h.run(COMMANDS.deleteSession, S1);
     expect(h.infos).toHaveLength(1);
+  });
+});
+
+// The gear is built when it opens so that each toggle can carry the direction
+// it goes — a claim the manifest cannot check, since nothing there declares the
+// menu. These read it the way a person does: the unit double has no
+// QuickPickItemKind, so the separators are not emitted and the list is flat,
+// and the codicon prefix is stripped so the assertions name the titles shown.
+describe('the gear menu offers each section switch one way round', () => {
+  type MenuState = ReturnType<NonNullable<CommandDeps['menuState']>>;
+
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockCommands as CommandHost).executeCommand;
+    delete (mockWindow as QuickPickHost).showQuickPick;
+    delete (mockWindow as StatusHost).setStatusBarMessage;
+  });
+
+  /** Opens the gear against a wiring that reports `state` — undefined being a
+   *  wiring with no menuState at all — answers the pick with the row titled
+   *  `choose` (undefined dismisses), and returns the titles offered and the
+   *  commands that ran. */
+  async function openGear(
+    state: MenuState | undefined,
+    choose?: string,
+  ): Promise<{ offered: string[]; ran: string[] }> {
+    const { deps } = chatDeps(projectOf());
+    const { accounts } = fakeAccountDeps([]);
+    const wired: AccountCommandDeps = { ...deps, accounts };
+    if (state !== undefined) wired.menuState = () => state;
+    const offered: string[] = [];
+    const ran: string[] = [];
+    (mockWindow as QuickPickHost).showQuickPick = async (items) => {
+      const rows = (items as { label: string; kind?: number }[]).filter(
+        (i) => i.kind === undefined,
+      );
+      const titles = rows.map((r) => r.label.replace(/^\$\([^)]+\) /, ''));
+      offered.push(...titles);
+      if (choose === undefined) return undefined;
+      const at = titles.indexOf(choose);
+      return at === -1 ? undefined : rows[at];
+    };
+    (mockCommands as CommandHost).executeCommand = async (id) => {
+      ran.push(id);
+      return undefined;
+    };
+    const harness = withRegisteredCommands(wired);
+    await harness.run(COMMANDS.settingsMenu);
+    return { offered, ran };
+  }
+
+  const known = (over: Partial<MenuState> = {}): MenuState => ({
+    hooksInstalled: true,
+    onlyActive: false,
+    accountsSection: true,
+    shellsSection: true,
+    ...over,
+  });
+
+  it('offers Hide Accounts Section, and not Show, while the section is drawn', async () => {
+    const { offered } = await openGear(known({ accountsSection: true }));
+    expect(offered).toContain('Hide Accounts Section');
+    expect(offered).not.toContain('Show Accounts Section');
+  });
+
+  it('offers Show Accounts Section, and not Hide, while it is folded away', async () => {
+    const { offered } = await openGear(known({ accountsSection: false }));
+    expect(offered).toContain('Show Accounts Section');
+    expect(offered).not.toContain('Hide Accounts Section');
+  });
+
+  it('does the same for Shells', async () => {
+    const drawn = await openGear(known({ shellsSection: true }));
+    expect(drawn.offered).toContain('Hide Shells Section');
+    expect(drawn.offered).not.toContain('Show Shells Section');
+
+    const folded = await openGear(known({ shellsSection: false }));
+    expect(folded.offered).toContain('Show Shells Section');
+    expect(folded.offered).not.toContain('Hide Shells Section');
+  });
+
+  it('keeps the two pairs together, Accounts first, as one Sections group', async () => {
+    const { offered } = await openGear(known());
+    const accounts = offered.indexOf('Hide Accounts Section');
+    expect(accounts).toBeGreaterThan(-1);
+    expect(offered[accounts + 1]).toBe('Hide Shells Section');
+  });
+
+  it('offers both halves of each pair when the wiring cannot say which way it goes', async () => {
+    // Absent state must not guess: the wrong label on a toggle is worse than
+    // two entries.
+    const { offered } = await openGear(undefined);
+    for (const title of [
+      'Show Accounts Section',
+      'Hide Accounts Section',
+      'Show Shells Section',
+      'Hide Shells Section',
+    ]) {
+      expect(offered).toContain(title);
+    }
+  });
+
+  it('runs the command behind the row that was picked', async () => {
+    const shells = await openGear(known(), 'Hide Shells Section');
+    expect(shells.ran).toEqual([COMMANDS.hideShellsSection]);
+
+    const accounts = await openGear(
+      known({ accountsSection: false }),
+      'Show Accounts Section',
+    );
+    expect(accounts.ran).toEqual([COMMANDS.showAccountsSection]);
+  });
+
+  it('runs nothing when the menu is dismissed', async () => {
+    const { ran } = await openGear(known());
+    expect(ran).toEqual([]);
+  });
+
+  it('the Shells pair writes the value each half names, through the wiring', async () => {
+    const wrote: boolean[] = [];
+    const { deps } = chatDeps(projectOf());
+    const { accounts } = fakeAccountDeps([]);
+    (mockWindow as StatusHost).setStatusBarMessage = () => undefined;
+    const harness = withRegisteredCommands({
+      ...deps,
+      accounts,
+      setShellsSection: async (on) => {
+        wrote.push(on);
+      },
+    });
+    await harness.run(COMMANDS.hideShellsSection);
+    await harness.run(COMMANDS.showShellsSection);
+    expect(wrote).toEqual([false, true]);
   });
 });

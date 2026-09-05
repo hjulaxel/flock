@@ -1332,6 +1332,14 @@ export const COMMANDS = {
    *  writes `lineage.accounts.section`. */
   showAccountsSection: 'lineage.showAccountsSection',
   hideAccountsSection: 'lineage.hideAccountsSection',
+  /** The Shells SECTION's switch — the same pair, for the same layout reason,
+   *  on `lineage.shells.section`. Until this pair existed the only way to fold
+   *  the Shells list away was settings.json while Accounts had a gear entry,
+   *  and two sections that cost the same row should be flipped the same way.
+   *  Hides the list only: what the sessions run is untouched, and the two row
+   *  verbs stay registered. */
+  showShellsSection: 'lineage.showShellsSection',
+  hideShellsSection: 'lineage.hideShellsSection',
   /** The two DISPLAY MODES, said in the gear menu rather than only in settings.
    *  Two ids for one setting, the same shape the filter above uses: each command
    *  knows the mode it means, and the state the user reads back is which of the
@@ -1783,6 +1791,12 @@ export const CONFIG_KEYS = {
    *  in the view's when-clause — `accountsEnabled` stays the feature's off
    *  switch, this only decides whether the list is drawn in the sidebar. */
   accountsSection: 'accounts.section',
+  /** Draw Shells as a section of the Flock container — one row per `Bash`
+   *  call a session is running. ON by default, like Accounts. The view's
+   *  `when` clause read this key alone for a release and nothing in the source
+   *  named it; the gear pair that flips it needs the spelling here so that the
+   *  write and the manifest cannot drift apart. */
+  shellsSection: 'shells.section',
   /** Offer to move a conversation when the account it is on runs out of its
    *  five-hour window. OFF by default, and that default is the point: the
    *  switch is a real interruption — the CLI restarts and the prompt cache does
@@ -4426,6 +4440,11 @@ export interface CommandDeps {
    *  and the state the user reads is which of the two the gear menu is
    *  offering, which the view's own `when` clause decides. */
   setAccountsSection(on: boolean): Promise<void>;
+  // ---- the Shells section -------------------------------------------------
+  /** Write `lineage.shells.section`. The same shape as `setAccountsSection`,
+   *  for the same reason: each of the two commands knows the value it means,
+   *  and the state the user reads back is which half the gear menu offers. */
+  setShellsSection(on: boolean): Promise<void>;
   // ---- the branch line ----------------------------------------------------
   /** Write `lineage.git.branchDisplay` — which of the two ways a session says
    *  the worktree it is in. A setter and no getter, like the two above: each of
@@ -4522,6 +4541,7 @@ export interface CommandDeps {
     hooksInstalled: boolean;
     onlyActive: boolean;
     accountsSection: boolean;
+    shellsSection: boolean;
     /** `lineage.git.branchDisplay`. Optional so a wiring that predates the two
      *  modes offers both halves rather than claiming one of them. */
     branchDisplay?: BranchDisplay;

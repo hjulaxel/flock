@@ -10753,6 +10753,11 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   // it has to be as easy to find as it was to lose. Nothing about accounts stops
   // working — the ten verbs stay registered, routing and pinning are untouched —
   // so the wording says "section", never "accounts".
+  //
+  // Shells is the third view and carries the identical pair on
+  // `lineage.shells.section`. For a release it did not: Accounts had a gear
+  // entry and Shells only settings.json, for two sections that cost the same
+  // row. The gear groups the two pairs as "Sections" so they read as one choice.
 
   /**
    * The gear: everything the view title used to keep behind its `...`.
@@ -10881,7 +10886,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       },
     );
 
-    group('Accounts');
+    group('Sections');
     if (state === undefined || !state.accountsSection) {
       items.push({
         label: '$(account) Show Accounts Section',
@@ -10894,6 +10899,20 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         label: '$(account) Hide Accounts Section',
         description: "Moves Flock's buttons up onto the FLOCK row",
         command: COMMANDS.hideAccountsSection,
+      });
+    }
+    if (state === undefined || !state.shellsSection) {
+      items.push({
+        label: '$(terminal) Show Shells Section',
+        description: 'One row per command your sessions are running',
+        command: COMMANDS.showShellsSection,
+      });
+    }
+    if (state === undefined || state.shellsSection) {
+      items.push({
+        label: '$(terminal) Hide Shells Section',
+        description: 'The list goes; what your sessions run does not change',
+        command: COMMANDS.hideShellsSection,
       });
     }
 
@@ -10962,6 +10981,22 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     await deps.setAccountsSection(false);
     vscode.window.setStatusBarMessage(
       'Flock: Accounts hidden — every account verb is still in the palette',
+      5000,
+    );
+  });
+
+  register(COMMANDS.showShellsSection, 'show the shells section', async () => {
+    await deps.setShellsSection(true);
+    vscode.window.setStatusBarMessage(
+      'Flock: Shells is back in the sidebar — one row per command your sessions run',
+      5000,
+    );
+  });
+
+  register(COMMANDS.hideShellsSection, 'hide the shells section', async () => {
+    await deps.setShellsSection(false);
+    vscode.window.setStatusBarMessage(
+      'Flock: Shells hidden — your sessions keep running everything they were',
       5000,
     );
   });

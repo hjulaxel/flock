@@ -6532,6 +6532,24 @@ export async function activate(
       }
     },
 
+    // The Shells section: the same write as Accounts, for the same reason —
+    // its `when` clause is a `config.` clause the workbench re-evaluates itself.
+    setShellsSection: async (on) => {
+      try {
+        await cfg().update(
+          CONFIG_KEYS.shellsSection,
+          on,
+          vscode.ConfigurationTarget.Global,
+        );
+      } catch (err) {
+        logError('extension.setShellsSection', err);
+        void vscode.window.showWarningMessage(
+          'Flock: could not save the Shells section setting — check that ' +
+            'settings are writable.',
+        );
+      }
+    },
+
     // The line under a session. No context key either: the gear menu reads the
     // value through menuState, and the views read it per render — so the write
     // is the whole of the update, and the config listener at the bottom of
@@ -6703,6 +6721,7 @@ export async function activate(
       verbsInstalled: store.getVerbsState().installed === true,
       onlyActive: boolCfg(CONFIG_KEYS.onlyActiveSessions, false),
       accountsSection: boolCfg(CONFIG_KEYS.accountsSection, true),
+      shellsSection: boolCfg(CONFIG_KEYS.shellsSection, true),
       branchDisplay: isBranchDisplay(
         cfg().get<string>(CONFIG_KEYS.gitBranchDisplay, DEFAULT_BRANCH_DISPLAY),
       )

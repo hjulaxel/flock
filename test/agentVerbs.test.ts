@@ -561,6 +561,7 @@ function forkDeps(over: { launchFails?: boolean } = {}) {
     notificationsEnabled: () => false,
     setOnlyActiveSessions: async () => undefined,
     setAccountsSection: async () => undefined,
+    setShellsSection: async () => undefined,
     setBranchDisplay: async () => undefined,
     selectedSessions: () => [],
     switchWorkspace: async () => undefined,

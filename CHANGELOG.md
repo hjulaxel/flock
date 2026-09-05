@@ -4,6 +4,19 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **The gear menu can fold the Shells section away, and bring it back.** The
+  Accounts section has had its *Show / Hide Accounts Section* pair since the
+  gear existed; Shells, which costs the same row of the sidebar, could only be
+  folded from `settings.json`. The gear now has a **Sections** group holding
+  both pairs, each labelled with the direction it goes — *Hide Shells Section*
+  while the list is drawn, never both — and the two verbs are in the Command
+  Palette under **Flock**. Hiding the section hides a list, nothing more: the
+  commands your sessions run are untouched.
+
 ## [0.1.10] — 2026-08-31
 
 ### Fixed

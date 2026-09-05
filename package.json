@@ -474,6 +474,16 @@
         "category": "Flock"
       },
       {
+        "command": "lineage.showShellsSection",
+        "title": "Show Shells Section",
+        "category": "Flock"
+      },
+      {
+        "command": "lineage.hideShellsSection",
+        "title": "Hide Shells Section",
+        "category": "Flock"
+      },
+      {
         "command": "lineage.switchWorkspace",
         "title": "Switch Workspace...",
         "category": "Flock",
@@ -1945,7 +1955,7 @@
         "lineage.shells.section": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Draw **Shells** as a section of the Flock sidebar: one row per command your sessions actually run — every `Bash` call Claude makes, with the ones executing right now pinned to the top and a live clock on each. Failed runs show their exit code, refused ones say they never ran, and a backgrounded job stays on the list until it finishes, with **Open Output** on its menu for the file the CLI is writing its stdout to.\n\nIt ships collapsed, and the section's badge counts what is running — so a script that is still going is visible without opening it.\n\n**Every live session on this machine**, not only this window's: the facts come from the transcripts on disk, so a command running in a session another window launched is a row here like any other. Clicking a row focuses the conversation that started it.\n\nLike **Accounts**, drawing a second section moves Flock's top-bar buttons down onto the **SESSIONS** row; see `lineage.accounts.section`."
+          "markdownDescription": "Draw **Shells** as a section of the Flock sidebar: one row per command your sessions actually run — every `Bash` call Claude makes, with the ones executing right now pinned to the top and a live clock on each. Failed runs show their exit code, refused ones say they never ran, and a backgrounded job stays on the list until it finishes, with **Open Output** on its menu for the file the CLI is writing its stdout to.\n\nIt ships collapsed, and the section's badge counts what is running — so a script that is still going is visible without opening it.\n\n**Every live session on this machine**, not only this window's: the facts come from the transcripts on disk, so a command running in a session another window launched is a row here like any other. Clicking a row focuses the conversation that started it.\n\nLike **Accounts**, drawing a second section moves Flock's top-bar buttons down onto the **SESSIONS** row; see `lineage.accounts.section`. The switch is also in the gear menu at the top of the sidebar."
         },
         "lineage.accounts.offerSwitchAtLimit": {
           "type": "boolean",

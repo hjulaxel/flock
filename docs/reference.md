@@ -1277,11 +1277,11 @@ evidence is singular. It disappears while the tree is empty.
 The **gear** opens a menu holding everything that used to be behind the `...`:
 the active-sessions filter, **Show Closed Projects and Hidden Folders…**, **Mark
 All Notifications as Read**, **Restore Archived Session…**, **Archive Stale
-Sessions…**, **New Project…**, the closed-projects list, the Accounts section
-switch, the hooks pair, and **Refresh**. Each toggle is labelled with the
-direction it goes — you get *Hide Accounts Section* when the section is showing,
-never both — which is why it is built when it opens rather than declared in the
-manifest.
+Sessions…**, **New Project…**, the closed-projects list, the Accounts and Shells
+section switches, the hooks pair, and **Refresh**. Each toggle is labelled with
+the direction it goes — you get *Hide Accounts Section* when the section is
+showing, never both — which is why it is built when it opens rather than declared
+in the manifest.
 
 > Where the buttons sit, and why it is a choice. VS Code has no menu id for a view
 > container's title bar — there is `view/title` and no `viewsContainer/title` — so
@@ -1290,11 +1290,12 @@ manifest.
 > merges that view's buttons into the container header and draws no separate
 > section header.
 >
-> Flock has two views, Sessions and Accounts, so by default the buttons sit on the
-> SESSIONS row just below the name. Turn **Accounts** off
-> (`lineage.accounts.section`, or the gear menu) and they move up onto the FLOCK
-> row. That is the entire trade, and it is settled in favour of Accounts: a list of
-> subscriptions on screen is worth more than one row of height. Nothing about
+> Flock has three views — Sessions, Accounts and Shells — so by default the buttons
+> sit on the SESSIONS row just below the name. Turn **Accounts** and **Shells** off
+> (`lineage.accounts.section` and `lineage.shells.section`, or their pairs in the
+> gear menu) and they move up onto the FLOCK row. That is the entire trade, and it
+> is settled in favour of the sections: a list of subscriptions on screen is worth
+> more than one row of height. Nothing about
 > accounts stops working either way — usage is still read, new sessions are still
 > routed, a session is still pinned to its account for life, and every account verb
 > is in the Command Palette under **Flock**.
