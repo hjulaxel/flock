@@ -267,3 +267,33 @@ describe('orphanRescueDecision', () => {
     expect(d.reap).toEqual([101]);
   });
 });
+
+// ------------------------------------------------- the real ps, once each
+//
+// Everything above injects its `ps` output, which is what makes the ladder
+// testable — and what lets a machine whose `ps` rejects our flags pass every
+// test while reaping nothing. These run the REAL sweeps once, against this
+// process, so a `ps` that does not accept `-axo` (BusyBox on Alpine) or prints
+// `lstart` in a shape parsePsPidFacts cannot read fails here, on every OS in
+// the CI matrix that has a `ps`, instead of on a user's machine.
+
+describe('the ps sweeps, against this machine', () => {
+  const posix = process.platform === 'win32' ? it.skip : it;
+
+  posix('listDescendants walks the real table: this process hangs off its parent', async () => {
+    const kids = await listDescendants(process.ppid);
+    expect(kids).toContain(process.pid);
+  });
+
+  posix('listPidFacts reads a real start time and parent for this process', async () => {
+    const facts = await listPidFacts([process.pid]);
+    const fact = facts.get(process.pid);
+    expect(fact).toBeDefined();
+    expect(fact?.ppid).toBe(process.ppid);
+    expect((fact?.start ?? '').length).toBeGreaterThan(0);
+    // Two sweeps a moment apart must agree on the identity string, or the
+    // orphan rescue can never match a snapshot against a later verification.
+    const again = await listPidFacts([process.pid]);
+    expect(again.get(process.pid)?.start).toBe(fact?.start);
+  });
+});

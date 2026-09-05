@@ -7,7 +7,16 @@ on:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    # Windows is new to the matrix. Until the suite has been triaged on a real
+    # run, a red Windows leg says "not yet looked at" rather than "broken", so
+    # it does not block a merge. Remove this line the day it is green.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
