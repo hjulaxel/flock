@@ -1,14 +1,23 @@
 // src/shellsView.ts — the Shells view: what CLAUDE is running, right now.
 //
-// One row per `Bash` command a session has issued — `npm test`, the migration
+// One row per `Bash` command a session is running — `npm test`, the migration
 // script, the background job somebody started forty minutes ago and forgot.
 // Not one row per terminal: a terminal is the pty Flock launched claude INTO,
 // there is one per session, it is yours, and it never told you anything you
 // did not already know from the tree. The thing that is genuinely invisible is
 // what the model decided to execute inside it, and that is what this lists.
 //
-// (An earlier build of this view listed the terminals. It was a process list
-// of the wrong processes: it answered "which shells do I have open", which the
+// RUNNING, NOT RAN. A command that finishes leaves the list, the way it leaves
+// the CLI's own "1 shell running" indicator — this section is that indicator,
+// across every session at once, with the command and a clock on it. The first
+// build kept a history of finished runs underneath the live ones, and the
+// history was what you saw: a hundred rows of `git status` with exit codes,
+// and the one row the section exists for somewhere among them or not there at
+// all. What ran is in the conversation; what is running is not visible
+// anywhere else, and that is the whole list now.
+//
+// (An earlier build still listed the terminals. It was a process list of the
+// wrong processes: it answered "which shells do I have open", which the
 // workbench's own terminal dropdown already answers, instead of "what is
 // Claude running", which nothing did. The pid/tmux facts it carried are still
 // reachable — they are on the session row's hover in the tree, which is where
@@ -34,12 +43,16 @@
 //
 // COST, stated because this view reads files on a timer. Per live session the
 // steady state is one `statSync` plus the bytes appended since the last look
-// (see ShellRunsTracker) — the transcript is never re-read from the top. The
-// scan runs on the roster tick whether or not the section is expanded, because
-// the container BADGE is how a running script is noticed at all when the
-// section is collapsed, and a badge that is only correct while you are looking
-// at it is not a badge. The one-second clock that advances the elapsed times
-// runs only while the view is visible AND something is actually live.
+// (see ShellRunsTracker) — the transcript is read from the top once, on the
+// first look. The scan runs on EVERY roster tick, changed or not, whether or
+// not the section is expanded: the container BADGE is how a running script is
+// noticed at all when the section is collapsed, and a badge that is only
+// correct while you are looking at it is not a badge. Every tick rather than
+// every forest change, because the first build rode the forest and the forest
+// only moves when the roster does — a session that stays `busy` while it runs
+// one command after another never moves it, and the view showed the command
+// before last until something unrelated happened. The one-second clock that
+// advances the elapsed times runs only while the view is visible AND has rows.
 
 import * as vscode from 'vscode';
 
@@ -66,10 +79,9 @@ export const SHELLS_VIEW_ID = 'lineageShells';
 /**
  * Rows the view will draw, across every session.
  *
- * A cap on the LIST, on top of the per-session cap the tracker already holds.
- * Six sessions each keeping sixty commands is 360 rows of mostly `git status`,
- * and a list that long is not read, it is scrolled past. Live runs are never
- * the ones dropped — see pickShellRows.
+ * A rail, not a budget: every row is a live command, and a machine with a
+ * hundred of those has a bigger problem than a long list. It exists so a
+ * pathological transcript cannot turn the section into a scrollbar.
  */
 export const MAX_ROWS = 100;
 
@@ -92,6 +104,13 @@ export interface ShellSessionInfo {
   transcriptPath: string;
   /** Where it is running, for the hover. */
   cwd?: string;
+  /** The roster says the session is blocked — on a permission prompt, or a
+   *  question. An unanswered `Bash` call in such a session is not executing:
+   *  it is the thing the prompt is asking about. The CLI writes the call
+   *  before it asks, so without this the row would spin for as long as you
+   *  took to read the prompt — measured across the denials on this machine,
+   *  a median of 22 seconds and up to a minute of a clock on nothing. */
+  waiting?: boolean;
 }
 
 export interface ShellDeps {
@@ -99,13 +118,14 @@ export interface ShellDeps {
    * The LIVE sessions, resolved to transcripts.
    *
    * Live only, and that is a correctness rule rather than a cost one. "No
-   * result yet" means "still executing" — verified over 6 890 Bash calls, zero
-   * orphans — but only for a session whose process is alive. A conversation
-   * that was killed mid-command leaves a `tool_use` that will never be
-   * answered, and listing it as running would be the view's one way to lie.
+   * result yet" means "still executing" — but only for a session whose
+   * process is alive. A conversation that was killed mid-command leaves a
+   * `tool_use` that will never be answered, and listing it as running would
+   * be the view's one way to lie.
    */
   sessions(): readonly ShellSessionInfo[];
-  /** Fires on the roster tick and whenever the forest changes. */
+  /** Fires on EVERY roster tick, and whenever the forest changes. The tick is
+   *  the part that matters — see the header on cost. */
   onDidChange(listener: () => void): DisposableLike;
 }
 
@@ -121,27 +141,37 @@ export interface ShellRow {
   id: string;
   /** Set only when the list spans more than one conversation. */
   sessionLabel?: string;
+  /** The call is unanswered because its session is blocked at a prompt, not
+   *  because the command is executing. Drawn without the spinner, worded as
+   *  such, and left out of the running count. */
+  awaiting?: true;
 }
 
 /**
- * Every run, newest and live first, capped.
+ * Every LIVE run — executing, or detached and not yet finished — newest
+ * first, capped. Finished runs are not rows: see the header.
  *
  * The session label is attached HERE rather than at render time, and only when
  * the rows span more than one conversation: in a window with one session it is
- * the same word on all hundred rows, which is a column of noise, and in a
- * window with four it is the only thing telling them apart.
+ * the same word on every row, which is a column of noise, and in a window with
+ * four it is the only thing telling them apart.
+ *
+ * `waiting` names the sessions the roster reports blocked; a `running` run in
+ * one of them is marked `awaiting` rather than dropped, because the command
+ * Claude is asking to run is worth a row — it is just not a running one.
  */
 export function pickShellRows(
   perSession: ReadonlyMap<string, readonly ShellRun[]>,
   labels: ReadonlyMap<string, string>,
-  max: number = MAX_ROWS,
+  opts: { waiting?: ReadonlySet<string>; max?: number } = {},
 ): ShellRow[] {
-  const all: ShellRun[] = [];
+  const max = opts.max ?? MAX_ROWS;
+  const waiting = opts.waiting ?? new Set<string>();
+  const live: ShellRun[] = [];
   for (const runs of perSession.values()) {
-    for (const run of runs ?? []) if (run) all.push(run);
+    for (const run of runs ?? []) if (run && isLive(run)) live.push(run);
   }
-  // sortShellRuns puts live first, so a cap can only ever cut history.
-  const kept = sortShellRuns(all).slice(0, Math.max(0, max));
+  const kept = sortShellRuns(live).slice(0, Math.max(0, max));
   const spread = new Set(kept.map((r) => r.sessionId)).size > 1;
   return kept.map((run) => {
     const label = labels.get(run.sessionId);
@@ -152,34 +182,54 @@ export function pickShellRows(
       ...(spread && label !== undefined && label !== ''
         ? { sessionLabel: label }
         : {}),
+      ...(run.outcome === 'running' && waiting.has(run.sessionId)
+        ? { awaiting: true as const }
+        : {}),
     };
   });
 }
 
-/** `;shell;` + the outcome (+ `;live;`, + `;output;` when there is a file to
- *  open). Through the repo's own token builder — the wrapping semicolons are
- *  what stop a `viewItem =~ /;ok;/` clause half-matching a longer token. */
-export function shellContextValue(run: ShellRun): string {
-  return contextValueOf(shellRunTokens(run));
+/** `;shell;` + the outcome (+ `;live;`, + `;awaiting;` on a call blocked at a
+ *  prompt, + `;output;` when there is a file to open). Through the repo's own
+ *  token builder — the wrapping semicolons are what stop a `viewItem =~ /;ok;/`
+ *  clause half-matching a longer token. */
+export function shellContextValue(run: ShellRun, awaiting = false): string {
+  return contextValueOf(shellRunTokens(run, awaiting));
+}
+
+/** How many commands are executing right now, background jobs included and
+ *  calls awaiting approval excluded. This is the badge. */
+export function countRunning(rows: readonly ShellRow[]): number {
+  let n = 0;
+  for (const row of rows ?? []) {
+    if (row && isLive(row.run) && row.awaiting !== true) n++;
+  }
+  return n;
 }
 
 /**
- * The view's own subtitle: `2 running`, `1 running · 1 background`, or nothing.
+ * The view's own subtitle: `2 running`, `1 running · 1 background`,
+ * `1 awaiting approval`, or nothing.
  *
  * Nothing when nothing is live, deliberately — a header that permanently reads
  * "0 running" is a header nobody reads, and the point of putting the count up
  * there is that it MEANS something on the day it appears.
  */
-export function shellsViewDescription(runs: readonly ShellRun[]): string {
+export function shellsViewDescription(rows: readonly ShellRow[]): string {
   let running = 0;
   let background = 0;
-  for (const run of runs ?? []) {
-    if (run?.outcome === 'running') running++;
-    else if (run?.outcome === 'background') background++;
+  let awaiting = 0;
+  for (const row of rows ?? []) {
+    const run = row?.run;
+    if (run?.outcome === 'running') {
+      if (row.awaiting === true) awaiting++;
+      else running++;
+    } else if (run?.outcome === 'background') background++;
   }
   const parts: string[] = [];
   if (running > 0) parts.push(`${running} running`);
   if (background > 0) parts.push(`${background} background`);
+  if (awaiting > 0) parts.push(`${awaiting} awaiting approval`);
   return parts.join(' · ');
 }
 
@@ -213,6 +263,7 @@ export class ShellsViewProvider implements vscode.TreeDataProvider<ShellRow> {
   scan(): ShellRow[] {
     const perSession = new Map<string, readonly ShellRun[]>();
     const labels = new Map<string, string>();
+    const waiting = new Set<string>();
     let sessions: readonly ShellSessionInfo[] = [];
     try {
       sessions = this.deps.sessions() ?? [];
@@ -226,6 +277,7 @@ export class ShellsViewProvider implements vscode.TreeDataProvider<ShellRow> {
       if (session.transcriptPath === '') continue;
       seen.add(session.id);
       labels.set(session.id, session.label ?? '');
+      if (session.waiting === true) waiting.add(session.id);
       if (session.cwd !== undefined && session.cwd !== '') {
         this.cwds.set(session.id, session.cwd);
       }
@@ -247,7 +299,7 @@ export class ShellsViewProvider implements vscode.TreeDataProvider<ShellRow> {
     for (const id of [...this.cwds.keys()]) {
       if (!seen.has(id)) this.cwds.delete(id);
     }
-    this.rows = pickShellRows(perSession, labels);
+    this.rows = pickShellRows(perSession, labels, { waiting });
     return this.rows;
   }
 
@@ -256,10 +308,10 @@ export class ShellsViewProvider implements vscode.TreeDataProvider<ShellRow> {
     return this.rows;
   }
 
-  /** How many commands are executing right now, background jobs included.
-   *  This is the badge. */
+  /** How many commands are executing right now, background jobs included and
+   *  calls awaiting approval excluded. This is the badge. */
   liveCount(): number {
-    return this.rows.filter((row) => isLive(row.run)).length;
+    return countRunning(this.rows);
   }
 
   refresh(): void {
@@ -286,17 +338,20 @@ export class ShellsViewProvider implements vscode.TreeDataProvider<ShellRow> {
     // re-sorts as things finish must not make the workbench treat a row that
     // moved as a row that appeared.
     item.id = `shell:${run.id}`;
-    item.iconPath = new vscode.ThemeIcon(shellRunIconId(run));
-    item.contextValue = shellContextValue(run);
+    const awaiting = row.awaiting === true;
+    item.iconPath = new vscode.ThemeIcon(shellRunIconId(run, awaiting));
+    item.contextValue = shellContextValue(run, awaiting);
     item.description = shellRunDetail({
       run,
       now,
+      awaiting,
       ...(row.sessionLabel === undefined ? {} : { sessionLabel: row.sessionLabel }),
     });
     const cwd = this.cwds.get(run.sessionId);
     item.tooltip = shellRunTooltip({
       run,
       now,
+      awaiting,
       ...(row.sessionLabel === undefined ? {} : { sessionLabel: row.sessionLabel }),
       ...(cwd === undefined ? {} : { cwd }),
     });
@@ -337,7 +392,7 @@ export interface ShellsViewController extends DisposableLike {
 
 /**
  * createTreeView(SHELLS_VIEW_ID), a scan on every roster tick, and a
- * one-second clock while something is live and the view is on screen.
+ * one-second clock while the view has rows and is on screen.
  *
  * TWO CADENCES, because the two things being kept true have different costs.
  * The SCAN is what finds a new command and what the badge is computed from, so
@@ -345,7 +400,7 @@ export interface ShellsViewController extends DisposableLike {
  * tick, which is the extension's existing heartbeat, and adds a stat plus a
  * few appended kilobytes per live session to it. The CLOCK only advances
  * numbers that are already on screen, so it is pure waste when nothing is
- * running or nobody is looking, and it stops in both cases.
+ * listed or nobody is looking, and it stops in both cases.
  */
 export function registerShellsView(deps: ShellDeps): ShellsViewController {
   const provider = new ShellsViewProvider(deps);
@@ -385,11 +440,13 @@ export function registerShellsView(deps: ShellDeps): ShellsViewController {
       logError('shellsView.badge', err);
     }
     try {
-      view.description = shellsViewDescription(rows.map((r) => r.run));
+      view.description = shellsViewDescription(rows);
     } catch (err) {
       logError('shellsView.description', err);
     }
-    schedule(live > 0);
+    // Rows, not `live`: a call awaiting approval has a clock too — how long
+    // the prompt has been sitting there — and it is not in the badge count.
+    schedule(rows.length > 0);
   };
 
   /** Start or stop the clock. Never two timers, and never one that outlives

@@ -1,9 +1,10 @@
 // test/shellsView.test.ts — the Shells view: rows, counts, and the manifest.
 //
 // The provider is TreeDataProvider boilerplate over toolShells.ts (tested next
-// door) plus two decisions of its own — which runs make the list, and whether
-// a row says which session it came from. Those are pure functions here, and
-// they are what this file pins.
+// door) plus three decisions of its own — which runs make the list (the live
+// ones, and only those), whether a row says which session it came from, and
+// when an unanswered call is a prompt rather than a process. Those are pure
+// functions here, and they are what this file pins.
 
 import { describe, expect, it } from 'vitest';
 import * as fs from 'node:fs';
@@ -12,17 +13,20 @@ import * as path from 'node:path';
 import {
   MAX_ROWS,
   SHELLS_VIEW_ID,
+  countRunning,
   pickShellRows,
   shellContextValue,
   shellsViewDescription,
 } from '../src/shellsView';
+import type { ShellRow } from '../src/shellsView';
 import type { ShellRun } from '../src/toolShells';
 
 const A = '0f00000a-0000-4000-8000-00000000000a';
 const B = '0f00000b-0000-4000-8000-00000000000b';
 const NOW = 1_785_160_000_000;
 
-function run(id: string, over: Partial<ShellRun> = {}): ShellRun {
+/** A finished run — the kind the view no longer lists. */
+function done(id: string, over: Partial<ShellRun> = {}): ShellRun {
   return {
     id,
     sessionId: A,
@@ -34,6 +38,22 @@ function run(id: string, over: Partial<ShellRun> = {}): ShellRun {
   };
 }
 
+/** A run still executing. */
+function live(id: string, over: Partial<ShellRun> = {}): ShellRun {
+  return {
+    id,
+    sessionId: A,
+    command: `sleep ${id}`,
+    startedAt: NOW,
+    outcome: 'running',
+    ...over,
+  };
+}
+
+function row(run: ShellRun, over: Partial<ShellRow> = {}): ShellRow {
+  return { kind: 'shell', run, id: run.sessionId, ...over };
+}
+
 const labels = new Map([
   [A, 'the parser fix'],
   [B, 'the release'],
@@ -41,27 +61,50 @@ const labels = new Map([
 
 describe('pickShellRows', () => {
   it('carries the SESSION id as `id`, so every session verb still works', () => {
-    const rows = pickShellRows(new Map([[A, [run('toolu_1')]]]), labels);
+    const rows = pickShellRows(new Map([[A, [live('toolu_1')]]]), labels);
     // Not the run's id: `sessionIdFromArg` reads `.id`, and Focus, Fork and
     // Rename all reach this view through it unchanged.
     expect(rows[0]?.id).toBe(A);
     expect(rows[0]?.run.id).toBe('toolu_1');
   });
 
+  // The list is the CLI's own "1 shell running" indicator across every
+  // session, not a history: what ran is in the conversation, what is running
+  // is the thing nothing else shows.
+  it('lists what is live and nothing that has finished', () => {
+    const rows = pickShellRows(
+      new Map([
+        [
+          A,
+          [
+            done('ok'),
+            done('bad', { outcome: 'failed', exitCode: 1 }),
+            done('no', { outcome: 'denied' }),
+            live('fg'),
+            live('bg', { outcome: 'background', outputFile: '/tmp/bg.output' }),
+          ],
+        ],
+      ]),
+      labels,
+    );
+    expect(rows.map((r) => r.run.id).sort()).toEqual(['bg', 'fg']);
+  });
+
   // One conversation means the same word on every row — a column of noise.
   it('leaves the session name off when there is only one session', () => {
     const rows = pickShellRows(
-      new Map([[A, [run('toolu_1'), run('toolu_2')]]]),
+      new Map([[A, [live('toolu_1'), live('toolu_2')]]]),
       labels,
     );
+    expect(rows).toHaveLength(2);
     expect(rows.every((r) => r.sessionLabel === undefined)).toBe(true);
   });
 
   it('puts the session name on every row once the list spans two', () => {
     const rows = pickShellRows(
       new Map([
-        [A, [run('toolu_1')]],
-        [B, [run('toolu_2', { sessionId: B })]],
+        [A, [live('toolu_1')]],
+        [B, [live('toolu_2', { sessionId: B })]],
       ]),
       labels,
     );
@@ -71,34 +114,52 @@ describe('pickShellRows', () => {
     ]);
   });
 
-  it('interleaves two sessions by time rather than grouping them', () => {
+  it('interleaves two sessions by time rather than grouping them, newest first', () => {
     const rows = pickShellRows(
       new Map([
-        [A, [run('a1', { endedAt: NOW + 100 }), run('a2', { endedAt: NOW + 300 })]],
-        [B, [run('b1', { sessionId: B, endedAt: NOW + 200 })]],
+        [A, [live('a1', { startedAt: NOW + 100 }), live('a2', { startedAt: NOW + 300 })]],
+        [B, [live('b1', { sessionId: B, startedAt: NOW + 200 })]],
       ]),
       labels,
     );
     expect(rows.map((r) => r.run.id)).toEqual(['a2', 'b1', 'a1']);
   });
 
-  // The cap exists so six sessions of history do not become 360 rows of
-  // `git status`. It must never be what removes a running command.
-  it('caps the list without ever dropping something that is running', () => {
-    const finished = Array.from({ length: 40 }, (_, i) =>
-      run(`done${i}`, { endedAt: NOW + i }),
+  // The CLI writes the call before it asks for permission, so an unanswered
+  // call in a session the roster reports blocked is the thing the prompt is
+  // about. It is worth a row — you can see what Claude wants to run — but not
+  // a spinner, and not a place in the running count.
+  it('marks a running call in a blocked session as awaiting approval', () => {
+    const rows = pickShellRows(
+      new Map([
+        [A, [live('asked')]],
+        [B, [live('going', { sessionId: B })]],
+      ]),
+      labels,
+      { waiting: new Set([A]) },
     );
-    const live = run('live', { outcome: 'running', endedAt: undefined });
-    const rows = pickShellRows(new Map([[A, [...finished, live]]]), labels, 5);
-    expect(rows).toHaveLength(5);
-    expect(rows[0]?.run.id).toBe('live');
+    const byId = new Map(rows.map((r) => [r.run.id, r]));
+    expect(byId.get('asked')?.awaiting).toBe(true);
+    expect(byId.get('going')?.awaiting).toBeUndefined();
   });
 
-  it('caps at MAX_ROWS by default', () => {
+  // A detached job is up regardless of what its session is doing now: the
+  // prompt the session is blocked on is about something else.
+  it('leaves a background job alone in a blocked session', () => {
+    const rows = pickShellRows(
+      new Map([[A, [live('bg', { outcome: 'background' })]]]),
+      labels,
+      { waiting: new Set([A]) },
+    );
+    expect(rows[0]?.awaiting).toBeUndefined();
+  });
+
+  it('caps the list', () => {
     const many = Array.from({ length: MAX_ROWS + 25 }, (_, i) =>
-      run(`r${i}`, { endedAt: NOW + i }),
+      live(`r${i}`, { startedAt: NOW + i }),
     );
     expect(pickShellRows(new Map([[A, many]]), labels)).toHaveLength(MAX_ROWS);
+    expect(pickShellRows(new Map([[A, many]]), labels, { max: 5 })).toHaveLength(5);
   });
 
   it('survives a session that reported nothing', () => {
@@ -109,36 +170,49 @@ describe('pickShellRows', () => {
 
 describe('the row’s context value', () => {
   it('wraps its tokens in semicolons, so a `when` clause cannot half-match', () => {
-    expect(shellContextValue(run('toolu_1'))).toBe(';shell;ok;');
-    expect(shellContextValue(run('toolu_1', { outcome: 'running' }))).toBe(
-      ';shell;running;live;',
+    expect(shellContextValue(done('toolu_1'))).toBe(';shell;ok;');
+    expect(shellContextValue(live('toolu_1'))).toBe(';shell;running;live;');
+  });
+
+  it('marks a call awaiting approval, and only a running one', () => {
+    expect(shellContextValue(live('toolu_1'), true)).toBe(
+      ';shell;running;live;awaiting;',
+    );
+    expect(shellContextValue(live('bg', { outcome: 'background' }), true)).toBe(
+      ';shell;background;live;',
     );
   });
 
   it('marks a row whose output is on disk, which is what puts Open Output on it', () => {
     const value = shellContextValue(
-      run('toolu_1', { outcome: 'background', outputFile: '/tmp/x.output' }),
+      live('toolu_1', { outcome: 'background', outputFile: '/tmp/x.output' }),
     );
     expect(value).toContain(';output;');
   });
 });
 
-describe('the view’s subtitle', () => {
-  it('counts what is up, running and background apart', () => {
-    expect(
-      shellsViewDescription([
-        run('a', { outcome: 'running' }),
-        run('b', { outcome: 'running' }),
-        run('c', { outcome: 'background' }),
-        run('d'),
-      ]),
-    ).toBe('2 running · 1 background');
+describe('the badge and the view’s subtitle', () => {
+  const rows = [
+    row(live('a')),
+    row(live('b')),
+    row(live('c', { outcome: 'background' })),
+    row(live('d'), { awaiting: true }),
+  ];
+
+  it('counts what is executing — background included, awaiting excluded', () => {
+    expect(countRunning(rows)).toBe(3);
+    expect(countRunning([])).toBe(0);
+  });
+
+  it('counts running, background and awaiting apart', () => {
+    expect(shellsViewDescription(rows)).toBe(
+      '2 running · 1 background · 1 awaiting approval',
+    );
   });
 
   // A header that permanently reads "0 running" is a header nobody reads; the
   // point of the count is that it means something on the day it appears.
   it('says nothing at all when nothing is up', () => {
-    expect(shellsViewDescription([run('a'), run('b', { outcome: 'failed' })])).toBe('');
     expect(shellsViewDescription([])).toBe('');
   });
 });

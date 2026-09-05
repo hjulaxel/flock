@@ -36,20 +36,28 @@
 //           for is a long one.
 //
 // The pairing rule the whole parse rests on: every `tool_use` eventually gets
-// a `tool_result` carrying its id. Verified over 6 890 Bash calls across the
-// transcripts on this machine — zero orphans, interruptions and denials
-// included. So a `tool_use` with no result IS a command still executing, and
-// that is a fact rather than an inference.
+// a `tool_result` carrying its id. Verified over 30 214 Bash calls across the
+// transcripts on this machine — two orphans, both in sessions that died
+// mid-command weeks ago, interruptions and denials otherwise all answered. So
+// a `tool_use` with no result IS a command still executing, with one guard for
+// the two: the API will not accept a new assistant turn while a tool call is
+// unanswered, so an assistant record from a LATER message than the call's
+// settles it (see ShellRunSet.settleUnanswered). Without that guard a session
+// that crashed under a command and was resumed would show the command running
+// for the rest of its life.
 //
-// READS ARE INCREMENTAL, not a fixed tail. usage.ts re-reads a 96 kB tail per
-// rebuild and can afford to because the facts it wants are always in the last
-// few records; this view wants a HISTORY, and a session that just printed 200 kB
-// of test output would push every earlier command out of any tail worth
-// re-reading on a timer. So each session is opened once at a bounded tail and
-// thereafter only the bytes appended since the last look are parsed — steady
-// state is a stat plus a few kB, and the history accumulates in memory instead
-// of being re-derived. A transcript that SHRANK (a compaction rewrote it) is
-// detected on size and re-seeded from the tail.
+// THE FIRST LOOK READS THE WHOLE FILE; after that only what was appended.
+// usage.ts re-reads a 96 kB tail per rebuild because the facts it wants are
+// always in the last few records. The fact this view wants — is anything still
+// running — is NOT: a dev server started in a session's first minute is still
+// up an hour and ten megabytes later, and its record is at the top of the file.
+// A tail would lose it on every window reload while the CLI's own indicator
+// kept saying "1 shell running", which is the exact disagreement this view
+// exists to remove. Measured on the largest transcript on the machine
+// (13.5 MB): read 25 ms, parse 15 ms, once per session per window. Thereafter
+// the steady state is a stat plus the few kB appended since the last look. A
+// transcript that SHRANK (a compaction rewrote it) is detected on size and
+// re-read in full, which is idempotent because runs are keyed by tool_use id.
 //
 // No vscode import, every effect injectable through plain fs: the parser and
 // the formatting are the interesting parts and the tests bite there.
@@ -61,22 +69,17 @@ import { logError } from './log';
 
 // -------------------------------------------------------------- dimensions
 
-/** How much of a transcript to read the FIRST time a session is seen.
+/** The most of a transcript one read will take, first look or catch-up.
  *
- *  256 kB, and the number is a history budget rather than a correctness one:
- *  everything the view must get right (what is running now) is in the last few
- *  records, and this window only decides how far back the list already reaches
- *  the moment you open it. Bigger is paid exactly once per session per window,
- *  but it is paid on the UI thread, and past a couple of hundred kilobytes it
- *  buys commands old enough that the transcript itself is the better place to
- *  look for them. */
-export const SEED_TAIL_BYTES = 256 * 1024;
-
-/** Never parse more than this in one incremental step. A session that wrote
- *  8 MB while the view was collapsed gets re-seeded from its tail instead —
- *  the alternative is a multi-megabyte parse on the tick where you expanded
- *  the view, to recover history the cap below would discard anyway. */
-export const MAX_STEP_BYTES = 2 * 1024 * 1024;
+ *  64 MB, and it is a safety rail rather than a budget: the first look reads
+ *  the WHOLE file on purpose (see the header — a background job's record is
+ *  wherever it is), and every transcript on the machine this was written on is
+ *  under 14 MB. A file past the rail is read from its tail, its first partial
+ *  line dropped, and a command above the cut is the one thing this view can
+ *  then miss. The same rail bounds a catch-up: a session that appended more
+ *  than this between two looks is re-read from the tail rather than parsed
+ *  forward in one step. */
+export const MAX_SEED_BYTES = 64 * 1024 * 1024;
 
 /** Cap on a newline-less tail we are willing to hold between reads. A single
  *  transcript record can be large (a tool result with a lot of stdout in it),
@@ -153,6 +156,12 @@ export interface ShellRun {
   outputFile?: string;
   /** Run by a sub-agent rather than by the conversation itself. */
   sidechain?: true;
+  /** The API message the call was part of (`msg_…`). One assistant message is
+   *  written as several records — one per content block, all carrying this id
+   *  — so it is what tells "another block of the same turn" from "the next
+   *  turn", and the next turn is what proves an unanswered call will never be
+   *  answered. */
+  messageId?: string;
 }
 
 // -------------------------------------------------------------- formatting
@@ -265,11 +274,18 @@ export function shellRunDetail(input: {
   now: number;
   sessionLabel?: string;
   maxCommandChars?: number;
+  /** The session is blocked on a permission prompt, so an unanswered call is
+   *  a command Claude ASKED for and nobody has let run yet. See `awaiting` on
+   *  shellsView.ShellRow. */
+  awaiting?: boolean;
 }): string {
   const { run, now } = input;
   const parts: string[] = [];
   const elapsed = formatDuration(runElapsedMs(run, now));
   if (elapsed !== '') parts.push(elapsed);
+  if (input.awaiting === true && run.outcome === 'running') {
+    parts.push('awaiting approval');
+  }
   if (run.outcome === 'background') parts.push('background');
   if (run.outcome === 'denied') parts.push('denied');
   if (run.outcome === 'failed') {
@@ -306,16 +322,28 @@ export function shellRunTooltip(input: {
   now: number;
   sessionLabel?: string;
   cwd?: string;
+  awaiting?: boolean;
 }): string {
   const { run, now } = input;
+  const awaiting = input.awaiting === true && run.outcome === 'running';
   const lines: string[] = [];
   lines.push(run.command === '' ? '(no command)' : run.command);
   lines.push('');
-  lines.push(outcomeWord(run));
+  lines.push(
+    awaiting
+      ? 'asked, not running — the session is waiting for permission'
+      : outcomeWord(run),
+  );
   if (run.reason !== undefined && run.reason !== '') lines.push(run.reason);
   const elapsed = formatDuration(runElapsedMs(run, now));
   if (elapsed !== '') {
-    lines.push(isLive(run) ? `running for ${elapsed}` : `took ${elapsed}`);
+    lines.push(
+      awaiting
+        ? `waiting for ${elapsed}`
+        : isLive(run)
+          ? `running for ${elapsed}`
+          : `took ${elapsed}`,
+    );
   }
   if (run.description !== undefined && run.description !== '') {
     lines.push(run.description);
@@ -355,14 +383,17 @@ export function outcomeWord(run: ShellRun): string {
  * The glyph.
  *
  * `loading~spin` on a running row, which the workbench animates: the one thing
- * on this view that changes on its own should look like it. Everything else is
- * a still, and the two failure glyphs are kept apart on purpose — `error` says
- * the script broke, `circle-slash` says it was refused and never started.
+ * on this view that changes on its own should look like it. A row awaiting
+ * approval does NOT spin — nothing is happening, which is the point of telling
+ * it apart — and wears `shield`, the workbench's permission glyph. Everything
+ * else is a still, and the two failure glyphs are kept apart on purpose —
+ * `error` says the script broke, `circle-slash` says it was refused and never
+ * started.
  */
-export function shellRunIconId(run: ShellRun): string {
+export function shellRunIconId(run: ShellRun, awaiting = false): string {
   switch (run.outcome) {
     case 'running':
-      return 'loading~spin';
+      return awaiting ? 'shield' : 'loading~spin';
     case 'background':
       return 'server-process';
     case 'ok':
@@ -375,12 +406,14 @@ export function shellRunIconId(run: ShellRun): string {
   }
 }
 
-/** `;shell;` plus the outcome, and `;background;` on a detached run so the
- *  menu can offer its output file. Wrapping semicolons through the repo's own
- *  token rule, so a `viewItem =~ /;ok;/` clause cannot half-match. */
-export function shellRunTokens(run: ShellRun): ContextToken[] {
+/** `;shell;` plus the outcome, `;live;` while the process is up, `;awaiting;`
+ *  on a call blocked at a permission prompt, and `;output;` on a detached run
+ *  so the menu can offer its output file. Wrapping semicolons through the
+ *  repo's own token rule, so a `viewItem =~ /;ok;/` clause cannot half-match. */
+export function shellRunTokens(run: ShellRun, awaiting = false): ContextToken[] {
   const tokens: ContextToken[] = ['shell', run.outcome];
   if (isLive(run)) tokens.push('live');
+  if (awaiting && run.outcome === 'running') tokens.push('awaiting');
   if (run.outputFile !== undefined && run.outputFile !== '') tokens.push('output');
   return tokens;
 }
@@ -454,6 +487,15 @@ function textOf(content: unknown): string {
     }
   }
   return parts.join('\n');
+}
+
+/** `rec.message.id` — the API message id shared by every record of one
+ *  assistant turn — or nothing. */
+function messageIdOf(rec: Record<string, unknown>): string | undefined {
+  const message = rec['message'];
+  if (!isRecord(message)) return undefined;
+  const id = message['id'];
+  return typeof id === 'string' && id !== '' ? id : undefined;
 }
 
 /** The blocks of `rec.message.content`, or none. */
@@ -586,6 +628,11 @@ export class ShellRunSet {
     return this.runs.size;
   }
 
+  /** Whether a call with this id is known — answered or not. */
+  has(id: string): boolean {
+    return this.runs.has(id);
+  }
+
   /** Feed one transcript record. Unknown shapes are ignored, never fatal. */
   ingest(rec: Record<string, unknown>): void {
     const type = rec['type'];
@@ -598,6 +645,9 @@ export class ShellRunSet {
 
   private ingestAssistant(rec: Record<string, unknown>): void {
     const at = epochOf(rec);
+    const messageId = messageIdOf(rec);
+    const sidechain = rec['isSidechain'] === true;
+    this.settleUnanswered(messageId, sidechain, at);
     for (const block of blocksOf(rec)) {
       if (block['type'] !== 'tool_use' || block['name'] !== 'Bash') continue;
       const id = block['id'];
@@ -616,11 +666,46 @@ export class ShellRunSet {
         startedAt: at,
         outcome: 'running',
         ...(description === undefined ? {} : { description }),
-        ...(rec['isSidechain'] === true ? { sidechain: true as const } : {}),
+        ...(sidechain ? { sidechain: true as const } : {}),
+        ...(messageId === undefined ? {} : { messageId }),
       };
       this.runs.set(id, run);
     }
     this.trim();
+  }
+
+  /**
+   * The orphan guard: an assistant record from a LATER message ends every call
+   * of the same chain that is still waiting for its result.
+   *
+   * The API refuses a new assistant turn while a `tool_use` in the previous
+   * one has no `tool_result`, so the CLI cannot have written this record
+   * unless every earlier call was answered — and if the answer is not in the
+   * file, the session died under the command and was resumed. Two such calls
+   * exist in the 30 214 on this machine; without this they would spin forever.
+   *
+   * Two things are deliberately NOT settled. Another block of the SAME message
+   * — one assistant turn lands as one record per content block, all sharing
+   * `message.id`, and a turn that fires four commands writes four records
+   * while all four run. And the other chain: a sub-agent's records interleave
+   * with the conversation's, and neither proves anything about the other.
+   * A record with no message id, or a run without one, proves nothing either
+   * and settles nothing.
+   */
+  private settleUnanswered(
+    messageId: string | undefined,
+    sidechain: boolean,
+    at: number,
+  ): void {
+    if (messageId === undefined) return;
+    for (const run of this.runs.values()) {
+      if (run.outcome !== 'running') continue;
+      if ((run.sidechain === true) !== sidechain) continue;
+      if (run.messageId === undefined || run.messageId === messageId) continue;
+      run.outcome = 'failed';
+      run.reason = 'no result was recorded — the conversation moved on';
+      run.endedAt = Number.isFinite(at) ? at : run.startedAt;
+    }
   }
 
   private ingestUser(rec: Record<string, unknown>): void {
@@ -797,8 +882,8 @@ export interface ShellSessionRef {
  * The alternative — re-read a fixed tail every tick, the way usage.ts does —
  * was measured against what this view actually needs and fails it in both
  * directions. It costs a full window parse per live session per repaint, and
- * it still cannot show a history longer than the window, so a session that
- * printed a megabyte of test output would forget everything it ran before.
+ * a window cannot see a command that started before it, so a background job
+ * older than the window would be invisible for as long as it ran.
  *
  * `fs` is injected so the tests can drive this over a fake filesystem without
  * writing transcripts to disk.
@@ -838,24 +923,23 @@ export class ShellRunsTracker {
     if (size < 0) return tail.set.list();
     if (size === tail.offset) return tail.set.list(); // nothing appended
 
-    // Three cases seek to a bounded tail instead of reading forward: the FIRST
-    // look at this session, a file that SHRANK (a compaction rewrote it in
-    // place, so the old offset now points into the middle of a different
-    // record), and a jump too big to parse in one tick (the view was collapsed
-    // while the session worked). All three land on the same window, and none
-    // of them needs to discard what is already known: `ingest` keys runs by
-    // their tool_use id and ignores an id it has already seen, so re-reading
-    // records is idempotent — which is what lets a compaction keep its history
-    // rather than blank the view.
+    // Three cases read the file from the top instead of from where the last
+    // look stopped: the FIRST look at this session, a file that SHRANK (a
+    // compaction rewrote it in place, so the old offset now points into the
+    // middle of a different record), and a jump past the rail (the extension
+    // host was suspended while the session worked). None of them discards
+    // what is already known: `ingest` keys runs by their tool_use id and
+    // ignores an id it has already seen, so re-reading records is idempotent
+    // — which is what lets a compaction keep its rows rather than blank the
+    // view. "From the top" is bounded by MAX_SEED_BYTES; a file past the rail
+    // starts at a cut record, whose fragment is dropped rather than guessed at.
     const first = tail.offset === 0 && tail.pending === '';
-    let seeding = false;
-    if (first || size < tail.offset || size - tail.offset > MAX_STEP_BYTES) {
-      const from = Math.max(0, size - SEED_TAIL_BYTES);
+    let cutFirstLine = false;
+    if (first || size < tail.offset || size - tail.offset > MAX_SEED_BYTES) {
+      const from = Math.max(0, size - MAX_SEED_BYTES);
       tail.offset = from;
       tail.pending = '';
-      // A window that starts past byte 0 cut a record in half; its first line
-      // is a fragment and is dropped rather than guessed at.
-      seeding = from > 0;
+      cutFirstLine = from > 0;
     }
 
     let chunk: string;
@@ -877,7 +961,7 @@ export class ShellRunsTracker {
       return tail.set.list();
     }
     tail.pending = text.slice(cut + 1);
-    feed(tail.set, text.slice(0, cut), seeding);
+    feed(tail.set, text.slice(0, cut), cutFirstLine);
     return tail.set.list();
   }
 
@@ -896,7 +980,7 @@ export class ShellRunsTracker {
   private read(file: string, from: number, want: number): string {
     const fd = this.io.openSync(file, 'r');
     try {
-      const size = Math.min(want, MAX_STEP_BYTES);
+      const size = Math.min(want, MAX_SEED_BYTES);
       if (size <= 0) return '';
       const buf = Buffer.alloc(size);
       const read = this.io.readSync(fd, buf, 0, size, from);
