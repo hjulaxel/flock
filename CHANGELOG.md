@@ -55,6 +55,11 @@ All notable changes to Flock are recorded here. The format follows
   older than 48 hours, as it did by default. The number only ever decided which
   checkboxes started ticked in a dialog that lets you untick them, which is not
   worth a row in the editor. A value left in `settings.json` does nothing.
+- **`lineage.pollIntervalMs`.** The roster is polled every three seconds, as it
+  was by default. With the instant-update hooks installed the poll is a
+  fallback, and without them three seconds is the tempo the tree was built
+  around; a tuning knob for it was one more row nobody should turn. A value
+  left in `settings.json` does nothing.
 
 ### Changed
 

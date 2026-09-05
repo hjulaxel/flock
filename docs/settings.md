@@ -45,7 +45,7 @@ else, so change the words there and rerun the script rather than editing here.
 
 <!-- generated:settings:start -->
 
-Flock contributes **49 settings**. **17** of them are switches that ship off, and **20** are tagged *advanced* — paths, timings, diagnostics and previews, the rows `@tag:advanced` finds in the Settings editor. Advanced rows are marked below and sit last in their category.
+Flock contributes **48 settings**. **17** of them are switches that ship off, and **19** are tagged *advanced* — paths, timings, diagnostics and previews, the rows `@tag:advanced` finds in the Settings editor. Advanced rows are marked below and sit last in their category.
 
 ### Sessions
 
@@ -137,7 +137,6 @@ Flock contributes **49 settings**. **17** of them are switches that ship off, an
 | --- | --- | --- |
 | `lineage.claudeBinary` | `""` | Advanced — Full path to the claude CLI. Empty = search PATH. |
 | `lineage.codexBinary` | `""` | Advanced — Full path to the codex CLI, used by sessions on a Codex / OpenAI account. Empty = search PATH, then the usual install roots (~/.codex/bin, the active nvm node version, ~/.local/bin, Homebrew). Worth setting explicitly if you use a node version manager, since VS Code often does not inherit its PATH. |
-| `lineage.pollIntervalMs` | `3000` | Advanced — How often to poll `claude agents --json` (milliseconds). |
 
 ### Hooks and verbs
 

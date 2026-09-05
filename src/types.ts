@@ -1495,7 +1495,6 @@ export type CommandId = (typeof COMMANDS)[keyof typeof COMMANDS];
 
 export const CONFIG_SECTION = 'lineage';
 export const CONFIG_KEYS = {
-  pollIntervalMs: 'pollIntervalMs',
   claudeBinary: 'claudeBinary',
   /** The Codex CLI, for sessions launched on a Codex/OpenAI account. Its own
    *  key rather than a per-provider map because the two binaries are found by

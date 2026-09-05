@@ -108,7 +108,6 @@ describe('the settings editor: categories', () => {
 const ADVANCED = [
   'lineage.claudeBinary',
   'lineage.codexBinary',
-  'lineage.pollIntervalMs',
   'lineage.chat.autoCloseMinutes',
   'lineage.session.detachGraceMinutes',
   'lineage.session.reloadGraceSeconds',

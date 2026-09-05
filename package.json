@@ -2238,17 +2238,6 @@
             "tags": [
               "advanced"
             ]
-          },
-          "lineage.pollIntervalMs": {
-            "type": "number",
-            "default": 3000,
-            "order": 3,
-            "minimum": 1000,
-            "maximum": 60000,
-            "description": "How often to poll `claude agents --json` (milliseconds).",
-            "tags": [
-              "advanced"
-            ]
           }
         }
       },

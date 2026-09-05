@@ -319,6 +319,10 @@ import { HooksManager } from './hooks';
 import { STATE_FILE_NAME, resolveStateDir } from './stateHome';
 import { AgentVerbsManager } from './agentVerbs';
 
+/** How often the roster is polled. A constant, not a setting: with the hooks
+ *  installed the poll is a fallback, and without them three seconds is the
+ *  tempo the tree was designed around — a knob here could only make the tree
+ *  slower or the CLI busier, so it was a knob nobody should turn. */
 const DEFAULT_POLL_INTERVAL_MS = 3000;
 /** workspaceState key holding this window's active project workspace. */
 const ACTIVE_WORKSPACE_KEY = 'lineage.activeWorkspace';
@@ -3030,7 +3034,7 @@ export async function activate(
       void store.appendChainMember(e.nodeId, e.sessionId);
     }
     // Stop is the turn ending, right now — the poll transition would say
-    // the same thing up to pollIntervalMs later. (`Notification` is claude
+    // the same thing up to one poll interval later. (`Notification` is claude
     // asking for the user, same urgency.)
     if (e.sessionId && (e.event === 'Stop' || e.event === 'Notification')) {
       noteSessionDone(e.sessionId);
@@ -7345,11 +7349,7 @@ export async function activate(
     return { ...result, entries: await rosterFilter.apply(result.entries) };
   };
 
-  poller = new RosterPoller(
-    fetchFiltered,
-    onResult,
-    numCfg(CONFIG_KEYS.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS),
-  );
+  poller = new RosterPoller(fetchFiltered, onResult, DEFAULT_POLL_INTERVAL_MS);
   context.subscriptions.push(poller);
   // start() already performs the immediate first fetch — a separate first tick
   // would only be coalesced away.
@@ -7364,7 +7364,6 @@ export async function activate(
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (!e.affectsConfiguration(CONFIG_SECTION)) return;
-      poller?.setIntervalMs(numCfg(CONFIG_KEYS.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS));
       syncHookWatcher();
       syncVerbsWatcher();
       // Flipping showArchived on must populate the index immediately rather
