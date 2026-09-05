@@ -34,6 +34,14 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Fixed
 
+- **A Windows `.cmd` shim launches through `cmd.exe`, quoted.** An npm install
+  puts `claude.cmd` on `PATH`, and a batch file is not something a terminal can
+  start: Windows only pretends, by silently prepending `cmd.exe` — the very
+  behaviour Node closed for CVE-2024-27980, and the reason the roster call
+  already wrapped the shim. The terminal launch handed the shim straight to the
+  pty with nothing quoted, so a session name with `&` in it was two commands.
+  It now runs `cmd /d /s /c` with the path and every argument quoted for cmd.
+  The native `claude.exe` never needed this and still gets none of it.
 - **Flock finds a CLI the editor's `PATH` does not show it.** The extension
   host inherits the environment the editor was launched with, which on a Mac
   opened from the Dock, a Snap, or a Windows whose installer edited `PATH` for

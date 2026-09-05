@@ -223,8 +223,10 @@ inside WSL, where tmux, `ps` and `/bin/sh` all exist and every row above reads
 *not yet* above degrades to what its row says, and an install verb that could
 only refuse there is hidden from the Command Palette. Install the CLI
 with the [native installer](https://code.claude.com/docs/en/setup), which puts
-`claude.exe` on your `PATH`; Flock prefers it over the `.cmd` shim an npm
-install leaves, which needs a command processor between it and the terminal.
+`claude.exe` on your `PATH`. Flock prefers it over the `.cmd` shim an npm
+install leaves: the shim is a batch file, so Flock runs it through `cmd.exe`
+and quotes for it, and a prompt naming an environment variable as `%NAME%` is
+expanded on the way through — the one thing the shim path cannot carry.
 
 **Linux.** Everything works, and paths compare exactly, the way the filesystem
 does — two directories whose names differ only in case are two directories to
