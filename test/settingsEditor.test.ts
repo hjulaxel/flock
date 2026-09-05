@@ -11,6 +11,7 @@
 
 import { describe, expect, it } from 'vitest';
 
+import { windowModelChoices } from '../src/recommend';
 import { contributedSettings, settingsCategories } from './manifest';
 
 /** The categories, in the order the editor should list them. Pinned as a
@@ -97,5 +98,106 @@ describe('the settings editor: categories', () => {
     const legacy = contributedSettings()['lineage.workspaces.enabled'];
     expect(legacy).toBeDefined();
     expect(legacy?.markdownDeprecationMessage).toContain('#lineage.mode#');
+  });
+});
+
+/** Tier D of design/settings-tiers.md §3 — paths, timings, diagnostics,
+ *  previews, and anything that needs a reload. Pinned by name: `@tag:advanced`
+ *  is the Advanced list, and a key that falls off it silently joins the
+ *  Preferences a first-time reader is meant to be able to read without it. */
+const ADVANCED = [
+  'lineage.claudeBinary',
+  'lineage.codexBinary',
+  'lineage.pollIntervalMs',
+  'lineage.chat.autoCloseMinutes',
+  'lineage.session.detachGraceMinutes',
+  'lineage.session.reloadGraceSeconds',
+  'lineage.sessionSwitching',
+  'lineage.showArchived',
+  'lineage.showPhantomRows',
+  'lineage.busyStaleMinutes',
+  'lineage.workspaces.resumeSessions',
+  'lineage.explorer.followProject',
+  'lineage.explorer.scope',
+  'lineage.runningBadge',
+  'lineage.groupSessionsByBranch',
+  'lineage.branchColors',
+  'lineage.git.worktreePath',
+  'lineage.git.sessionBranchDetail',
+  'lineage.preview.directoryModel',
+  'lineage.viewStyle',
+  'lineage.staleAfterHours',
+];
+
+describe('the settings editor: tags', () => {
+  it('tags every tier D key advanced, and nothing else', () => {
+    const settings = contributedSettings();
+    const tagged = Object.entries(settings)
+      .filter(([, p]) => p.tags?.includes('advanced'))
+      .map(([key]) => key)
+      .sort();
+    expect(tagged).toEqual([...ADVANCED].sort());
+  });
+
+  // VS Code's own tags where they apply: the editor draws its Preview badge
+  // for `preview`, and `usesOnlineServices` is its filter for settings that
+  // reach the network — which in Flock is exactly one.
+  it("carries VS Code's preview and usesOnlineServices tags on the two rows they describe", () => {
+    const settings = contributedSettings();
+    expect(settings['lineage.preview.directoryModel']?.tags).toContain('preview');
+    const online = Object.entries(settings)
+      .filter(([, p]) => p.tags?.includes('usesOnlineServices'))
+      .map(([key]) => key);
+    expect(online).toEqual(['lineage.git.pullRequests']);
+  });
+
+  // Within a category the visible rows come first, so a reader can stop at
+  // the first advanced one and have read everything that is a preference.
+  it('orders advanced rows after the visible ones inside every category', () => {
+    for (const category of settingsCategories()) {
+      const rows = Object.values(category.properties);
+      const firstAdvanced = rows.findIndex((p) => p.tags?.includes('advanced'));
+      if (firstAdvanced === -1) continue;
+      for (const row of rows.slice(firstAdvanced)) {
+        expect(row.tags, `${category.title}: a visible row below an advanced one`).toContain(
+          'advanced',
+        );
+      }
+    }
+  });
+});
+
+describe('the settings editor: enums say what they mean', () => {
+  it('gives every enum a label and a sentence per value', () => {
+    let enums = 0;
+    for (const [key, p] of Object.entries(contributedSettings())) {
+      if (p.enum === undefined) continue;
+      enums += 1;
+      expect(p.enumItemLabels, `${key} enumItemLabels`).toHaveLength(p.enum.length);
+      expect(p.enumDescriptions, `${key} enumDescriptions`).toHaveLength(p.enum.length);
+      // A label that is the value again is no label, and two values wearing
+      // one label cannot be told apart in the dropdown.
+      for (const label of p.enumItemLabels ?? []) {
+        expect(label.trim().length, key).toBeGreaterThan(0);
+        expect(p.enum, `${key}: label "${label}" is a raw value`).not.toContain(label);
+      }
+      expect(new Set(p.enumItemLabels).size, key).toBe(p.enum.length);
+    }
+    // The loop asserting nothing is the failure mode this guards against.
+    expect(enums).toBeGreaterThan(0);
+  });
+
+  // The window model's dropdown and the gear's picker are two spellings of one
+  // question, and the labels are how they are kept from disagreeing: each
+  // picker label must be readable in the dropdown's label for the same value.
+  it('labels lineage.mode with the words the window-model picker uses', () => {
+    const mode = contributedSettings()['lineage.mode'];
+    expect(mode?.enum).toBeDefined();
+    const labels = new Map(
+      (mode?.enum ?? []).map((value, at) => [value, mode?.enumItemLabels?.[at] ?? '']),
+    );
+    for (const choice of windowModelChoices({ mode: undefined, workspacesEnabled: true })) {
+      expect(labels.get(choice.id), choice.id).toContain(choice.label);
+    }
   });
 });
