@@ -8,6 +8,19 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Added
 
+- **The two taste questions are asked once, when they become real.** Nobody
+  can answer "what is a window" before they have lived in one, so instead of
+  sitting on the first-run checklist the two pickers are offered at the moment
+  each question first costs something, and at most once per install. The
+  first time a window in the one-folder-per-project model sends another
+  project's session to its own window, one message asks whether Flock should
+  switch this window between projects for you or keep one folder per window —
+  **Choose…** opens **Choose Window Model…**, **Not now** closes the question
+  for good. The first time a window's second session tab opens, one message
+  asks where sessions should open — **Choose…** opens **Choose Where Sessions
+  Open…**. Neither fires on activation or on a timer; dismissing either with
+  the X asks again next time, as every Flock notice does; and answering the
+  picker from the gear settles the question, so it is never asked afterwards.
 - **Choose Where Sessions Open… is a verb, and it has a fifth answer.** The
   surface picker — one pinned session tab, editor tabs, the Claude Code
   extension, the bottom terminal panel, or **Its own window** (each session as

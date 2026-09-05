@@ -37,10 +37,16 @@ import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 
 import { log, logError } from './log';
-import { recommendedPlan, surfaceChoices, windowModelChoices } from './recommend';
+import {
+  recommendedPlan,
+  surfaceChoices,
+  windowModelChoices,
+  windowModelOffer,
+} from './recommend';
 import { ADVANCED_SETTINGS_QUERY, SETTINGS_QUERY, statusFacts } from './status';
 import type { StatusAction, StatusFact } from './status';
 import type {
+  ContextualOfferId,
   RecommendedSetting,
   RecommendedStep,
   RecommendedStepId,
@@ -2191,6 +2197,10 @@ async function writeChoice<T extends TasteChoice>(
  */
 async function tasteVerb<T extends TasteChoice>(
   deps: CommandDeps,
+  /** The one-time offer this verb answers (`offerWindowModel`, and the
+   *  second-tab offer in extension.ts): a choice made from the gear or the
+   *  Status verb settles the question, so the offer must not ask it later. */
+  offer: ContextualOfferId,
   ask: (world: RecommendedWorld) => Promise<T | undefined>,
   words: {
     /** Said when the wiring cannot supply the world. */
@@ -2215,6 +2225,7 @@ async function tasteVerb<T extends TasteChoice>(
     return;
   }
   deps.refresh();
+  await deps.offers?.markAnswered(offer);
   vscode.window.setStatusBarMessage(words.receipt(choice.label), 5000);
 }
 
@@ -4395,22 +4406,66 @@ async function routeForeign(
   const node = deps.getForest().nodes.get(sessionId);
   const cwd = node?.cwd ?? deps.getRecord(sessionId)?.cwd;
   if (!outsideScope(deps.scopeDirs?.(), cwd)) return false;
-  if (await deps.focusWindowFor(sessionId)) return true;
-  if ((await deps.focusWindowForDir?.(cwd ?? '', sessionId)) === true) {
-    return true;
+  const claimants = matchProjects(deps.allProjects(), cwd);
+  if (
+    !(await deps.focusWindowFor(sessionId)) &&
+    (await deps.focusWindowForDir?.(cwd ?? '', sessionId)) !== true
+  ) {
+    // outsideScope proved the cwd known, so openTargetFor can never answer ''.
+    const target = openTargetFor(claimants, cwd);
+    const label = node?.label ?? shortId(sessionId);
+    const OPEN = 'Open in New Window';
+    const choice = await vscode.window.showInformationMessage(
+      `Flock: "${label}" is in ${target} — outside this window's folder. ` +
+        'Open that folder in its own window to work on it; this window is ' +
+        'never rearranged.',
+      OPEN,
+    );
+    if (choice === OPEN) await deps.openProject(target, true);
   }
-  // outsideScope proved the cwd known, so openTargetFor can never answer ''.
-  const target = openTargetFor(matchProjects(deps.allProjects(), cwd), cwd);
-  const label = node?.label ?? shortId(sessionId);
-  const OPEN = 'Open in New Window';
-  const choice = await vscode.window.showInformationMessage(
-    `Flock: "${label}" is in ${target} — outside this window's folder. ` +
-      'Open that folder in its own window to work on it; this window is ' +
-      'never rearranged.',
-    OPEN,
-  );
-  if (choice === OPEN) await deps.openProject(target, true);
+  // AFTER the routing, whichever tier did it: the person has just watched the
+  // model cost them a click, which is the moment the question is real.
+  await offerWindowModel(deps, claimants.length > 0);
   return true;
+}
+
+/**
+ * "What is a window?", asked ONCE, at the moment it becomes real — a folder
+ * window has just sent a project's session elsewhere.
+ *
+ * `windowModelOffer` (src/recommend.ts) decides; this draws the message and
+ * acts on the answer, on the terms every notice here keeps: "Choose…" stamps
+ * and runs the picker, "Not now" stamps, the X stamps nothing and the question
+ * comes back with the next routed session. A wiring without `offers` — every
+ * unit double — reads as already answered, so nothing here speaks in a test
+ * that did not ask for it. The stamp is per install (globalState, extension.ts)
+ * and the picker itself stamps it too (see `tasteVerb`), so a person who found
+ * the verb in the gear first is never asked a question they have answered.
+ */
+async function offerWindowModel(
+  deps: CommandDeps,
+  claimed: boolean,
+): Promise<void> {
+  const verdict = windowModelOffer({
+    mode: deps.lineageMode?.(),
+    claimed,
+    answered: deps.offers?.answered('windowModel') ?? true,
+  });
+  if (verdict !== 'offer') return;
+  const CHOOSE = 'Choose…';
+  const NOT_NOW = 'Not now';
+  const answer = await vscode.window.showInformationMessage(
+    'Flock can switch this window between projects for you, or keep one ' +
+      'folder per window. Choose a window model?',
+    CHOOSE,
+    NOT_NOW,
+  );
+  if (answer === CHOOSE) {
+    await deps.offers?.markAnswered('windowModel');
+    await vscode.commands.executeCommand(COMMANDS.chooseWindowModel);
+  } else if (answer === NOT_NOW) {
+    await deps.offers?.markAnswered('windowModel');
+  }
 }
 
 export async function resumeFlow(
@@ -10753,7 +10808,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   // Both are `tasteVerb` with different words, so they cannot drift in the one
   // property that matters: a cancelled picker writes nothing and says nothing.
   register(COMMANDS.chooseWindowModel, 'choose window model', () =>
-    tasteVerb(deps, chooseWindowModel, {
+    tasteVerb(deps, 'windowModel', chooseWindowModel, {
       unavailable: 'Flock: the window model picker is not available in this window.',
       unchanged: 'The window model is unchanged.',
       receipt: (label) => `Flock: this window is now “${label}”`,
@@ -10761,7 +10816,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   );
 
   register(COMMANDS.chooseSurface, 'choose where sessions open', () =>
-    tasteVerb(deps, chooseSurface, {
+    tasteVerb(deps, 'surface', chooseSurface, {
       unavailable: 'Flock: the surface picker is not available in this window.',
       unchanged: 'Sessions open where they did.',
       receipt: (label) => `Flock: sessions now open as “${label}”`,

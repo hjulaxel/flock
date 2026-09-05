@@ -6393,7 +6393,16 @@ describe('the add / import flows', () => {
       try {
         const { deps, calls } = poolDeps({ world: settledWorld });
         const asked = scriptPicks('Flock only');
-        const harness = withRegisteredCommands(deps);
+        const marked: string[] = [];
+        const harness = withRegisteredCommands({
+          ...deps,
+          offers: {
+            answered: () => false,
+            markAnswered: async (offer) => {
+              marked.push(offer);
+            },
+          },
+        });
         await harness.run(COMMANDS.chooseWindowModel);
         expect(asked.offered[0]).toEqual([
           'One folder per project (current)',
@@ -6405,6 +6414,9 @@ describe('the add / import flows', () => {
         // same person the picker was.
         expect(said.join(' ')).toContain('Flock only');
         expect(calls.refreshes).toBeGreaterThan(0);
+        // A choice made here settles the question the one-time offer would
+        // ask after a routed session: stamped, so it never asks.
+        expect(marked).toEqual(['windowModel']);
       } finally {
         delete (mockWindow as { setStatusBarMessage?: unknown })
           .setStatusBarMessage;
@@ -6428,7 +6440,16 @@ describe('the add / import flows', () => {
           world: { ...settledWorld, soloSession: true },
         });
         const asked = scriptPicks('Bottom terminal panel');
-        const harness = withRegisteredCommands(deps);
+        const marked: string[] = [];
+        const harness = withRegisteredCommands({
+          ...deps,
+          offers: {
+            answered: () => false,
+            markAnswered: async (offer) => {
+              marked.push(offer);
+            },
+          },
+        });
         await harness.run(COMMANDS.chooseSurface);
         expect(asked.offered[0]).toEqual([
           'One pinned session tab (current)',
@@ -6444,6 +6465,9 @@ describe('the add / import flows', () => {
         ]);
         expect(said.join(' ')).toContain('Bottom terminal panel');
         expect(calls.refreshes).toBeGreaterThan(0);
+        // Settles the second-tab offer too: answered from the gear is
+        // answered.
+        expect(marked).toEqual(['surface']);
 
         // Cancelled: nothing written, nothing said — the same silence the
         // window-model verb keeps.
@@ -6588,14 +6612,20 @@ describe('folder mode: foreign rows route to their own window', () => {
     choose?: string;
     focusWindowFor?: (id: string) => Promise<boolean>;
     focusWindowForDir?: (dir: string, id?: string) => Promise<boolean>;
+    /** Wires the one-time offers' stamp, reporting this answer; absent is a
+     *  wiring without them, which is what every other test here is. */
+    offerAnswered?: boolean;
   }): {
     told: string[];
     opened: Array<[string, boolean]>;
+    /** Offers stamped as answered. */
+    marked: string[];
     calls: ChatCalls;
     run: (command: string, arg: string) => Promise<void>;
   } {
     const told: string[] = [];
     const opened: Array<[string, boolean]> = [];
+    const marked: string[] = [];
     (
       mockWindow as {
         showInformationMessage?: (
@@ -6629,8 +6659,18 @@ describe('folder mode: foreign rows route to their own window', () => {
         opened.push([fsPath, newWindow]);
       },
       markSeen: async () => undefined,
+      ...(over.offerAnswered === undefined
+        ? {}
+        : {
+            offers: {
+              answered: () => over.offerAnswered === true,
+              markAnswered: async (offer: string) => {
+                marked.push(offer);
+              },
+            },
+          }),
     });
-    return { told, opened, calls, run: (c, a) => harness.run(c, a) };
+    return { told, opened, marked, calls, run: (c, a) => harness.run(c, a) };
   }
 
   it('routes to the window that has the session bound, and stops', async () => {
@@ -6704,6 +6744,79 @@ describe('folder mode: foreign rows route to their own window', () => {
     // exactly as it does without a mode.
     expect(routed).toEqual([]);
     expect(h.told[0]).toContain('outside Flock');
+  });
+
+  // THE ONE-TIME WINDOW-MODEL OFFER hangs off this routing: the click has just
+  // cost the person a window, which is the first moment "what is a window" is
+  // a question they can answer (design/settings-tiers.md §5). The decision is
+  // `windowModelOffer` (test/recommend.test.ts); what is under test here is
+  // that it speaks after the routing, once, on the notice rules every toast
+  // here keeps — and never in a wiring that has no stamp to keep.
+  describe('offers the window-model picker, once, after routing', () => {
+    afterEach(() => {
+      delete (mockCommands as { executeCommand?: unknown }).executeCommand;
+    });
+
+    it('asks after the route lands, and "Not now" stamps the install', async () => {
+      const h = routeHarness({
+        focusWindowForDir: async () => true,
+        offerAnswered: false,
+        choose: 'Not now',
+      });
+      await h.run(COMMANDS.focusSession, SESSION);
+      expect(h.told).toHaveLength(1);
+      expect(h.told[0]).toContain('Choose a window model?');
+      expect(h.marked).toEqual(['windowModel']);
+      expect(h.calls.launches).toEqual([]);
+    });
+
+    it('runs Choose Window Model… on "Choose…", and stamps', async () => {
+      const executed: string[] = [];
+      (mockCommands as { executeCommand?: unknown }).executeCommand = async (
+        id: string,
+      ) => {
+        executed.push(id);
+      };
+      const h = routeHarness({
+        focusWindowForDir: async () => true,
+        offerAnswered: false,
+        choose: 'Choose…',
+      });
+      await h.run(COMMANDS.focusSession, SESSION);
+      expect(executed).toEqual([COMMANDS.chooseWindowModel]);
+      expect(h.marked).toEqual(['windowModel']);
+    });
+
+    it('stamps nothing when dismissed with the X — it asks again next time', async () => {
+      const h = routeHarness({
+        focusWindowForDir: async () => true,
+        offerAnswered: false,
+      });
+      await h.run(COMMANDS.focusSession, SESSION);
+      expect(h.told).toHaveLength(1);
+      expect(h.marked).toEqual([]);
+    });
+
+    it('never asks twice, and never for a session no project claims', async () => {
+      const answered = routeHarness({
+        focusWindowForDir: async () => true,
+        offerAnswered: true,
+      });
+      await answered.run(COMMANDS.focusSession, SESSION);
+      expect(answered.told).toEqual([]);
+
+      // Routed all the same — the fence is about the folder, not the project
+      // — but "switch this window between projects" would be a false offer
+      // about a directory nobody named.
+      const unclaimed = routeHarness({
+        cwd: '/elsewhere/task',
+        focusWindowForDir: async () => true,
+        offerAnswered: false,
+      });
+      await unclaimed.run(COMMANDS.focusSession, SESSION);
+      expect(unclaimed.told).toEqual([]);
+      expect(unclaimed.marked).toEqual([]);
+    });
   });
 });
 

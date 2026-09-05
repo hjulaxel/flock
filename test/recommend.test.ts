@@ -18,7 +18,9 @@ import {
   recommendedNotice,
   recommendedPlan,
   surfaceChoices,
+  surfaceOffer,
   windowModelChoices,
+  windowModelOffer,
 } from '../src/recommend';
 import type {
   RecommendedStepId,
@@ -599,5 +601,56 @@ describe('recommendedNotice: the one-time offer', () => {
       'worktrees',
     ]);
     expect(recommendedNotice({ world: almost, dismissed: false })).toBe('none');
+  });
+});
+
+// The two taste questions left the checklist for the moment they become real
+// (design/settings-tiers.md §5). Each decision is pure, and what is pinned is
+// the shape every notice in this extension shares: hard to trigger, once per
+// install, and never on a machine that has already answered.
+describe('windowModelOffer: asked once, when a folder window routes a project away', () => {
+  it('offers in the folder model, for a claimed session, until answered', () => {
+    expect(
+      windowModelOffer({ mode: 'folder', claimed: true, answered: false }),
+    ).toBe('offer');
+  });
+
+  it('never speaks twice', () => {
+    expect(
+      windowModelOffer({ mode: 'folder', claimed: true, answered: true }),
+    ).toBe('none');
+  });
+
+  it('stays quiet for a session no project claims', () => {
+    // A folder nobody named is not a project to switch between, so the offer's
+    // own sentence — "switch this window between projects" — would be false.
+    expect(
+      windowModelOffer({ mode: 'folder', claimed: false, answered: false }),
+    ).toBe('none');
+  });
+
+  it('stays quiet in the two models that never route, and in a wiring with none', () => {
+    for (const mode of ['root', 'project', undefined] as const) {
+      expect(
+        windowModelOffer({ mode, claimed: true, answered: false }),
+        String(mode),
+      ).toBe('none');
+    }
+  });
+});
+
+describe('surfaceOffer: asked once, at the second session tab', () => {
+  it('offers on exactly the second tab', () => {
+    expect(surfaceOffer({ boundTabs: 0, answered: false })).toBe('none');
+    expect(surfaceOffer({ boundTabs: 1, answered: false })).toBe('none');
+    expect(surfaceOffer({ boundTabs: 2, answered: false })).toBe('offer');
+    // Not every tab after it: a dismissal with the X is not nagged about on
+    // the third and the fourth; it comes back with the next window that
+    // reaches two.
+    expect(surfaceOffer({ boundTabs: 3, answered: false })).toBe('none');
+  });
+
+  it('never speaks twice', () => {
+    expect(surfaceOffer({ boundTabs: 2, answered: true })).toBe('none');
   });
 });

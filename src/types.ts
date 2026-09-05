@@ -4629,6 +4629,21 @@ export interface CommandDeps {
    *  the menu and the "(current)" mark one click later cannot disagree.
    *  Optional for the same reason. */
   surface?(): string | undefined;
+  /** The two contextual one-time offers — the window-model picker, offered
+   *  the first time a folder-model window routes another project's session
+   *  away; the surface picker, offered when a window's second session tab
+   *  opens. `windowModelOffer` / `surfaceOffer` (src/recommend.ts) decide;
+   *  this is the stamp behind each, once per install in globalState, set by
+   *  an answer — the offer's own buttons, or the picker behind it being
+   *  answered from anywhere, the gear included — and never by the X.
+   *
+   *  Optional: a wiring without it — every unit double — reads as already
+   *  answered and never offers, which is what the routing tests rely on. The
+   *  union is spelled out because types.ts imports nothing. */
+  offers?: {
+    answered(offer: 'windowModel' | 'surface'): boolean;
+    markAnswered(offer: 'windowModel' | 'surface'): Promise<void>;
+  };
   menuState?(): {
     hooksInstalled: boolean;
     onlyActive: boolean;

@@ -29,11 +29,12 @@
 //               NOT checklist steps. Nobody can answer "what is a window"
 //               before they have lived in one, so each is a verb of its own
 //               (`Flock: Choose Window Model…`, `Flock: Choose Where Sessions
-//               Open…`), asked at the moment it becomes real rather than on
-//               the first run (design/settings-tiers.md §5). The writes belong
-//               to whichever option is CHOSEN in the picker (`surfaceChoices`
-//               / `windowModelChoices` below), and cancelling either writes
-//               nothing.
+//               Open…`), offered ONCE at the moment it becomes real rather
+//               than on the first run — `windowModelOffer` and `surfaceOffer`
+//               at the end of this file decide when (design/settings-tiers.md
+//               §5). The writes belong to whichever option is CHOSEN in the
+//               picker (`surfaceChoices` / `windowModelChoices` below), and
+//               cancelling either writes nothing.
 //
 // A "recommended setup" is only honest if it moves the first group, asks about
 // the third, and leaves the other two alone. That distinction is the whole
@@ -568,4 +569,62 @@ export function recommendedNotice(opts: {
   // subtraction to stay honest.
   const recommended = plan.steps.filter((s) => s.recommended).length;
   return recommended >= 2 ? 'offer' : 'none';
+}
+
+// ------------------------------------------------ the two contextual offers
+
+/** The two taste questions the checklist no longer asks, each offered ONCE, at
+ *  the moment it becomes real. "Once" is once per install: the stamp behind
+ *  each is a globalState key (extension.ts), set by an answer — "Choose…",
+ *  "Not now", or the picker itself being answered from anywhere, the gear
+ *  included — and never by a dismissal with the X, which asks again next time,
+ *  the rule every notice in this extension follows. */
+export type ContextualOfferId = 'windowModel' | 'surface';
+
+/**
+ * Should a folder-model window that has just ROUTED a foreign session offer
+ * the window-model picker?
+ *
+ * "What is a window" becomes a real question the first time a window in the
+ * one-folder-per-project model meets a session it cannot show: the click has
+ * just gone to another window (or offered to open one), and the person has now
+ * lived the cost of the model without ever having chosen it. Three things have
+ * to hold — the window IS in the folder model (the other two never route), a
+ * project of theirs claims the session (a session in some folder nobody named
+ * is not a project to switch between), and this install has not answered or
+ * declined the question already.
+ */
+export function windowModelOffer(opts: {
+  /** The resolved model of the window that routed — `deps.lineageMode()`;
+   *  undefined is a wiring with no mode machinery, which never routes. */
+  mode: 'folder' | 'root' | 'project' | undefined;
+  /** Whether a project of the user's claims the routed session's directory. */
+  claimed: boolean;
+  /** The stamp: answered, declined, or the picker already run. */
+  answered: boolean;
+}): 'offer' | 'none' {
+  if (opts.answered) return 'none';
+  if (opts.mode !== 'folder') return 'none';
+  return opts.claimed ? 'offer' : 'none';
+}
+
+/**
+ * Should the session tab that has just opened offer the surface picker?
+ *
+ * One tab is a terminal; two is an arrangement, and the second is the first
+ * moment "where should these open" can be answered from experience rather than
+ * from a description. EXACTLY the second, not every tab after it: an offer
+ * dismissed with the X is not repeated on the third and the fourth in the same
+ * window, and comes back with the next window that reaches two. Counted over
+ * the tabs bound in THIS window once a launch has landed — a reload that
+ * revives two tabs at once is no launch and no gesture, and never counts.
+ */
+export function surfaceOffer(opts: {
+  /** Session tabs bound in this window, the one that just opened included. */
+  boundTabs: number;
+  /** The stamp, as above. */
+  answered: boolean;
+}): 'offer' | 'none' {
+  if (opts.answered) return 'none';
+  return opts.boundTabs === 2 ? 'offer' : 'none';
 }

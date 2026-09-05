@@ -196,8 +196,10 @@ import { BranchListCache } from './branchList';
 import {
   recommendedNotice,
   surfaceChoices,
+  surfaceOffer,
   windowModelChoices,
 } from './recommend';
+import type { ContextualOfferId } from './recommend';
 import { chatAutoCloseVictims } from './chatAutoClose';
 import { frontSession, mayFollowSelection } from './switcher';
 import { type WhereAmI, whereAmI } from './whereami';
@@ -355,6 +357,16 @@ const RECOMMENDED_NOTICE_KEY = 'lineage.recommendedNoticeShown';
 /** globalState once more: the walkthrough front door is decided once per
  *  install — opened or judged unnecessary — and either verdict is final. */
 const WALKTHROUGH_KEY = 'lineage.walkthroughOpened';
+/** globalState, one key per contextual offer (`ContextualOfferId`): the
+ *  window-model question, asked the first time a folder-model window routes
+ *  another project's session away, and the surface question, asked when a
+ *  window's second session tab opens. Each is set by an answer — the offer's
+ *  buttons, or the picker behind it being answered from anywhere — never by
+ *  the X, and never on activation or a timer. */
+const OFFER_KEYS: Record<ContextualOfferId, string> = {
+  windowModel: 'lineage.windowModelOfferAnswered',
+  surface: 'lineage.surfaceOfferAnswered',
+};
 /** What `workbench.action.openWalkthrough` takes: publisher.name#walkthroughId.
  *  The id half is `EXTENSION_ID`, which a test holds equal to the manifest;
  *  the fragment is the walkthrough's `id` in package.json. A walkthrough
@@ -5700,6 +5712,58 @@ export async function activate(
     );
   };
 
+  // THE TWO CONTEXTUAL OFFERS' stamps. Once per install, the way every notice
+  // here is; the decisions are `windowModelOffer` and `surfaceOffer` in
+  // src/recommend.ts, and the two verbs stamp these too when answered from
+  // the gear, so a question already settled is never asked.
+  const offerAnswered = (offer: ContextualOfferId): boolean =>
+    context.globalState.get<boolean>(OFFER_KEYS[offer]) === true;
+  const markOfferAnswered = async (offer: ContextualOfferId): Promise<void> => {
+    await context.globalState.update(OFFER_KEYS[offer], true);
+  };
+
+  /** "Where should sessions open?", asked ONCE, at the moment it becomes real:
+   *  the second session tab in a window. `surfaceOffer` decides; this draws
+   *  the message and acts on the answer on the terms every notice here keeps
+   *  — "Choose…" stamps and runs the picker, "Not now" stamps, the X stamps
+   *  nothing. Called from the launch funnel below and nowhere else: never
+   *  from activation, never from a timer, never from a reload's
+   *  re-association, so the tabs counted are tabs a gesture opened. The
+   *  window-model twin lives in commands.ts beside the routing it hangs off. */
+  const offerSurfaceOnSecondTab = (): void => {
+    try {
+      const verdict = surfaceOffer({
+        boundTabs: registry.boundSessionIds().length,
+        answered: offerAnswered('surface'),
+      });
+      if (verdict !== 'offer') return;
+      const CHOOSE = 'Choose…';
+      const NOT_NOW = 'Not now';
+      void vscode.window
+        .showInformationMessage(
+          'Flock: that is your second session tab. Sessions can open as ' +
+            'editor tabs, one pinned tab at a time, in the terminal panel, ' +
+            'in a window of their own, or in the Claude Code extension. ' +
+            'Choose where they open?',
+          CHOOSE,
+          NOT_NOW,
+        )
+        .then(
+          async (answer) => {
+            if (answer === CHOOSE) {
+              await markOfferAnswered('surface');
+              await vscode.commands.executeCommand(COMMANDS.chooseSurface);
+            } else if (answer === NOT_NOW) {
+              await markOfferAnswered('surface');
+            }
+          },
+          (err) => logError('surface.offer', err),
+        );
+    } catch (err) {
+      logError('surface.offer', err);
+    }
+  };
+
   const commandDeps: AccountCommandDeps = {
     // The whole accounts surface, as ONE optional member: the verbs guard
     // on its presence, so a build without it behaves exactly as this extension
@@ -5977,6 +6041,11 @@ export async function activate(
       // for.
       const spawnedAt = Date.now();
       const binding = await registry.launch(launchOpts);
+      // The second tab in a window is the moment the surface question becomes
+      // real (`offerSurfaceOnSecondTab`); a launch that never started is not a
+      // tab. Here and not on `onDidBind`, because binds also arrive from a
+      // reload's re-association and from adoptions — none of them a gesture.
+      if (binding) offerSurfaceOnSecondTab();
       // A launch that never started must not leave an optimistic row standing
       // for the whole TTL: the terminal failed loudly, and a row for a session
       // that does not exist is worse than no row.
@@ -6818,6 +6887,7 @@ export async function activate(
         launchMode: cfg().get<string>(CONFIG_KEYS.launchMode),
         claudeExtensionInstalled: claudeExtensionInstalled(),
       }).find((c) => c.current)?.label,
+    offers: { answered: offerAnswered, markAnswered: markOfferAnswered },
 
     menuState: () => ({
       hooksInstalled: store.getHookState().installed === true,
