@@ -193,7 +193,11 @@ import {
   describeForkEdge,
 } from './daemon';
 import { BranchListCache } from './branchList';
-import { recommendedNotice, windowModelChoices } from './recommend';
+import {
+  recommendedNotice,
+  surfaceChoices,
+  windowModelChoices,
+} from './recommend';
 import { chatAutoCloseVictims } from './chatAutoClose';
 import { frontSession, mayFollowSelection } from './switcher';
 import { type WhereAmI, whereAmI } from './whereami';
@@ -5684,6 +5688,18 @@ export async function activate(
   // defer: a poke before construction is a poke about an empty queue.
   let dispatchHost: DispatchHost | undefined;
 
+  /** Whether the official Claude Code extension is installed — probed by the
+   *  same extension id `resolveLaunchMode`'s installed callback gets at every
+   *  launch, so the surface picker, the gear's entry for it and the launcher
+   *  cannot disagree about whether the delegate is really there. */
+  const claudeExtensionInstalled = (): boolean => {
+    const delegate = delegateFor('claudeExtension');
+    return (
+      delegate !== undefined &&
+      vscode.extensions?.getExtension(delegate.extensionId) !== undefined
+    );
+  };
+
   const commandDeps: AccountCommandDeps = {
     // The whole accounts surface, as ONE optional member: the verbs guard
     // on its presence, so a build without it behaves exactly as this extension
@@ -6699,10 +6715,6 @@ export async function activate(
         }
         if (maxWorktrees >= 2) break;
       }
-      // Probed by the same extension id `resolveLaunchMode`'s installed
-      // callback gets at every launch, so the surface picker and the launcher
-      // cannot disagree about whether the delegate is really there.
-      const claudeDelegate = delegateFor('claudeExtension');
       return {
         platform: process.platform,
         tmuxBinary: findTmuxBinary(),
@@ -6728,10 +6740,7 @@ export async function activate(
         mode: cfg().get<string>(CONFIG_KEYS.mode),
         workspacesEnabled: boolCfg(CONFIG_KEYS.workspacesEnabled, true),
         workspacesAutoSwitch: cfg().get<boolean>(LEGACY_KEYS.workspacesAutoSwitch),
-        claudeExtensionInstalled:
-          claudeDelegate !== undefined &&
-          vscode.extensions?.getExtension(claudeDelegate.extensionId) !==
-            undefined,
+        claudeExtensionInstalled: claudeExtensionInstalled(),
       };
     },
 
@@ -6799,6 +6808,15 @@ export async function activate(
         mode: cfg().get<string>(CONFIG_KEYS.mode),
         workspacesEnabled: boolCfg(CONFIG_KEYS.workspacesEnabled, true),
         workspacesAutoSwitch: cfg().get<boolean>(LEGACY_KEYS.workspacesAutoSwitch),
+      }).find((c) => c.current)?.label,
+    // The same four reads the checklist's world makes for the surface
+    // question, and nothing else — no worktree probe behind opening a menu.
+    surface: () =>
+      surfaceChoices({
+        terminalLocation: terminalLocation(),
+        soloSession: boolCfg(CONFIG_KEYS.soloSession, false),
+        launchMode: cfg().get<string>(CONFIG_KEYS.launchMode),
+        claudeExtensionInstalled: claudeExtensionInstalled(),
       }).find((c) => c.current)?.label,
 
     menuState: () => ({

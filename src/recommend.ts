@@ -391,7 +391,17 @@ export interface SurfaceChoice {
  * The extension option writes `launch.mode` ALONE, leaving the Flock-side
  * arrangement where it was for whenever the person comes back.
  */
-export function surfaceChoices(world: RecommendedWorld): SurfaceChoice[] {
+export function surfaceChoices(
+  /** The FOUR fields this actually reads, rather than the whole world — the
+   *  narrowing `windowModelChoices` makes, for the same reason: the gear menu
+   *  names the current arrangement in its entry, and assembling a full
+   *  `RecommendedWorld` for that would probe every project's worktrees behind
+   *  opening a menu. Every existing caller passes a full world. */
+  world: Pick<
+    RecommendedWorld,
+    'terminalLocation' | 'soloSession' | 'launchMode' | 'claudeExtensionInstalled'
+  >,
+): SurfaceChoice[] {
   const resolved = resolveLaunchMode(
     world.launchMode,
     () => world.claudeExtensionInstalled,

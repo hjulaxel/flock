@@ -682,6 +682,7 @@ describe('manifest: the view title contributions', () => {
       'lineage.showStatus',
       'lineage.recommendedSetup',
       'lineage.chooseWindowModel',
+      'lineage.chooseSurface',
       'lineage.openAdvancedSettings',
       'lineage.showOnlyActiveSessions',
       'lineage.showAllSessions',

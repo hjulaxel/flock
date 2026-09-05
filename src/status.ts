@@ -52,8 +52,8 @@ export interface StatusInput {
 
 /** What picking a row does. Every arm names an EXISTING flow — a contributed
  *  command, the editor at one key, the settings write the checklist's `tmux`
- *  step makes, the surface picker — so this module can never grow a verb of
- *  its own that the palette does not have. */
+ *  step makes — so this module can never grow a verb of its own that the
+ *  palette does not have. */
 export type StatusAction =
   | { readonly kind: 'command'; readonly command: string }
   | { readonly kind: 'openSetting'; readonly key: string }
@@ -63,8 +63,7 @@ export type StatusAction =
       readonly settings: readonly RecommendedSetting[];
       /** The status-bar line said once the write lands. */
       readonly receipt: string;
-    }
-  | { readonly kind: 'chooseSurface' };
+    };
 
 export type StatusFactId =
   | 'tmux'
@@ -245,8 +244,8 @@ export function statusFacts(input: StatusInput): StatusFact[] {
       (world.terminalLocation === 'newWindow'
         ? 'Own window per session'
         : 'not one of the picker’s four'),
-    next: 'Choose where sessions open…',
-    action: { kind: 'chooseSurface' },
+    next: 'Choose Where Sessions Open…',
+    action: { kind: 'command', command: COMMANDS.chooseSurface },
   });
 
   return facts;

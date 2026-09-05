@@ -8,6 +8,16 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Added
 
+- **Choose Where Sessions Open… is a verb.** The surface picker — one pinned
+  session tab, editor tabs, the Claude Code extension, or the bottom terminal
+  panel, with where sessions open today marked — used to be reachable only as
+  a row of the Recommended Setup checklist. It is now **Flock: Choose Where
+  Sessions Open…** in the Command Palette and in the gear's Setup group, right
+  after **Choose Window Model…**, and the gear entry says which arrangement you
+  are on before you open it, the way the window-model entry does. The Status
+  verb's *Where sessions open* row runs the same command. Choosing an option
+  writes `lineage.terminalLocation`, `lineage.soloSession` and
+  `lineage.launch.mode` together; cancelling writes nothing.
 - **The Settings editor is Flock's settings page.** There is no page of Flock's
   own and none is coming: VS Code's built-in editor now draws Flock's settings
   in ten titled categories — Sessions, Attention, Forking and closing,

@@ -223,7 +223,9 @@ describe('status: the two taste rows read as their pickers do', () => {
       const current = surfaceChoices(world).find((c) => c.current);
       expect(current, 'a world the picker marks').toBeDefined();
       expect(row.value).toBe(current?.label);
-      expect(row.action).toEqual({ kind: 'chooseSurface' });
+      // The same contributed command the gear runs, by id — not a picker of
+      // the Status verb's own.
+      expect(row.action).toEqual({ kind: 'command', command: COMMANDS.chooseSurface });
     }
   });
 

@@ -458,6 +458,12 @@
         "icon": "$(window)"
       },
       {
+        "command": "lineage.chooseSurface",
+        "title": "Choose Where Sessions Open...",
+        "category": "Flock",
+        "icon": "$(layout)"
+      },
+      {
         "command": "lineage.openSettings",
         "title": "Open Settings",
         "category": "Flock",

@@ -2196,19 +2196,55 @@ async function writeChoice<T extends TasteChoice>(
 
 /**
  * The surface question asked AND acted on: the picker, then the writes the
- * chosen option carries.
- *
- * ONE function for the two places the question is asked — the checklist's
- * `surface` step and the Status verb's "Where sessions open" row — so the two
- * cannot drift: same rows, same "(current)" mark, same writes. A copy in the
- * Status verb would be the second surface picker in a codebase whose whole
- * argument for `chooseFromTaste` was that there should not be two.
+ * chosen option carries. What the checklist's `surface` step runs; the verb
+ * `Flock: Choose Where Sessions Open…` is `tasteVerb` over the same picker,
+ * and the Status verb's row runs that command, so there is one surface picker
+ * in a codebase whose whole argument for `chooseFromTaste` was that there
+ * should not be two.
  */
 async function surfaceFlow(
   deps: CommandDeps,
   world: RecommendedWorld,
 ): Promise<{ choice: SurfaceChoice | undefined; unwritable: readonly string[] }> {
   return writeChoice(deps, await chooseSurface(world));
+}
+
+/**
+ * A taste picker as a VERB: read the world, ask, write what the chosen option
+ * carries, refresh, and say what changed — by the option's LABEL, never its
+ * value, because the receipt has to be readable by the same person the picker
+ * was. `Choose Window Model…` and `Choose Where Sessions Open…` are both this
+ * function; the words differ, the contract does not. A cancelled picker
+ * writes nothing and says nothing, and a key the wiring could not write is
+ * named, with the fact that nothing moved.
+ */
+async function tasteVerb<T extends TasteChoice>(
+  deps: CommandDeps,
+  ask: (world: RecommendedWorld) => Promise<T | undefined>,
+  words: {
+    /** Said when the wiring cannot supply the world. */
+    unavailable: string;
+    /** The tail of the warning when a key could not be written. */
+    unchanged: string;
+    /** The status-bar receipt, given the chosen label. */
+    receipt: (label: string) => string;
+  },
+): Promise<void> {
+  const world = await deps.recommendedWorld?.();
+  if (!world) {
+    void vscode.window.showInformationMessage(words.unavailable);
+    return;
+  }
+  const { choice, unwritable } = await writeChoice(deps, await ask(world));
+  if (choice === undefined) return;
+  if (unwritable.length > 0) {
+    void vscode.window.showWarningMessage(
+      `Flock: could not write ${unwritable.join(', ')}. ${words.unchanged}`,
+    );
+    return;
+  }
+  deps.refresh();
+  vscode.window.setStatusBarMessage(words.receipt(choice.label), 5000);
 }
 
 /**
@@ -10734,41 +10770,32 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     await recommendedSetupFlow(deps);
   });
 
-  // THE WINDOW MODEL, on its own, without the checklist around it. The
-  // recommended setup asks this once, at the moment somebody meets the
-  // product; this is the verb for the other moment — when they have been
-  // living in one model for a month and want a different one. Reaching that
-  // through a settings dropdown means knowing the key is called `lineage.mode`
-  // and that `project` is spelled that way even though it means "auto-switch",
-  // which is knowledge the product should not require.
+  // THE TWO TASTE QUESTIONS, each on its own, without the checklist around
+  // them. These are the verbs for the moment after somebody has lived with an
+  // answer — a month in one window model, a week of sessions opening where
+  // the default put them — and wants a different one. Reaching either through
+  // the settings editor means knowing that the key is called `lineage.mode`
+  // and that `project` is spelled that way even though it means
+  // "auto-switch", or that where a session opens is three keys that have to
+  // move together, which is knowledge the product should not require.
   //
-  // Says what it did, and says the model by its LABEL rather than its value:
-  // the receipt has to be readable by the same person the picker was.
-  register(COMMANDS.chooseWindowModel, 'choose window model', async () => {
-    const world = await deps.recommendedWorld?.();
-    if (!world) {
-      void vscode.window.showInformationMessage(
-        'Flock: the window model picker is not available in this window.',
-      );
-      return;
-    }
-    const choice = await chooseWindowModel(world);
-    if (choice === undefined) return;
-    const unwritable = (await deps.writeSettings?.(choice.settings)) ?? [
-      ...choice.settings.map((setting) => setting.key),
-    ];
-    if (unwritable.length > 0) {
-      void vscode.window.showWarningMessage(
-        `Flock: could not write ${unwritable.join(', ')}. The window model is unchanged.`,
-      );
-      return;
-    }
-    deps.refresh();
-    vscode.window.setStatusBarMessage(
-      `Flock: this window is now “${choice.label}”`,
-      5000,
-    );
-  });
+  // Both are `tasteVerb` with different words, so they cannot drift in the one
+  // property that matters: a cancelled picker writes nothing and says nothing.
+  register(COMMANDS.chooseWindowModel, 'choose window model', () =>
+    tasteVerb(deps, chooseWindowModel, {
+      unavailable: 'Flock: the window model picker is not available in this window.',
+      unchanged: 'The window model is unchanged.',
+      receipt: (label) => `Flock: this window is now “${label}”`,
+    }),
+  );
+
+  register(COMMANDS.chooseSurface, 'choose where sessions open', () =>
+    tasteVerb(deps, chooseSurface, {
+      unavailable: 'Flock: the surface picker is not available in this window.',
+      unchanged: 'Sessions open where they did.',
+      receipt: (label) => `Flock: sessions now open as “${label}”`,
+    }),
+  );
 
   // ------------------------------------------------- the settings editor
   //
@@ -10830,16 +10857,13 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       matchOnDetail: true,
     });
     if (!chosen) return;
-    await runStatusAction(world, chosen.fact.action);
+    await runStatusAction(chosen.fact.action);
   });
 
   /** The picked row's verb. Every arm is an existing flow reached by its
    *  existing route — the contributed command, the editor at a key, the
-   *  checklist's own settings write, the shared surface picker. */
-  async function runStatusAction(
-    world: RecommendedWorld,
-    action: StatusAction,
-  ): Promise<void> {
+   *  checklist's own settings write. */
+  async function runStatusAction(action: StatusAction): Promise<void> {
     switch (action.kind) {
       case 'command':
         await vscode.commands.executeCommand(action.command);
@@ -10872,22 +10896,6 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         }
         deps.refresh();
         vscode.window.setStatusBarMessage(action.receipt, 5000);
-        return;
-      }
-      case 'chooseSurface': {
-        const { choice, unwritable } = await surfaceFlow(deps, world);
-        if (choice === undefined) return;
-        if (unwritable.length > 0) {
-          void vscode.window.showWarningMessage(
-            `Flock: could not write ${unwritable.join(', ')}. Sessions open where they did.`,
-          );
-          return;
-        }
-        deps.refresh();
-        vscode.window.setStatusBarMessage(
-          `Flock: sessions now open as “${choice.label}”`,
-          5000,
-        );
         return;
       }
     }
@@ -10990,6 +10998,18 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
           ? 'One folder per project, Flock only, or auto-switch'
           : `Currently “${modelNow}” — change it`,
       command: COMMANDS.chooseWindowModel,
+    });
+    // The other taste question, on the same terms: names where sessions open
+    // TODAY, through `surfaceChoices` — the function the picker itself uses —
+    // and falls back to listing the places when the wiring cannot say.
+    const surfaceNow = safeCall('menuSurface', () => deps.surface?.());
+    items.push({
+      label: '$(layout) Choose Where Sessions Open...',
+      description:
+        surfaceNow === undefined
+          ? 'One pinned tab, editor tabs, the Claude Code extension, or the panel'
+          : `Currently “${surfaceNow}” — change it`,
+      command: COMMANDS.chooseSurface,
     });
     // LAST in the group, and plainly named: the rows the manifest tags
     // `advanced` — paths, timings, diagnostics, previews — are the ones a

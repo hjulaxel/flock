@@ -6403,6 +6403,52 @@ describe('the add / import flows', () => {
       }
     });
 
+    it('is a verb of its own too — Choose Where Sessions Open…, with a receipt naming the place', async () => {
+      // `chooseWindowModel`'s twin, on the same contract: the world is read,
+      // the picker marks where sessions open today, the OPTION writes its
+      // three keys together, and the receipt says the label rather than the
+      // values behind it.
+      const said: string[] = [];
+      (
+        mockWindow as { setStatusBarMessage?: (t: string, ms?: number) => void }
+      ).setStatusBarMessage = (text) => {
+        said.push(text);
+      };
+      try {
+        const { deps, calls } = poolDeps({
+          world: { ...settledWorld, soloSession: true },
+        });
+        const asked = scriptPicks('Bottom terminal panel');
+        const harness = withRegisteredCommands(deps);
+        await harness.run(COMMANDS.chooseSurface);
+        expect(asked.offered[0]).toEqual([
+          'One pinned session tab (current)',
+          'Editor tabs',
+          'Claude Code extension',
+          'Bottom terminal panel',
+        ]);
+        expect(calls.settings).toEqual([
+          { key: 'terminalLocation', value: 'panel' },
+          { key: 'soloSession', value: false },
+          { key: 'launch.mode', value: 'flock' },
+        ]);
+        expect(said.join(' ')).toContain('Bottom terminal panel');
+        expect(calls.refreshes).toBeGreaterThan(0);
+
+        // Cancelled: nothing written, nothing said — the same silence the
+        // window-model verb keeps.
+        const quiet = poolDeps({ world: settledWorld });
+        scriptPicks(undefined);
+        await withRegisteredCommands(quiet.deps).run(COMMANDS.chooseSurface);
+        expect(quiet.calls.settings).toEqual([]);
+        expect(saidInfo).toEqual([]);
+      } finally {
+        delete (mockWindow as { setStatusBarMessage?: unknown })
+          .setStatusBarMessage;
+        delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+      }
+    });
+
     it('writes nothing for a ticked surface step whose picker was cancelled', async () => {
       // The tick opened the question; only an ANSWER writes. Escape on the
       // four-way picker is "no", not an error, and the receipt says nothing
@@ -8379,11 +8425,12 @@ describe('the gear menu offers each section switch one way round', () => {
   // first-time reader is meant to be able to skip.
   it('opens with the Setup group in the order the design reads', async () => {
     const { offered } = await openGear(known());
-    expect(offered.slice(0, 5)).toEqual([
+    expect(offered.slice(0, 6)).toEqual([
       'Flock Settings...',
       'Status...',
       'Recommended Setup...',
       'Choose Window Model...',
+      'Choose Where Sessions Open...',
       'Open Advanced Settings',
     ]);
   });
@@ -8393,8 +8440,43 @@ describe('the gear menu offers each section switch one way round', () => {
     expect(settings.ran).toEqual([COMMANDS.openSettings]);
     const status = await openGear(known(), 'Status...');
     expect(status.ran).toEqual([COMMANDS.showStatus]);
+    const surface = await openGear(known(), 'Choose Where Sessions Open...');
+    expect(surface.ran).toEqual([COMMANDS.chooseSurface]);
     const advanced = await openGear(known(), 'Open Advanced Settings');
     expect(advanced.ran).toEqual([COMMANDS.openAdvancedSettings]);
+  });
+
+  // Both taste entries answer "which am I on?" without being opened, and both
+  // read their answer through the picker's own function — so the sentence in
+  // the menu and the "(current)" mark one click later cannot disagree. A
+  // wiring that cannot say falls back to listing the choices.
+  it('names the current window model and surface in the two picker entries', async () => {
+    const { deps } = chatDeps(projectOf());
+    const { accounts } = fakeAccountDeps([]);
+    const described: Record<string, string | undefined> = {};
+    (mockWindow as QuickPickHost).showQuickPick = async (items) => {
+      for (const row of items as { label: string; description?: string; kind?: number }[]) {
+        if (row.kind !== undefined) continue;
+        described[row.label.replace(/^\$\([^)]+\) /, '')] = row.description;
+      }
+      return undefined;
+    };
+    const harness = withRegisteredCommands({
+      ...deps,
+      accounts,
+      windowModel: () => 'Flock only',
+      surface: () => 'One pinned session tab',
+    });
+    await harness.run(COMMANDS.settingsMenu);
+    expect(described['Choose Window Model...']).toBe('Currently “Flock only” — change it');
+    expect(described['Choose Where Sessions Open...']).toBe(
+      'Currently “One pinned session tab” — change it',
+    );
+
+    const bare = withRegisteredCommands({ ...deps, accounts });
+    await bare.run(COMMANDS.settingsMenu);
+    expect(described['Choose Window Model...']).not.toContain('Currently');
+    expect(described['Choose Where Sessions Open...']).not.toContain('Currently');
   });
 });
 
@@ -8492,6 +8574,14 @@ describe('the settings editor verbs and the Status picker', () => {
     // Picking the hooks row runs the install — the same contributed command
     // the gear and the palette run, by id.
     expect(executed.map((e) => e.id)).toEqual([COMMANDS.installHooks]);
+  });
+
+  it('runs the surface verb, not a picker of its own, when Where sessions open is picked', async () => {
+    (mockWindow as QuickPickHost).showQuickPick = async (items) =>
+      (items as { label: string }[]).find((r) => r.label.endsWith('Where sessions open'));
+    const { run, executed } = harnessWith({ recommendedWorld: async () => world });
+    await run(COMMANDS.showStatus);
+    expect(executed.map((e) => e.id)).toEqual([COMMANDS.chooseSurface]);
   });
 
   it('opens the editor at the key when a binary row is picked', async () => {

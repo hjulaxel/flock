@@ -1389,8 +1389,9 @@ export const COMMANDS = {
    *  offer, so every line has to carry its own reason and its own cost — and
    *  the answer has to be theirs, per line, before anything is written. */
   recommendedSetup: 'lineage.recommendedSetup',
-  /** WHICH OF THE THREE WINDOW MODELS this window is in — the same picker the
-   *  recommended setup's `windowModel` step opens, reachable on its own.
+  /** WHICH OF THE THREE WINDOW MODELS this window is in, as a picker with the
+   *  current one marked — in the gear, behind the Status verb's row, and in
+   *  the palette.
    *
    *  A VERB rather than "open the settings UI and find the dropdown", because
    *  the dropdown is where the choice went unfound: it is one of forty-odd
@@ -1405,6 +1406,15 @@ export const COMMANDS = {
    *  person who needs to find this, and hiding it in some models would be the
    *  same mistake the dropdown made. */
   chooseWindowModel: 'lineage.chooseWindowModel',
+  /** WHERE SESSIONS OPEN — one pinned tab, editor tabs, the Claude Code
+   *  extension or the terminal panel — as a picker with the current
+   *  arrangement marked. `chooseWindowModel`'s twin: the other taste question
+   *  nobody can answer before they have lived with the default, asked as a
+   *  verb rather than as three settings rows (`terminalLocation`,
+   *  `soloSession`, `launch.mode`) that have to be moved together to mean
+   *  anything. In the gear beside the window-model picker, behind the Status
+   *  verb's "Where sessions open" row, and in the palette. */
+  chooseSurface: 'lineage.chooseSurface',
   /** The built-in Settings editor, filtered to Flock. There is no settings
    *  page of Flock's own: the manifest's categories, order, tags and enum
    *  labels ARE the page, and this verb is the door to it. A verb rather than
@@ -4611,6 +4621,13 @@ export interface CommandDeps {
    *  — and every unit double — gets the old static description rather than a
    *  claim it cannot support. */
   windowModel?(): string | undefined;
+  /** The LABEL of the arrangement sessions open in today — "Editor tabs",
+   *  "One pinned session tab" — for the gear's Choose Where Sessions Open…
+   *  entry, on the same terms as `windowModel` above: read through
+   *  `surfaceChoices`, the function the picker itself uses, so the sentence in
+   *  the menu and the "(current)" mark one click later cannot disagree.
+   *  Optional for the same reason. */
+  surface?(): string | undefined;
   menuState?(): {
     hooksInstalled: boolean;
     onlyActive: boolean;

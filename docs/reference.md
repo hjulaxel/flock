@@ -1286,9 +1286,11 @@ has and what this window is on — is tmux installed and on, are the hooks and t
 in-session verbs installed, which `claude` and `codex` were found and where, which
 window model this is, where sessions open — as read-only rows, each of which runs
 the verb that changes it when picked (the install, the picker, the setting).
-Then **Recommended Setup…**, **Choose Window Model…**, and **Open Advanced
-Settings**, which is the same editor narrowed to the rows tagged *advanced*:
-paths, timings, diagnostics, previews. Below that group: the active-sessions
+Then **Recommended Setup…**, **Choose Window Model…**, **Choose Where Sessions
+Open…** — the two taste questions, each entry naming the answer this window has
+today — and **Open Advanced Settings**, which is the same editor narrowed to the
+rows tagged *advanced*: paths, timings, diagnostics, previews. Below that group:
+the active-sessions
 filter, **Show Closed Projects and Hidden Folders…**, **Mark All Notifications
 as Read**, **Restore Archived Session…**, **Archive Stale Sessions…**, **New
 Project…**, the closed-projects list, the Accounts and Shells section switches,
