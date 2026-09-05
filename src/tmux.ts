@@ -175,14 +175,31 @@ const UNSAFE_IN_CONF = /['"\\;#\s]/;
 export function resolveExitShell(
   shell: string | undefined,
   platform: string,
+  /** Whether a path exists on this machine. Injected so the fallback ladder
+   *  is testable on any OS; production stats the file. */
+  exists: (p: string) => boolean = fileExists,
 ): string | null {
   if (platform === 'win32') return null;
-  const fallback = platform === 'darwin' ? '/bin/zsh' : '/bin/bash';
+  // The platform's own default first, then `/bin/sh`, which POSIX guarantees
+  // and which is the one path a NixOS machine — no `/bin/bash`, no
+  // `/bin/zsh` — actually has. A hook that respawns a shell that is not there
+  // leaves the pane dead and the tab stuck, which is worse than the plain
+  // close the whole feature replaced.
+  const preferred = platform === 'darwin' ? '/bin/zsh' : '/bin/bash';
+  const fallback = exists(preferred) ? preferred : '/bin/sh';
   if (typeof shell !== 'string') return fallback;
   const trimmed = shell.trim();
   if (trimmed === '' || !trimmed.startsWith('/')) return fallback;
   if (UNSAFE_IN_CONF.test(trimmed)) return fallback;
   return trimmed;
+}
+
+function fileExists(p: string): boolean {
+  try {
+    return fs.statSync(p).isFile();
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -986,11 +1003,56 @@ export function tmuxAdvice(opts: {
   return opts.binary === null ? 'install' : 'none';
 }
 
-/** Install line for the host, or undefined where we should not advise one.
- *  Deliberately the package manager and nothing else — a curl-to-shell in a
- *  toast is not something a session manager should be teaching. */
-export function tmuxInstallHint(platform: string): string | undefined {
+/**
+ * Install line for the host, or undefined where we should not advise one.
+ * Deliberately the package manager and nothing else — a curl-to-shell in a
+ * toast is not something a session manager should be teaching.
+ *
+ * On Linux the package manager is the distribution's, read from
+ * `/etc/os-release` (`ID`, then `ID_LIKE` for the derivatives — Pop!_OS says
+ * `ubuntu debian`, Manjaro says `arch`). Unknown or unreadable falls back to
+ * apt, which is the line this function always gave and still the most likely
+ * one. `osRelease` is the file's text, injectable so the table is testable on
+ * any OS; production reads the file, once per call, which is once per notice.
+ */
+export function tmuxInstallHint(
+  platform: string,
+  osRelease?: string | null,
+): string | undefined {
   if (platform === 'darwin') return 'brew install tmux';
-  if (platform === 'linux') return 'sudo apt install tmux';
-  return undefined;
+  if (platform !== 'linux') return undefined;
+  const text = osRelease === undefined ? readOsRelease() : osRelease;
+  return linuxTmuxInstallHint(text);
+}
+
+/** Pure. The distro's own install line from `/etc/os-release` text. */
+export function linuxTmuxInstallHint(osRelease: string | null): string {
+  const ids: string[] = [];
+  for (const key of ['ID', 'ID_LIKE']) {
+    const m = new RegExp(`^${key}=("?)([^"\\n]*)\\1\\s*$`, 'm').exec(osRelease ?? '');
+    if (m) ids.push(...(m[2] ?? '').toLowerCase().split(/\s+/).filter(Boolean));
+  }
+  for (const id of ids) {
+    if (id === 'nixos') return 'nix-env -iA nixpkgs.tmux';
+    if (id === 'alpine') return 'sudo apk add tmux';
+    if (id === 'arch' || id === 'manjaro' || id === 'endeavouros') return 'sudo pacman -S tmux';
+    if (id === 'fedora' || id === 'rhel' || id === 'centos' || id === 'rocky' || id === 'almalinux') {
+      return 'sudo dnf install tmux';
+    }
+    if (id === 'opensuse' || id.startsWith('opensuse-') || id === 'sles' || id === 'suse') {
+      return 'sudo zypper install tmux';
+    }
+    if (id === 'debian' || id === 'ubuntu' || id === 'linuxmint' || id === 'pop') {
+      return 'sudo apt install tmux';
+    }
+  }
+  return 'sudo apt install tmux';
+}
+
+function readOsRelease(): string | null {
+  try {
+    return fs.readFileSync('/etc/os-release', 'utf8');
+  } catch {
+    return null;
+  }
 }

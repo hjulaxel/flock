@@ -226,15 +226,15 @@ with the [native installer](https://code.claude.com/docs/en/setup), which puts
 `claude.exe` on your `PATH`; Flock prefers it over the `.cmd` shim an npm
 install leaves, which needs a command processor between it and the terminal.
 
-**Linux.** Everything works. Two things to know. Paths compare
-case-insensitively, the way macOS and Windows compare them, so two directories
-whose names differ only in case group as one — a trade made so a project never
-fails to match its own sessions. And an editor installed as a **Snap** or a
-**Flatpak** does not see the `PATH` your shell has: a `claude` or `tmux`
-installed under your home directory is invisible to it. Set
-`lineage.claudeBinary` to the full path and install tmux system-wide. A Flatpak
-also sandboxes the editor away from host binaries altogether, so prefer the
-`.deb`, `.rpm` or tarball build.
+**Linux.** Everything works, and paths compare exactly, the way the filesystem
+does — two directories whose names differ only in case are two directories to
+Flock too, where macOS and Windows fold them into one. One thing to know: an
+editor installed as a **Snap** or a **Flatpak** does not see the `PATH` your
+shell has, so a `claude` or `tmux` installed under your home directory is
+invisible to it. Set `lineage.claudeBinary` to the full path and install tmux
+system-wide. A Flatpak also sandboxes the editor away from host binaries
+altogether, so prefer the `.deb`, `.rpm` or tarball build. The tmux notice
+names your distribution's own package manager, read from `/etc/os-release`.
 
 **Remote hosts.** Over Remote-SSH, in a Dev Container or a Codespace, Flock runs
 on the remote and gets that machine's tier. Install tmux there.

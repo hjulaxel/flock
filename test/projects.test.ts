@@ -25,6 +25,8 @@ import {
   matchProjects,
   normalizeDir,
   pathKey,
+  pathKeyFor,
+  PATHS_FOLD_CASE,
   preferredClaimant,
   projectClaiming,
   projectDirs,
@@ -129,9 +131,25 @@ describe('isWithin', () => {
     expect(isWithin('/tmp/alpha/sub', '/tmp/alpha')).toBe(false);
   });
 
-  it('compares case-insensitively (macOS and Windows are)', () => {
+  it('folds case exactly where the platform does', () => {
+    // Both answers, on whatever OS this runs on: the decision is a platform
+    // fact and the function that takes it is what makes the fact testable.
+    expect(pathKeyFor('/Users/X/Code', true)).toBe('/users/x/code');
+    expect(pathKeyFor('/Users/X/Code', false)).toBe('/Users/X/Code');
+    expect(pathKeyFor('C:\\Users\\X\\Code\\', true)).toBe('c:/users/x/code');
+    // And the platform's own answer is one of the two, chosen by the constant.
+    expect(PATHS_FOLD_CASE).toBe(process.platform === 'darwin' || process.platform === 'win32');
+    expect(pathKey('/Users/X/Code')).toBe(pathKeyFor('/Users/X/Code', PATHS_FOLD_CASE));
+  });
+
+  it.runIf(PATHS_FOLD_CASE)('compares case-insensitively on macOS and Windows', () => {
     expect(isWithin('/Users/x/Code', '/users/x/code/api')).toBe(true);
     expect(pathKey('/Users/X/Code')).toBe('/users/x/code');
+  });
+
+  it.runIf(!PATHS_FOLD_CASE)('keeps two directories that differ only in case apart on Linux', () => {
+    expect(isWithin('/home/x/Code', '/home/x/code/api')).toBe(false);
+    expect(pathKey('/home/x/Code')).toBe('/home/x/Code');
   });
 
   it('never matches on an empty side', () => {
@@ -153,7 +171,7 @@ describe('baseName', () => {
 describe('projectDirs', () => {
   it('puts rootDir first and dedupes the extras', () => {
     const p = project('p1', 'API', '/code/api', {
-      dirs: ['/code/shared/', '/code/api', '/CODE/SHARED'],
+      dirs: ['/code/shared/', '/code/api', PATHS_FOLD_CASE ? '/CODE/SHARED' : '/code//shared'],
     });
     expect(projectDirs(p)).toEqual(['/code/api', '/code/shared']);
   });
@@ -1535,7 +1553,7 @@ describe('subprojectLabels', () => {
     ]);
   });
 
-  it('collides case-insensitively, matching pathKey', () => {
+  it.runIf(PATHS_FOLD_CASE)('collides case-insensitively, matching pathKey', () => {
     expect(subprojectLabels(['/code/api/Src', '/code/web/src'])).toEqual([
       'api/Src',
       'web/src',

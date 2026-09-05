@@ -42,7 +42,7 @@ import {
 } from '../src/commands';
 import type { AccountCommandDeps } from '../src/commands';
 import type { AccountDeps, SwitchAccountResult } from '../src/accountsView';
-import { isWithin, validateProjectName } from '../src/projects';
+import { PATHS_FOLD_CASE, isWithin, validateProjectName } from '../src/projects';
 import {
   COMMANDS,
   MAX_PROJECT_NAME_LEN,
@@ -2486,7 +2486,9 @@ describe('the subproject verbs', () => {
     const two = app({ dirs: ['/code/app/api'] });
     const store = laneStore([
       lane({ id: 'l1', name: 'Handlers', dir: '/code/app/api' }),
-      lane({ id: 'l2', name: 'Schemas', dir: '/CODE/APP/API' }),
+      // Spelled differently but the same directory: by case where the platform
+      // folds it, by a trailing separator everywhere.
+      lane({ id: 'l2', name: 'Schemas', dir: PATHS_FOLD_CASE ? '/CODE/APP/API' : '/code/app/api/' }),
       lane({ id: 'l3', name: 'Elsewhere', dir: '/code/app' }),
       lane({ id: 'l4', name: 'Another project', dir: '/code/app/api', projectId: 'p2' }),
     ]);

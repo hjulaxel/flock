@@ -144,16 +144,44 @@ export function normalizeDir(input: unknown): string {
 }
 
 /**
- * The comparison form. Case-INSENSITIVE on purpose: the two platforms this
- * ships on (macOS, Windows) both have case-insensitive filesystems by default,
- * so `/Users/x/Code` and `/Users/x/code` are one directory and must group as
- * one. On Linux that is a theoretical over-match between two directories whose
- * names differ only in case — a trade this design accepts knowingly, because
- * the opposite error (a project silently not matching its own sessions) is the
- * one users would actually hit.
+ * Whether this platform's filesystems ignore case by default. macOS (APFS,
+ * HFS+) and Windows (NTFS) do; Linux does not, and neither does anything else
+ * Node runs on. Decided once, from the platform, because it is a property of
+ * the machine and not of any one path: a case-sensitive APFS volume exists,
+ * and so does a case-insensitive ext4 directory, but neither is the default a
+ * person gets, and a per-path probe on every compare would put a stat inside
+ * the tree's hot loop.
+ */
+export const PATHS_FOLD_CASE: boolean =
+  process.platform === 'darwin' || process.platform === 'win32';
+
+/**
+ * The comparison form, with the folding decision passed in — `pathKey` below
+ * is this with the platform's answer. Exported so a test can exercise both
+ * answers on whichever OS it happens to run on.
+ */
+export function pathKeyFor(dir: string, foldCase: boolean): string {
+  const normalized = normalizeDir(dir);
+  return foldCase ? normalized.toLowerCase() : normalized;
+}
+
+/**
+ * The comparison form. Case-INSENSITIVE where the platform's filesystems are
+ * (macOS, Windows): there `/Users/x/Code` and `/Users/x/code` are one
+ * directory and must group as one. Case-SENSITIVE on Linux, where they are
+ * two directories — folding there would file one project's sessions under
+ * another whenever two paths differ only in case, and the tree would have
+ * no way to show which it meant.
+ *
+ * Until 0.1.10 this folded everywhere, and the folded key was PERSISTED in
+ * the minted-branch map (state.ts). A Linux store written by that build holds
+ * lowercased repository keys, so the readers there try the exact key first
+ * and the folded one second — a read-side fallback rather than a migration
+ * write, because this codebase does not rewrite a user's state on activation
+ * to suit a new build.
  */
 export function pathKey(dir: string): string {
-  return normalizeDir(dir).toLowerCase();
+  return pathKeyFor(dir, PATHS_FOLD_CASE);
 }
 
 /** True when `target` IS `dir` or sits underneath it. Boundary-aware, so

@@ -19,6 +19,28 @@ All notable changes to Flock are recorded here. The format follows
   reveal, which opens Finder, File Explorer or the desktop's file manager as the
   host dictates, and the title told two platforms out of three the wrong thing.
 
+### Fixed
+
+- **Linux compares paths the way its filesystems do.** Every path comparison in
+  Flock folded case, because the two platforms it was written on — macOS and
+  Windows — do. On Linux that filed two directories whose names differ only in
+  case under one project, with no way for the tree to say which it meant. The
+  fold is now a platform decision: macOS and Windows keep it, Linux compares
+  exactly. The one place the folded key was written to disk — the record of
+  which branches Flock itself minted, which is what earns the delete offer when
+  a worktree is removed — is read under both spellings, so a Linux store an
+  older build wrote keeps answering for a repository with capitals in its path.
+  Nothing rewrites your state to suit the new build.
+- **The tmux notice names your distribution's package manager.** It said
+  `sudo apt install tmux` to every Linux. It now reads `/etc/os-release` and
+  says `dnf`, `pacman`, `zypper`, `apk` or `nix-env` where those are the
+  answer, and apt where it cannot tell.
+- **`/exit` finds a shell on a machine without `/bin/bash`.** The exit-to-shell
+  hook respawns your `$SHELL`, and fell back to `/bin/bash` (or `/bin/zsh` on
+  macOS) when that was unusable. NixOS has neither, and a hook that respawns a
+  shell that is not there leaves the pane dead and the tab stuck. The fallback
+  now checks the file exists and takes `/bin/sh` otherwise.
+
 ## [0.1.10] — 2026-08-31
 
 ### Fixed

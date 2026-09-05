@@ -26,6 +26,7 @@ import {
   computeGrouping,
   directoryBranchVisibility,
   projectBranchList,
+  PATHS_FOLD_CASE,
 } from '../src/projects';
 import type { GroupingResult } from '../src/projects';
 import {
@@ -704,7 +705,7 @@ describe('projectBranchList', () => {
     expect(out).toHaveLength(1);
   });
 
-  it('dedupes case-insensitively, the way every path rule here does', () => {
+  it.runIf(PATHS_FOLD_CASE)('dedupes case-insensitively, the way every path rule here does', () => {
     const out = projectBranchList({
       subprojects: [
         { branches: [branch('main', '/code/app')] },

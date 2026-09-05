@@ -50,6 +50,7 @@ import {
   worktreePathFor,
   worktreeRemoveArgv,
 } from '../src/worktrees';
+import { PATHS_FOLD_CASE } from '../src/projects';
 import type { BranchStatus, GitCommandResult } from '../src/types';
 
 const ROOT = path.join(__dirname, '..');
@@ -452,7 +453,7 @@ describe('isCheckedOut / isExistingWorktree', () => {
 
   it('spots a path that is already a worktree, case-insensitively', () => {
     expect(isExistingWorktree('/c/app-feat-x', checkouts)).toBe(true);
-    expect(isExistingWorktree('/c/APP-FEAT-X', checkouts)).toBe(true);
+    if (PATHS_FOLD_CASE) expect(isExistingWorktree('/c/APP-FEAT-X', checkouts)).toBe(true);
     expect(isExistingWorktree('/c/app-feat-y', checkouts)).toBe(false);
     expect(isExistingWorktree('', checkouts)).toBe(false);
   });
