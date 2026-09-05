@@ -96,6 +96,17 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Changed
 
+- **The recommended setup asks four things.** Instant updates, the in-session
+  verbs, your first project, and your history (when this machine has some) —
+  the consent items and the two that put rows on the tree, all pre-ticked,
+  every one of which a new user can say yes to without understanding Flock;
+  plus the tmux repair when tmux is installed but switched off, and the branch
+  rows, offered unticked, when a repository has two checkouts. The two taste
+  questions — *what a window is* and *where sessions open* — have left the
+  checklist: nobody can answer them before they have lived with the default,
+  so they are the gear's **Choose Window Model…** and **Choose Where Sessions
+  Open…** instead. On a machine where everything is already true the
+  checklist now says so rather than opening a picker with nothing on it.
 - **One description per setting.** `docs/settings.md` used to carry a
   hand-kept table beside the descriptions `package.json` already holds for the
   Settings editor, and the two drifted: the table ran short, its header quoted

@@ -1924,7 +1924,7 @@ interface RecommendedPick extends vscode.QuickPickItem {
  *
  * WHAT IS OFFERED IS NOT DECIDED HERE. `recommendedPlan` (src/recommend.ts) is
  * pure and tested and owns every sentence the user reads; this function is the
- * side effects — the picker, the seven ways of applying a step, and the receipt.
+ * side effects — the picker, the five ways of applying a step, and the receipt.
  *
  * NO CONFIRMATION MODAL OF ITS OWN, deliberately. The picker IS the choice, the
  * same way running `showBranchesAndWorktrees` is: every line says what it
@@ -1950,11 +1950,11 @@ export async function recommendedSetupFlow(deps: CommandDeps): Promise<void> {
 
   const plan = recommendedPlan(world);
   if (plan.steps.length === 0) {
-    // Defensive: the `surface` step is on every plan today, so this branch is
-    // unreachable — kept because recommendedPlan owns that fact, not this
-    // function, and a future plan with a genuinely empty answer should say
-    // this rather than open an empty picker. The notes (today: tmux is not
-    // installed) are the one thing left worth saying.
+    // A settled machine. Every step has an "already done" now that the two
+    // taste questions are verbs of their own rather than rows on every plan,
+    // so somebody who has everything is told so instead of being shown an
+    // empty picker. The notes (today: tmux is not installed) are the one thing
+    // left worth saying.
     void vscode.window.showInformationMessage(
       ['Flock: everything recommended is already set up.', ...plan.notes].join(' '),
     );
@@ -1986,7 +1986,7 @@ export async function recommendedSetupFlow(deps: CommandDeps): Promise<void> {
     if (!wanted.has(step.id)) continue;
     let done = false;
     try {
-      done = await applyRecommendedStep(deps, step, world, failed);
+      done = await applyRecommendedStep(deps, step, failed);
     } catch (err) {
       // Per step, so one thrown step cannot take the other five with it. The
       // top-level guard in `register` would have caught this and reported the
@@ -2017,13 +2017,11 @@ export async function recommendedSetupFlow(deps: CommandDeps): Promise<void> {
 }
 
 /** One step's side effect. Returns whether it actually landed — a declined
- *  consent dialog, a closed folder dialog and a cancelled surface picker all
- *  mean "no", and none is an error. Keys that could not be written are
- *  appended to `failed`. */
+ *  consent dialog and a closed folder dialog both mean "no", and neither is an
+ *  error. Keys that could not be written are appended to `failed`. */
 async function applyRecommendedStep(
   deps: CommandDeps,
   step: RecommendedStep,
-  world: RecommendedWorld,
   failed: string[],
 ): Promise<boolean> {
   // The settings steps first, and by their table rather than by their id: which
@@ -2065,25 +2063,6 @@ async function applyRecommendedStep(
       // the person was shown the door, which is what this step promised.
       await importSessionsFlow(deps);
       return true;
-    case 'surface':
-    case 'windowModel': {
-      // The explicit question the step promised. The choice writes; the tick
-      // did not — so a cancelled picker is "no" and costs nothing, exactly as
-      // recommend.ts's contract for a TASTE question requires. Both taste steps
-      // land here because they are the same shape of thing: open a picker, and
-      // write whatever the chosen option carries. The surface half is
-      // `surfaceFlow`, shared with the Status verb's row.
-      const { choice, unwritable } =
-        step.id === 'surface'
-          ? await surfaceFlow(deps, world)
-          : await writeChoice(deps, await chooseWindowModel(world));
-      if (choice === undefined) return false;
-      if (unwritable.length > 0) {
-        failed.push(`${step.title} (${unwritable.join(', ')})`);
-        return false;
-      }
-      return true;
-    }
     default:
       return false;
   }
@@ -2195,21 +2174,6 @@ async function writeChoice<T extends TasteChoice>(
 }
 
 /**
- * The surface question asked AND acted on: the picker, then the writes the
- * chosen option carries. What the checklist's `surface` step runs; the verb
- * `Flock: Choose Where Sessions Open…` is `tasteVerb` over the same picker,
- * and the Status verb's row runs that command, so there is one surface picker
- * in a codebase whose whole argument for `chooseFromTaste` was that there
- * should not be two.
- */
-async function surfaceFlow(
-  deps: CommandDeps,
-  world: RecommendedWorld,
-): Promise<{ choice: SurfaceChoice | undefined; unwritable: readonly string[] }> {
-  return writeChoice(deps, await chooseSurface(world));
-}
-
-/**
  * A taste picker as a VERB: read the world, ask, write what the chosen option
  * carries, refresh, and say what changed — by the option's LABEL, never its
  * value, because the receipt has to be readable by the same person the picker
@@ -2217,6 +2181,13 @@ async function surfaceFlow(
  * function; the words differ, the contract does not. A cancelled picker
  * writes nothing and says nothing, and a key the wiring could not write is
  * named, with the fact that nothing moved.
+ *
+ * THE ONLY ROUTE to either picker. The checklist used to carry both as rows
+ * on every plan, and they left it for the reason design/settings-tiers.md §5
+ * gives: nobody can answer "what is a window" before they have lived in one.
+ * The Status verb's rows run these two commands by id, so there is one
+ * picker per question in a codebase whose whole argument for
+ * `chooseFromTaste` was that there should not be two.
  */
 async function tasteVerb<T extends TasteChoice>(
   deps: CommandDeps,

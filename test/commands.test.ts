@@ -6069,9 +6069,8 @@ describe('the add / import flows', () => {
     over: Partial<UnlistedSession> = {},
   ): UnlistedSession => ({ sessionId: id, live: false, ...over });
 
-  /** A machine with nothing left to recommend — except the surface question,
-   *  which is on every plan. Each setup test moves exactly the fields it is
-   *  about, so what it is testing is what it changed. */
+  /** A machine with nothing left to recommend. Each setup test moves exactly
+   *  the fields it is about, so what it is testing is what it changed. */
   const settledWorld: RecommendedWorld = {
     platform: 'darwin',
     tmuxBinary: '/opt/homebrew/bin/tmux',
@@ -6268,19 +6267,23 @@ describe('the add / import flows', () => {
     const VERBS = 'Let Claude fork its own sessions';
     const PROJECT = 'Make your first project';
     const BRANCHES = 'Show branch and worktree rows';
-    const SURFACE = 'Choose where sessions open';
-    const WINDOW_MODEL = 'Choose what a window is';
 
     beforeEach(() => {
       // newProjectFlow names the project it just made, and falls back to this
       // command when there is no inline rename to run.
       (mockCommands as { executeCommand?: unknown }).executeCommand =
         async () => undefined;
+      // The two taste verbs leave a status-bar receipt; a host without the
+      // API would throw inside the handler. Tests that read the receipt
+      // install their own collector over this.
+      (mockWindow as StatusHost).setStatusBarMessage = () => undefined;
     });
 
     afterEach(() => {
       delete (mockCommands as { executeCommand?: unknown }).executeCommand;
+      delete (mockCommands as { registerCommand?: unknown }).registerCommand;
       delete (mockWindow as { showOpenDialog?: unknown }).showOpenDialog;
+      delete (mockWindow as StatusHost).setStatusBarMessage;
     });
 
     it('says so, and asks nothing, where the wiring cannot answer', async () => {
@@ -6292,26 +6295,33 @@ describe('the add / import flows', () => {
       expect(calls.settings).toEqual([]);
     });
 
-    it('still asks the two taste questions on a machine with nothing else to do, and the receipt carries the notes', async () => {
-      // The old "everything recommended is already set up" outcome is gone on
-      // purpose: neither taste step has an "already done", so even a settled
-      // machine is offered the checklist — with exactly those two rows on it —
-      // and the notes ride the receipt.
+    it('says everything is set up on a settled machine, and still carries the notes', async () => {
+      // Every step has an "already done" now that the two taste questions are
+      // verbs of their own, so a settled machine is told so — no picker opens,
+      // nothing is written — and the one thing it cannot do for you is still
+      // said.
       const { deps, calls } = poolDeps({
         world: { ...settledWorld, tmuxBinary: null },
       });
-      const asked = scriptPicks([SURFACE], 'Editor tabs (current)');
+      const asked = scriptPicks();
       await recommendedSetupFlow(deps);
-      expect(asked.offered[0]).toEqual([SURFACE, WINDOW_MODEL]);
-      // Choosing an option — even the current one — writes it, explicitly.
-      expect(calls.settings).toEqual([
-        { key: 'terminalLocation', value: 'editor' },
-        { key: 'soloSession', value: false },
-        { key: 'launch.mode', value: 'flock' },
-      ]);
-      // The one thing it cannot do for you is still said.
+      expect(asked.offered).toEqual([]);
+      expect(calls.settings).toEqual([]);
+      expect(saidInfo.join(' ')).toContain('everything recommended is already set up');
       expect(saidInfo.join(' ')).toContain('tmux is not installed');
-      expect(saidInfo.join(' ')).toContain('choose differently');
+    });
+
+    it('asks neither taste question — where sessions open and what a window is are verbs', async () => {
+      // Nobody can answer "what is a window" before they have lived in one:
+      // the two pickers are `Choose Window Model…` and `Choose Where Sessions
+      // Open…`, offered once when they become real, never rows on the
+      // first-run checklist.
+      const { deps } = poolDeps({
+        world: { ...settledWorld, hooksInstalled: false, hasProjects: false },
+      });
+      const asked = scriptPicks(undefined);
+      await recommendedSetupFlow(deps);
+      expect(asked.offered[0]).toEqual([PROJECT, HOOKS]);
     });
 
     it('ticks what recommendedPlan recommends, and leaves the rest alone', async () => {
@@ -6321,20 +6331,20 @@ describe('the add / import flows', () => {
       const asked = scriptPicks(undefined);
       await recommendedSetupFlow(deps);
       expect(asked.many).toEqual([true]);
-      expect(asked.offered[0]).toEqual([SURFACE, WINDOW_MODEL, HOOKS, BRANCHES]);
-      expect(asked.picked[0]).toEqual([SURFACE, WINDOW_MODEL, HOOKS]);
+      expect(asked.offered[0]).toEqual([HOOKS, BRANCHES]);
+      expect(asked.picked[0]).toEqual([HOOKS]);
     });
 
     it('opens the three window models, cursor on the one you are in', async () => {
-      // The taste contract again: the tick opens the question, the OPTION
-      // writes. `folder` alone here, because that is the whole of what the
-      // Flock-only and one-folder-per-project answers move.
+      // The taste contract: the picker asks, the OPTION writes. `folder` alone
+      // here, because that is the whole of what the Flock-only and
+      // one-folder-per-project answers move.
       const { deps, calls } = poolDeps({
         world: { ...settledWorld, mode: 'root' },
       });
-      const asked = scriptPicks([WINDOW_MODEL], 'One folder per project');
-      await recommendedSetupFlow(deps);
-      expect(asked.offered[1]).toEqual([
+      const asked = scriptPicks('One folder per project');
+      await withRegisteredCommands(deps).run(COMMANDS.chooseWindowModel);
+      expect(asked.offered[0]).toEqual([
         'One folder per project',
         'Flock only (current)',
         'Auto-switch',
@@ -6351,9 +6361,9 @@ describe('the add / import flows', () => {
       const { deps, calls } = poolDeps({
         world: { ...settledWorld, mode: 'project', workspacesEnabled: false },
       });
-      const asked = scriptPicks([WINDOW_MODEL], 'Auto-switch');
-      await recommendedSetupFlow(deps);
-      expect(asked.offered[1]).toContain('Flock only (current)');
+      const asked = scriptPicks('Auto-switch');
+      await withRegisteredCommands(deps).run(COMMANDS.chooseWindowModel);
+      expect(asked.offered[0]).toContain('Flock only (current)');
       expect(calls.settings).toEqual([
         { key: 'mode', value: 'project' },
         { key: 'workspaces.enabled', value: true },
@@ -6361,20 +6371,19 @@ describe('the add / import flows', () => {
       ]);
     });
 
-    it('writes nothing for a ticked window-model step whose picker was cancelled', async () => {
+    it('writes nothing, and says nothing, when the window-model picker is cancelled', async () => {
       const { deps, calls } = poolDeps({ world: settledWorld });
-      scriptPicks([WINDOW_MODEL], undefined);
-      await recommendedSetupFlow(deps);
+      scriptPicks(undefined);
+      await withRegisteredCommands(deps).run(COMMANDS.chooseWindowModel);
       expect(calls.settings).toEqual([]);
-      expect(saidInfo.join(' ')).toContain('nothing was changed');
+      expect(saidInfo).toEqual([]);
     });
 
-    it('is also a verb of its own, with a receipt naming the model', async () => {
-      // The checklist asks this once, when somebody meets the product. The
-      // standalone command is for the other moment — a month in, wanting a
-      // different model — and it is the one that matters more, because the
-      // route it replaces is knowing that the key is called `lineage.mode` and
-      // that `project` is spelled that way while meaning "auto-switch".
+    it('says what it did, by the model’s label', async () => {
+      // The route this verb replaces is knowing that the key is called
+      // `lineage.mode` and that `project` is spelled that way while meaning
+      // "auto-switch" — so the receipt has to be readable by the same person
+      // the picker was.
       const said: string[] = [];
       (
         mockWindow as { setStatusBarMessage?: (t: string, ms?: number) => void }
@@ -6449,40 +6458,15 @@ describe('the add / import flows', () => {
       }
     });
 
-    it('writes nothing for a ticked surface step whose picker was cancelled', async () => {
-      // The tick opened the question; only an ANSWER writes. Escape on the
-      // four-way picker is "no", not an error, and the receipt says nothing
-      // happened.
-      const { deps, calls } = poolDeps({ world: settledWorld });
-      scriptPicks([SURFACE], undefined);
-      await recommendedSetupFlow(deps);
-      expect(calls.settings).toEqual([]);
-      expect(saidInfo.join(' ')).toContain('nothing was changed');
-    });
-
     it('writes launch.mode ALONE for the extension option, installed or not', async () => {
       const { deps, calls } = poolDeps({ world: settledWorld });
-      const asked = scriptPicks([SURFACE], 'Claude Code extension');
-      await recommendedSetupFlow(deps);
+      const asked = scriptPicks('Claude Code extension');
+      await withRegisteredCommands(deps).run(COMMANDS.chooseSurface);
       // The row is on offer even though the extension is missing — the
       // description says so, and the launcher already falls back.
-      expect(asked.offered[1]).toContain('Claude Code extension');
+      expect(asked.offered[0]).toContain('Claude Code extension');
       expect(calls.settings).toEqual([
         { key: 'launch.mode', value: 'claudeExtension' },
-      ]);
-    });
-
-    it('suffixes the current arrangement, and moves off it when asked', async () => {
-      const { deps, calls } = poolDeps({
-        world: { ...settledWorld, soloSession: true },
-      });
-      const asked = scriptPicks([SURFACE], 'Bottom terminal panel');
-      await recommendedSetupFlow(deps);
-      expect(asked.offered[1]).toContain('One pinned session tab (current)');
-      expect(calls.settings).toEqual([
-        { key: 'terminalLocation', value: 'panel' },
-        { key: 'soloSession', value: false },
-        { key: 'launch.mode', value: 'flock' },
       ]);
     });
 

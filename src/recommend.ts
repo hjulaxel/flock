@@ -23,15 +23,17 @@
 //               direction; they stay in the settings UI where they belong.
 //               TWO taste questions ARE worth asking out loud, because a
 //               person who has never met the keys behind them cannot ask them
-//               of themselves. Where sessions open (`terminalLocation` +
-//               `soloSession` + `launch.mode`) is the `surface` step; what a
-//               WINDOW is (`mode`, and the legacy `workspaces.enabled` it
-//               supersedes) is the `windowModel` step. Both are explicit
-//               questions, never pre-ticked checkboxes that write settings:
-//               the steps themselves carry no settings at all, the writes
-//               belong to whichever option is CHOSEN in the picker
-//               (`surfaceChoices` / `windowModelChoices` below), and
-//               cancelling either writes nothing.
+//               of themselves: where sessions open (`terminalLocation` +
+//               `soloSession` + `launch.mode`) and what a WINDOW is (`mode`,
+//               and the legacy `workspaces.enabled` it supersedes). They are
+//               NOT checklist steps. Nobody can answer "what is a window"
+//               before they have lived in one, so each is a verb of its own
+//               (`Flock: Choose Window Model…`, `Flock: Choose Where Sessions
+//               Open…`), asked at the moment it becomes real rather than on
+//               the first run (design/settings-tiers.md §5). The writes belong
+//               to whichever option is CHOSEN in the picker (`surfaceChoices`
+//               / `windowModelChoices` below), and cancelling either writes
+//               nothing.
 //
 // A "recommended setup" is only honest if it moves the first group, asks about
 // the third, and leaves the other two alone. That distinction is the whole
@@ -61,8 +63,6 @@ export type { RecommendedWorld };
  *  tree live, then the optional rows. */
 export const RECOMMENDED_STEP_IDS = [
   'tmux',
-  'surface',
-  'windowModel',
   'project',
   'import',
   'hooks',
@@ -169,67 +169,6 @@ export function recommendedPlan(world: RecommendedWorld): RecommendedPlan {
       done.push('tmux');
     }
   }
-
-  // ---- where sessions open --------------------------------------------------
-  //
-  // ALWAYS OFFERED, which makes it the one step with no `done` arm: a choice
-  // has no "already done". Every other line here repairs or enables something,
-  // so "already true" retires it; this one is a question, and the defaults
-  // being AN answer is not the same as the person having been asked.
-  //
-  // It is TASTE, so it is ASKED — a FLOW step whose tick opens an explicit
-  // four-way picker (commands.ts) — and never pre-answered: the step itself
-  // writes nothing, and confirming the checklist with it ticked still writes
-  // nothing until an option is chosen in that picker. The four options and
-  // their writes are `surfaceChoices` below, so the sentence a person reads
-  // and the keys it moves live in the same file.
-  steps.push({
-    id: 'surface',
-    title: 'Choose where sessions open',
-    why:
-      'Four places a session can live: one pinned tab at a time, a tab per ' +
-      'session beside your files, the official Claude Code extension’s own ' +
-      'UI, or the terminal panel under your editor. The default is fine; the ' +
-      'point is that it was never YOUR answer until you give it.',
-    writes: 'opens a picker of the four — nothing until you choose one there',
-    undo: 'run Recommended Setup again and choose differently',
-    recommended: true,
-    settings: [],
-  });
-
-  // ---- what a window is -----------------------------------------------------
-  //
-  // ALWAYS OFFERED, the second step with no `done` arm, and for exactly the
-  // reason the one above has none: this is a question, and the default being AN
-  // answer is not the same as the person having been asked. It is a stronger
-  // case than `surface`, if anything — `lineage.mode` decides what a window IS,
-  // and until now the only route to it was a dropdown among forty-odd settings
-  // whose values read `folder` / `flock` / `project` rather than in words
-  // anybody uses. A three-way choice nobody can find is not a choice.
-  //
-  // It writes nothing itself: the tick opens `windowModelChoices`'s picker
-  // (commands.ts, the same plumbing `surface` uses) and the OPTION writes, so a
-  // cancelled picker is "no" and costs nothing.
-  //
-  // The default stays `folder` whatever anybody picks here — that is the point
-  // of asking rather than flipping. Somebody who wants the auto-switching window
-  // gets it because they chose it, and their choice also retires the legacy
-  // `workspaces.enabled` key on their machine, which no activation of ours is
-  // ever going to do for them.
-  steps.push({
-    id: 'windowModel',
-    title: 'Choose what a window is',
-    why:
-      'Three ways to live: one folder per project, where a window is the ' +
-      'folder you opened; Flock only, where the window is the sidebar and you ' +
-      'open a window when you want files; or auto-switch, where one window ' +
-      'follows whichever project you are working in. Each costs something ' +
-      'different, and the default was never your answer.',
-    writes: 'opens a picker of the three — nothing until you choose one there',
-    undo: 'run Recommended Setup again, or Flock: Choose Window Model…',
-    recommended: true,
-    settings: [],
-  });
 
   // ---- a project ----------------------------------------------------------
   if (world.hasProjects) {
@@ -356,9 +295,9 @@ export function recommendedPlan(world: RecommendedWorld): RecommendedPlan {
 
 export type SurfaceChoiceId = 'pinnedTab' | 'editorTabs' | 'claudeExtension' | 'panel';
 
-/** One of the four places a session can open — a row of the picker the
- *  `surface` step runs. The settings are written all together when THIS option
- *  is chosen there, and not a moment sooner. */
+/** One of the four places a session can open — a row of the picker
+ *  `Flock: Choose Where Sessions Open…` runs. The settings are written all
+ *  together when THIS option is chosen there, and not a moment sooner. */
 export interface SurfaceChoice {
   readonly id: SurfaceChoiceId;
   /** The picker label. */
@@ -473,8 +412,8 @@ export function surfaceChoices(
 
 export type WindowModelId = 'folder' | 'root' | 'project';
 
-/** One of the three window models — a row of the picker the `windowModel` step
- *  runs, and of `Flock: Choose Window Model…`. Shaped exactly like
+/** One of the three window models — a row of the picker
+ *  `Flock: Choose Window Model…` runs. Shaped exactly like
  *  `SurfaceChoice` because it IS the same question in a different subject: a
  *  taste choice whose settings are written all together when this option is
  *  chosen, and not a moment sooner. */
@@ -601,14 +540,12 @@ export function recommendedNotice(opts: {
   if (opts.dismissed) return 'none';
   if (opts.world.hasProjects) return 'none';
   const plan = recommendedPlan(opts.world);
-  // The `surface` and `windowModel` steps are on EVERY plan by design — a
-  // choice has no "already done" — so counting them would quietly lower the
-  // threshold to "anybody with no projects", the exact firing this threshold
-  // exists to stop. Two always-offered steps rather than one makes this
-  // subtraction load-bearing rather than merely correct: without it the
-  // threshold of two would be met by them alone.
-  const recommended = plan.steps.filter(
-    (s) => s.recommended && s.id !== 'surface' && s.id !== 'windowModel',
-  ).length;
+  // Recommended steps only: the branch rows are offered unticked, so a person
+  // with two checkouts and one thing to do is still a person with one thing to
+  // do. Every step left on a plan has an "already done" — the two taste
+  // questions, which had none and would have met this threshold by
+  // themselves, are verbs now rather than steps — so the count needs no
+  // subtraction to stay honest.
+  const recommended = plan.steps.filter((s) => s.recommended).length;
   return recommended >= 2 ? 'offer' : 'none';
 }
