@@ -1078,11 +1078,34 @@ own are also left alone by workspace switching.
 
 ### Codex, Gemini and other CLIs
 
-Session rows come from the Claude CLI's own registry, so today every observed
-session is a Claude session. The other provider ids exist so a **project** can
-declare what it runs — that is what picks the logo — and so an account can keep
-its own config directory. They are not yet somewhere a session starts: the
-launcher execs one binary.
+Claude session rows come from the Claude CLI's own registry (`claude agents
+--json`). Codex rows come from Flock's own records plus the Codex CLI's
+rollout files under `~/.codex/sessions`, so a Codex session Flock launched has
+a row, an age, a fork and a resume exactly like a Claude one, and a Codex
+session started in some other terminal shows up as history the moment its
+rollout does.
+
+**What a Codex row gets, and where each fact comes from.**
+
+| Fact | Claude row | Codex row |
+| --- | --- | --- |
+| Busy / idle | the CLI's registry, every poll | the rollout's own `task_started` / `task_complete` records, every poll; the hooks, instantly |
+| Waiting for you | the registry | the `PermissionRequest` hook only — the rollout never records a prompt |
+| Turn finished (green dot, bell) | registry transition; `Stop` hook | rollout transition; `Stop` hook |
+| Compaction ring | `PreCompact` hook in, roster quiet out | `PreCompact` in, `PostCompact` out — Codex says when it ends |
+| Account meter | the CLI's usage endpoint | the rate limits the CLI writes after every turn, as old as the last turn (the hover says how old) |
+| Signed in as | `.claude.json` | the id token's `email` in `auth.json`, plus the plan |
+| Instant updates | **Install Instant-Update Hooks…** — a plugin directory | **Install Codex Hooks…** — entries merged into `~/.codex/hooks.json`, trusted once by you via `/hooks` |
+| Move to another login | **Move to Account…**, same CLI | not offered: Codex keeps its threads in a store Flock does not move |
+| Continue on the other CLI | **Continue on Another CLI…** → Codex | **Continue on Another CLI…** → Claude |
+| Fork and Compact, Close with Summary | yes | the plain verb, by name — both rest on `/compact` being a Claude command |
+| Named tabs | `--name` | Flock's own title; Codex has no naming flag |
+
+Gemini and `generic` rows still exist so a **project** can declare what it runs
+— that is what picks the logo — and so an account can keep its own config
+directory; Gemini is not yet somewhere a session starts. The `generic` row is
+the API-key profile: a Claude launch authenticated by an environment variable,
+with no plan windows to meter.
 
 ## Close and archive
 

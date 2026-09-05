@@ -25,6 +25,7 @@ import * as vscode from 'vscode';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import * as fs from 'node:fs/promises';
+import * as fsSync from 'node:fs';
 
 import {
   listPidFacts,
@@ -143,8 +144,12 @@ import {
   codexSessionsDir,
   findCodexBinary,
   matchRollout,
+  readRolloutActivity,
   scanRollouts,
 } from './codex';
+import type { RolloutActivity } from './codex';
+import { CodexHooksManager } from './codexHooks';
+import { handoffRefusal } from './handoff';
 import { CODEX_HOME_ENV } from './accounts';
 
 /** Codex id discovery (see adoptCodexSession): how often to look for the
@@ -3019,6 +3024,61 @@ export async function activate(
   }
   await setHooksContext(hookState.installed);
 
+  // The hook-tracked half of a Codex row's status — written by the sink
+  // below, read by `codexStatusFor` beside codexLiveEntries, which explains
+  // the rule. Declared HERE, ahead of the sink, because the sink can fire
+  // during a later `await` of this activation and a `const` declared after it
+  // would still be in its temporal dead zone.
+  interface CodexActivityMark {
+    status: 'busy' | 'waiting' | 'idle';
+    at: number;
+  }
+  const codexActivity = new Map<string, CodexActivityMark>();
+  interface CodexTailEntry {
+    mtimeMs: number;
+    size: number;
+    activity: RolloutActivity | null;
+  }
+  const codexTailCache = new Map<string, CodexTailEntry>();
+
+  // The Codex half (src/codexHooks.ts): entries merged into every Codex
+  // home's hooks.json — the machine's own and one per Codex account with its
+  // own CODEX_HOME. Its events land in the same file HooksManager tails, so
+  // there is no second watcher; there is a second install record, because the
+  // two installs are consented to separately.
+  const codexHooksManager = new CodexHooksManager(
+    {
+      getStored: () => store.getCodexHookState(),
+      setStored: (s) => store.setCodexHookState(s),
+    },
+    {
+      homes: () =>
+        store
+          .getAccounts()
+          .filter((p) => p.provider === 'codex')
+          .map((p) => (typeof p.configDir === 'string' ? p.configDir.trim() : ''))
+          .filter((d) => d !== ''),
+    },
+  );
+  context.subscriptions.push(codexHooksManager);
+  try {
+    await codexHooksManager.selfHeal();
+  } catch (err) {
+    logError('extension.codexHooks.selfHeal', err);
+  }
+
+  /** Is there a Codex to hook at all — an account on the roster, or the CLI
+   *  on the machine? Gates the Codex hook entries in the gear menu and the
+   *  recommended-setup step, so neither is offered where it can only refuse. */
+  const codexHooksAvailable = (): boolean => {
+    try {
+      if (store.getAccounts().some((p) => p.provider === 'codex')) return true;
+    } catch (err) {
+      logError('extension.codexHooksAvailable', err);
+    }
+    return codexBin() !== null;
+  };
+
   const hookEventSink = (e: HookEvent): void => {
     if (e.sessionId) resolver.invalidate(e.sessionId);
     // Re-key. The hook inherited LINEAGE_NODE_ID from a terminal WE
@@ -3042,9 +3102,37 @@ export async function activate(
     }
     // Stop is the turn ending, right now — the poll transition would say
     // the same thing up to pollIntervalMs later. (`Notification` is claude
-    // asking for the user, same urgency.)
-    if (e.sessionId && (e.event === 'Stop' || e.event === 'Notification')) {
+    // asking for the user, same urgency; `PermissionRequest` is Codex asking,
+    // the same thing under the other CLI's name.)
+    if (
+      e.sessionId &&
+      (e.event === 'Stop' ||
+        e.event === 'Notification' ||
+        (e.cli === 'codex' && e.event === 'PermissionRequest'))
+    ) {
       noteSessionDone(e.sessionId);
+    }
+    // ---- codex status (see the codex status block near codexLiveEntries) --
+    //
+    // The hook is the instant half of a Codex row's status. Marked under the
+    // event's own session id; the reader asks under every generation alias.
+    if (e.cli === 'codex' && e.sessionId) {
+      const at = Date.now();
+      if (e.event === 'PermissionRequest') {
+        codexActivity.set(e.sessionId, { status: 'waiting', at });
+      } else if (e.event === 'UserPromptSubmit') {
+        codexActivity.set(e.sessionId, { status: 'busy', at });
+      } else if (e.event === 'Stop') {
+        codexActivity.set(e.sessionId, { status: 'idle', at });
+      } else if (e.event === 'SessionEnd') {
+        codexActivity.delete(e.sessionId);
+      } else if (e.event === 'PostCompact') {
+        // Codex says when a compaction ENDS — the signal Claude never sends
+        // and compaction.ts has to infer from the roster going quiet. Whether
+        // the turn carries on is what the hook-tracked mark says.
+        const stillBusy = codexActivity.get(e.sessionId)?.status === 'busy';
+        compaction.noteFinish(chainAliases(e.sessionId), at, stillBusy);
+      }
     }
     // ---- compaction (src/compaction.ts) -------------------------------
     //
@@ -3104,9 +3192,13 @@ export async function activate(
    *  activation, from a config change and after install/remove. */
   const syncHookWatcher = (): void => {
     try {
+      // Either install feeds the one events file, so either keeps the tail
+      // running — a machine with only the Codex entries installed must still
+      // read them.
       if (
         boolCfg(CONFIG_KEYS.hooksEnabled, false) &&
-        hooksManager.getState().installed
+        (hooksManager.getState().installed ||
+          codexHooksManager.getState().installed)
       ) {
         hooksManager.startWatcher(hookEventSink);
       } else {
@@ -3667,7 +3759,14 @@ export async function activate(
       const live = store.getAccounts();
       const liveIds = new Set(live.map((p) => p.id));
       const tombstonedIds = store.accountIds().filter((id) => !liveIds.has(id));
-      const seeds = seedDefaultProfiles(live, { hasCodexAuth, tombstonedIds });
+      // The CLI alone is reason enough for a row (see SeedOptions): the row's
+      // one action is Sign In, and its meter says "not signed in" until then.
+      const hasCodexBinary = codexBin() !== null;
+      const seeds = seedDefaultProfiles(live, {
+        hasCodexAuth,
+        hasCodexBinary,
+        tombstonedIds,
+      });
       for (const seed of seeds) {
         await store.upsertAccount(seed.id, {
           provider: seed.provider,
@@ -4468,6 +4567,25 @@ export async function activate(
       .sort((a, b) => rank(a) - rank(b));
   };
 
+  /** Accounts on the OTHER CLI this conversation could be handed off to,
+   *  best first by the same rule `switchTargetsFor` ranks by. Judged by the
+   *  conversation's CLI (`handoffRefusal`'s fourth argument), never the pin's,
+   *  for the reason that function gives. */
+  const handoffTargetsFor = (
+    sessionId: string,
+    from: AccountProfile | null,
+    now: number,
+  ): AccountProfile[] => {
+    const cli = sessionProviderFor(sessionId) === 'codex' ? 'codex' : 'claude';
+    const rank = (p: AccountProfile): number =>
+      rankUsage(usageCache.get(p), now) === 'open' ? 0 : 1;
+    return store
+      .getAccounts()
+      .filter((p) => handoffRefusal(from, p, true, cli) === null)
+      .filter((p) => rankUsage(usageCache.get(p), now) !== 'exhausted')
+      .sort((a, b) => rank(a) - rank(b));
+  };
+
   const maybeOfferSwitchAtLimit = async (): Promise<void> => {
     if (!boolCfg(CONFIG_KEYS.offerSwitchAtLimit, false)) return;
     const now = Date.now();
@@ -4486,28 +4604,52 @@ export async function activate(
         if (typeof key !== 'number' || !Number.isFinite(key)) continue;
         if (offeredAtLimit.get(sessionId) === key) continue;
 
-        const [best] = switchTargetsFor(sessionId, from, now);
-        if (!best) continue; // nowhere to go: the offer would be a complaint
-        offeredAtLimit.set(sessionId, key);
-
         const label =
           forest.nodes.get(sessionId)?.label ??
           store.get(sessionId)?.title ??
           shortId(sessionId);
-        const MOVE = `Move to ${best.label}`;
-        const choice = await vscode.window.showInformationMessage(
+        const opening =
           `Flock: ${from.label} has used up its five-hour window, and ` +
-            `"${label}" is running on it.`,
-          MOVE,
+          `"${label}" is running on it.`;
+
+        const [best] = switchTargetsFor(sessionId, from, now);
+        if (best) {
+          offeredAtLimit.set(sessionId, key);
+          const MOVE = `Move to ${best.label}`;
+          const choice = await vscode.window.showInformationMessage(opening, MOVE);
+          if (choice !== MOVE) continue;
+          // Through the ordinary verb, with the account already named. The
+          // modal it puts up is not skipped: pressing a notification button is
+          // not consent to restart a process and lose a prompt cache.
+          await vscode.commands.executeCommand(
+            COMMANDS.switchSessionAccount,
+            sessionId,
+            best.id,
+          );
+          continue;
+        }
+
+        // No same-CLI account with room — the roster this extension seeds by
+        // default, one Claude login and one Codex login, has none. The other
+        // CLI is still a place the work can continue: a HANDOFF, a new
+        // session briefed on the transcript (src/handoff.ts), offered under
+        // its own name so nobody reads it as a resume. Same one-offer-per-
+        // window key, same "with room" filter, and it works in both
+        // directions now that Codex accounts carry a meter of their own.
+        const [other] = handoffTargetsFor(sessionId, from, now);
+        if (!other) continue; // nowhere to go: the offer would be a complaint
+        offeredAtLimit.set(sessionId, key);
+        const CONTINUE = `Continue on ${other.label}`;
+        const choice = await vscode.window.showInformationMessage(
+          `${opening} A new session on ${other.label} can pick the work up ` +
+            'from the transcript.',
+          CONTINUE,
         );
-        if (choice !== MOVE) continue;
-        // Through the ordinary verb, with the account already named. The modal
-        // it puts up is not skipped: pressing a notification button is not
-        // consent to restart a process and lose a prompt cache.
+        if (choice !== CONTINUE) continue;
         await vscode.commands.executeCommand(
-          COMMANDS.switchSessionAccount,
+          COMMANDS.handoffSession,
           sessionId,
-          best.id,
+          other.id,
         );
       } catch (err) {
         logError('extension.maybeOfferSwitchAtLimit', err);
@@ -5676,9 +5818,13 @@ export async function activate(
       hasTranscript(sessionId, { extraProjectsDirs: profileProjectsDirs() }),
     // The same lookup hasTranscript runs, kept as a pair on purpose: the
     // handoff brief has to NAME the file, and two different searches answering
-    // the two questions would eventually disagree.
+    // the two questions would eventually disagree. Then the Codex store: a
+    // rollout is the transcript of a Codex conversation, and the handoff
+    // brief reads either layout (handoff.TRANSCRIPT_SHAPE).
     transcriptPathOf: (sessionId) =>
-      transcriptFile(sessionId, { extraProjectsDirs: profileProjectsDirs() }),
+      transcriptFile(sessionId, { extraProjectsDirs: profileProjectsDirs() }) ??
+      codexArchived().find((s) => s.sessionId === sessionId)?.transcriptPath ??
+      null,
     repairResumeLeaf: (sessionId) =>
       repairResumeLeaf(sessionId, { extraProjectsDirs: profileProjectsDirs() }),
     transcriptFacts,
@@ -6256,6 +6402,17 @@ export async function activate(
       return state;
     },
     getHookState: () => hooksManager.getState(),
+    installCodexHooks: async () => {
+      const state = await codexHooksManager.install();
+      syncHookWatcher();
+      return state;
+    },
+    removeCodexHooks: async () => {
+      const state = await codexHooksManager.remove();
+      syncHookWatcher();
+      return state;
+    },
+    getCodexHookState: () => codexHooksManager.getState(),
     setHooksEnabled: async (enabled) => {
       try {
         await cfg().update(
@@ -6649,6 +6806,8 @@ export async function activate(
         hooksInstalled: store.getHookState().installed === true,
         verbsInstalled: store.getVerbsState().installed === true,
         verbsAvailable: true,
+        codexHooksInstalled: store.getCodexHookState().installed === true,
+        codexHooksAvailable: codexHooksAvailable(),
         // CLOSED projects count. Somebody who put their last project away has
         // met the concept, and "make your first project" would be wrong.
         hasProjects: store.getProjects().some((p) => p.deleted !== true),
@@ -6725,6 +6884,8 @@ export async function activate(
     menuState: () => ({
       hooksInstalled: store.getHookState().installed === true,
       verbsInstalled: store.getVerbsState().installed === true,
+      codexHooksInstalled: store.getCodexHookState().installed === true,
+      codexHooksAvailable: codexHooksAvailable(),
       onlyActive: boolCfg(CONFIG_KEYS.onlyActiveSessions, false),
       accountsSection: boolCfg(CONFIG_KEYS.accountsSection, true),
       branchDisplay: isBranchDisplay(
@@ -7119,9 +7280,87 @@ export async function activate(
       if (!held) continue;
       const entry: RosterEntry = { sessionId: id, kind: 'interactive' };
       if (typeof rec.cwd === 'string' && rec.cwd !== '') entry.cwd = rec.cwd;
+      const status = codexStatusFor(id);
+      if (status !== undefined) entry.status = status;
       out.push(entry);
     }
     return out;
+  };
+
+  // ------------------------------------------------- codex status
+  //
+  // WHAT A CODEX ROW IS DOING. The Claude roster says `busy` / `waiting` /
+  // `idle` for every Claude session; nothing says it for a Codex one, so a
+  // Codex row used to sit at `unknown` for life — no amber dot while it
+  // worked, no turn-ended transition, no green dot, no "waiting for you".
+  // Two sources now, and the same two the Claude side has:
+  //
+  //   the hook stream   instant, and the only one that can say WAITING: a
+  //                     `PermissionRequest` is Codex asking the user, and the
+  //                     rollout never records the prompt. `UserPromptSubmit`
+  //                     is busy, `Stop` is idle, `SessionEnd` forgets.
+  //   the rollout tail  one poll late, always available: the CLI writes
+  //                     `task_started` and `task_complete` into the rollout
+  //                     (codex.rolloutActivityFromTail). Read only when the
+  //                     file's stat has moved — one statSync per live Codex
+  //                     row per poll otherwise, the cost the Shells section
+  //                     already pays for Claude rows.
+  //
+  // Which wins: the hook, when its event is NEWER than the rollout's last
+  // write. A waiting mark is raised by a hook and the rollout stays still
+  // until the user answers — so the hook stays newer for exactly as long as
+  // the question is open, and the moment the turn resumes the rollout moves
+  // past it and speaks for itself. Nothing here is REQUIRED by anything: with
+  // hooks untrusted or off, the tail alone gives the amber and green dots.
+
+  // `codexActivity` and `codexTailCache` are declared up in section 7, beside
+  // the hook sink that writes the first of them: the sink can run during a
+  // later `await` of this activation, and a `const` declared down here would
+  // still be in its temporal dead zone then.
+
+  /** The rollout's own account of the session, cached on (mtime, size). */
+  const codexTailStatus = (
+    id: string,
+  ): { activity: RolloutActivity | null; mtimeMs: number } | undefined => {
+    let file: string | undefined;
+    for (const alias of chainAliases(id)) {
+      file = codexArchived().find((s) => s.sessionId === alias)?.transcriptPath;
+      if (file !== undefined) break;
+    }
+    if (file === undefined) return undefined;
+    let st: fsSync.Stats;
+    try {
+      st = fsSync.statSync(file);
+    } catch {
+      codexTailCache.delete(id);
+      return undefined;
+    }
+    const hit = codexTailCache.get(id);
+    if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) {
+      return { activity: hit.activity, mtimeMs: hit.mtimeMs };
+    }
+    const activity = readRolloutActivity(file);
+    codexTailCache.set(id, { mtimeMs: st.mtimeMs, size: st.size, activity });
+    return { activity, mtimeMs: st.mtimeMs };
+  };
+
+  const codexStatusFor = (id: string): string | undefined => {
+    let mark: CodexActivityMark | undefined;
+    for (const alias of chainAliases(id)) {
+      const m = codexActivity.get(alias);
+      if (m && (mark === undefined || m.at > mark.at)) mark = m;
+    }
+    let tail: ReturnType<typeof codexTailStatus>;
+    try {
+      tail = codexTailStatus(id);
+    } catch (err) {
+      logError('extension.codexTailStatus', err);
+      tail = undefined;
+    }
+    if (mark !== undefined && (tail === undefined || mark.at >= tail.mtimeMs)) {
+      return mark.status;
+    }
+    return tail?.activity ?? undefined;
   };
 
   /** The fetched roster with this window's Codex rows folded in. A Codex id

@@ -65,6 +65,7 @@ export const RECOMMENDED_STEP_IDS = [
   'project',
   'import',
   'hooks',
+  'codexHooks',
   'verbs',
   'worktrees',
 ] as const;
@@ -283,6 +284,33 @@ export function recommendedPlan(world: RecommendedWorld): RecommendedPlan {
         'tree redraws immediately.',
       writes: 'a plugin directory under ~/.claude/skills — named in full next',
       undo: 'Flock: Remove Instant-Update Hooks',
+      recommended: true,
+      settings: [],
+    });
+  }
+
+  // ---- instant updates, Codex ---------------------------------------------
+  //
+  // Offered only where there is a Codex to hook: a Codex account on the
+  // roster or the CLI on the machine (world.codexHooksAvailable). Absent on
+  // every world written before Codex hooks existed, which describes a machine
+  // without Codex — and a step that cannot be run must not be offered, nor
+  // reported as done.
+  if (world.codexHooksAvailable !== true) {
+    // Nothing said in either direction.
+  } else if (world.codexHooksInstalled === true) {
+    done.push('codexHooks');
+  } else {
+    steps.push({
+      id: 'codexHooks',
+      title: 'Instant updates for Codex (hooks)',
+      why:
+        'The Claude hooks above say nothing about a Codex session. Codex has ' +
+        'the same hook events; with them a Codex row gets its amber dot while ' +
+        'it works, its green dot the instant a turn ends, and a waiting mark ' +
+        'when it asks for permission — which nothing else reports for Codex.',
+      writes: 'one entry per event into ~/.codex/hooks.json — merged, never replaced',
+      undo: 'Flock: Remove Codex Hooks',
       recommended: true,
       settings: [],
     });

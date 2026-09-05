@@ -251,9 +251,11 @@ describe('weekdayFor', () => {
 // -------------------------------------------------------------- supportsUsage
 
 describe('supportsUsage', () => {
-  it('true only for a claude profile without an API-key-shaped extraEnv', () => {
+  it('true for a claude or codex profile without an API-key-shaped extraEnv', () => {
     expect(supportsUsage(profile('a'))).toBe(true);
-    expect(supportsUsage(profile('b', { provider: 'codex' }))).toBe(false);
+    // Codex is read off its rollouts now (see codexUsage.test.ts).
+    expect(supportsUsage(profile('b', { provider: 'codex' }))).toBe(true);
+    expect(supportsUsage(profile('b2', { provider: 'codex', extraEnv: { OPENAI_API_KEY: 'x' } }))).toBe(false);
     expect(supportsUsage(profile('c', { provider: 'gemini' }))).toBe(false);
     expect(supportsUsage(profile('d', { provider: 'generic' }))).toBe(false);
     expect(supportsUsage(profile('e', { extraEnv: { ANTHROPIC_API_KEY: 'x' } }))).toBe(false);
@@ -1037,9 +1039,9 @@ describe('LimitsService — profiles this file has nothing to say about', () => 
     return { service, readFile, exec, fetchFn };
   }
 
-  it('codex, gemini and generic profiles all answer null without touching a single dependency', async () => {
+  it('gemini and generic profiles answer null without touching a single dependency', async () => {
     const { service, readFile, exec, fetchFn } = spyHarness();
-    for (const provider of ['codex', 'gemini', 'generic'] as const) {
+    for (const provider of ['gemini', 'generic'] as const) {
       expect(await service.readUsage(profile(`p-${provider}`, { provider }))).toBeNull();
     }
     expect(readFile).not.toHaveBeenCalled();

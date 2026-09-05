@@ -4,6 +4,77 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Codex sessions get the same treatment as Claude ones.** Four things a
+  Codex row could not do, and now does, each from a real source rather than a
+  guess:
+
+  - **A Codex account has a meter.** Codex offers no usage endpoint Flock may
+    call, but the CLI writes the server's rate limits into the rollout after
+    every turn — `used_percent`, `window_minutes` (300 and 10080 on every plan
+    measured), `resets_at`, `plan_type` — so the row reads the newest of those
+    off disk: `5h 12% → 1h 20m · wk 3% → Tue`, exactly as a Claude row does.
+    The hover names who is signed in (the id token's `email` in `auth.json`,
+    read the way `.claude.json` is read for Claude) and the plan, and says how
+    old the numbers are, because they are as old as the last Codex turn on
+    that login; a window whose reset has passed since is shown open rather
+    than at a remembered percentage. No network, no keychain, no token leaves
+    the parser. The auto-picker and the at-the-limit offer score Codex
+    accounts with the same numbers.
+
+  - **Codex hooks — Install Codex Hooks…** Codex has Claude's hook events under
+    the same names and payload fields, plus `PermissionRequest` and
+    `PostCompact`. It reads them from one file, `~/.codex/hooks.json`, so the
+    install MERGES one entry per event into that file (and into each Codex
+    account's own `CODEX_HOME`), leaving every other entry in it untouched, and
+    **Remove Codex Hooks** strips exactly those entries back out. The events
+    land in the same `~/.lineage/events.ndjson` the Claude plugin writes, so
+    there is one reader and one switch (`lineage.hooks.enabled`). One step is
+    yours: Codex runs a hook it has not seen only after you trust it — `/hooks`
+    in a Codex session — and the install says so instead of letting you wonder
+    why nothing changed. Offered in **Recommended Setup** and the gear menu
+    only where there is a Codex to hook.
+
+  - **A Codex row has a status.** Nothing reports a Codex session's status the
+    way `claude agents --json` reports a Claude one's, so Codex rows sat at
+    "unknown" for life: no amber dot while working, no turn-ended transition,
+    no green dot. The rollout says it — `task_started`, `task_complete`,
+    `turn_aborted` — so the row now reads the newest of those off the file's
+    tail, one poll late and one `stat` per live Codex row per poll. With the
+    hooks trusted it is instant, and `PermissionRequest` gives Codex the one
+    state the rollout never records: waiting for you. `PostCompact` ends the
+    compaction ring on a Codex row the moment it ends, which is more than
+    Claude can say.
+
+  - **Continue on Another CLI… goes both ways, and the at-the-limit offer uses
+    it.** A Codex conversation can be handed to a Claude account: the brief
+    names the rollout, and tells the child how each CLI's file is laid out so
+    its first minute is reading rather than reverse-engineering. The
+    conversation's own CLI decides which accounts are "the other CLI", never
+    the pin's — an unpinned Codex conversation used to be judged a Claude one.
+    And when an account fills and no same-CLI account has room — the default
+    roster of one Claude login and one Codex login never does — the
+    notification offers **Continue on** the other CLI's account instead of
+    staying silent.
+
+- **The Codex row is there from the start.** The default roster used to seed a
+  Codex account only once `~/.codex/auth.json` existed; now the `codex` CLI on
+  the machine is reason enough. A row for a CLI that is not signed in has one
+  action, **Sign In**, which is precisely the step left — and its meter reads
+  "not signed in" until it succeeds. A machine with neither CLI still gets no
+  Codex row.
+
+### Changed
+
+- The accounts welcome text, the setting descriptions for `lineage.hooks.enabled`,
+  `lineage.accounts.enabled` and `lineage.accounts.offerSwitchAtLimit`, the
+  README, the reference and the setup walkthrough now describe what a Codex
+  row gets and where each fact comes from. No new setting: the hook reader's
+  one switch covers both CLIs.
+
 ## [0.1.11] — 2026-09-05
 
 ### Added

@@ -176,6 +176,27 @@ export function hookCommandFor(platform: string): string {
   return platform === 'win32' ? HOOK_COMMAND_WINDOWS : HOOK_COMMAND;
 }
 
+/**
+ * The same command for the CODEX CLI's hooks (src/codexHooks.ts), with one
+ * more constant field in the wrapper: `"cli":"codex"`. Codex's hook payload
+ * spells its fields exactly as Claude's does — `hook_event_name`,
+ * `session_id`, `transcript_path`, `cwd`, and `source` on SessionStart (its
+ * documentation and codex-cli 0.153.0 agree) — so the SAME events file and
+ * the SAME parser serve both, and the wrapper field is the one thing the
+ * payload cannot say: which CLI's hook this was. That matters for exactly one
+ * consumer, liveness: "Codex hooks are proven live" has to be a fact about
+ * Codex events, because a Codex hook that the user has not yet trusted (see
+ * codexHooks.ts) is silent while Claude's keeps writing.
+ *
+ * Still ONE write(2), for the reason HOOK_COMMAND's note gives. Not a change
+ * to HOOK_COMMAND itself: that string is persisted into every user's plugin
+ * directory and changing it is a PLUGIN_VERSION bump and a rewrite.
+ */
+export const CODEX_HOOK_COMMAND =
+  '/bin/sh -c \'mkdir -p "$HOME/.lineage"; p=$(cat); [ -n "$p" ] || p=null; ' +
+  'printf "{\\"lineage_node_id\\":\\"%s\\",\\"cli\\":\\"codex\\",\\"payload\\":%s}\\n" ' +
+  '"${LINEAGE_NODE_ID:-}" "$p" >> "$HOME/.lineage/events.ndjson"\'';
+
 /** The hook events we listen for. Every one is a pure accelerator.
  *  UserPromptSubmit (v3) is the freshness beat: it fires on every prompt, so
  *  a conversation whose id churned is re-keyed within one user action, which is
@@ -244,11 +265,16 @@ export function parseEventLine(line: string): HookEvent | null {
 
   let body: Record<string, unknown> = parsed;
   let nodeId: string | null = null;
+  let cli: HookEvent['cli'] = null;
   if ('lineage_node_id' in parsed) {
     const nid = parsed['lineage_node_id'];
     nodeId = isSessionId(nid) ? nid : null;
     const payload = parsed['payload'];
     body = isRecord(payload) ? payload : {};
+    // The wrapper's `cli` is written by CODEX_HOOK_COMMAND and by nothing
+    // else; the Claude plugin's command predates the field. So absent means
+    // claude, and only the flat v2 shape (no wrapper at all) says nothing.
+    cli = parsed['cli'] === 'codex' ? 'codex' : 'claude';
   }
 
   const name = body['hook_event_name'];
@@ -264,6 +290,7 @@ export function parseEventLine(line: string): HookEvent | null {
     transcriptPath: typeof tp === 'string' && tp.length > 0 ? tp : null,
     nodeId,
     source: typeof src === 'string' && src.length > 0 ? src : null,
+    cli,
     raw: parsed,
   };
 }
@@ -301,6 +328,12 @@ export class HooksManager implements DisposableLike {
 
   // liveness signals
   private lastEvent: number | null = null;
+  /** The newest event whose wrapper said `cli: codex` — see HookEvent.cli.
+   *  Kept apart from `lastEvent` because the question it answers is apart:
+   *  the Codex hook is trusted by the user inside a Codex session
+   *  (codexHooks.ts), and until that happens Claude's events keep the shared
+   *  file busy while Codex's never arrive. */
+  private lastCodexEvent: number | null = null;
   private active = false;
   private watchStartedAt = 0;
   private rosterActivityTicks = 0;
@@ -354,6 +387,20 @@ export class HooksManager implements DisposableLike {
   /** Epoch ms of the last parsed hook event, or null if none ever arrived. */
   lastEventAt(): number | null {
     return this.lastEvent;
+  }
+
+  /** `hooksActive`, for Codex events only: a Codex hook event arrived within
+   *  HOOK_ACTIVITY_WINDOW_MS. False until the user has trusted the Flock
+   *  entry in a Codex session — the one fact the install cannot establish on
+   *  its own, and the one this exists to report. */
+  codexHooksActive(): boolean {
+    if (!this.emit || this.lastCodexEvent === null) return false;
+    return Date.now() - this.lastCodexEvent <= HOOK_ACTIVITY_WINDOW_MS;
+  }
+
+  /** Epoch ms of the last Codex hook event, or null if none ever arrived. */
+  lastCodexEventAt(): number | null {
+    return this.lastCodexEvent;
   }
 
   onDidChangeHooksActive(
@@ -867,7 +914,7 @@ export class HooksManager implements DisposableLike {
         if (line.length === 0) continue;
         const event = parseEventLine(line);
         if (!event) continue;
-        this.noteEvent();
+        this.noteEvent(event.cli);
         try {
           emit(event);
         } catch (err) {
@@ -906,8 +953,9 @@ export class HooksManager implements DisposableLike {
     }
   }
 
-  private noteEvent(): void {
+  private noteEvent(cli: HookEvent['cli']): void {
     this.lastEvent = Date.now();
+    if (cli === 'codex') this.lastCodexEvent = this.lastEvent;
     this.setActive(true);
   }
 
@@ -954,7 +1002,7 @@ export class HooksManager implements DisposableLike {
 
 // ------------------------------------------------------------------ helpers
 
-function homeDir(home?: string): string {
+export function homeDir(home?: string): string {
   if (typeof home === 'string' && home.length > 0) return home;
   try {
     const h = os.homedir();
@@ -1010,7 +1058,9 @@ function carriesOurCommand(parsed: unknown): boolean {
   return false;
 }
 
-function readTextSync(file: string): string | null {
+/** Exported for codexHooks.ts, which writes a JSON file with the same care
+ *  and must not grow a second, slightly different copy of it. */
+export function readTextSync(file: string): string | null {
   try {
     return fs.readFileSync(file, 'utf8');
   } catch {
@@ -1018,8 +1068,9 @@ function readTextSync(file: string): string | null {
   }
 }
 
-/** tmp file in the SAME directory, fsync, validate, rename. */
-function writeFileAtomicSync(file: string, text: string): void {
+/** tmp file in the SAME directory, fsync, validate, rename. Exported for the
+ *  reason readTextSync is. */
+export function writeFileAtomicSync(file: string, text: string): void {
   const dir = path.dirname(file);
   fs.mkdirSync(dir, { recursive: true });
   const tmp = path.join(dir, `.${path.basename(file)}.${process.pid}.tmp`);
@@ -1069,7 +1120,10 @@ function windowApi(): MessageApi {
   return (vscode.window ?? {}) as unknown as MessageApi;
 }
 
-async function showInfo(
+/** Exported (with showWarning and homeDir) for codexHooks.ts: the two hook
+ *  installers must speak through the same shims, so a host without the API
+ *  degrades both of them the same way. */
+export async function showInfo(
   message: string,
   options?: vscode.MessageOptions,
   ...items: string[]
@@ -1084,7 +1138,7 @@ async function showInfo(
   }
 }
 
-async function showWarning(message: string): Promise<string | undefined> {
+export async function showWarning(message: string): Promise<string | undefined> {
   const api = windowApi();
   if (typeof api.showWarningMessage !== 'function') return undefined;
   try {

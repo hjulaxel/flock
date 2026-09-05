@@ -60,23 +60,34 @@ chats, and much more.
   [Branches and worktrees are parked](#branches-and-worktrees-are-parked).
 
 - **Use several accounts, on either CLI.** A row per subscription — a work plan,
-  a personal plan, a **ChatGPT / Codex** plan, or an API key. Claude plan
-  accounts show their current usage; Codex and API-key rows have no meter to
-  read. An account also keeps its own config directory, so you only
-  need to sign in **once per account**. New sessions are routed automatically,
-  and a session is then pinned to its account — until you move it. Run out of
-  window mid-conversation? **Move to Account…** carries that conversation over
-  to another subscription and picks up where it was; with tmux, without even
-  moving the tab. Between accounts on the same CLI: a Claude conversation's
-  transcript means nothing to `codex`, so those are never offered.
+  a personal plan, a **ChatGPT / Codex** plan, or an API key. Flock finds the
+  CLIs on your machine on its own, so a Mac with `claude` and `codex` installed
+  starts with two rows, signed in or not. Claude plan accounts and Codex plan
+  accounts both show their current five-hour and weekly usage — Claude's from
+  the CLI's own usage endpoint, Codex's from the rate limits the CLI writes
+  after every turn — and who is signed in; API-key rows have no meter to read.
+  An account also keeps its own config directory, so you only need to sign in
+  **once per account**. New sessions are routed automatically, and a session is
+  then pinned to its account — until you move it. Run out of window
+  mid-conversation? **Move to Account…** carries that conversation over to
+  another subscription on the same CLI and picks up where it was; with tmux,
+  without even moving the tab. **Continue on Another CLI…** crosses over: a new
+  session on the other CLI, briefed to read the transcript and carry on — a
+  Claude conversation continues on Codex, a Codex one on Claude — and it is
+  what the at-the-limit offer proposes when no same-CLI account has room.
 
   A session on a Codex account runs the `codex` CLI under that account's own
   `CODEX_HOME`, and gets the same tree row, age, attention dot, fork and resume
-  as a Claude one. Two differences worth knowing: Codex has no start-time naming
-  flag, so those tabs wear Flock's own title, and **Fork and Compact** offers a
-  plain fork instead — the Codex CLI has no compaction command to hand it. If
-  the row cannot find your CLI (common with a node version manager, whose PATH
-  VS Code often does not inherit), set `lineage.codexBinary`.
+  as a Claude one — and, with **Install Codex Hooks…**, the same instant
+  updates: the amber dot while it works, the green dot the moment a turn ends,
+  and a waiting mark when Codex asks for permission. Without hooks the row
+  still gets busy and idle, one poll late, from the rollout itself. Two
+  differences remain: Codex has no start-time naming flag, so those tabs wear
+  Flock's own title, and **Fork and Compact** and **Close with Summary** offer
+  the plain verb instead — both rest on typing `/compact` and reading back what
+  the Claude CLI writes. If the row cannot find your CLI (common with a node
+  version manager, whose PATH VS Code often does not inherit), set
+  `lineage.codexBinary`.
 
 - **Project workspaces.** Scope a window to one project. Switching saves the tab
   layout you leave and restores the target's. With tmux installed, other

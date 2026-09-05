@@ -70,14 +70,34 @@ export function codexSessionsDir(codexHome?: string): string {
 }
 
 /** `<home>/auth.json` — the file whose existence means "there is a Codex login
- *  here to point an account row at". Read by the seeder and by the account
- *  view; never parsed, only stat'ed, because it holds a live token. */
+ *  here to point an account row at". Stat'ed by the seeder; READ by the limits
+ *  reader, which takes exactly two claims out of the id token it holds (who,
+ *  and which plan — see parseCodexAuth) and nothing else. It holds live
+ *  tokens, and nothing in this module returns, logs or formats one. */
 export function codexAuthPath(codexHome?: string): string {
   const home =
     typeof codexHome === 'string' && codexHome.trim() !== ''
       ? codexHome.trim()
       : defaultCodexHome();
   return path.join(home, 'auth.json');
+}
+
+/**
+ * `<home>/hooks.json` — the ONE user-level file Codex reads lifecycle hooks
+ * from. Verified against `codex-cli 0.153.0` and its documentation: hooks
+ * come from `$CODEX_HOME/hooks.json` or an inline `[hooks]` table in
+ * `config.toml`, from `<repo>/.codex/hooks.json` per project, and from
+ * managed layers. Flock writes the user-level JSON file and never the TOML:
+ * a JSON document can be merged into and unmerged from exactly, entry by
+ * entry, and a TOML edit cannot be promised to round-trip somebody else's
+ * comments and formatting. See src/codexHooks.ts for the merge.
+ */
+export function codexHooksPath(codexHome?: string): string {
+  const home =
+    typeof codexHome === 'string' && codexHome.trim() !== ''
+      ? codexHome.trim()
+      : defaultCodexHome();
+  return path.join(home, 'hooks.json');
 }
 
 /**
@@ -665,4 +685,340 @@ function normalizeDir(raw: unknown): string | undefined {
   }
   const slashed = resolved.replace(/\\/g, '/').replace(/\/+$/, '');
   return slashed === '' ? '/' : slashed;
+}
+
+// ------------------------------------------------------------- rate limits
+//
+// WHERE CODEX KEEPS ITS METER. Claude Code serves `/usage` from an OAuth
+// endpoint (see limits.ts); Codex has no equivalent Flock may call. What it
+// has instead is better for our purposes and worse for freshness: after every
+// turn the CLI writes a `token_count` event into the rollout, and that record
+// carries the account's rate limits as the server just reported them —
+//
+//   {"timestamp":"…","type":"event_msg","payload":{"type":"token_count",
+//     "info":{…},"rate_limits":{"limit_id":"codex","primary":{"used_percent":
+//     0.0,"window_minutes":300,"resets_at":1788649421},"secondary":{
+//     "used_percent":1.0,"window_minutes":10080,"resets_at":1788766690},
+//     "plan_type":"plus",…}}}
+//
+// (measured on codex-cli 0.153.0; `resets_at` is epoch SECONDS.) So the meter
+// is a file read, never a network call — but its numbers are as old as the
+// last Codex turn on that login, which is why every reading carries the
+// record's own timestamp for the caller to say so.
+//
+// The windows are NAMED BY DURATION, not by role: `primary` was the weekly
+// window on one plan's rollouts here and the five-hour one on another's. The
+// mapping onto Flock's `fiveHour` / `sevenDay` slots therefore goes by
+// `window_minutes`, and the duration travels along (UsageWindow.minutes) so a
+// window of some third length is labelled by what it is.
+
+/** One window as Codex reports it. `resetsAt` is already in epoch MS. */
+export interface CodexRateWindow {
+  usedPercent: number;
+  windowMinutes?: number;
+  resetsAt?: number;
+}
+
+export interface CodexRateLimits {
+  primary?: CodexRateWindow;
+  secondary?: CodexRateWindow;
+  /** `plan_type` — `plus`, `pro`, `team`, … as the server spells it. */
+  planType?: string;
+  /** Epoch ms of the record that carried these, from its own ISO stamp; 0
+   *  when the stamp was missing or unreadable. */
+  observedAt: number;
+}
+
+/** How much of a rollout's tail to read looking for the newest `token_count`.
+ *  A turn appends a handful of records; 256 kB is dozens of turns, and a
+ *  rollout with none in that span (a long tool output) simply yields to the
+ *  next-newest file. */
+export const RATE_LIMIT_TAIL_BYTES = 256 * 1024;
+
+/** How many rollouts, newest first, to look in before concluding a store has
+ *  no reading. Bounded so an account with a thousand old sessions and no
+ *  recent turn costs a few reads, not a walk. */
+export const RATE_LIMIT_MAX_FILES = 8;
+
+function isRecordValue(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+function readCodexWindow(value: unknown): CodexRateWindow | undefined {
+  if (!isRecordValue(value)) return undefined;
+  const used = value['used_percent'];
+  if (typeof used !== 'number' || !Number.isFinite(used)) return undefined;
+  const out: CodexRateWindow = {
+    usedPercent: Math.max(0, Math.min(100, used)),
+  };
+  const minutes = value['window_minutes'];
+  if (typeof minutes === 'number' && Number.isFinite(minutes) && minutes > 0) {
+    out.windowMinutes = minutes;
+  }
+  const resets = value['resets_at'];
+  if (typeof resets === 'number' && Number.isFinite(resets) && resets > 0) {
+    // Seconds on every file measured; a millisecond value would be past the
+    // year 33000 read as seconds, so the threshold cannot misfire either way.
+    out.resetsAt = resets < 1e12 ? resets * 1000 : resets;
+  } else if (typeof resets === 'string') {
+    const parsed = Date.parse(resets);
+    if (Number.isFinite(parsed)) out.resetsAt = parsed;
+  }
+  return out;
+}
+
+/**
+ * Pure. The NEWEST rate-limit reading in a stretch of rollout text — the last
+ * `token_count` event that carries `rate_limits` — or null when there is none.
+ *
+ * Scanned from the end, one line at a time, and only lines that contain the
+ * literal `"rate_limits"` are parsed: a rollout tail is mostly tool output,
+ * and JSON.parse on every line of it would be the expensive way to find the
+ * one line that matters. A line that fails to parse (the window cut it in
+ * half) is skipped, never fatal.
+ */
+export function parseRolloutRateLimits(text: string): CodexRateLimits | null {
+  if (typeof text !== 'string' || text === '') return null;
+  const lines = text.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (line === undefined || !line.includes('"rate_limits"')) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!isRecordValue(parsed)) continue;
+    const payload = parsed['payload'];
+    if (!isRecordValue(payload)) continue;
+    const limits = payload['rate_limits'];
+    if (!isRecordValue(limits)) continue;
+
+    const stampRaw = parsed['timestamp'];
+    const stamp = typeof stampRaw === 'string' ? Date.parse(stampRaw) : NaN;
+    const out: CodexRateLimits = {
+      observedAt: Number.isFinite(stamp) ? stamp : 0,
+    };
+    const primary = readCodexWindow(limits['primary']);
+    if (primary !== undefined) out.primary = primary;
+    const secondary = readCodexWindow(limits['secondary']);
+    if (secondary !== undefined) out.secondary = secondary;
+    const plan = limits['plan_type'];
+    if (typeof plan === 'string' && plan.trim() !== '') out.planType = plan.trim();
+    if (out.primary === undefined && out.secondary === undefined) continue;
+    return out;
+  }
+  return null;
+}
+
+/** What one store yielded: the newest reading and which file it came from. */
+export interface CodexUsageReading extends CodexRateLimits {
+  rolloutPath: string;
+}
+
+export interface ReadCodexUsageOptions {
+  /** The `<CODEX_HOME>/sessions` roots to look in — one account, so normally
+   *  one root. */
+  sessionsDirs: readonly string[];
+  /** Newest-first file budget; see RATE_LIMIT_MAX_FILES. */
+  maxFiles?: number;
+  /** Day-directory age bound handed to scanRollouts. */
+  maxAgeDays?: number;
+}
+
+/**
+ * The newest rate-limit reading in a Codex store, or null.
+ *
+ * Newest by FILE MTIME, not by day directory alone: the day tree orders
+ * sessions by when they started, and the session that most recently took a
+ * turn — the one whose reading is current — may have started a week ago.
+ * Never throws; an unreadable file is skipped.
+ */
+export function readCodexUsage(opts: ReadCodexUsageOptions): CodexUsageReading | null {
+  const maxFiles =
+    typeof opts?.maxFiles === 'number' && Number.isFinite(opts.maxFiles)
+      ? Math.max(0, opts.maxFiles)
+      : RATE_LIMIT_MAX_FILES;
+  let rollouts: RolloutMeta[];
+  try {
+    rollouts = scanRollouts({
+      sessionsDirs: opts?.sessionsDirs ?? [],
+      ...(opts?.maxAgeDays !== undefined ? { maxAgeDays: opts.maxAgeDays } : {}),
+    });
+  } catch {
+    return null;
+  }
+  rollouts.sort((a, b) => b.endedAt - a.endedAt);
+  for (const meta of rollouts.slice(0, maxFiles)) {
+    let tail: string;
+    try {
+      tail = readTail(meta.path, RATE_LIMIT_TAIL_BYTES);
+    } catch {
+      continue;
+    }
+    const limits = parseRolloutRateLimits(tail);
+    if (limits === null) continue;
+    return { ...limits, rolloutPath: meta.path };
+  }
+  return null;
+}
+
+/** The last `maxBytes` of a file as UTF-8. Throws on io failure — callers
+ *  decide whether a missing file is an error (here, it never is). */
+export function readTail(file: string, maxBytes: number): string {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const size = fs.fstatSync(fd).size;
+    if (!Number.isFinite(size) || size <= 0) return '';
+    const want = Math.min(size, Math.max(0, maxBytes));
+    if (want === 0) return '';
+    const buf = Buffer.alloc(want);
+    const read = fs.readSync(fd, buf, 0, want, size - want);
+    return buf.toString('utf-8', 0, read);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// ---------------------------------------------------------------- identity
+//
+// `auth.json` holds `tokens.id_token`, an OpenID id token whose payload names
+// the login: `email`, and under the `https://api.openai.com/auth` claim,
+// `chatgpt_plan_type`. Decoding a JWT payload is base64url + JSON.parse and
+// touches no network and no signature — Flock is not VERIFYING the token, it
+// is reading the name on it, exactly as the Claude side reads
+// `oauthAccount.emailAddress` out of `.claude.json`. The token itself, the
+// access token beside it and the refresh token beside that never leave the
+// parsing function.
+
+export interface CodexIdentity {
+  /** The `email` claim. */
+  email?: string;
+  /** `chatgpt_plan_type` — `plus`, `pro`, `team`, … */
+  planType?: string;
+  /** `auth_mode` as the file spells it: `chatgpt` or `apikey`. An API-key
+   *  login has no id token and therefore no email to show. */
+  authMode?: string;
+}
+
+/** The claims of a JWT's payload segment, or null when the string is not one.
+ *  Pure; verifies nothing and must not be used as if it did. */
+export function decodeJwtClaims(token: unknown): Record<string, unknown> | null {
+  if (typeof token !== 'string') return null;
+  const parts = token.split('.');
+  if (parts.length < 2) return null;
+  const seg = parts[1];
+  if (seg === undefined || seg === '') return null;
+  try {
+    const b64 = seg.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+    const json = Buffer.from(padded, 'base64').toString('utf-8');
+    const parsed: unknown = JSON.parse(json);
+    return isRecordValue(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Pure. Who a Codex `auth.json` says is signed in. Null when the text is not
+ * an auth file at all; an auth file with no id token (API-key mode) yields an
+ * identity with `authMode` set and nothing else — signed in, anonymously.
+ *
+ * Returns ONLY the fields above. The tokens are read out of the parsed object
+ * and discarded inside this function.
+ */
+export function parseCodexAuth(text: string | null): CodexIdentity | null {
+  if (typeof text !== 'string' || text.trim() === '') return null;
+  let root: unknown;
+  try {
+    root = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!isRecordValue(root)) return null;
+  const out: CodexIdentity = {};
+  const mode = root['auth_mode'];
+  if (typeof mode === 'string' && mode.trim() !== '') out.authMode = mode.trim();
+  const tokens = root['tokens'];
+  if (isRecordValue(tokens)) {
+    const claims = decodeJwtClaims(tokens['id_token']);
+    if (claims !== null) {
+      const email = claims['email'];
+      if (typeof email === 'string' && email.trim() !== '') out.email = email.trim();
+      const auth = claims['https://api.openai.com/auth'];
+      if (isRecordValue(auth)) {
+        const plan = auth['chatgpt_plan_type'];
+        if (typeof plan === 'string' && plan.trim() !== '') out.planType = plan.trim();
+      }
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- activity
+//
+// WHAT A LIVE CODEX ROW IS DOING. `claude agents --json` reports a Claude
+// session's status; nothing reports a Codex session's, so a Codex row used
+// to have no amber dot and no "finished" transition at all. The rollout says
+// it, though, one line at a time: the CLI writes `task_started` when a turn
+// begins and `task_complete` (or `turn_aborted`) when it ends —
+//
+//   {"type":"event_msg","payload":{"type":"task_started","turn_id":"…"}}
+//   {"type":"event_msg","payload":{"type":"task_complete","turn_id":"…",…}}
+//
+// so the newest of those in the tail is the row's status, one poll late. The
+// hook path (PermissionRequest, UserPromptSubmit, Stop) is the instant one and
+// the only one that can say "waiting for you" — the rollout never records an
+// approval prompt; see extension.ts's Codex activity map.
+
+export type RolloutActivity = 'busy' | 'idle';
+
+/** Tail budget for the activity read: a turn's closing records are a few
+ *  hundred bytes each, but a turn can END with a large tool output, and the
+ *  `task_complete` sits after it. */
+export const ACTIVITY_TAIL_BYTES = 64 * 1024;
+
+const BUSY_EVENTS: ReadonlySet<string> = new Set(['task_started', 'user_message']);
+const IDLE_EVENTS: ReadonlySet<string> = new Set(['task_complete', 'turn_aborted']);
+
+/**
+ * Pure. The newest turn boundary in a stretch of rollout text, or null when
+ * the window holds none. `user_message` counts as busy because it is what the
+ * CLI writes the instant a prompt is submitted, a beat before `task_started`.
+ */
+export function rolloutActivityFromTail(text: string): RolloutActivity | null {
+  if (typeof text !== 'string' || text === '') return null;
+  const lines = text.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (line === undefined || !line.includes('"event_msg"')) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!isRecordValue(parsed)) continue;
+    const payload = parsed['payload'];
+    if (!isRecordValue(payload)) continue;
+    const type = payload['type'];
+    if (typeof type !== 'string') continue;
+    if (BUSY_EVENTS.has(type)) return 'busy';
+    if (IDLE_EVENTS.has(type)) return 'idle';
+  }
+  return null;
+}
+
+/** `rolloutActivityFromTail` over a file's tail. Null for an unreadable file
+ *  — the ordinary state of a rollout the CLI is still creating. */
+export function readRolloutActivity(file: string): RolloutActivity | null {
+  let tail: string;
+  try {
+    tail = readTail(file, ACTIVITY_TAIL_BYTES);
+  } catch {
+    return null;
+  }
+  return rolloutActivityFromTail(tail);
 }

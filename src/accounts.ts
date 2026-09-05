@@ -763,9 +763,19 @@ export const DEFAULT_CODEX_PROFILE_ID = 'codex-default';
 
 export interface SeedOptions {
   /** Does `~/.codex/auth.json` exist? Checked by the CALLER — this module never
-   *  touches the filesystem — because the answer decides whether a Codex row
-   *  appears in a list that must not offer accounts the user cannot use. */
+   *  touches the filesystem. A login is the strongest reason to seed a Codex
+   *  row: there is an account there to point at. */
   hasCodexAuth: boolean;
+  /** Is the `codex` CLI on this machine at all (codex.findCodexBinary)? The
+   *  weaker reason, and sufficient on its own: a Codex row for an installed
+   *  but not-yet-signed-in CLI is a row whose one action — **Sign In** — is
+   *  exactly the thing the user has left to do, and the meter under it says
+   *  "not signed in" until they do. Seeding it is what makes the standard
+   *  roster read "Claude, and Codex" from the first activation, instead of
+   *  Codex appearing only after somebody has already found the CLI's own login
+   *  command by other means. Optional; absent reads as false, which is what
+   *  every caller written before the binary was consulted meant. */
+  hasCodexBinary?: boolean;
   /** Epoch ms for the createdAt/updatedAt stamps. Injectable so a test can
    *  assert on them; defaults to now. */
   now?: number;
@@ -786,9 +796,16 @@ export interface SeedOptions {
  * A Claude default is always seeded: the extension launches Claude sessions
  * whether or not anybody ever opens the accounts view, and having them belong
  * to a visible account from day one is what makes the pin (and every usage
- * meter hung off it) meaningful. A Codex default is seeded only when
- * `~/.codex/auth.json` says there is a Codex login to point at — an account row
- * for a CLI that is not signed in is a row whose only possible action fails.
+ * meter hung off it) meaningful. A Codex default is seeded when there is
+ * anything Codex on the machine to point it at — a login (`~/.codex/auth.json`)
+ * or merely the CLI. It used to take the login alone, on the argument that a
+ * row for a CLI that is not signed in is a row whose only action fails; but
+ * its action is **Sign In**, which is precisely what does not fail, and the
+ * row's meter reads "not signed in" until it succeeds. What the old rule cost
+ * was the roster's shape: a machine with both CLIs installed showed one
+ * account until the user had signed Codex in some other way first, and never
+ * learned from Flock that Codex was an option here at all. A machine with
+ * neither still gets no Codex row.
  *
  * Neither seeded profile gets a configDir: they are the DEFAULT ACCOUNT for
  * their provider, inheriting the login that is already on the machine. Giving
@@ -837,7 +854,7 @@ export function seedDefaultProfiles(
   };
 
   seed(DEFAULT_CLAUDE_PROFILE_ID, 'claude', 'Claude — default');
-  if (opts?.hasCodexAuth) {
+  if (opts?.hasCodexAuth === true || opts?.hasCodexBinary === true) {
     seed(DEFAULT_CODEX_PROFILE_ID, 'codex', 'Codex — default');
   }
   return out;

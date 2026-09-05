@@ -1161,6 +1161,10 @@ export function migrateState(raw: unknown): LineageState {
   if (verbs) out.verbsInstall = verbs;
   else delete out.verbsInstall;
 
+  const codexHook = sanitizeHookState(working.codexHookInstall);
+  if (codexHook) out.codexHookInstall = codexHook;
+  else delete out.codexHookInstall;
+
   out.version = STATE_SCHEMA_VERSION;
   return out as unknown as LineageState;
 }
@@ -1330,6 +1334,10 @@ export function mergeStates(
   const verbs = mem.verbsInstall ?? disk.verbsInstall;
   if (verbs) out.verbsInstall = verbs;
   else delete out.verbsInstall;
+
+  const codexHook = mem.codexHookInstall ?? disk.codexHookInstall;
+  if (codexHook) out.codexHookInstall = codexHook;
+  else delete out.codexHookInstall;
 
   out.version = STATE_SCHEMA_VERSION;
   return out as unknown as LineageState;
@@ -1556,6 +1564,13 @@ export class StateStore implements DisposableLike {
   getVerbsState(): HookInstallState {
     const v = this.memory.verbsInstall;
     return v ? { ...v } : { installed: false };
+  }
+
+  /** The Codex hooks' install record — the third of the trio, under its own
+   *  key for the same reason. */
+  getCodexHookState(): HookInstallState {
+    const c = this.memory.codexHookInstall;
+    return c ? { ...c } : { installed: false };
   }
 
   /** Every project, name-sorted. Hidden ones are INCLUDED — the tree filters,
@@ -2137,6 +2152,13 @@ export class StateStore implements DisposableLike {
     const clean = sanitizeHookState(s) ?? { installed: false };
     return this.enqueue((state) => {
       state.verbsInstall = clean;
+    });
+  }
+
+  setCodexHookState(s: HookInstallState): Promise<void> {
+    const clean = sanitizeHookState(s) ?? { installed: false };
+    return this.enqueue((state) => {
+      state.codexHookInstall = clean;
     });
   }
 

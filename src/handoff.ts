@@ -63,11 +63,18 @@ export function handoffRefusal(
   from: AccountProfile | null | undefined,
   to: AccountProfile | null | undefined,
   hasTranscript: boolean,
+  /** The CLI that WROTE the conversation, when the caller knows it. Outranks
+   *  the pin: a Codex conversation started in a terminal has no pin at all,
+   *  and reading the missing pin as the default provider would judge it a
+   *  Claude one and offer it a Codex account as "the other CLI" — the exact
+   *  inversion `offerSwitch` fixed on the switch side. Absent, the pin's CLI
+   *  stands, which is every caller written before Codex parents existed. */
+  fromCli?: SessionCli,
 ): HandoffRefusal | null {
   // Existence first: `cliOfProfile` reads a missing profile as the default
   // provider, so a null target would otherwise be judged as a claude one.
   if (!to || to.deleted === true) return 'no-target';
-  if (cliOfProfile(from) === cliOfProfile(to)) return 'same-cli';
+  if ((fromCli ?? cliOfProfile(from)) === cliOfProfile(to)) return 'same-cli';
   if (!canHostSession(to)) return 'cannot-host';
   if (!hasTranscript) return 'no-transcript';
   return null;
@@ -103,6 +110,38 @@ export interface HandoffBriefInput {
    *  the opening prompt. */
   cwd?: string;
 }
+
+/**
+ * One or two lines telling the child how the OTHER CLI's file is laid out, so
+ * its first minute is reading rather than reverse-engineering. Measured on real
+ * files, not guessed:
+ *
+ *   Claude   one record per line; `type` is `user` or `assistant`, the text is
+ *            under `message.content` (a string, or an array of blocks with a
+ *            `text` field).
+ *   Codex    one record per line; the first is a `session_meta` header tens of
+ *            kilobytes long (the whole system prompt) and is skippable. The
+ *            conversation is in `response_item` records whose payload is a
+ *            `message` with `role` user/assistant and `content` blocks of
+ *            `input_text` / `output_text`; `event_msg` records of type
+ *            `user_message` and `agent_message` repeat the same text compactly.
+ *
+ * Gemini has no line because Flock never reads a Gemini transcript (it is not a
+ * session provider); the brief still composes for it, wordlessly.
+ */
+const TRANSCRIPT_SHAPE: Readonly<Record<SessionCli, readonly string[]>> = {
+  claude: [
+    'Layout: one JSON record per line; "type" is "user" or "assistant" and',
+    'the text is under message.content (a string, or blocks with a "text").',
+  ],
+  codex: [
+    'Layout: a Codex rollout. Skip the long first line (the session header).',
+    'The conversation is in "response_item" records whose payload is a',
+    '"message" with role user/assistant; "event_msg" records of type',
+    '"user_message" and "agent_message" carry the same text more compactly.',
+  ],
+  gemini: [],
+};
 
 /** Ceiling for the composed brief, same figure as MAX_AGENT_PROMPT_CHARS and
  *  for the same reason: an opening turn is an argv, and argvs have budgets.
@@ -140,6 +179,7 @@ export function buildHandoffPrompt(input: HandoffBriefInput): string {
     '',
     'Read it before doing anything else, recent entries first: user and',
     'assistant text carry the state, tool output mostly does not.',
+    ...TRANSCRIPT_SHAPE[input.sourceCli],
   ];
   if (title) lines.push('The conversation is titled "' + title + '".');
   if (cwd) lines.push('The work happens in ' + cwd + '.');
