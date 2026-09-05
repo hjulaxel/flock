@@ -126,7 +126,6 @@ const ADVANCED = [
   'lineage.git.sessionBranchDetail',
   'lineage.preview.directoryModel',
   'lineage.viewStyle',
-  'lineage.staleAfterHours',
 ];
 
 describe('the settings editor: tags', () => {

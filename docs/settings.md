@@ -45,7 +45,7 @@ else, so change the words there and rerun the script rather than editing here.
 
 <!-- generated:settings:start -->
 
-Flock contributes **50 settings**. **17** of them are switches that ship off, and **21** are tagged *advanced* — paths, timings, diagnostics and previews, the rows `@tag:advanced` finds in the Settings editor. Advanced rows are marked below and sit last in their category.
+Flock contributes **49 settings**. **17** of them are switches that ship off, and **20** are tagged *advanced* — paths, timings, diagnostics and previews, the rows `@tag:advanced` finds in the Settings editor. Advanced rows are marked below and sit last in their category.
 
 ### Sessions
 
@@ -129,7 +129,6 @@ Flock contributes **50 settings**. **17** of them are switches that ship off, an
 | `lineage.chat.autoCloseMinutes` | `1440` | Advanced — A project chat's tab closes on its own after this many minutes without use — **1440 is one day**. *Use* means either half of it: the chat said something, or you clicked on it. The conversation is kept — **Chat History…** on the project's row reopens it — so this tidies the tab, never the words. A chat that is busy or waiting is never touched, and neither is the tab you are looking at. `0` turns it off. |
 | `lineage.session.detachGraceMinutes` | `10` | Advanced — When a workspace switch (or solo mode) closes a tmux-wrapped session's tab, the process keeps running detached for this many minutes so switching back reattaches instantly. Its row stays in the tree and its hover says how long is left. At the deadline an idle session is closed to an archived row; a busy one closes after its turn ends. At most 8 sessions run detached at once; overflow closes the oldest idle one first. `0` disables the grace — the tab still closes instantly, and the process is ended by the next sweep within a minute. |
 | `lineage.session.reloadGraceSeconds` | `45` | Advanced — How many seconds a session may keep running after the window that owned it closed. This is a measurement, not a reprieve: VS Code reports a window **reload** and a window **close** identically, so the only way to tell them apart is to wait — a reload comes back and reattaches, a close never does. At the deadline the session settles to an archived row you can resume, because a folder no window has open should have nothing running in it. Keep this low; raise it only if reloads on this machine are slow enough to lose sessions. `0` ends sessions the moment the window goes, which also means every reload loses them. |
-| `lineage.staleAfterHours` | `48` | Advanced — Age at which "Archive Stale Sessions..." pre-ticks a session. This never removes anything on its own — it only decides which checkboxes start ticked in that command. |
 | `lineage.busyStaleMinutes` | `5` | Advanced — How long a session may keep the CLI's "busy" status with an untouched transcript before Flock stops drawing the running (amber) dot and shows it as idle. `claude agents --json` sometimes freezes a session's status at `busy` after its turn actually ended (most often an interactive session you finished with); a genuinely working session writes its transcript within seconds, so silence this long means it is done. Raise it if a long single tool call briefly flips to idle; turn on "Show Phantom Rows" to see the raw, uncorrected status. |
 
 ### CLI

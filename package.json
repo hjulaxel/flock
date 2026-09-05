@@ -2205,20 +2205,10 @@
               "advanced"
             ]
           },
-          "lineage.staleAfterHours": {
-            "type": "number",
-            "default": 48,
-            "order": 5,
-            "minimum": 1,
-            "description": "Age at which \"Archive Stale Sessions...\" pre-ticks a session. This never removes anything on its own — it only decides which checkboxes start ticked in that command.",
-            "tags": [
-              "advanced"
-            ]
-          },
           "lineage.busyStaleMinutes": {
             "type": "number",
             "default": 5,
-            "order": 6,
+            "order": 5,
             "minimum": 1,
             "description": "How long a session may keep the CLI's \"busy\" status with an untouched transcript before Flock stops drawing the running (amber) dot and shows it as idle. `claude agents --json` sometimes freezes a session's status at `busy` after its turn actually ended (most often an interactive session you finished with); a genuinely working session writes its transcript within seconds, so silence this long means it is done. Raise it if a long single tool call briefly flips to idle; turn on \"Show Phantom Rows\" to see the raw, uncorrected status.",
             "tags": [

@@ -52,6 +52,7 @@ import {
   COMMANDS,
   COMPACT_PROMPT,
   CONTEXT_HOOKS_INSTALLED,
+  DEFAULT_STALE_AFTER_HOURS,
   MAX_DISPATCH_PROMPT_CHARS,
   MAX_PROJECT_NAME_LEN,
   PROVIDERS,
@@ -9394,10 +9395,11 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   });
 
   register(COMMANDS.deleteStale, 'archive stale sessions', async () => {
-    const hours = deps.staleAfterHours();
+    // A constant, not a setting: the age only decides which rows start
+    // ticked, and the dialog itself is where that answer gets corrected.
     const candidates = staleCandidates(
       deps.getForest(),
-      hours * 3_600_000,
+      DEFAULT_STALE_AFTER_HOURS * 3_600_000,
       Date.now(),
     );
     if (candidates.length === 0) {
@@ -9414,7 +9416,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       picked: c.stale,
     }));
     const chosen = await vscode.window.showQuickPick(items, {
-      title: `Archive stale sessions — pre-ticked at ${hours}h and older`,
+      title: `Archive stale sessions — pre-ticked at ${DEFAULT_STALE_AFTER_HOURS}h and older`,
       placeHolder: 'Tick every row to remove from the tree, then press Enter',
       canPickMany: true,
       matchOnDescription: true,

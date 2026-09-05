@@ -556,7 +556,6 @@ function forkDeps(over: { launchFails?: boolean } = {}) {
     hiddenFolders: () => [],
     hideFolder: async () => undefined,
     unhideFolder: async () => undefined,
-    staleAfterHours: () => 24,
     markSeen: async () => undefined,
     notificationsEnabled: () => false,
     setOnlyActiveSessions: async () => undefined,

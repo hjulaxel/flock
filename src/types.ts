@@ -1751,7 +1751,6 @@ export const CONFIG_KEYS = {
    * nothing there regresses and nothing is half-rendered.
    */
   previewDirectoryModel: 'preview.directoryModel',
-  staleAfterHours: 'staleAfterHours',
   busyStaleMinutes: 'busyStaleMinutes',
   // Notifications
   notificationsEnabled: 'notifications.enabled',
@@ -1854,7 +1853,9 @@ export const BRANCH_FEATURE_SWITCHES: readonly {
 ] as const;
 
 /** Age past which `lineage.deleteStale` pre-selects a session. Not a filter —
- *  nothing is ever removed without the user ticking it. */
+ *  nothing is ever removed without the user ticking it — which is also why it
+ *  stopped being a setting: a number that only decides which checkboxes start
+ *  ticked, in a dialog that lets you untick them, is not worth a row. */
 export const DEFAULT_STALE_AFTER_HOURS = 48;
 
 /** Minutes a roster row may keep the CLI's `busy` status with a SILENT
@@ -4383,8 +4384,6 @@ export interface CommandDeps {
   hiddenFolders(): HiddenFolder[];
   hideFolder(dir: string): Promise<void>;
   unhideFolder(dir: string): Promise<void>;
-  /** `lineage.staleAfterHours` — only ever pre-ticks a checkbox. */
-  staleAfterHours(): number;
   /** The pool the Add Session and Import pickers draw from: every session this
    *  machine knows about that has no row right now — live foreign ones and
    *  recordless transcripts alike, chain-collapsed to one entry per

@@ -1140,7 +1140,7 @@ the age and the directory, restoring as many as you tick in one press of Enter.
 **Restore Archived Session…** is the same thing for the whole machine — the
 door for a session whose directory no project claims, or whose project you
 cannot remember. **Archive Stale Sessions…** is the bulk form: oldest-first,
-pre-ticked at `lineage.staleAfterHours`, undoable the same way, and with no
+pre-ticked at 48 hours, undoable the same way, and with no
 second dialog, because the checklist you just filled in was the question.
 
 Nothing here touches a transcript. Any session that ever ran is still resumable

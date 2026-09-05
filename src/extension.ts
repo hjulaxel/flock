@@ -58,7 +58,6 @@ import {
   DEFAULT_CLOSE_SUMMARY_MODE,
   DEFAULT_PROVIDER,
   DEFAULT_SESSION_SWITCHING,
-  DEFAULT_STALE_AFTER_HOURS,
   ENV_NODE_ID,
   EXTENSION_ID,
   isCloseSummaryMode,
@@ -6403,8 +6402,6 @@ export async function activate(
     hiddenFolders: () => store.getHiddenFolders(),
     hideFolder: (dir) => store.hideFolder(dir),
     unhideFolder: (dir) => store.unhideFolder(dir),
-    staleAfterHours: () =>
-      numCfg(CONFIG_KEYS.staleAfterHours, DEFAULT_STALE_AFTER_HOURS),
     // The Add Session / Import pool: what this machine knows that the tree is
     // not showing. Snapshots of caches the rebuild already maintains — the
     // last roster tick and the archive index — so opening a picker costs no

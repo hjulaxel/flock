@@ -51,6 +51,10 @@ All notable changes to Flock are recorded here. The format follows
   forked from — are always drawn. They are what keeps the tree's ancestry
   honest, and a switch that could hide them was a knob nobody should turn. A
   value left in `settings.json` does nothing.
+- **`lineage.staleAfterHours`.** **Archive Stale Sessions…** pre-ticks rows
+  older than 48 hours, as it did by default. The number only ever decided which
+  checkboxes started ticked in a dialog that lets you untick them, which is not
+  worth a row in the editor. A value left in `settings.json` does nothing.
 
 ### Changed
 

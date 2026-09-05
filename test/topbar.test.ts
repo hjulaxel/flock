@@ -164,7 +164,6 @@ function depsOf(
     hiddenFolders: () => [],
     hideFolder: nope,
     unhideFolder: nope,
-    staleAfterHours: () => 48,
     markSeen: nope,
     notificationsEnabled: () => true,
     setOnlyActiveSessions: nope,
