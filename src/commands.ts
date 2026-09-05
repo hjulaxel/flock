@@ -144,6 +144,7 @@ import {
 // and a launch; every decision it makes lives in handoff.ts where it is
 // testable.
 import { buildHandoffPrompt, handoffRefusal } from './handoff';
+import type { SessionCli } from './accounts';
 import {
   describeRouting,
   pinnedLaunchProfile,
@@ -2043,6 +2044,15 @@ async function applyRecommendedStep(
       // plugin only makes Claude WRITE the events, and `lineage.hooks.enabled`
       // is the half that reads them.
       const state = await deps.installHooks();
+      if (state.installed !== true) return false;
+      await deps.setHooksEnabled(true);
+      return true;
+    }
+    case 'codexHooks': {
+      // The Claude step's contract for the other CLI: the merge is the
+      // consent, and installing flips the shared reader gate.
+      if (!deps.installCodexHooks) return false;
+      const state = await deps.installCodexHooks();
       if (state.installed !== true) return false;
       await deps.setHooksEnabled(true);
       return true;
@@ -7853,6 +7863,10 @@ async function switchAccountFlow(
 async function handoffFlow(
   deps: AccountCommandDeps,
   sessionIdArg: string,
+  /** The account to continue on, already decided. Set only by the
+   *  at-the-limit offer, which named an account in its own text and must not
+   *  then ask again — see switchAccountFlow's twin parameter. */
+  preselectedAccountId?: string,
 ): Promise<void> {
   const accts = deps.accounts;
   if (!accts) return;
@@ -7873,17 +7887,15 @@ async function handoffFlow(
   const profiles = accts.accounts();
   const current = pinnedProfile(accts.sessionProfileId(sessionId), profiles);
 
-  // Same honesty as the account switch, for the same reason: only Claude's
-  // transcript layout is one Flock knows how to NAME, and the brief has to
-  // name the file. A Codex parent gets "not yet", never a wrong path.
-  if (cliOfProfile(current) !== 'claude') {
-    const cli = current ? (PROVIDERS[current.provider]?.label ?? 'that') : 'that';
-    void vscode.window.showWarningMessage(
-      `Flock: "${label}" is a ${cli} conversation, and Flock cannot yet find ` +
-        "that CLI's own transcript to brief the new session with.",
-    );
-    return;
-  }
+  // WHICH CLI WROTE THIS — the conversation's, never the pin's, for the reason
+  // switchAccountFlow gives at length: a Codex conversation started in a
+  // terminal has no pin, and a missing pin reads as Claude. Both directions
+  // are real now. A Claude parent briefs a Codex child and a Codex parent
+  // briefs a Claude one; `transcriptPathOf` answers for either layout (the
+  // wiring holds both indexes), so the old "cannot yet find that CLI's own
+  // transcript" refusal has nothing left to refuse.
+  const sourceCli: SessionCli =
+    sessionLaunchProvider(deps, sessionId) === 'codex' ? 'codex' : 'claude';
   const transcriptPath = deps.transcriptPathOf?.(sessionId) ?? null;
   if (transcriptPath === null) {
     void vscode.window.showWarningMessage(
@@ -7897,36 +7909,46 @@ async function handoffFlow(
   // mechanism would then refuse — and an empty list has one honest cause: no
   // account on another CLI exists yet.
   const choices = profiles.filter(
-    (p) => handoffRefusal(current, p, true) === null,
+    (p) => handoffRefusal(current, p, true, sourceCli) === null,
   );
   if (choices.length === 0) {
+    const other = sourceCli === 'codex' ? 'Claude' : 'Codex';
     void vscode.window.showInformationMessage(
-      'Flock: no account on another CLI is configured to continue ' +
-        `"${label}" on. Add one in the Accounts section first.`,
+      `Flock: no ${other} account is configured to continue "${label}" on. ` +
+        'Add one in the Accounts section first.',
     );
     return;
   }
 
-  interface HandoffPick extends vscode.QuickPickItem {
-    accountId: string;
+  let target: AccountProfile | undefined;
+  const preselected =
+    typeof preselectedAccountId === 'string' && preselectedAccountId !== ''
+      ? choices.find((p) => p.id === preselectedAccountId)
+      : undefined;
+  if (preselected !== undefined) {
+    target = preselected;
+  } else {
+    interface HandoffPick extends vscode.QuickPickItem {
+      accountId: string;
+    }
+    const items: HandoffPick[] = choices.map((p) => ({
+      label: p.label,
+      description: accountPickDescription(accts, p),
+      accountId: p.id,
+    }));
+    const chosen = await vscode.window.showQuickPick(items, {
+      // "a NEW session", said in the picker: the one place the difference from
+      // Move to Account… must be visible before anything happens.
+      placeHolder: `Brief a new session on… ("${label}" continues; not a resume)`,
+      matchOnDescription: true,
+      ignoreFocusOut: true,
+    });
+    if (!chosen) return;
+    target = accts.getAccount(chosen.accountId);
   }
-  const items: HandoffPick[] = choices.map((p) => ({
-    label: p.label,
-    description: accountPickDescription(accts, p),
-    accountId: p.id,
-  }));
-  const chosen = await vscode.window.showQuickPick(items, {
-    // "a NEW session", said in the picker: the one place the difference from
-    // Move to Account… must be visible before anything happens.
-    placeHolder: `Brief a new session on… ("${label}" continues; not a resume)`,
-    matchOnDescription: true,
-    ignoreFocusOut: true,
-  });
-  if (!chosen) return;
-  const target = accts.getAccount(chosen.accountId);
   // Re-checked against the same rule the list was built from: the account can
   // have been deleted between the picker opening and the click.
-  if (!target || handoffRefusal(current, target, true) !== null) return;
+  if (!target || handoffRefusal(current, target, true, sourceCli) !== null) return;
 
   const cwd = node?.cwd ?? deps.getRecord(sessionId)?.cwd;
   // Named like a fork, with the destination CLI visible — a row that hides
@@ -7940,7 +7962,7 @@ async function handoffFlow(
 
   const brief = buildHandoffPrompt({
     transcriptPath,
-    sourceCli: cliOfProfile(current),
+    sourceCli,
     parentTitle: label,
     ...(cwd !== undefined ? { cwd } : {}),
   });
@@ -10911,6 +10933,24 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         command: COMMANDS.removeHooks,
       });
     }
+    // The Codex pair appears only where there is a Codex to hook. A wiring
+    // that cannot say (no menuState at all) offers neither, because "no Codex
+    // here" is the likelier answer on an arbitrary machine and a refusing
+    // verb is worse than a missing one.
+    if (state?.codexHooksAvailable === true) {
+      if (state.codexHooksInstalled !== true) {
+        items.push({
+          label: '$(plug) Install Codex Hooks',
+          description: 'The same instant updates for Codex sessions',
+          command: COMMANDS.installCodexHooks,
+        });
+      } else {
+        items.push({
+          label: '$(debug-disconnect) Remove Codex Hooks',
+          command: COMMANDS.removeCodexHooks,
+        });
+      }
+    }
 
     group('In-Session Verbs');
     if (!hooksKnown || state?.verbsInstalled !== true) {
@@ -11197,6 +11237,49 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     log('hooks: remove ->', state.installed ? 'still installed' : 'removed');
   });
 
+  // ---------------------------------------------------------- codex hooks
+  //
+  // The hooks pair for the OTHER CLI (src/codexHooks.ts). Same shape, same
+  // reader gate: the Codex entries write into the same events file the Claude
+  // plugin does, so `lineage.hooks.enabled` is the switch for both, and
+  // installing either flips it on. Optional deps, so a wiring without the
+  // Codex manager has the two commands registered and refusing.
+
+  register(COMMANDS.installCodexHooks, 'install codex hooks', async () => {
+    if (!deps.installCodexHooks) {
+      void vscode.window.showInformationMessage(
+        'Flock: Codex hooks are not available in this window.',
+      );
+      return;
+    }
+    const state = await deps.installCodexHooks();
+    if (state.installed === true) await deps.setHooksEnabled(true);
+    log('codex hooks: install ->', state.installed ? 'installed' : 'not installed');
+  });
+
+  register(COMMANDS.removeCodexHooks, 'remove codex hooks', async () => {
+    if (!deps.removeCodexHooks || !deps.getCodexHookState) {
+      void vscode.window.showInformationMessage(
+        'Flock: Codex hooks are not available in this window.',
+      );
+      return;
+    }
+    if (!deps.getCodexHookState().installed) {
+      void vscode.window.showInformationMessage(
+        'Flock: Codex hooks are not installed.',
+      );
+      return;
+    }
+    const state = await deps.removeCodexHooks();
+    // The reader stays on while the CLAUDE plugin is still installed: the
+    // gate is shared, and turning it off here would silence a plugin the user
+    // did not ask to silence.
+    if (state.installed !== true && !deps.getHookState().installed) {
+      await deps.setHooksEnabled(false);
+    }
+    log('codex hooks: remove ->', state.installed ? 'still installed' : 'removed');
+  });
+
   // ------------------------------------------------------ in-session verbs
   //
   // The hooks pair's shape, verb for verb: install is consent-gated by one
@@ -11418,7 +11501,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   register(
     COMMANDS.handoffSession,
     'handoff session',
-    async (arg?: unknown) => {
+    async (arg?: unknown, accountArg?: unknown) => {
       const id = await targetSession(
         deps,
         arg,
@@ -11426,7 +11509,15 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         { liveOnly: false },
       );
       if (!id) return;
-      await handoffFlow(deps, id);
+      // Second argument: the at-the-limit offer already named an account —
+      // the same contract switchSessionAccount keeps with its button.
+      await handoffFlow(
+        deps,
+        id,
+        typeof accountArg === 'string' && accountArg !== ''
+          ? accountArg
+          : undefined,
+      );
     },
   );
 

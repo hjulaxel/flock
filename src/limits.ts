@@ -64,6 +64,13 @@ import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
+import {
+  codexAuthPath,
+  codexSessionsDir,
+  parseCodexAuth,
+  readCodexUsage,
+} from './codex';
+import type { CodexIdentity, CodexRateLimits, CodexUsageReading } from './codex';
 import { logError } from './log';
 import type {
   AccountProfile,
@@ -86,6 +93,9 @@ export const CREDENTIALS_FILE = '.credentials.json';
 
 /** Where a profile with no configDir inherits its login from. */
 export const DEFAULT_CONFIG_DIR_NAME = '.claude';
+
+/** The Codex equivalent: `~/.codex`, the home `CODEX_HOME` relocates. */
+export const DEFAULT_CODEX_HOME_NAME = '.codex';
 
 /** The macOS keychain service Claude Code stores the default login under. */
 export const KEYCHAIN_SERVICE = 'Claude Code-credentials';
@@ -158,6 +168,8 @@ const SCAN_NODE_BUDGET = 256;
 const API_KEY_ENV_NAMES: readonly string[] = [
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
+  // A Codex profile authenticating by key has no plan windows either.
+  'OPENAI_API_KEY',
 ];
 
 // -------------------------------------------------------- injected seams
@@ -194,6 +206,11 @@ export type ExecLike = (
  *  exception. */
 export type ReadFileLike = (file: string) => Promise<string | null>;
 
+/** The newest rate-limit reading in a Codex store (`<home>/sessions`), or
+ *  null when it holds none. Never rejects. The real one is codex.readCodexUsage
+ *  behind a promise; a test hands back a literal. */
+export type CodexUsageLike = (sessionsDir: string) => Promise<CodexUsageReading | null>;
+
 /**
  * Everything this module would otherwise reach for directly. Mirrors the house
  * pattern (git.ts's `ProbeOptions.run`, tmux.ts's `resolveTmuxSpawn`): real
@@ -204,6 +221,7 @@ export interface LimitsDeps {
   fetch?: FetchLike;
   exec?: ExecLike;
   readFile?: ReadFileLike;
+  codexUsage?: CodexUsageLike;
   /** `process.platform`. Gates the keychain tier. */
   platform?: string;
   now?: () => number;
@@ -256,6 +274,16 @@ function realExec(
 async function realReadFile(file: string): Promise<string | null> {
   try {
     return await fsp.readFile(file, 'utf-8');
+  } catch {
+    return null;
+  }
+}
+
+/** Synchronous underneath (codex.ts is a node-only module of bounded reads);
+ *  wrapped so the seam has one shape whichever side of it a caller is on. */
+async function realCodexUsage(sessionsDir: string): Promise<CodexUsageReading | null> {
+  try {
+    return readCodexUsage({ sessionsDirs: [sessionsDir] });
   } catch {
     return null;
   }
@@ -586,6 +614,28 @@ function percentLabel(utilization: number): string {
   return `${Math.min(99, Math.round(pct))}%`;
 }
 
+/**
+ * The word in front of a window's percentage. The slot's own name (`5h`, `wk`)
+ * whenever the window is the length the slot was named for — or carries no
+ * length at all, which is every Claude window — and the window's real
+ * duration otherwise: `6h`, `3d`. Exported so the accounts view's formatter
+ * can spell the same rule with its own words (`week`), and so the rule is
+ * tested once.
+ */
+export function windowLabel(
+  win: UsageWindow,
+  slotName: string,
+  weekWord: string = 'wk',
+): string {
+  const minutes = win.minutes;
+  if (minutes === undefined || !Number.isFinite(minutes) || minutes <= 0) return slotName;
+  if (minutes === 300) return slotName === 'wk' || slotName === weekWord ? slotName : '5h';
+  if (minutes === 10080) return slotName === '5h' ? slotName : weekWord;
+  if (minutes < 60) return `${String(Math.round(minutes))}m`;
+  if (minutes < 24 * 60) return `${String(Math.round(minutes / 60))}h`;
+  return `${String(Math.round(minutes / (24 * 60)))}d`;
+}
+
 function weeklyReset(snapshot: UsageSnapshot): number | undefined {
   const a = snapshot.sevenDay?.resetsAt;
   if (a !== undefined && Number.isFinite(a)) return a;
@@ -663,11 +713,15 @@ export function formatUsageSummary(
   if (snapshot.fiveHour) {
     const left = resetInLabel(snapshot.fiveHour.resetsAt, now);
     parts.push(
-      `5h ${percentLabel(snapshot.fiveHour.utilization)}` +
+      `${windowLabel(snapshot.fiveHour, '5h')} ${percentLabel(snapshot.fiveHour.utilization)}` +
         (left === '' ? '' : ` → ${left}`),
     );
   }
-  if (snapshot.sevenDay) parts.push(`wk ${percentLabel(snapshot.sevenDay.utilization)}`);
+  if (snapshot.sevenDay) {
+    parts.push(
+      `${windowLabel(snapshot.sevenDay, 'wk')} ${percentLabel(snapshot.sevenDay.utilization)}`,
+    );
+  }
   if (snapshot.sevenDayOpus) parts.push(`opus ${percentLabel(snapshot.sevenDayOpus.utilization)}`);
 
   const who =
@@ -691,8 +745,13 @@ export function formatUsageSummary(
       case 'http':
       case 'parse':
         return 'usage unavailable';
-      default:
-        return snapshot.stale === true ? 'usage stale' : 'usage n/a';
+      default: {
+        // A signed-in account with no windows to show — a Codex login that has
+        // not taken a turn yet — still names itself: the name is the fact the
+        // row has, and "usage n/a" alone under it reads as a fault.
+        const word = snapshot.stale === true ? 'usage stale' : 'usage n/a';
+        return who === '' ? word : `${who} · ${word}`;
+      }
     }
   }
 
@@ -788,17 +847,76 @@ function hasApiKeyEnv(profile: AccountProfile): boolean {
 /**
  * Whether this file has anything to say about a profile at all.
  *
- * Today this answers for OAuth Claude accounts only. Codex's usage lives behind
- * a different (and, at the time of writing, undocumented) surface, and
- * inventing one would produce numbers rather than an absence — so Codex,
- * Gemini, generic and API-key profiles get `null`, which routing.ts already
- * treats as "unknown" and the view renders as no meter at all. This is a
- * deliberate stub: when the Codex endpoint is known, it becomes another branch
- * here and nothing downstream has to change.
+ * Two providers, two sources, one answer shape. An OAuth Claude account is
+ * read from the usage endpoint; a Codex account is read off the newest rollout
+ * in its home, where the CLI writes the server's rate limits after every turn
+ * (see codex.ts's rate-limits section — the surface this used to call
+ * undocumented, found and measured). Gemini, generic and API-key profiles
+ * still get `null`, which routing.ts treats as "unknown" and the view renders
+ * as no meter at all: a key has no plan windows to report.
  */
 export function supportsUsage(profile: AccountProfile): boolean {
-  if (profile.provider !== 'claude') return false;
-  return !hasApiKeyEnv(profile);
+  if (hasApiKeyEnv(profile)) return false;
+  return profile.provider === 'claude' || profile.provider === 'codex';
+}
+
+// -------------------------------------------------------------- codex shape
+
+/** Windows a day or shorter take the short slot; anything longer, the weekly
+ *  one. Codex's are 300 and 10080 minutes on every plan measured, so the rule
+ *  is a formality with a tie-break: when both readings fall on one side, the
+ *  second takes the free slot rather than overwriting the first. */
+const SHORT_WINDOW_MAX_MINUTES = 24 * 60;
+
+function codexSlotFor(
+  minutes: number | undefined,
+  snapshot: UsageSnapshot,
+): 'fiveHour' | 'sevenDay' | undefined {
+  const preferred: 'fiveHour' | 'sevenDay' =
+    minutes === undefined || minutes <= SHORT_WINDOW_MAX_MINUTES ? 'fiveHour' : 'sevenDay';
+  if (snapshot[preferred] === undefined) return preferred;
+  const other: 'fiveHour' | 'sevenDay' = preferred === 'fiveHour' ? 'sevenDay' : 'fiveHour';
+  return snapshot[other] === undefined ? other : undefined;
+}
+
+/**
+ * Pure. A Codex reading and identity as the `UsageSnapshot` every consumer
+ * already speaks.
+ *
+ * A window whose reset is already behind `now` is reported OPEN — 0%, no
+ * reset — rather than at the percentage the file remembers: the reading is
+ * only as fresh as the last Codex turn, and a five-hour window measured
+ * yesterday has rolled over however full it was. `observedAt` carries the
+ * reading's own stamp so the hover can say how old the numbers are. An
+ * exported function rather than a private step so the mapping is pinned by
+ * tests independently of the reader.
+ */
+export function buildCodexSnapshot(
+  reading: CodexRateLimits | null,
+  identity: CodexIdentity | null,
+  now: number,
+): UsageSnapshot {
+  const snapshot: UsageSnapshot = { fetchedAt: now };
+  if (identity?.email !== undefined) snapshot.signedInAs = identity.email;
+  const plan = reading?.planType ?? identity?.planType;
+  if (plan !== undefined) snapshot.plan = plan;
+  if (reading === null) return snapshot;
+  if (Number.isFinite(reading.observedAt) && reading.observedAt > 0) {
+    snapshot.observedAt = reading.observedAt;
+  }
+  for (const win of [reading.primary, reading.secondary]) {
+    if (win === undefined) continue;
+    const slot = codexSlotFor(win.windowMinutes, snapshot);
+    if (slot === undefined) continue;
+    const built: UsageWindow = { utilization: clampPercent(win.usedPercent) };
+    if (win.windowMinutes !== undefined) built.minutes = win.windowMinutes;
+    if (win.resetsAt !== undefined) {
+      if (win.resetsAt <= now) built.utilization = 0; // rolled over since
+      else built.resetsAt = win.resetsAt;
+    }
+    snapshot[slot] = built;
+  }
+  return snapshot;
 }
 
 // ---------------------------------------------------------------- the reader
@@ -821,9 +939,10 @@ interface CacheEntry {
 
 function cloneWindow(win: UsageWindow | undefined): UsageWindow | undefined {
   if (win === undefined) return undefined;
-  return win.resetsAt === undefined
-    ? { utilization: win.utilization }
-    : { utilization: win.utilization, resetsAt: win.resetsAt };
+  const out: UsageWindow = { utilization: win.utilization };
+  if (win.resetsAt !== undefined) out.resetsAt = win.resetsAt;
+  if (win.minutes !== undefined) out.minutes = win.minutes;
+  return out;
 }
 
 function cloneSnapshot(snapshot: UsageSnapshot): UsageSnapshot {
@@ -836,6 +955,8 @@ function cloneSnapshot(snapshot: UsageSnapshot): UsageSnapshot {
   if (opus !== undefined) out.sevenDayOpus = opus;
   if (snapshot.stale === true) out.stale = true;
   if (snapshot.error !== undefined) out.error = snapshot.error;
+  if (snapshot.plan !== undefined) out.plan = snapshot.plan;
+  if (snapshot.observedAt !== undefined) out.observedAt = snapshot.observedAt;
   return out;
 }
 
@@ -861,6 +982,7 @@ export class LimitsService implements LimitsReader, DisposableLike {
   private readonly fetchImpl: FetchLike;
   private readonly exec: ExecLike;
   private readonly readFile: ReadFileLike;
+  private readonly codexUsage: CodexUsageLike;
   private readonly platform: string;
   private readonly clock: () => number;
   private readonly homeDir: string;
@@ -876,6 +998,7 @@ export class LimitsService implements LimitsReader, DisposableLike {
     this.fetchImpl = deps.fetch ?? realFetch;
     this.exec = deps.exec ?? realExec;
     this.readFile = deps.readFile ?? realReadFile;
+    this.codexUsage = deps.codexUsage ?? realCodexUsage;
     this.platform = deps.platform ?? process.platform;
     this.clock = deps.now ?? Date.now;
     this.homeDir = deps.homeDir ?? safeHomedir();
@@ -996,10 +1119,17 @@ export class LimitsService implements LimitsReader, DisposableLike {
 
   // ------------------------------------------------------------------ private
 
+  /** The directory this profile's login lives in — `~/.claude` or `~/.codex`
+   *  by provider when the profile names none. Keys the cache too, so a profile
+   *  whose directory moved reads as a different login. */
   private configDirFor(profile: AccountProfile): string {
     const configured = typeof profile.configDir === 'string' ? profile.configDir.trim() : '';
     if (configured !== '') return configured;
-    return this.homeDir === '' ? '' : path.join(this.homeDir, DEFAULT_CONFIG_DIR_NAME);
+    if (this.homeDir === '') return '';
+    return path.join(
+      this.homeDir,
+      profile.provider === 'codex' ? DEFAULT_CODEX_HOME_NAME : DEFAULT_CONFIG_DIR_NAME,
+    );
   }
 
   private emit(): void {
@@ -1017,6 +1147,7 @@ export class LimitsService implements LimitsReader, DisposableLike {
     profile: AccountProfile,
     entry: CacheEntry,
   ): Promise<UsageSnapshot | null> {
+    if (profile.provider === 'codex') return this.refreshCodex(profile, entry);
     const before = signature(entry.snapshot);
     let result: UsageSnapshot;
     try {
@@ -1073,6 +1204,54 @@ export class LimitsService implements LimitsReader, DisposableLike {
       if (who !== undefined) result.signedInAs = who;
     } catch {
       /* expected-failure tier: the snapshot simply goes out without a name */
+    }
+    if (signature(result) !== before) this.emit();
+    return result;
+  }
+
+  /**
+   * The Codex attempt: two file reads, no network, no keychain.
+   *
+   *   1. `<home>/auth.json` missing → `no-credentials`: nothing is signed in
+   *      here, and the row's Sign In is the fix. No backoff — a file read is
+   *      free, and a user who has just signed in should see it next look.
+   *   2. present → identity out of it (who, plan); then the newest rate-limit
+   *      reading in `<home>/sessions`, which may be null for a login that has
+   *      never taken a turn — a snapshot with a name and no windows, not an
+   *      error, because nothing failed.
+   *
+   * A thrown read is `parse` without backoff: the disk did not say something
+   * unusable, we failed to read it, and the next attempt costs nothing.
+   */
+  private async refreshCodex(
+    profile: AccountProfile,
+    entry: CacheEntry,
+  ): Promise<UsageSnapshot | null> {
+    const before = signature(entry.snapshot);
+    let result: UsageSnapshot;
+    try {
+      entry.lastAttemptAt = this.clock();
+      const home = this.configDirFor(profile);
+      const authText = home === '' ? null : await this.readFile(codexAuthPath(home));
+      const identity = parseCodexAuth(authText);
+      if (authText === null) {
+        result = this.settleFailure(entry, 'no-credentials', false);
+      } else {
+        const reading = await this.codexUsage(codexSessionsDir(home));
+        result = this.settleSuccess(
+          entry,
+          buildCodexSnapshot(reading, identity, this.clock()),
+        );
+      }
+      // Identity rides on failure too, as it does for Claude: a login whose
+      // meter cannot be read is still a login with a name.
+      if (identity?.email !== undefined) result.signedInAs = identity.email;
+      if (result.plan === undefined && identity?.planType !== undefined) {
+        result.plan = identity.planType;
+      }
+    } catch (err) {
+      logError('limits: codex usage read failed', err);
+      result = this.settleFailure(entry, 'parse', false);
     }
     if (signature(result) !== before) this.emit();
     return result;

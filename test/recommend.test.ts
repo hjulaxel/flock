@@ -101,6 +101,8 @@ describe('recommendedPlan: what is offered', () => {
       world({
         tmuxMode: 'off',
         hooksInstalled: false,
+        codexHooksAvailable: true,
+        codexHooksInstalled: false,
         verbsInstalled: false,
         hasProjects: false,
         unlistedCount: 3,
@@ -108,6 +110,24 @@ describe('recommendedPlan: what is offered', () => {
       }),
     );
     expect(order).toEqual([...RECOMMENDED_STEP_IDS]);
+  });
+
+  it('offers the Codex hooks only where there is a Codex to hook, and reports them done once installed', () => {
+    // No Codex on the machine (the default of every older world): neither
+    // offered nor claimed as done.
+    const none = recommendedPlan(settled);
+    expect(none.steps.map((s) => s.id)).not.toContain('codexHooks');
+    expect(none.done).not.toContain('codexHooks');
+    // A Codex account or binary, entries not yet merged: offered, ticked.
+    const offered = recommendedPlan(world({ codexHooksAvailable: true }));
+    const step = offered.steps.find((s) => s.id === 'codexHooks');
+    expect(step?.recommended).toBe(true);
+    expect(step?.writes).toContain('hooks.json');
+    expect(step?.undo).toContain('Remove Codex Hooks');
+    // Installed: done.
+    const done = recommendedPlan(world({ codexHooksAvailable: true, codexHooksInstalled: true }));
+    expect(done.steps.map((s) => s.id)).not.toContain('codexHooks');
+    expect(done.done).toContain('codexHooks');
   });
 
   it('recommends everything it offers except the branch rows', () => {
@@ -268,6 +288,8 @@ describe('recommendedPlan: what it may never touch', () => {
       world({
         tmuxMode: 'off',
         hooksInstalled: false,
+        codexHooksAvailable: true,
+        codexHooksInstalled: false,
         verbsInstalled: false,
         hasProjects: false,
         unlistedCount: 5,
@@ -283,6 +305,7 @@ describe('recommendedPlan: what it may never touch', () => {
       // knows how to run would silently do nothing when ticked.
       const imperative: RecommendedStepId[] = [
         'hooks',
+        'codexHooks',
         'verbs',
         'project',
         'import',

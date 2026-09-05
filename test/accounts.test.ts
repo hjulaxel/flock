@@ -560,6 +560,17 @@ describe('seedDefaultProfiles', () => {
     expect(codex?.configDir).toBeUndefined();
   });
 
+  it('the CLI alone seeds the Codex row — not yet signed in is what Sign In is for', () => {
+    const seeded = seedDefaultProfiles([], { hasCodexAuth: false, hasCodexBinary: true });
+    expect(seeded.map((p) => p.id).sort()).toEqual(
+      [DEFAULT_CLAUDE_PROFILE_ID, DEFAULT_CODEX_PROFILE_ID].sort(),
+    );
+    // Neither the login nor the CLI: no Codex row, exactly as before.
+    expect(
+      seedDefaultProfiles([], { hasCodexAuth: false, hasCodexBinary: false }).map((p) => p.id),
+    ).toEqual([DEFAULT_CLAUDE_PROFILE_ID]);
+  });
+
   it('is idempotent: seeding twice against its own output adds nothing', () => {
     const first = seedDefaultProfiles([], { hasCodexAuth: true });
     const second = seedDefaultProfiles(first, { hasCodexAuth: true });

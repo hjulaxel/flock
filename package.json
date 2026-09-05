@@ -24,6 +24,7 @@
   "keywords": [
     "claude",
     "claude code",
+    "codex",
     "agents",
     "sessions",
     "orchestration"
@@ -364,6 +365,16 @@
       {
         "command": "lineage.removeHooks",
         "title": "Remove Instant-Update Hooks",
+        "category": "Flock"
+      },
+      {
+        "command": "lineage.installCodexHooks",
+        "title": "Install Codex Hooks...",
+        "category": "Flock"
+      },
+      {
+        "command": "lineage.removeCodexHooks",
+        "title": "Remove Codex Hooks",
         "category": "Flock"
       },
       {
@@ -1673,7 +1684,7 @@
       },
       {
         "view": "lineageAccounts",
-        "contents": "No AI accounts yet.\n[Add Account](command:lineage.addAccount)\nAn account is one subscription you can launch sessions on — a work plan, a personal plan, an API key. Each gets its own config directory, so you sign in once per account and never again."
+        "contents": "No AI accounts yet.\n[Add Account](command:lineage.addAccount)\nAn account is one subscription you can launch sessions on — a Claude plan, a ChatGPT / Codex plan, an API key. Flock lists the CLIs it finds on this machine on its own; add a second login of either here. Each gets its own config directory, so you sign in once per account and never again."
       },
       {
         "view": "lineageShells",
@@ -1861,7 +1872,7 @@
         "lineage.hooks.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Read the Claude Code hook event stream for instant updates. \"Install Instant-Update Hooks…\" sets this for you — installing the plugin only makes Claude write the events, this is the switch that makes Flock read them. The plugin lives in a skills directory and never edits ~/.claude/settings.json."
+          "description": "Read the hook event stream for instant updates — Claude Code's and Codex's, one file. \"Install Instant-Update Hooks…\" (Claude) and \"Install Codex Hooks…\" each set this for you: installing only makes the CLI write the events, this is the switch that makes Flock read them. The Claude plugin lives in a skills directory and never edits ~/.claude/settings.json; the Codex entries are merged into ~/.codex/hooks.json and stripped back out on removal, and Codex runs them only once you have trusted them (/hooks in a Codex session)."
         },
         "lineage.verbs.enabled": {
           "type": "boolean",
@@ -1935,7 +1946,7 @@
         "lineage.accounts.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Show the Accounts view, where each AI subscription you can launch sessions on gets a row: which plan it is, how much of its five-hour and weekly windows is gone, and which one new sessions use by default. Each account keeps its own config directory, so signing in to one never signs you out of another, and a session stays on the account it started on for life — resuming or forking it re-uses that account whatever the routing says today. Turn off if you only ever use one account; nothing about how sessions launch changes, the view just stops taking up sidebar space. The section is also gated on lineage.accounts.section, which is on by default and is the switch to reach for if you would rather have Flock's buttons on the FLOCK row."
+          "description": "Show the Accounts view, where each AI subscription you can launch sessions on gets a row: which plan it is, how much of its five-hour and weekly windows is gone — for a Claude plan and for a ChatGPT / Codex plan alike — and which one new sessions use by default. Each account keeps its own config directory, so signing in to one never signs you out of another, and a session stays on the account it started on for life — resuming or forking it re-uses that account whatever the routing says today. Turn off if you only ever use one account; nothing about how sessions launch changes, the view just stops taking up sidebar space. The section is also gated on lineage.accounts.section, which is on by default and is the switch to reach for if you would rather have Flock's buttons on the FLOCK row."
         },
         "lineage.accounts.section": {
           "type": "boolean",
@@ -1950,7 +1961,7 @@
         "lineage.accounts.offerSwitchAtLimit": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "Offer to **move a running conversation to another account** when the account it is on uses up its five-hour window.\n\nFlock already reads every account's meters, so it knows the moment one fills — and that is the moment somebody with a second subscription wants the conversation they were in the middle of moved. When this is on, a session hosted by this window whose account has just run out gets one notification naming the account with the most room, and a button that starts the ordinary **Move to Account...** flow with that account already chosen. The confirmation still appears: what the move costs — Claude Code restarts, the turn in flight is cut off, and the prompt cache does not follow — is the same however the flow was reached.\n\n**Off by default.** The offer proposes an interruption, so it is only welcome to somebody who decided in advance that they would rather be asked. With it off nothing is lost: the verb is in every session row's context menu whenever you have two accounts a session could run on, and in the Command Palette under **Flock**.\n\nOne offer per five-hour window, per session, so a meter that re-reads on a timer cannot turn into a repeating prompt. The window resetting starts a fresh one."
+          "markdownDescription": "Offer to **move a running conversation to another account** when the account it is on uses up its five-hour window.\n\nFlock already reads every account's meters — Claude's and Codex's — so it knows the moment one fills, and that is the moment somebody with a second subscription wants the conversation they were in the middle of moved. When this is on, a session hosted by this window whose account has just run out gets one notification naming the account with the most room, and a button that starts the ordinary **Move to Account...** flow with that account already chosen. The confirmation still appears: what the move costs — the CLI restarts, the turn in flight is cut off, and the prompt cache does not follow — is the same however the flow was reached.\n\nWhen no account on the **same** CLI has room — the default roster of one Claude login and one Codex login never does — the button offers **Continue on** the other CLI's account instead: a new session there, briefed on the transcript, the same **Continue on Another CLI...** the row menu has. Named as a continuation, never as a move, because that is what it is.\n\n**Off by default.** The offer proposes an interruption, so it is only welcome to somebody who decided in advance that they would rather be asked. With it off nothing is lost: both verbs are in every session row's context menu whenever the roster holds somewhere to go, and in the Command Palette under **Flock**.\n\nOne offer per five-hour window, per session, so a meter that re-reads on a timer cannot turn into a repeating prompt. The window resetting starts a fresh one."
         },
         "lineage.viewStyle": {
           "type": "string",

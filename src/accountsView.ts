@@ -540,19 +540,46 @@ export function formatUsageSummary(
 
   const parts: string[] = [];
   const five = pct(snapshot.fiveHour);
-  if (five !== undefined) {
+  if (five !== undefined && snapshot.fiveHour) {
     // The reset earns its place on the row: 90% with ten minutes to go and 90%
     // with four hours to go are opposite answers to "start another session
     // here?", and the percentage alone cannot tell them apart.
-    const until = untilLabel(snapshot.fiveHour?.resetsAt, now);
-    parts.push(`5h ${String(five)}%${until === '' ? '' : ` · resets ${until}`}`);
+    const until = untilLabel(snapshot.fiveHour.resetsAt, now);
+    parts.push(
+      `${slotLabel(snapshot.fiveHour, '5h')} ${String(five)}%` +
+        (until === '' ? '' : ` · resets ${until}`),
+    );
   }
   const week = pct(snapshot.sevenDay);
-  if (week !== undefined) parts.push(`week ${String(week)}%`);
+  if (week !== undefined && snapshot.sevenDay) {
+    parts.push(`${slotLabel(snapshot.sevenDay, 'week')} ${String(week)}%`);
+  }
   const opus = pct(snapshot.sevenDayOpus);
   if (opus !== undefined) parts.push(`opus ${String(opus)}%`);
-  if (parts.length === 0) return snapshot.stale === true ? 'stale' : '';
+  if (parts.length === 0) {
+    // A signed-in account with nothing measured yet — a Codex login that has
+    // not taken a turn — shows its name rather than an empty line; the name is
+    // the fact the row has. Same rule limits.ts's formatter applies.
+    if (who !== '') return snapshot.stale === true ? `${who} · stale` : who;
+    return snapshot.stale === true ? 'stale' : '';
+  }
   return parts.join(' · ') + (snapshot.stale === true ? ' (stale)' : '');
+}
+
+/**
+ * The word before a window's percentage: the slot's name for a window of the
+ * length the slot was named for (or of no stated length — every Claude window),
+ * the real duration otherwise. limits.windowLabel states the same rule with
+ * `wk`; this view says `week`, as it always has.
+ */
+function slotLabel(win: UsageWindow, slotName: '5h' | 'week'): string {
+  const minutes = win.minutes;
+  if (minutes === undefined || !Number.isFinite(minutes) || minutes <= 0) return slotName;
+  if (minutes === 300) return '5h';
+  if (minutes === 10080) return 'week';
+  if (minutes < 60) return `${String(Math.round(minutes))}m`;
+  if (minutes < 24 * 60) return `${String(Math.round(minutes / 60))}h`;
+  return `${String(Math.round(minutes / (24 * 60)))}d`;
 }
 
 /**
@@ -581,6 +608,41 @@ export function usageSummaryOf(
  *  string and a config dir is a path, and neither is trusted markup. */
 function mdEscape(s: string): string {
   return s.replace(/[\\`*_[\]<>#|]/g, (m) => `\\${m}`);
+}
+
+/** The hover's name for a window: the slot's name for a window of the length
+ *  the slot was named for, the duration itself otherwise ("Six-hour window",
+ *  "3-day window"). Mirrors `slotLabel` for the row. */
+function windowName(win: UsageWindow, slotName: string): string {
+  const minutes = win.minutes;
+  if (minutes === undefined || !Number.isFinite(minutes) || minutes <= 0) return slotName;
+  if (minutes === 300 || minutes === 10080) return slotName;
+  if (minutes < 60) return `${String(Math.round(minutes))}-minute window`;
+  if (minutes < 24 * 60) return `${String(Math.round(minutes / 60))}-hour window`;
+  return `${String(Math.round(minutes / (24 * 60)))}-day window`;
+}
+
+/** "ChatGPT Plus", "ChatGPT Team" — the plan as a person names it, from the
+ *  lowercase token the provider writes. Unknown tokens pass through
+ *  capitalised rather than being guessed at. */
+export function planLabel(provider: ProviderId, plan: string): string {
+  const token = plan.trim();
+  if (token === '') return '';
+  const word = token.charAt(0).toUpperCase() + token.slice(1);
+  return provider === 'codex' ? `ChatGPT ${word}` : word;
+}
+
+/** "2 hours ago", "3 days ago", "just now" — how old a reading is. */
+export function agoLabel(at: number, now: number): string {
+  if (!Number.isFinite(at) || !Number.isFinite(now)) return '';
+  const ms = now - at;
+  if (ms < 60_000) return 'just now';
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 60) return `${String(minutes)} minute${minutes === 1 ? '' : 's'} ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${String(hours)} hour${hours === 1 ? '' : 's'} ago`;
+  const days = Math.round(hours / 24);
+  return `${String(days)} day${days === 1 ? '' : 's'} ago`;
 }
 
 // ---------------------------------------------------------------- provider
@@ -688,21 +750,33 @@ export class AccountsViewProvider implements vscode.TreeDataProvider<AccountRow>
       md.appendMarkdown('\n\n');
 
       // Said on the row rather than discovered at launch time: this extension
-      // starts Claude Code sessions, so an account for another CLI is a place
-      // to sign in and read meters, not a place a session can begin.
+      // starts Claude Code and Codex sessions, so an account for a third CLI
+      // is a place to sign in and read meters, not a place a session can
+      // begin.
       if (!canHostSession(profile)) {
         md.appendMarkdown(
           'New sessions cannot start on this account — Flock launches ' +
-            'Claude Code.\n\n',
+            'Claude Code and Codex.\n\n',
         );
       }
 
       // Identity outranks inference: when the profile's own config dir NAMES
       // its login, say that — it is the one line that settles "did my sign-in
-      // take?" without a terminal.
+      // take?" without a terminal. The plan rides beside it when the provider
+      // says one (Codex does; Claude's endpoint does not).
       const who =
         typeof snapshot?.signedInAs === 'string' ? snapshot.signedInAs.trim() : '';
-      if (who !== '') md.appendMarkdown(`Signed in as **${mdEscape(who)}**\n\n`);
+      const plan =
+        typeof snapshot?.plan === 'string' ? snapshot.plan.trim() : '';
+      if (who !== '') {
+        md.appendMarkdown(
+          `Signed in as **${mdEscape(who)}**` +
+            (plan === '' ? '' : ` · ${mdEscape(planLabel(profile.provider, plan))}`) +
+            '\n\n',
+        );
+      } else if (plan !== '') {
+        md.appendMarkdown(`${mdEscape(planLabel(profile.provider, plan))}\n\n`);
+      }
 
       const dir =
         typeof profile.configDir === 'string' ? profile.configDir.trim() : '';
@@ -738,15 +812,32 @@ export class AccountsViewProvider implements vscode.TreeDataProvider<AccountRow>
       const rows: string[] = [];
       const line = (name: string, win: UsageWindow | undefined): void => {
         const p = pct(win);
-        if (p === undefined) return;
-        const until = untilLabel(win?.resetsAt, now);
-        rows.push(`${name}: ${String(p)}%${until === '' ? '' : ` (resets ${until})`}`);
+        if (p === undefined || win === undefined) return;
+        const until = untilLabel(win.resetsAt, now);
+        rows.push(
+          `${windowName(win, name)}: ${String(p)}%${until === '' ? '' : ` (resets ${until})`}`,
+        );
       };
       line('Five-hour window', snapshot?.fiveHour);
       line('Weekly', snapshot?.sevenDay);
       line('Weekly (Opus)', snapshot?.sevenDayOpus);
       if (rows.length > 0) md.appendMarkdown(rows.join('\n\n') + '\n\n');
       else md.appendMarkdown(`${this.summary(snapshot) || 'No usage data.'}\n\n`);
+
+      // Where the numbers came from, when it is not "just now". Codex writes
+      // its rate limits into the transcript after every turn and nowhere Flock
+      // may ask, so its meter is exactly as old as the last Codex turn on this
+      // login — worth one line, because a reading from Tuesday under a row you
+      // are about to launch on is a different fact from one taken a minute ago.
+      const observed = snapshot?.observedAt;
+      if (typeof observed === 'number' && Number.isFinite(observed) && observed > 0) {
+        const age = agoLabel(observed, now);
+        md.appendMarkdown(
+          `Numbers from the last ${mdEscape(info.label)} turn on this login` +
+            (age === '' ? '' : `, ${age}`) +
+            '. Windows that have reset since are shown open.\n\n',
+        );
+      }
       return md;
     } catch (err) {
       logError('accountsView.tooltip', err);

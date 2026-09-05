@@ -457,6 +457,20 @@ describe('migrateState', () => {
     expect(migrateState({ hookInstall: 'installed' }).hookInstall).toBeUndefined();
   });
 
+  it('codexHookInstall is sanitized by the same rule and kept apart from hookInstall', () => {
+    const migrated = migrateState({
+      hookInstall: { installed: false },
+      codexHookInstall: { installed: true, pluginDir: '/h/.codex/hooks.json', pluginVersion: 1 },
+    });
+    expect(migrated.codexHookInstall).toEqual({
+      installed: true,
+      pluginDir: '/h/.codex/hooks.json',
+      pluginVersion: 1,
+    });
+    expect(migrated.hookInstall).toEqual({ installed: false });
+    expect(migrateState({ codexHookInstall: { installed: 'yes' } }).codexHookInstall).toBeUndefined();
+  });
+
   it('folds a legacy (v0) node map into records without importing guessed edges', () => {
     const migrated = migrateState({
       slug: 'legacy-addon',
@@ -590,6 +604,17 @@ describe('mergeStates', () => {
 
     const fallback = mergeStates(state({ hookInstall: { installed: true } }), state());
     expect(fallback.hookInstall).toEqual({ installed: true });
+  });
+
+  it('merges codexHookInstall memory-first like the other two install records, independently of them', () => {
+    const disk = state({ codexHookInstall: { installed: true }, hookInstall: { installed: true } });
+    const mem = state({ codexHookInstall: { installed: false } });
+    const merged = mergeStates(disk, mem);
+    expect(merged.codexHookInstall).toEqual({ installed: false });
+    expect(merged.hookInstall).toEqual({ installed: true });
+    const fallback = mergeStates(state({ codexHookInstall: { installed: true } }), state());
+    expect(fallback.codexHookInstall).toEqual({ installed: true });
+    expect(mergeStates(state(), state()).codexHookInstall).toBeUndefined();
   });
 });
 

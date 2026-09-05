@@ -64,6 +64,18 @@ describe('handoffRefusal', () => {
     expect(handoffRefusal(undefined, CODEX, true)).toBe(null);
   });
 
+  it("the conversation's own CLI outranks the pin: an unpinned CODEX conversation hands off to Claude, not to Codex", () => {
+    // The inversion the fourth argument exists to prevent: with no pin the
+    // default provider is claude, and a Codex conversation started in a
+    // terminal would be offered a Codex account as "the other CLI".
+    expect(handoffRefusal(null, CODEX, true, 'codex')).toBe('same-cli');
+    expect(handoffRefusal(null, CLAUDE, true, 'codex')).toBe(null);
+    expect(handoffRefusal(null, GENERIC, true, 'codex')).toBe(null);
+    // A pin that disagrees with the bytes loses to the bytes.
+    expect(handoffRefusal(CODEX, CLAUDE, true, 'claude')).toBe('same-cli');
+    expect(handoffRefusal(CLAUDE, CODEX, true, 'claude')).toBe(null);
+  });
+
   it('same-cli outranks cannot-host: a gemini target fails on hosting, not CLI', () => {
     // Different CLI (claude → gemini), so the durable same-cli test passes it
     // through, and the capability test is what refuses.
@@ -123,6 +135,20 @@ describe('buildHandoffPrompt', () => {
     expect(full).toContain('"auth 2"');
     expect(full).toContain('/repo');
     expect(full).toContain(CLI_DISPLAY_NAME.codex);
+  });
+
+  it('tells the child how the SOURCE file is laid out, per CLI', () => {
+    const fromClaude = buildHandoffPrompt({ transcriptPath: PATH, sourceCli: 'claude' });
+    expect(fromClaude).toContain('message.content');
+    expect(fromClaude).not.toContain('rollout');
+    const fromCodex = buildHandoffPrompt({
+      transcriptPath: '/h/.codex/sessions/2026/09/05/rollout-x.jsonl',
+      sourceCli: 'codex',
+    });
+    expect(fromCodex).toContain('Codex rollout');
+    expect(fromCodex).toContain('response_item');
+    expect(fromCodex).toContain('Skip the long first line');
+    expect(fromCodex).not.toContain('message.content');
   });
 
   it('whitespace-only metadata is omitted, not printed as blank claims', () => {

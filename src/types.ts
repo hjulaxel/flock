@@ -746,6 +746,15 @@ export interface UsageWindow {
   utilization: number;
   /** Epoch ms at which this window rolls over, when the provider says. */
   resetsAt?: number;
+  /** How long the window is, in minutes, when the provider says so. Claude's
+   *  endpoint names its windows (five-hour, seven-day) and this stays unset;
+   *  Codex reports each window as a `window_minutes` figure and names nothing,
+   *  so the slot a Codex window lands in (`fiveHour`, `sevenDay`) is chosen by
+   *  duration and this records the duration it actually had. A formatter that
+   *  finds a value here other than 300 or 10080 labels the window by it
+   *  instead of by the slot's name — a "5h" label over a six-hour window
+   *  would be a small lie the row has no reason to tell. */
+  minutes?: number;
 }
 
 /**
@@ -781,10 +790,26 @@ export interface UsageSnapshot {
   stale?: boolean;
   error?: 'no-credentials' | 'expired' | 'token-stale' | 'http' | 'parse';
   /** Who the profile's config dir says is signed in
-   *  (`oauthAccount.emailAddress` from its `.claude.json`). Identity, not
+   *  (`oauthAccount.emailAddress` from its `.claude.json`; for a Codex home,
+   *  the `email` claim of the id token in its `auth.json`). Identity, not
    *  credential — shown in the view on purpose, so a row whose usage cannot be
    *  read still names its account instead of claiming "not logged in". */
   signedInAs?: string;
+  /** The plan the provider says this login is on — `plus`, `pro`, `team` —
+   *  when the provider says. Codex writes it beside every rate-limit reading
+   *  (`plan_type`) and into the id token; Claude's usage endpoint does not name
+   *  one, so a Claude snapshot leaves this unset. A hover line, never a rule:
+   *  nothing routes on it. */
+  plan?: string;
+  /** Epoch ms of the PROVIDER'S reading, when it differs from `fetchedAt`.
+   *  Claude's numbers are fetched live and the two coincide, so this stays
+   *  unset. Codex's are read off the newest rollout on disk — the CLI writes
+   *  its rate limits into the transcript after every turn and nowhere else —
+   *  so the numbers are as old as the last Codex turn on that login, and the
+   *  hover says so instead of presenting a three-day-old reading as current.
+   *  Any window whose reset has already passed is reported as open rather than
+   *  at its stale percentage, because that is what has actually happened. */
+  observedAt?: number;
 }
 
 /**
@@ -1055,6 +1080,14 @@ export const COMMANDS = {
   openProject: 'lineage.openProject',
   installHooks: 'lineage.installHooks',
   removeHooks: 'lineage.removeHooks',
+  /** The Codex CLI's half of instant updates. Codex reads hooks from ONE
+   *  user-level file, `$CODEX_HOME/hooks.json`, rather than from a plugin
+   *  directory — so this pair merges Flock's entries into that file and
+   *  strips exactly those entries back out, leaving whatever else the user
+   *  keeps there untouched. Same one-modal consent, same reader gate
+   *  (`lineage.hooks.enabled`), same events file. See src/codexHooks.ts. */
+  installCodexHooks: 'lineage.installCodexHooks',
+  removeCodexHooks: 'lineage.removeCodexHooks',
   /** The in-session verbs: a skill plus a tiny CLI that let the user say
    *  "fork this session" TO CLAUDE, which then asks a Flock window to run the
    *  same forkFlow the sidebar button runs. Install/remove mirror the hooks
@@ -2043,6 +2076,16 @@ export interface RecommendedWorld {
    *  window is really auto-switching or is the Flock-only model wearing the old
    *  spelling. */
   readonly workspacesEnabled: boolean;
+  /** Whether the Codex hooks step can be offered at all: a Codex account on
+   *  the roster, or the `codex` binary found. Optional — absent reads as
+   *  false — so every world literal written before Codex hooks existed stays
+   *  valid and describes a machine without Codex, which is what it did
+   *  describe. A step that cannot be run must never be offered. */
+  readonly codexHooksAvailable?: boolean;
+  /** The Codex hook install record's `installed` flag. Optional for the same
+   *  reason; absent reads as not installed, which only matters when the step
+   *  is available. */
+  readonly codexHooksInstalled?: boolean;
 }
 
 // ------------------------------------------------------------------ lineage results
@@ -3229,6 +3272,12 @@ export interface LineageState {
    *  files did the user consent to", and giving that idea two types would
    *  invite them to drift. */
   verbsInstall?: HookInstallState;
+  /** The Codex hook install record (codexHooks.ts) — `hookInstall`'s twin for
+   *  the other CLI, and its own key for the reason `verbsInstall` is: the two
+   *  installs are consented to separately, live in different files, and
+   *  installing one must never claim the other. `pluginDir` here names the
+   *  `hooks.json` Flock merged its entries into, not a directory. */
+  codexHookInstall?: HookInstallState;
   /** v8. The dispatch queue, keyed by entry id — intents to start a session,
    *  parked until an account is worth it (src/dispatch.ts). Optional for the
    *  reason `accounts` is: hand-built literals predate it, and migrateState
@@ -3253,6 +3302,15 @@ export interface HookEvent {
    *  on a FORK is a new branch, not a re-key, and chaining it would collapse
    *  the parent into its own fork. */
   source: string | null;
+  /** Which CLI's hook wrote the line. The Codex hook command stamps
+   *  `"cli":"codex"` into the wrapper (see hooks.CODEX_HOOK_COMMAND); the
+   *  Claude plugin's command predates the field and stamps nothing, so an
+   *  absent field reads as `claude`. Null only for a line whose wrapper is
+   *  missing altogether (the flat v2 shape), where nothing can be said. The
+   *  consumer that needs it is liveness: "Codex hooks are proven live" is a
+   *  fact about Codex events specifically, and the two CLIs share one events
+   *  file. */
+  cli: 'claude' | 'codex' | null;
   raw: unknown;
 }
 
@@ -3875,9 +3933,12 @@ export interface CommandDeps {
   refresh(): void;
   hasTranscript(sessionId: string): boolean;
   /** The transcript's path, for the one verb that has to NAME the file rather
-   *  than test for it: the handoff brief (src/handoff.ts). Claude layout only,
-   *  like `hasTranscript` — a Codex parent answers null and the verb says
-   *  "not yet" honestly. Optional so every unit double stays valid. */
+   *  than test for it: the handoff brief (src/handoff.ts). Both layouts: a
+   *  Claude transcript under a config directory's `projects/`, or a Codex
+   *  rollout under a Codex home's `sessions/` — the wiring holds both indexes
+   *  and is the only thing that can answer for either. Null means the
+   *  conversation has not taken a turn yet, and the verb says so honestly.
+   *  Optional so every unit double stays valid. */
   transcriptPathOf?(sessionId: string): string | null;
   /** The dispatch queue, when the wiring provides one — extension.ts owns the
    *  store and the clock (dispatchHost.ts); the verbs only park, list and
@@ -4176,6 +4237,13 @@ export interface CommandDeps {
   /** Write `lineage.hooks.enabled`. Installing the plugin is only half the
    *  switch — this is the half that starts the events reader. */
   setHooksEnabled(enabled: boolean): Promise<void>;
+  // Codex hooks (G) — OPTIONAL like the verbs trio below and for the same
+  // reason. A wiring without them has the two commands registered and
+  // refusing. The reader gate is shared with the Claude hooks
+  // (`setHooksEnabled`): one events file, one watcher, one switch.
+  installCodexHooks?(): Promise<HookInstallState>;
+  removeCodexHooks?(): Promise<HookInstallState>;
+  getCodexHookState?(): HookInstallState;
   // in-session verbs (G) — all four OPTIONAL, unlike the hooks quartet, so no
   // existing unit double has to learn them: a wiring without them has the two
   // commands registered and refusing, never half-performing.
@@ -4528,6 +4596,13 @@ export interface CommandDeps {
     /** In-session verbs installed? Optional for the same reason as
      *  `branchDisplay`: absent offers both halves of the pair. */
     verbsInstalled?: boolean;
+    /** Codex hooks installed? Optional for the same reason. */
+    codexHooksInstalled?: boolean;
+    /** Is there a Codex to hook at all — an account on the roster or the CLI on
+     *  the machine? Absent reads as false, and the gear menu then offers no
+     *  Codex hook entries: a verb that can only report "no Codex here" is
+     *  worse than no verb. */
+    codexHooksAvailable?: boolean;
   };
   // ---- multi-select -------------------------------------------------------
   /** The session ids selected in whichever view is on screen, top to bottom, or
