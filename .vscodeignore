@@ -22,6 +22,10 @@ prototype/**
 # The README links into docs/ — those links resolve against the repository on
 # the marketplace page, so the files themselves do not need to ship.
 docs/**
+# Design notes are written for the repository, not the package: the README
+# never links to them, and they record decisions rather than anything the
+# extension reads at runtime.
+design/**
 **/*.map
 **/*.ts
 !dist/extension.js
