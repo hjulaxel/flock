@@ -14,6 +14,7 @@
 
 import { execFile } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import * as process from 'node:process';
 
@@ -725,29 +726,80 @@ export async function fetchRosterMulti(
   };
 }
 
+/** The machine facts CLI discovery reads. Injectable so the Windows and Linux
+ *  answers are testable from a macOS laptop; production passes nothing and
+ *  gets the real process. */
+export interface DiscoveryWorld {
+  platform?: string;
+  env?: NodeJS.ProcessEnv;
+  home?: string;
+}
+
+/**
+ * Where the official installers put `claude` when it is NOT on the PATH the
+ * extension host inherited — which is often: VS Code launched from the Dock
+ * or a Snap never ran the shell profile that adds `~/.local/bin`, and a
+ * Windows PATH edit made by an installer reaches only shells opened after it.
+ * Ordered by how likely the hit is the CLI the person actually runs; every
+ * entry is a directory a real installer writes to, nothing guessed:
+ *
+ *   ~/.local/bin                          the native installer, all platforms
+ *                                         (claude.exe on Windows)
+ *   %APPDATA%\npm                         npm's global bin on Windows — the
+ *                                         claude.cmd shim
+ *   %LOCALAPPDATA%\Microsoft\WinGet\Links WinGet's portable-package links
+ *   ~/.claude/local                       the older `claude migrate-installer`
+ *                                         location, still on many machines
+ *   /opt/homebrew/bin, /usr/local/bin     Homebrew (arm64, x64), and npm's
+ *                                         default global prefix
+ *
+ * Pure: a Windows without APPDATA set simply contributes fewer candidates.
+ */
+export function claudeFallbackBinDirs(world: DiscoveryWorld = {}): string[] {
+  const platform = world.platform ?? process.platform;
+  const env = world.env ?? process.env;
+  const home = world.home ?? os.homedir();
+  const out = [path.join(home, '.local', 'bin')];
+  if (platform === 'win32') {
+    const appData = env['APPDATA'];
+    if (typeof appData === 'string' && appData !== '') out.push(path.join(appData, 'npm'));
+    const local = env['LOCALAPPDATA'];
+    if (typeof local === 'string' && local !== '') {
+      out.push(path.join(local, 'Microsoft', 'WinGet', 'Links'));
+    }
+    return out;
+  }
+  out.push(path.join(home, '.claude', 'local'), '/opt/homebrew/bin', '/usr/local/bin');
+  return out;
+}
+
 /**
  * A non-empty `configured` value is returned verbatim (no existence check —
  * the user knows where their CLI is, and an over-eager check would reject a
  * shim we cannot stat). Otherwise scan PATH for an existing file named claude
- * (claude.exe/claude.cmd on win32); first absolute hit wins, else null.
+ * (claude.exe/claude.cmd on win32), then the install roots the official
+ * installers use (`claudeFallbackBinDirs`); first hit wins, else null.
  *
  * On win32 the NATIVE executable is preferred over the batch shim, and the
  * extension-less `claude` — the POSIX shell script npm drops next to the shim
  * — is not a candidate at all: Windows cannot execute it, so returning it
  * would only produce a spawn failure that reads as "the CLI is broken".
  */
-export function findClaudeBinary(configured?: string): string | null {
+export function findClaudeBinary(
+  configured?: string,
+  world: DiscoveryWorld = {},
+): string | null {
   if (typeof configured === 'string' && configured.trim().length > 0) {
     return configured;
   }
-  const names =
-    process.platform === 'win32'
-      ? ['claude.exe', 'claude.cmd']
-      : ['claude'];
-  const rawPath = process.env['PATH'] ?? process.env['Path'] ?? '';
-  if (rawPath.length === 0) return null;
+  const platform = world.platform ?? process.platform;
+  const env = world.env ?? process.env;
+  const names = platform === 'win32' ? ['claude.exe', 'claude.cmd'] : ['claude'];
+  const rawPath = env['PATH'] ?? env['Path'] ?? '';
+  const dirs = rawPath.length > 0 ? rawPath.split(path.delimiter) : [];
+  dirs.push(...claudeFallbackBinDirs(world));
 
-  for (const dir of rawPath.split(path.delimiter)) {
+  for (const dir of dirs) {
     if (!dir) continue;
     for (const name of names) {
       const candidate = path.resolve(dir, name);

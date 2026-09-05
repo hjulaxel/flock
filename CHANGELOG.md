@@ -34,6 +34,16 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Fixed
 
+- **Flock finds a CLI the editor's `PATH` does not show it.** The extension
+  host inherits the environment the editor was launched with, which on a Mac
+  opened from the Dock, a Snap, or a Windows whose installer edited `PATH` for
+  shells that open later, predates the line that adds the CLI. When the scan
+  of `PATH` misses, Flock now tries the directories the official installers
+  actually write to: `~/.local/bin` (the native installer, `claude.exe` on
+  Windows), `%APPDATA%\npm` (the npm shim), WinGet's portable links, the older
+  `~/.claude/local`, and Homebrew's two prefixes — for `claude` and for
+  `codex` alike. `lineage.claudeBinary` and `lineage.codexBinary` still win
+  when set, verbatim.
 - **Linux compares paths the way its filesystems do.** Every path comparison in
   Flock folded case, because the two platforms it was written on — macOS and
   Windows — do. On Linux that filed two directories whose names differ only in

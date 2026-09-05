@@ -42,6 +42,7 @@ import * as process from 'node:process';
 import { log } from './log';
 import { SESSION_ID_RE, isSessionId } from './types';
 import type { LaunchOptions } from './types';
+import type { DiscoveryWorld } from './roster';
 
 // ------------------------------------------------------------------ layout
 
@@ -207,14 +208,18 @@ export function buildCodexArgs(opts: LaunchOptions): string[] {
  * `codex` that only resolves inside an interactive shell is precisely the
  * failure that made "sign in" do nothing.
  */
-export function findCodexBinary(configured?: string): string | null {
+export function findCodexBinary(
+  configured?: string,
+  world: DiscoveryWorld = {},
+): string | null {
   if (typeof configured === 'string' && configured.trim().length > 0) {
     return configured;
   }
-  const names =
-    process.platform === 'win32' ? ['codex.exe', 'codex.cmd'] : ['codex'];
+  const platform = world.platform ?? process.platform;
+  const env = world.env ?? process.env;
+  const names = platform === 'win32' ? ['codex.exe', 'codex.cmd'] : ['codex'];
 
-  const rawPath = process.env['PATH'] ?? process.env['Path'] ?? '';
+  const rawPath = env['PATH'] ?? env['Path'] ?? '';
   const dirs = rawPath.length > 0 ? rawPath.split(path.delimiter) : [];
   for (const dir of dirs) {
     if (!dir) continue;
@@ -224,7 +229,7 @@ export function findCodexBinary(configured?: string): string | null {
     }
   }
 
-  for (const dir of fallbackBinDirs()) {
+  for (const dir of codexFallbackBinDirs(world)) {
     for (const name of names) {
       const hit = fileAt(path.join(dir, name));
       if (hit !== null) return hit;
@@ -255,11 +260,30 @@ function fileAt(candidate: string): string | null {
  *   /opt/homebrew/bin   homebrew on apple silicon
  *   /usr/local/bin      homebrew on intel, and npm's default global prefix
  *
+ * On Windows the roots are `~/.codex/bin` again, then `%APPDATA%\npm` (npm's
+ * global bin, where the `codex.cmd` shim lands) and WinGet's portable links.
+ * nvm-windows keeps its versions under `%APPDATA%\nvm` but exposes the active
+ * one through a symlink that IS on PATH, so it needs no entry here.
+ *
  * Never throws: an unreadable root is one that contributes no candidates.
+ * Exported, with the machine facts injectable, so the table is testable on
+ * any OS.
  */
-function fallbackBinDirs(): string[] {
-  const home = os.homedir();
+export function codexFallbackBinDirs(world: DiscoveryWorld = {}): string[] {
+  const platform = world.platform ?? process.platform;
+  const env = world.env ?? process.env;
+  const home = world.home ?? os.homedir();
   const out: string[] = [path.join(home, '.codex', 'bin')];
+
+  if (platform === 'win32') {
+    const appData = env['APPDATA'];
+    if (typeof appData === 'string' && appData !== '') out.push(path.join(appData, 'npm'));
+    const local = env['LOCALAPPDATA'];
+    if (typeof local === 'string' && local !== '') {
+      out.push(path.join(local, 'Microsoft', 'WinGet', 'Links'));
+    }
+    return out;
+  }
 
   const nvmRoot = path.join(home, '.nvm', 'versions', 'node');
   try {
