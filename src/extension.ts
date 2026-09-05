@@ -1498,7 +1498,12 @@ export async function activate(
       compactionOf: (id, status) =>
         compaction.phaseOf(chainAliases(id), compactionNow, status === 'busy'),
       opts: {
-        showGhosts: boolCfg(CONFIG_KEYS.showGhosts, true),
+        // Always. Ghost ancestors — the exited sessions live ones were forked
+        // from — are what keep the tree's ancestry honest, and a toggle that
+        // could hide them was a setting nobody should turn; the parameter
+        // stays on buildForest so the ghost rules remain testable in
+        // isolation.
+        showGhosts: true,
         notificationsDefault: boolCfg(CONFIG_KEYS.notificationsEnabled, true),
         onlyActive: boolCfg(CONFIG_KEYS.onlyActiveSessions, false),
       },
@@ -7461,8 +7466,8 @@ export async function activate(
       // The filter can also be flipped from settings.json, and the title button
       // is a picture of the setting — it has to follow either way in.
       void syncOnlyActiveContext();
-      // showGhosts, onlyActiveSessions and notifications.enabled are read per
-      // buildForest, groupByFolder per getChildren — a rebuild covers them all.
+      // onlyActiveSessions and notifications.enabled are read per buildForest,
+      // groupByFolder per getChildren — a rebuild covers them all.
       if (haveRoster) void scheduleRebuild(lastEntries);
       else refreshViews();
     }),

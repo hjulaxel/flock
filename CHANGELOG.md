@@ -45,6 +45,13 @@ All notable changes to Flock are recorded here. The format follows
   Palette under **Flock**. Hiding the section hides a list, nothing more: the
   commands your sessions run are untouched.
 
+### Removed
+
+- **`lineage.showGhosts`.** Exited ancestors — the sessions your live ones were
+  forked from — are always drawn. They are what keeps the tree's ancestry
+  honest, and a switch that could hide them was a knob nobody should turn. A
+  value left in `settings.json` does nothing.
+
 ### Changed
 
 - **One description per setting.** `docs/settings.md` used to carry a

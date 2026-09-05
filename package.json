@@ -2122,16 +2122,10 @@
             "order": 4,
             "description": "Show only sessions that are still running. Closed, exited and inferred-ancestor rows are filtered out of the tree — nothing is archived or removed, and a live session forked from a closed one keeps its place. This is the \"Show Only Active Sessions\" toggle in the view title."
           },
-          "lineage.showGhosts": {
-            "type": "boolean",
-            "default": true,
-            "order": 5,
-            "description": "Show exited ancestor sessions that live sessions were forked from."
-          },
           "lineage.showArchived": {
             "type": "boolean",
             "default": false,
-            "order": 6,
+            "order": 5,
             "description": "Show ALL closed sessions found in ~/.claude/projects, even ones this tree never knew. Off by default: your own sessions already stay in the tree after their tab closes (as dimmed, resumable inactive rows, until you archive them) — this switch only adds foreign history on top. This is NOT the archive: sessions you archived are behind \"Archived Sessions...\" on the project's row.",
             "tags": [
               "advanced"
@@ -2140,7 +2134,7 @@
           "lineage.showPhantomRows": {
             "type": "boolean",
             "default": false,
-            "order": 7,
+            "order": 6,
             "description": "Show roster rows that are not sessions: entries whose process has exited but that `claude agents --json` never reaped, and `claude bg-spare` daemon warm-spares (pre-forked processes waiting to be claimed, which report an inherited name and a frozen status). Off by default — these cannot be focused, forked or resumed, and a stuck spare will pin the attention badge on the view indefinitely. Turn on to debug the roster.",
             "tags": [
               "advanced"
@@ -2161,7 +2155,7 @@
               "Use the built-in VS Code tree. Rename opens a box at the top of the window, because the tree API has no editable row."
             ],
             "default": "inline",
-            "order": 8,
+            "order": 7,
             "markdownDescription": "How the Sessions view is drawn. `inline` renames on the row like the Explorer; `native` uses the built-in tree widget. Takes effect on the next window reload.",
             "tags": [
               "advanced"

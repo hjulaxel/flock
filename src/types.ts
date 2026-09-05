@@ -1511,7 +1511,6 @@ export const CONFIG_KEYS = {
    *  into — so it is silently inert when `tmux` is off or tmux is absent. */
   exitToShell: 'exitToShell',
   groupByFolder: 'groupByFolder',
-  showGhosts: 'showGhosts',
   showArchived: 'showArchived',
   /** Hide every session that is over — closed, exited, or an inferred
    *  ancestor — leaving only what is still running. A FILTER, not a delete:

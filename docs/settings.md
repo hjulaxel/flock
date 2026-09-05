@@ -45,7 +45,7 @@ else, so change the words there and rerun the script rather than editing here.
 
 <!-- generated:settings:start -->
 
-Flock contributes **51 settings**. **17** of them are switches that ship off, and **21** are tagged *advanced* — paths, timings, diagnostics and previews, the rows `@tag:advanced` finds in the Settings editor. Advanced rows are marked below and sit last in their category.
+Flock contributes **50 settings**. **17** of them are switches that ship off, and **21** are tagged *advanced* — paths, timings, diagnostics and previews, the rows `@tag:advanced` finds in the Settings editor. Advanced rows are marked below and sit last in their category.
 
 ### Sessions
 
@@ -117,7 +117,6 @@ Flock contributes **51 settings**. **17** of them are switches that ship off, an
 | `lineage.groupByFolder` | `true` | Group sessions that no project claims by their working directory. |
 | `lineage.onlyProjectSessions` | `false` | Show only sessions that belong to one of your projects. The roster is machine-wide, so this is the fastest way to stop seeing every directory anyone ever ran claude in. Ignored while you have no projects. |
 | `lineage.onlyActiveSessions` | `false` | Show only sessions that are still running. Closed, exited and inferred-ancestor rows are filtered out of the tree — nothing is archived or removed, and a live session forked from a closed one keeps its place. This is the "Show Only Active Sessions" toggle in the view title. |
-| `lineage.showGhosts` | `true` | Show exited ancestor sessions that live sessions were forked from. |
 | `lineage.showArchived` | `false` | Advanced — Show ALL closed sessions found in ~/.claude/projects, even ones this tree never knew. Off by default: your own sessions already stay in the tree after their tab closes (as dimmed, resumable inactive rows, until you archive them) — this switch only adds foreign history on top. This is NOT the archive: sessions you archived are behind "Archived Sessions..." on the project's row. |
 | `lineage.showPhantomRows` | `false` | Advanced — Show roster rows that are not sessions: entries whose process has exited but that `claude agents --json` never reaped, and `claude bg-spare` daemon warm-spares (pre-forked processes waiting to be claimed, which report an inherited name and a frozen status). Off by default — these cannot be focused, forked or resumed, and a stuck spare will pin the attention badge on the view indefinitely. Turn on to debug the roster. |
 | `lineage.viewStyle` | `"inline"` | Advanced — How the Sessions view is drawn. `inline` renames on the row like the Explorer; `native` uses the built-in tree widget. Takes effect on the next window reload. Values: `inline` — Inline (rename on the row); `native` — Native tree. |

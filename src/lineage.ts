@@ -552,6 +552,9 @@ export interface BuildForestInput {
     status: SessionStatus,
   ) => CompactionPhase | undefined;
   opts?: {
+    /** Whether exited ancestors get rows. Not a setting any more — the wiring
+     *  always passes true, since ghosts are what keep the ancestry honest —
+     *  but kept as a parameter so the ghost rules can be tested in isolation. */
     showGhosts?: boolean; // default true
     now?: number;         // default Date.now()
     /** `lineage.notifications.enabled` — the global default a per-record
