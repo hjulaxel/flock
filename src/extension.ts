@@ -117,6 +117,8 @@ import {
   projectDirs,
   projectReach,
   providerOfProject,
+  resolveUnclaimed,
+  unclaimedFlags,
   validateProjectName,
 } from './projects';
 import {
@@ -414,6 +416,19 @@ export async function activate(
     const v = cfg().get<number>(key);
     return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : dflt;
   };
+  /** `lineage.unclaimedSessions`, with the two booleans it replaced still read
+   *  where they are all somebody has set (projects.resolveUnclaimed), and split
+   *  back into the two flags the grouping code has always taken. Re-read per
+   *  call like every setting here; the configuration listener's rebuild is
+   *  what makes a flip show. */
+  const unclaimed = (): ReturnType<typeof unclaimedFlags> =>
+    unclaimedFlags(
+      resolveUnclaimed(
+        cfg().get<string>(CONFIG_KEYS.unclaimedSessions),
+        cfg().get<unknown>(LEGACY_KEYS.groupByFolder),
+        cfg().get<unknown>(LEGACY_KEYS.onlyProjectSessions),
+      ),
+    );
   /** The detach grace window (minutes). Not numCfg: 0 is a real value here —
    *  "no grace, the sweep kills on its next tick" — not an unset. Shared by
    *  the workspace switch's detach tier and the window-close stamp below. */
@@ -2759,11 +2774,12 @@ export async function activate(
     // edge, and a drag onto a folder row erased one. Retired — lineage is not
     // something a gesture may state, see WebtreeDeps and webtree.onDrop. The
     // store still READS the 'reparent' edges it wrote; nothing writes new ones.
-    groupByFolder: () => boolCfg(CONFIG_KEYS.groupByFolder, true),
+    // Both halves of `lineage.unclaimedSessions`: the renderers never learn
+    // the enum, so neither did their signatures.
+    groupByFolder: () => unclaimed().groupByFolder,
     projects: allProjects,
     hiddenFolders: () => store.getHiddenFolders().map((f) => f.path),
-    onlyProjectSessions: () =>
-      boolCfg(CONFIG_KEYS.onlyProjectSessions, false),
+    onlyProjectSessions: () => unclaimed().onlyProjectSessions,
     // Folder mode's fence, undefined whenever nothing is fenced. The same
     // answer the command layer's scopeDirs dep gives, so the rows a window
     // draws and the sessions its verbs will act on in place are one set.
@@ -7525,7 +7541,7 @@ export async function activate(
       // is a picture of the setting — it has to follow either way in.
       void syncOnlyActiveContext();
       // onlyActiveSessions and notifications.enabled are read per buildForest,
-      // groupByFolder per getChildren — a rebuild covers them all.
+      // unclaimedSessions per getChildren — a rebuild covers them all.
       if (haveRoster) void scheduleRebuild(lastEntries);
       else refreshViews();
     }),

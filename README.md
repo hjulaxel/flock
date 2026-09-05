@@ -134,7 +134,7 @@ chats, and much more.
 - **A recommended setup, that says why.** A good many of Flock's settings ship
   off, and they are not off for the same reason: two of them — instant updates
   and the in-session verbs — are off only because turning them on writes files
-  in your home directory, four of them *are* the clean slate below, and the rest
+  in your home directory, some of them *are* the clean slate below, and the rest
   are taste. **Flock: Recommended Setup** is the checklist that tells them apart:
   a line per thing worth turning on, with what it does and what it writes, every
   worthwhile one pre-ticked, and nothing written until you confirm. It offers the

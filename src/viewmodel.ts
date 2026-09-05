@@ -2873,8 +2873,8 @@ export function subtreeHasUnseen(
  *  tracking is on, waiting sessions where it is off — one definition, shared
  *  with statusTone, so the number on the view container always equals the dots
  *  in the tree. Counted over the rendered rows rather than the raw forest, so a
- *  session removed by a hidden folder / hidden project / onlyProjectSessions
- *  never leaves a permanent count with no row anywhere to open or dismiss.
+ *  session removed by a hidden folder / hidden project / `unclaimedSessions:
+ *  hidden` never leaves a permanent count with no row anywhere to open or dismiss.
  *  Collapsed rows still count — they are one click from view, and their ancestor
  *  is on screen. */
 export function attentionCountOf(

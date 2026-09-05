@@ -2092,28 +2092,37 @@
             "order": 1,
             "markdownDescription": "Show live sessions Flock does not own — `claude` running in some other terminal, another editor, a script. Off (the default), the tree holds only what you told Flock about: sessions launched here, bound to one of its terminals, or added with **Add Existing Session…** / **Import Previous Sessions…** — and a session with no row can never light the bell or write itself into your tree. Turn it on to watch everything on the machine, the way Flock used to; finished turns then stamp those sessions into the tree as they always did."
           },
-          "lineage.groupByFolder": {
-            "type": "boolean",
-            "default": true,
+          "lineage.unclaimedSessions": {
+            "type": "string",
+            "enum": [
+              "grouped",
+              "flat",
+              "hidden"
+            ],
+            "enumItemLabels": [
+              "Grouped by folder",
+              "Flat",
+              "Hidden"
+            ],
+            "enumDescriptions": [
+              "Sessions no project claims are filed under a row for their working directory.",
+              "Sessions no project claims are listed one by one, beside the project rows.",
+              "Only sessions that belong to one of your projects are shown. Ignored while you have no projects, so the tree is never empty for want of one."
+            ],
+            "default": "grouped",
             "order": 2,
-            "description": "Group sessions that no project claims by their working directory."
-          },
-          "lineage.onlyProjectSessions": {
-            "type": "boolean",
-            "default": false,
-            "order": 3,
-            "description": "Show only sessions that belong to one of your projects. The roster is machine-wide, so this is the fastest way to stop seeing every directory anyone ever ran claude in. Ignored while you have no projects."
+            "markdownDescription": "What to do with sessions **no project claims**. `grouped` (the default) files them under a row for their working directory; `flat` lists them one by one beside the project rows; `hidden` shows only sessions that belong to one of your projects — the roster is machine-wide, so this is the fastest way to stop seeing every directory anyone ever ran claude in. `hidden` is ignored while you have no projects, or the tree would be empty, and it never hides a running session: that files into the collapsed **Still running** group instead, because a view preference must not hide a process this window owns. Replaces `lineage.groupByFolder` and `lineage.onlyProjectSessions`, which are still honoured when they are all you have set."
           },
           "lineage.onlyActiveSessions": {
             "type": "boolean",
             "default": false,
-            "order": 4,
+            "order": 3,
             "description": "Show only sessions that are still running. Closed, exited and inferred-ancestor rows are filtered out of the tree — nothing is archived or removed, and a live session forked from a closed one keeps its place. This is the \"Show Only Active Sessions\" toggle in the view title."
           },
           "lineage.showArchived": {
             "type": "boolean",
             "default": false,
-            "order": 5,
+            "order": 4,
             "description": "Show ALL closed sessions found in ~/.claude/projects, even ones this tree never knew. Off by default: your own sessions already stay in the tree after their tab closes (as dimmed, resumable inactive rows, until you archive them) — this switch only adds foreign history on top. This is NOT the archive: sessions you archived are behind \"Archived Sessions...\" on the project's row.",
             "tags": [
               "advanced"
@@ -2122,7 +2131,7 @@
           "lineage.showPhantomRows": {
             "type": "boolean",
             "default": false,
-            "order": 6,
+            "order": 5,
             "description": "Show roster rows that are not sessions: entries whose process has exited but that `claude agents --json` never reaped, and `claude bg-spare` daemon warm-spares (pre-forked processes waiting to be claimed, which report an inherited name and a frozen status). Off by default — these cannot be focused, forked or resumed, and a stuck spare will pin the attention badge on the view indefinitely. Turn on to debug the roster.",
             "tags": [
               "advanced"
@@ -2143,7 +2152,7 @@
               "Use the built-in VS Code tree. Rename opens a box at the top of the window, because the tree API has no editable row."
             ],
             "default": "inline",
-            "order": 7,
+            "order": 6,
             "markdownDescription": "How the Sessions view is drawn. `inline` renames on the row like the Explorer; `native` uses the built-in tree widget. Takes effect on the next window reload.",
             "tags": [
               "advanced"

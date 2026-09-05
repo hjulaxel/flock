@@ -14,6 +14,7 @@ import {
   chatsForProject,
   closedProjectIds,
   computeGrouping,
+  DEFAULT_UNCLAIMED_SESSIONS,
   defaultBranchVisibility,
   flattenNestedProjects,
   parentDir,
@@ -30,8 +31,10 @@ import {
   projectDirs,
   projectReach,
   providerOfProject,
+  resolveUnclaimed,
   subprojectLabels,
   SUBPROJECT_MIN,
+  unclaimedFlags,
   validateProjectName,
 } from '../src/projects';
 import type { GroupingInput } from '../src/projects';
@@ -2174,3 +2177,78 @@ describe('computeGrouping: the branch block is opt-in', () => {
     }
   });
 });
+
+// ------------------------------------------------------ unclaimed sessions
+
+describe('resolveUnclaimed: the fold of groupByFolder and onlyProjectSessions', () => {
+  it('reads an explicit new value over anything the old keys say', () => {
+    // Somebody who set `unclaimedSessions` has answered in the current
+    // spelling; a boolean left beside it from before must not override that.
+    expect(resolveUnclaimed('flat', true, true)).toBe('flat');
+    expect(resolveUnclaimed('grouped', false, true)).toBe('grouped');
+    expect(resolveUnclaimed('hidden', false, false)).toBe('hidden');
+  });
+
+  it('honours a legacy onlyProjectSessions: true as hidden', () => {
+    expect(resolveUnclaimed(undefined, undefined, true)).toBe('hidden');
+    expect(resolveUnclaimed(undefined, true, true)).toBe('hidden');
+    // Hiding the unclaimed made grouping them moot, so it outranks the other
+    // key exactly as its effect used to.
+    expect(resolveUnclaimed(undefined, false, true)).toBe('hidden');
+  });
+
+  it('honours a legacy groupByFolder: false as flat', () => {
+    expect(resolveUnclaimed(undefined, false, undefined)).toBe('flat');
+    expect(resolveUnclaimed(undefined, false, false)).toBe('flat');
+  });
+
+  it('defaults to grouped when nothing was ever set, and on garbage', () => {
+    // The population that never wrote any of the three keys.
+    expect(resolveUnclaimed(undefined, undefined, undefined)).toBe('grouped');
+    expect(DEFAULT_UNCLAIMED_SESSIONS).toBe('grouped');
+    // The old defaults, written out by hand, say the same as their absence.
+    expect(resolveUnclaimed(undefined, true, false)).toBe('grouped');
+    // A typo in the new key is not a preference; neither is a string 'true'
+    // or a stray null in an old one.
+    expect(resolveUnclaimed('Hidden', undefined, undefined)).toBe('grouped');
+    expect(resolveUnclaimed(42, 'false', 'true')).toBe('grouped');
+    expect(resolveUnclaimed(null, null, null)).toBe('grouped');
+  });
+});
+
+describe('unclaimedFlags: the two booleans computeGrouping still takes', () => {
+  it('maps each answer onto the pair the grouping code already accepts', () => {
+    expect(unclaimedFlags('grouped')).toEqual({
+      groupByFolder: true,
+      onlyProjectSessions: false,
+    });
+    expect(unclaimedFlags('flat')).toEqual({
+      groupByFolder: false,
+      onlyProjectSessions: false,
+    });
+    // `hidden` keeps grouping on: the drop is ignored while there are no
+    // projects, and what is left then should file the default way.
+    expect(unclaimedFlags('hidden')).toEqual({
+      groupByFolder: true,
+      onlyProjectSessions: true,
+    });
+  });
+
+  it('round-trips the old defaults through the fold unchanged', () => {
+    // (groupByFolder: true, onlyProjectSessions: false) in, the same out — the
+    // shipped tree is byte-identical for everyone who never touched either key.
+    expect(unclaimedFlags(resolveUnclaimed(undefined, true, false))).toEqual({
+      groupByFolder: true,
+      onlyProjectSessions: false,
+    });
+    expect(unclaimedFlags(resolveUnclaimed(undefined, false, undefined))).toEqual({
+      groupByFolder: false,
+      onlyProjectSessions: false,
+    });
+    expect(unclaimedFlags(resolveUnclaimed(undefined, undefined, true))).toEqual({
+      groupByFolder: true,
+      onlyProjectSessions: true,
+    });
+  });
+});
+

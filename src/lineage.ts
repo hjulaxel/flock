@@ -1025,7 +1025,7 @@ export function buildForest(input: BuildForestInput): SessionForest {
   // ghost is the visible root of its subtree, and grouping keys entirely off
   // the root's cwd. Without this a fork of a just-closed parent falls out of
   // its project row into "(no directory)", or disappears altogether under
-  // `lineage.onlyProjectSessions`. Forks inherit the parent's directory, so
+  // `lineage.unclaimedSessions: hidden`. Forks inherit the parent's directory, so
   // the child's cwd is the right answer rather than a guess.
   //
   // Two children can disagree — one was forked after a cd, or resumed in

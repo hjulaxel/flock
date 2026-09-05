@@ -16,7 +16,7 @@ one of them means "you probably do not want this":
 | Why it ships off | Settings | What the checklist does |
 | --- | --- | --- |
 | **Consent** — turning it on writes files in your home directory | `hooks.enabled`, `verbs.enabled` | Offers them, ticked. This is the group it is for. |
-| **Policy** — it *is* the clean slate | `showForeignSessions`, `showArchived`, `showPhantomRows`, `onlyProjectSessions` | Never touches them. |
+| **Policy** — it *is* the clean slate | `showForeignSessions`, `showArchived`, `showPhantomRows`, `unclaimedSessions` | Never touches them. |
 | **Row budget** — it works, and it costs rows | `git.branches` and the five beside it | Offers `git.branches`, unticked, and only when one of your repositories actually has two checkouts. |
 | **Taste** | `soloSession`, `showTokens`, `notifications.popup`, the previews, `accounts.offerSwitchAtLimit` | Leaves them in the settings UI. |
 

@@ -46,7 +46,7 @@ was softened.
 
 | Setting | Default | Reads | Verdict | Why |
 | --- | --- | --- | --- | --- |
-| `pollIntervalMs` | 3000 | extension | **Remove, hardcode 3000** | Tuning knob nobody should turn; hooks make the poll a fallback anyway. |
+| `pollIntervalMs` | 3000 | extension | **Remove, hardcode 3000** — *done, step D* | Tuning knob nobody should turn; hooks make the poll a fallback anyway. |
 | `claudeBinary` | `""` | extension | Advanced | The escape hatch for a PATH the extension host did not inherit. Named in the empty view. Keep. |
 | `codexBinary` | `""` | extension | Advanced | Same, for Codex. Keep. |
 | `tmux` | `auto` | tmux, extension, recommend, state, agentVerbs | Preferences (Sessions), Status line | The detach tier's off switch. The Status verb shows installed / missing beside it. |
@@ -61,26 +61,26 @@ was softened.
 | `close.summaryMode` | `compact-and-tell-parent` | extension | Preferences (Closing) | **Keep all four values** (*kept on review*). `ask-me` is not a leftover: it is the fallback every refusal in `closeWithCompaction` hands to — no transcript, no compaction, a timeout — so the value a person can choose is the behaviour they would get anyway, named honestly. |
 | `launch.mode` | `flock` | extension, recommend | Onboarding picker + Preferences | Written by the surface picker. Keep. |
 | `sessionSwitching` | `flock` | extension, one `when` | Advanced | Only matters with the Claude Code extension installed. Fold into `launch.mode` later if it never grows a third value. |
-| `groupByFolder` | true | extension, tree, webtree | **Fold** | Together with `onlyProjectSessions` this is one question: what to do with sessions no project claims. One enum `unclaimedSessions: grouped \| flat \| hidden`. |
-| `onlyProjectSessions` | false | extension, tree, webtree | **Fold** (see above) | Same question, third answer. |
+| `groupByFolder` | true | extension, tree, webtree | **Fold** — *done, step D* | Together with `onlyProjectSessions` this is one question: what to do with sessions no project claims. One enum `unclaimedSessions: grouped \| flat \| hidden`. |
+| `onlyProjectSessions` | false | extension, tree, webtree | **Fold** (see above) — *done, step D* | Same question, third answer. `projects.resolveUnclaimed` folds the three reads; the renderers still take the two booleans. |
 | `showForeignSessions` | false | extension | Preferences (Clean slate) | The policy the docs are built around. Keep and explain. |
 | `onlyActiveSessions` | false | extension, webtree | Gear + title bar; stays a setting | **Keep as a setting** (*kept on review*). It is written at Global scope, mirrored into a context key, and the code already honours a flip made in `settings.json`. Moving it to `globalState` would take one key out of Settings Sync and gain nothing. |
-| `showGhosts` | true | extension | **Hardcode true** | Ghost ancestors are what make the tree honest. No test, no verb, one read. |
+| `showGhosts` | true | extension | **Hardcode true** — *done, step D* | Ghost ancestors are what make the tree honest. No test, no verb, one read. |
 | `showArchived` | false | extension | Advanced | The "everything on disk" mode. Import is the front door; this stays as the back one. |
 | `showPhantomRows` | false | extension | Advanced (diagnostic) | Debugging aid. Label it so. |
-| `staleAfterHours` | 48 | extension | **Hardcode 48** | Only pre-ticks checkboxes in a dialog that lets you untick them. |
+| `staleAfterHours` | 48 | extension | **Hardcode 48** — *done, step D* | Only pre-ticks checkboxes in a dialog that lets you untick them. |
 | `busyStaleMinutes` | 5 | extension | Advanced | Workaround for a CLI status bug. Hardcode once the CLI fixes it. |
 | `hooks.enabled` | false | extension | Gear (install / remove) | The reader gate the install flips. Could become `globalState`; low value either way. |
 | `verbs.enabled` | false | extension | Gear (install / remove) | Same shape as hooks. |
 | `notifications.enabled` | true | extension | Preferences (Attention) | Keep. |
 | `notifications.popup` | false | extension | Preferences (Attention) | Keep. |
 | `mode` | `folder` | extension, recommend, daemon, transcript | Gear picker + Preferences | The window model. Keep; the picker is the honest spelling, the editor's dropdown gets `enumItemLabels` so it reads the same. |
-| `workspaces.enabled` | true | extension, recommend | **Remove from the manifest** (step D) | Already carries `markdownDeprecationMessage` pointing at `#lineage.mode#` (since 68fe8d3); the first draft's claim that it did not was wrong, so VS Code already draws it struck through. Stop contributing it in step D; keep the read in `resolveMode` so an old `false` still folds `project` down to `root`. Verify first that `get()` still returns a value for an unregistered key. |
+| `workspaces.enabled` | true | extension, recommend | **Remove from the manifest** — *not in step D; see the decisions log* | Already carries `markdownDeprecationMessage` pointing at `#lineage.mode#` (since 68fe8d3); the first draft's claim that it did not was wrong, so VS Code already draws it struck through. Stop contributing it in step D; keep the read in `resolveMode` so an old `false` still folds `project` down to `root`. Verify first that `get()` still returns a value for an unregistered key. |
 | `workspaces.resumeSessions` | true | extension, workspaces | Advanced | Niche. |
-| `workspaces.autoSwitch` | true | extension | **Fold into `mode`** | `project` with auto-switch off is what `root` already is, minus a status-bar item. Two spellings of one model. |
+| `workspaces.autoSwitch` | true | extension | **Fold into `mode`** — *done, step D* | `project` with auto-switch off is what `root` already is, minus a status-bar item. Two spellings of one model. |
 | `explorer.followProject` | true | extension | Advanced (Auto-switch only) | The conversion is a verb anyway. |
 | `explorer.scope` | `directory` | extension, explorer | Advanced (Auto-switch only) | Needs a reload; belongs with the other reload-bound keys. |
-| `accounts.enabled` | true | extension, accountsView | **Fold into `accounts.section`** | Both must be on to draw one view. The gear toggles the section; nothing toggles this. |
+| `accounts.enabled` | true | extension, accountsView | **Fold into `accounts.section`** — *done, step D* | Both must be on to draw one view. The gear toggles the section; nothing toggles this. |
 | `accounts.section` | true | extension | Gear + Preferences (Accounts) | Keep; it is the one the gear flips. |
 | `shells.section` | true | `when` only | Gear + Preferences | The gear pair Accounts already has, added in step A. Before it, nothing but json flipped it. |
 | `accounts.offerSwitchAtLimit` | false | extension | Preferences (Accounts) | Keep. |
@@ -98,12 +98,18 @@ was softened.
 | `git.branchPrefix` | `""` | extension | Preferences (Worktrees) | Common personalisation; worth a visible row. |
 | `preview.directoryModel` | false | extension | Advanced (preview) | Carries VS Code's `preview` tag. Promote or delete by 0.2. |
 
-Net effect: 51 keys become **44** after step D — remove `pollIntervalMs`,
-`showGhosts`, `staleAfterHours`, `workspaces.enabled`, `workspaces.autoSwitch`
-and `accounts.enabled`; fold `groupByFolder` and `onlyProjectSessions` into
-one `unclaimedSessions`. No enum value goes: `terminalLocation: newWindow` and
-`close.summaryMode: ask-me` both stay, for the reasons in their rows. Nothing
-in this plan removes `viewStyle`.
+Net effect: 51 keys became **45** in step D — `pollIntervalMs`, `showGhosts`
+and `staleAfterHours` hardcoded; `workspaces.autoSwitch` folded into `mode`
+and `accounts.enabled` into `accounts.section`; `groupByFolder` and
+`onlyProjectSessions` folded into one `unclaimedSessions`. `workspaces.enabled`
+is still contributed, struck through, so the count is 45 rather than the 44
+the first draft promised — the decisions log says why. No enum value goes:
+`terminalLocation: newWindow` and `close.summaryMode: ask-me` both stay, for
+the reasons in their rows. Nothing in this plan removes `viewStyle`.
+
+Every retired key the source still reads is listed in `LEGACY_KEYS`
+(src/types.ts), kept apart from `CONFIG_KEYS` so the manifest cross-check and
+the table-driven setter can tell "read but never written" from "contributed".
 
 Rule for removals: a removed key that a user still has in `settings.json`
 must keep doing what it did, or do nothing. Never write to a user's settings
@@ -339,3 +345,25 @@ plan.
   and README's counts were made numberless rather than generated: a count a
   script rewrites is still a number the prose asks a reader to trust, and the
   one place the numbers now live is the generated summary line.
+- **Step D landed at 45 keys, not 44.** The three hardcodes and the three
+  folds are in, one commit each, and every retired key keeps working from
+  `settings.json`: `accounts.enabled: false` still keeps the Accounts list
+  from being registered (and the gear's section verbs clear it),
+  `workspaces.autoSwitch: false` still resolves a `project` window to `root`
+  (and the window-model picker deletes it when Auto-switch is chosen), and the
+  two grouping booleans still read as `flat` / `hidden` while the new key is
+  unset. `workspaces.enabled` was NOT removed from the manifest in this step:
+  the step's brief left it out, its deprecation marker is the one row in the
+  editor that points a reader at `lineage.mode`, and the picker still writes
+  it back to `true` — removing it would have made that write throw. Whether
+  it goes in a later step, or stays as the struck-through pointer, is open.
+- **A when-clause cannot honour a retired boolean.** The Accounts view's
+  `when` is `config.lineage.accounts.section` alone, because the when-clause
+  language cannot tell an unset key from `false` — `config.x != false`
+  compiles to "x is truthy", which would hide the view for everyone who never
+  wrote the old key. So a user carrying `accounts.enabled: false` keeps the
+  list unregistered but still sees the section's collapsed header until they
+  hide it from the gear; the log says so on activation. Folding a key that a
+  when-clause read is the one case where "keeps working" is only partly
+  reachable, and it is recorded here so the next fold checks for it first.
+

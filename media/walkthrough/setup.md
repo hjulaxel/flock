@@ -6,7 +6,7 @@ all off for the same reason, and that is the thing worth knowing:
 - **Two are off because turning them on writes files in your home directory.**
   Instant updates and the in-session verbs are both genuinely worth having, and
   neither could switch itself on without asking you first.
-- **Four are off because they *are* the clean slate** — the quiet first launch
+- **Some are off because they *are* the clean slate** — the quiet first launch
   the previous step described. Nothing recommends changing those.
 - **The branch rows are off because they cost rows** in a sidebar 250px wide.
   Whether that is a good trade depends on your repositories, so you get asked

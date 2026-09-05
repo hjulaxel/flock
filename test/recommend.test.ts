@@ -251,7 +251,7 @@ describe('recommendedPlan: what it may never touch', () => {
       'showForeignSessions',
       'showArchived',
       'showPhantomRows',
-      'onlyProjectSessions',
+      'unclaimedSessions',
       'preview.directoryModel',
       'git.pullRequests',
       'soloSession',

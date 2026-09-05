@@ -74,6 +74,15 @@ All notable changes to Flock are recorded here. The format follows
   window to Root exactly as `workspaces.enabled: false` always has, on read,
   with nothing rewritten. **Flock: Choose Window Model…** removes the old key
   when you choose Auto-switch, so it cannot fold your choice straight back.
+- **`lineage.groupByFolder` and `lineage.onlyProjectSessions`**, folded into
+  one dropdown: **`lineage.unclaimedSessions`** — *Grouped by folder* (the
+  default), *Flat*, or *Hidden*. The two switches were one question asked
+  twice — what to do with sessions no project claims — and the dropdown asks it
+  once, in the **What the tree shows** category. The old keys are still read
+  when the new one is unset: `onlyProjectSessions: true` is *Hidden*,
+  `groupByFolder: false` is *Flat*, and *Hidden* is still ignored while you
+  have no projects. Nothing is rewritten, and the tree is byte-identical for
+  everyone who never touched either key.
 
 ### Changed
 

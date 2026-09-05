@@ -1,8 +1,9 @@
 // src/recommend.ts — what a fresh install should turn on, and why.
 //
-// THE PROBLEM THIS FILE EXISTS TO FIX. Flock contributes forty settings and
-// seventeen of them are booleans that ship OFF. They are off for four different
-// reasons, and exactly one of those reasons is "you probably do not want this":
+// THE PROBLEM THIS FILE EXISTS TO FIX. Flock contributes dozens of settings
+// and a good many of them are booleans that ship OFF. They are off for four
+// different reasons, and exactly one of those reasons is "you probably do not
+// want this":
 //
 //   CONSENT     `hooks.enabled` and `verbs.enabled` are off because turning
 //               them on writes files under the user's home directory. Both are
@@ -11,7 +12,7 @@
 //               reachable only by somebody who already knew they existed. This
 //               is the group a recommended setup is FOR.
 //   POLICY      `showForeignSessions`, `showArchived`, `showPhantomRows` and
-//               `onlyProjectSessions` ARE the clean slate. Flipping any of them
+//               `unclaimedSessions` ARE the clean slate. Flipping any of them
 //               for somebody undoes the thing that made their first launch
 //               quiet, so nothing here may touch them, ever.
 //   ROW BUDGET  the branch block works and costs rows in a 250px sidebar. That

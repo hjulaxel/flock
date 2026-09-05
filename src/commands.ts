@@ -5891,7 +5891,7 @@ function noteRestoredWhileFiltered(
  * the note names it rather than enumerating the tree's five ways of hiding a
  * row. Every session in this list matched this project by directory, so it has
  * a claimant by construction — and the grouping applies folder-hiding and
- * `onlyProjectSessions` only to sessions NO project claims. The active-only
+ * `unclaimedSessions: hidden` only to sessions NO project claims. The active-only
  * filter is the one other reason a restored row can be missing, and it already
  * has its own sentence; the ids stranded here are withheld from it so that one
  * restore never produces two explanations of itself.

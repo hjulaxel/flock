@@ -1509,7 +1509,13 @@ export const CONFIG_KEYS = {
    *  detach tier — a wrapped pane is the only one something can be put back
    *  into — so it is silently inert when `tmux` is off or tmux is absent. */
   exitToShell: 'exitToShell',
-  groupByFolder: 'groupByFolder',
+  /** What the tree does with sessions NO project claims: `grouped` under a
+   *  folder row (the default), `flat` beside the projects, or `hidden`. One
+   *  question that used to be two booleans (`groupByFolder`,
+   *  `onlyProjectSessions`, both in LEGACY_KEYS); projects.resolveUnclaimed
+   *  folds the three reads into this value and projects.unclaimedFlags splits
+   *  it back into the two flags computeGrouping has always taken. */
+  unclaimedSessions: 'unclaimedSessions',
   showArchived: 'showArchived',
   /** Hide every session that is over — closed, exited, or an inferred
    *  ancestor — leaving only what is still running. A FILTER, not a delete:
@@ -1623,7 +1629,6 @@ export const CONFIG_KEYS = {
   /** WHERE you switch conversations: Flock's tree, or the Claude Code
    *  extension's own agent list. See SessionSwitching. */
   sessionSwitching: 'sessionSwitching',
-  onlyProjectSessions: 'onlyProjectSessions',
   /** Show live sessions Flock does not own — `claude` running in some other
    *  terminal, another editor, a script. OFF by default: the roster is
    *  machine-wide, and a tree that fills itself with every session anyone ever
@@ -1843,6 +1848,13 @@ export const LEGACY_KEYS = {
    *  resolves to `root` (modes.resolveMode) and the window-model picker deletes
    *  the key when somebody chooses auto-switch. */
   workspacesAutoSwitch: 'workspaces.autoSwitch',
+  /** `lineage.groupByFolder`, folded into `unclaimedSessions`: an explicit
+   *  `false` still reads as `flat` when the new key is unset. */
+  groupByFolder: 'groupByFolder',
+  /** `lineage.onlyProjectSessions`, folded into `unclaimedSessions`: an
+   *  explicit `true` still reads as `hidden` when the new key is unset, and
+   *  outranks a legacy `groupByFolder: false` beside it. */
+  onlyProjectSessions: 'onlyProjectSessions',
 } as const;
 
 /**
@@ -3487,6 +3499,9 @@ export interface TreeDeps {
    *  neither view resolves the other drops. `ParentSource` keeps its 'reparent'
    *  member: state files written before this still carry those edges, and they
    *  go on resolving exactly as they did. */
+  /** `lineage.unclaimedSessions` is not `flat` — the first of the two flags
+   *  computeGrouping takes (projects.unclaimedFlags); the renderers never see
+   *  the enum. */
   groupByFolder(): boolean;
   // ---- projects, visibility and selection -----------------------------
   /** EVERY project, hidden ones included, name-sorted. `computeGrouping` does
@@ -3496,7 +3511,7 @@ export interface TreeDeps {
   projects(): ProjectRecord[];
   /** Normalized paths the user removed from view. */
   hiddenFolders(): string[];
-  /** Only show sessions that belong to a project (config). */
+  /** `lineage.unclaimedSessions` is `hidden` — the second flag, same source. */
   onlyProjectSessions(): boolean;
   /** FOLDER MODE's scope: every REAL folder this window opened (the Flock
    *  anchor excluded), or undefined/empty when nothing is scoped (project
