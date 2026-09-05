@@ -1405,6 +1405,23 @@ export const COMMANDS = {
    *  person who needs to find this, and hiding it in some models would be the
    *  same mistake the dropdown made. */
   chooseWindowModel: 'lineage.chooseWindowModel',
+  /** The built-in Settings editor, filtered to Flock. There is no settings
+   *  page of Flock's own: the manifest's categories, order, tags and enum
+   *  labels ARE the page, and this verb is the door to it. A verb rather than
+   *  "open Settings and type flock", because the gear is where a person looks
+   *  for settings and the palette is where they look for a verb. */
+  openSettings: 'lineage.openSettings',
+  /** The same editor, narrowed to the rows the manifest tags `advanced`:
+   *  paths, timings, diagnostics, previews, and anything that needs a reload.
+   *  The tag is what makes this a filter rather than a second page. */
+  openAdvancedSettings: 'lineage.openAdvancedSettings',
+  /** What this machine has and what this window is on, as read-only rows
+   *  whose pick runs the verb that changes them — tmux installed and on, the
+   *  hooks and verbs installed, which `claude` and `codex` were found, which
+   *  window model this is, where sessions open. The facts are decided by
+   *  src/status.ts, pure, from the same world the checklist reads; nothing
+   *  here probes anything the checklist does not. */
+  showStatus: 'lineage.showStatus',
   /** The gear at the end of the view title, and everything that used to be
    *  behind the `...` beside it.
    *
@@ -4493,6 +4510,17 @@ export interface CommandDeps {
    *  has the command registered and reporting that it is unavailable in this
    *  window, which is true and actionable, rather than throwing. */
   recommendedWorld?(): Promise<RecommendedWorld>;
+  /** The two CLI probes every launch makes — `findClaudeBinary` and
+   *  `findCodexBinary` with their settings applied — plus whether the codex
+   *  key is set at all, for the Status verb's two binary rows. One member for
+   *  three answers because they are read together, once, when the picker is
+   *  built. Optional: a wiring without it draws no CLI rows, which is honest,
+   *  rather than "not found" about a machine nothing looked at. */
+  cliBinaries?(): {
+    claude: string | null;
+    codex: string | null;
+    codexConfigured: boolean;
+  };
   /** Write the settings a recommended step names, returning the keys it could
    *  NOT write (a read-only profile, a sync conflict) so the flow can say which
    *  ones are still where they were.

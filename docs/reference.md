@@ -1274,14 +1274,24 @@ from the palette. Forking the wrong thread leaves you a branch of a conversation
 you were not in, sitting next to the one you meant, so it guesses only where the
 evidence is singular. It disappears while the tree is empty.
 
-The **gear** opens a menu holding everything that used to be behind the `...`:
-the active-sessions filter, **Show Closed Projects and Hidden Folders…**, **Mark
-All Notifications as Read**, **Restore Archived Session…**, **Archive Stale
-Sessions…**, **New Project…**, the closed-projects list, the Accounts and Shells
-section switches, the hooks pair, and **Refresh**. Each toggle is labelled with
-the direction it goes — you get *Hide Accounts Section* when the section is
-showing, never both — which is why it is built when it opens rather than declared
-in the manifest.
+The **gear** opens a menu that starts with setup and holds everything that used
+to be behind the `...`. First **Flock Settings…**, which opens VS Code's own
+Settings editor filtered to Flock — there is no settings page of Flock's own; the
+editor draws the settings in ten categories, in the order they are worth
+reading, with the advanced rows last in each. Then **Status…**: what this machine
+has and what this window is on — is tmux installed and on, are the hooks and the
+in-session verbs installed, which `claude` and `codex` were found and where, which
+window model this is, where sessions open — as read-only rows, each of which runs
+the verb that changes it when picked (the install, the picker, the setting).
+Then **Recommended Setup…**, **Choose Window Model…**, and **Open Advanced
+Settings**, which is the same editor narrowed to the rows tagged *advanced*:
+paths, timings, diagnostics, previews. Below that group: the active-sessions
+filter, **Show Closed Projects and Hidden Folders…**, **Mark All Notifications
+as Read**, **Restore Archived Session…**, **Archive Stale Sessions…**, **New
+Project…**, the closed-projects list, the Accounts and Shells section switches,
+the hooks pair, and **Refresh**. Each toggle is labelled with the direction it
+goes — you get *Hide Accounts Section* when the section is showing, never both —
+which is why it is built when it opens rather than declared in the manifest.
 
 > Where the buttons sit, and why it is a choice. VS Code has no menu id for a view
 > container's title bar — there is `view/title` and no `viewsContainer/title` — so

@@ -8,6 +8,34 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Added
 
+- **The Settings editor is Flock's settings page.** There is no page of Flock's
+  own and none is coming: VS Code's built-in editor now draws Flock's settings
+  in ten titled categories — Sessions, Attention, Forking and closing,
+  Worktrees and branches, Accounts and sections, Window, What the tree shows,
+  Housekeeping, CLI, Hooks and verbs — each row in a chosen order with the
+  advanced ones last, so a category reads top to bottom the way the design
+  lists it. The rows that are paths, timings, diagnostics, previews or need a
+  reload carry VS Code's `advanced` tag; `lineage.git.pullRequests` carries
+  `usesOnlineServices`, the editor's own mark for a setting that reaches the
+  network, and `lineage.preview.directoryModel` carries `preview`, so the editor
+  draws its own badge. Every dropdown now reads in words — *Use tmux when
+  installed*, *Compact and tell the parent*, *Colour by branch* — the same words
+  the gear's pickers use. No key is renamed, retyped or given a new default.
+- **Flock Settings…, Status…, and Open Advanced Settings in the gear.** The
+  gear's Setup group now opens with **Flock Settings…**, the editor filtered to
+  Flock, and **Status…**: read-only rows saying whether tmux is installed and
+  on (and where), whether the instant-update hooks and the in-session verbs
+  are installed, which `claude` — and, for a Codex account, which `codex` —
+  was found and where, which window model this window is on, and where
+  sessions open. Picking a row runs the verb that changes it: the install or
+  its removal, the window-model picker, the same *where should sessions open*
+  picker the checklist asks with, or the Settings editor at the one key. The
+  facts come from the world the checklist already reads and the probes every
+  launch already makes; nothing new is looked at, and nothing is written until
+  a row is picked. **Open Advanced Settings** closes the group: the editor
+  narrowed to the rows tagged *advanced*. All three are in the Command Palette
+  under **Flock**.
+
 - **The gear menu can fold the Shells section away, and bring it back.** The
   Accounts section has had its *Show / Hide Accounts Section* pair since the
   gear existed; Shells, which costs the same row of the sidebar, could only be

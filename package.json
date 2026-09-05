@@ -458,6 +458,23 @@
         "icon": "$(window)"
       },
       {
+        "command": "lineage.openSettings",
+        "title": "Open Settings",
+        "category": "Flock",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "lineage.openAdvancedSettings",
+        "title": "Open Advanced Settings",
+        "category": "Flock"
+      },
+      {
+        "command": "lineage.showStatus",
+        "title": "Status...",
+        "category": "Flock",
+        "icon": "$(pulse)"
+      },
+      {
         "command": "lineage.settingsMenu",
         "title": "Settings and Housekeeping...",
         "category": "Flock",

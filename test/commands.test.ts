@@ -8372,6 +8372,153 @@ describe('the gear menu offers each section switch one way round', () => {
     expect(ran).toEqual([]);
   });
 
+  // The Setup group is the top of the menu, and its order is an argument: the
+  // settings page for the person who knows what they want, the status for the
+  // person checking, the checklist for the person who does not know yet, the
+  // model picker, and the advanced rows last because they are the ones a
+  // first-time reader is meant to be able to skip.
+  it('opens with the Setup group in the order the design reads', async () => {
+    const { offered } = await openGear(known());
+    expect(offered.slice(0, 5)).toEqual([
+      'Flock Settings...',
+      'Status...',
+      'Recommended Setup...',
+      'Choose Window Model...',
+      'Open Advanced Settings',
+    ]);
+  });
+
+  it('runs the settings verbs behind the rows that open them', async () => {
+    const settings = await openGear(known(), 'Flock Settings...');
+    expect(settings.ran).toEqual([COMMANDS.openSettings]);
+    const status = await openGear(known(), 'Status...');
+    expect(status.ran).toEqual([COMMANDS.showStatus]);
+    const advanced = await openGear(known(), 'Open Advanced Settings');
+    expect(advanced.ran).toEqual([COMMANDS.openAdvancedSettings]);
+  });
+});
+
+// The two settings verbs open the BUILT-IN editor at a filter — there is no
+// page of Flock's own — and the Status verb draws facts whose pick runs an
+// existing flow. These check the door, not the room: the query handed to the
+// workbench, and that a picked row reaches the verb the fact names.
+describe('the settings editor verbs and the Status picker', () => {
+  type World = Awaited<ReturnType<NonNullable<CommandDeps['recommendedWorld']>>>;
+
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockCommands as CommandHost).executeCommand;
+    delete (mockWindow as QuickPickHost).showQuickPick;
+    delete (mockWindow as QuickPickHost).showInformationMessage;
+    delete (mockWindow as StatusHost).setStatusBarMessage;
+  });
+
+  /** tmux installed and on, hooks not yet, verbs in, a claude on PATH and no
+   *  codex anywhere — a machine with exactly one thing left to fix. */
+  const world: World = {
+    platform: 'darwin',
+    tmuxBinary: '/opt/homebrew/bin/tmux',
+    tmuxMode: 'auto',
+    hooksInstalled: false,
+    verbsInstalled: true,
+    verbsAvailable: true,
+    hasProjects: true,
+    unlistedCount: 0,
+    branchRowsEnabled: false,
+    maxWorktrees: 1,
+    terminalLocation: 'editor',
+    soloSession: false,
+    launchMode: 'flock',
+    claudeExtensionInstalled: false,
+    mode: undefined,
+    workspacesEnabled: true,
+  };
+
+  function harnessWith(over: Partial<AccountCommandDeps> = {}): {
+    run: (id: string, ...args: unknown[]) => Promise<void>;
+    executed: { id: string; args: unknown[] }[];
+  } {
+    const { deps } = chatDeps(projectOf());
+    const { accounts } = fakeAccountDeps([]);
+    const executed: { id: string; args: unknown[] }[] = [];
+    (mockCommands as CommandHost).executeCommand = async (id, ...args) => {
+      executed.push({ id, args });
+      return undefined;
+    };
+    const harness = withRegisteredCommands({ ...deps, accounts, ...over });
+    return { run: harness.run, executed };
+  }
+
+  it('opens the editor filtered to Flock, and to the advanced rows', async () => {
+    const { run, executed } = harnessWith();
+    await run(COMMANDS.openSettings);
+    await run(COMMANDS.openAdvancedSettings);
+    expect(executed).toEqual([
+      { id: 'workbench.action.openSettings', args: ['@ext:hjulaxel.flock'] },
+      {
+        id: 'workbench.action.openSettings',
+        args: ['@ext:hjulaxel.flock @tag:advanced'],
+      },
+    ]);
+  });
+
+  it('draws the facts as rows and runs the verb behind the one picked', async () => {
+    const offered: { label: string; description?: string }[] = [];
+    (mockWindow as QuickPickHost).showQuickPick = async (items) => {
+      const rows = items as { label: string; description?: string }[];
+      offered.push(...rows);
+      return rows.find((r) => r.label.endsWith('Instant-update hooks'));
+    };
+    const { run, executed } = harnessWith({
+      recommendedWorld: async () => world,
+      cliBinaries: () => ({
+        claude: '/usr/local/bin/claude',
+        codex: null,
+        codexConfigured: false,
+      }),
+    });
+    await run(COMMANDS.showStatus);
+    const titles = offered.map((r) => r.label.replace(/^\$\([^)]+\) /, ''));
+    expect(titles).toEqual([
+      'tmux',
+      'Instant-update hooks',
+      'In-session verbs',
+      'claude CLI',
+      'Window model',
+      'Where sessions open',
+    ]);
+    expect(offered[0]?.description).toBe('installed at /opt/homebrew/bin/tmux, on');
+    expect(offered[1]?.description).toBe('not installed');
+    // Picking the hooks row runs the install — the same contributed command
+    // the gear and the palette run, by id.
+    expect(executed.map((e) => e.id)).toEqual([COMMANDS.installHooks]);
+  });
+
+  it('opens the editor at the key when a binary row is picked', async () => {
+    (mockWindow as QuickPickHost).showQuickPick = async (items) =>
+      (items as { label: string }[]).find((r) => r.label.endsWith('claude CLI'));
+    const { run, executed } = harnessWith({
+      recommendedWorld: async () => world,
+      cliBinaries: () => ({ claude: null, codex: null, codexConfigured: false }),
+    });
+    await run(COMMANDS.showStatus);
+    expect(executed).toEqual([
+      { id: 'workbench.action.openSettings', args: ['lineage.claudeBinary'] },
+    ]);
+  });
+
+  it('says so, and runs nothing, in a window without the world', async () => {
+    const said: string[] = [];
+    (mockWindow as QuickPickHost).showInformationMessage = async (message) => {
+      said.push(message);
+      return undefined;
+    };
+    const { run, executed } = harnessWith();
+    await run(COMMANDS.showStatus);
+    expect(said).toEqual(['Flock: status is not available in this window.']);
+    expect(executed).toEqual([]);
+  });
+
   it('the Shells pair writes the value each half names, through the wiring', async () => {
     const wrote: boolean[] = [];
     const { deps } = chatDeps(projectOf());

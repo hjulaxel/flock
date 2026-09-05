@@ -6710,6 +6710,16 @@ export async function activate(
     // — and so the legacy `workspaces.enabled` pair is folded by the same
     // `resolveMode` every gate here runs, which a raw read of the setting would
     // miss. RAW values in, exactly as `recommendedWorld` hands them over.
+    // The Status verb's two binary rows: the same probes every launch makes,
+    // with the same settings applied, so a row saying "found at" names the
+    // binary a launch would actually run.
+    cliBinaries: () => ({
+      claude: claudeBin(),
+      codex: codexBin(),
+      codexConfigured:
+        (cfg().get<string>(CONFIG_KEYS.codexBinary) ?? '').trim() !== '',
+    }),
+
     windowModel: () =>
       windowModelChoices({
         mode: cfg().get<string>(CONFIG_KEYS.mode),

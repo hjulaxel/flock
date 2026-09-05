@@ -4,6 +4,19 @@ All 51 settings, as contributed. The keys keep the `lineage.` prefix — Flock
 was named Lineage before 0.1.0, and renaming settings keys would silently
 discard everyone's existing configuration.
 
+The place to change them is VS Code's own Settings editor: **Flock: Open
+Settings** (also **Flock Settings…** at the top of the gear menu) opens it
+filtered to Flock, where the settings sit in ten categories — Sessions,
+Attention, Forking and closing, Worktrees and branches, Accounts and sections,
+Window, What the tree shows, Housekeeping, CLI, Hooks and verbs — with the
+advanced rows last in each. **Flock: Open Advanced Settings** narrows it to those
+rows alone (`@tag:advanced`: paths, timings, diagnostics, previews). Every
+dropdown reads in words rather than values, the way the gear's pickers do.
+**Flock: Status…** answers the questions this table is usually opened for — is
+tmux installed and on, are the hooks and verbs in, which CLIs were found, which
+window model this is, where sessions open — and picking a row runs the verb that
+changes it.
+
 **You do not have to read this table to set Flock up.** Seventeen of these ship
 off, and only some of them are off because the default is right —
 `lineage.hooks.enabled` and `lineage.verbs.enabled` are off because turning them

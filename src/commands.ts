@@ -38,6 +38,8 @@ import * as vscode from 'vscode';
 
 import { log, logError } from './log';
 import { recommendedPlan, surfaceChoices, windowModelChoices } from './recommend';
+import { ADVANCED_SETTINGS_QUERY, SETTINGS_QUERY, statusFacts } from './status';
+import type { StatusAction, StatusFact } from './status';
 import type {
   RecommendedSetting,
   RecommendedStep,
@@ -2068,15 +2070,13 @@ async function applyRecommendedStep(
       // did not — so a cancelled picker is "no" and costs nothing, exactly as
       // recommend.ts's contract for a TASTE question requires. Both taste steps
       // land here because they are the same shape of thing: open a picker, and
-      // write whatever the chosen option carries.
-      const choice =
+      // write whatever the chosen option carries. The surface half is
+      // `surfaceFlow`, shared with the Status verb's row.
+      const { choice, unwritable } =
         step.id === 'surface'
-          ? await chooseSurface(world)
-          : await chooseWindowModel(world);
+          ? await surfaceFlow(deps, world)
+          : await writeChoice(deps, await chooseWindowModel(world));
       if (choice === undefined) return false;
-      const unwritable = (await deps.writeSettings?.(choice.settings)) ?? [
-        ...choice.settings.map((s) => s.key),
-      ];
       if (unwritable.length > 0) {
         failed.push(`${step.title} (${unwritable.join(', ')})`);
         return false;
@@ -2176,6 +2176,38 @@ async function chooseSurface(
   world: RecommendedWorld,
 ): Promise<SurfaceChoice | undefined> {
   return chooseFromTaste(surfaceChoices(world), 'Where should sessions open?');
+}
+
+/** A taste picker's answer, written. `choice` is undefined for a cancelled
+ *  picker — "no", and nothing is written; `unwritable` names the keys the
+ *  wiring could not write (a read-only profile, a sync conflict), or every key
+ *  when there is no wiring to write with at all. */
+async function writeChoice<T extends TasteChoice>(
+  deps: CommandDeps,
+  choice: T | undefined,
+): Promise<{ choice: T | undefined; unwritable: readonly string[] }> {
+  if (choice === undefined) return { choice, unwritable: [] };
+  const unwritable = (await deps.writeSettings?.(choice.settings)) ?? [
+    ...choice.settings.map((s) => s.key),
+  ];
+  return { choice, unwritable };
+}
+
+/**
+ * The surface question asked AND acted on: the picker, then the writes the
+ * chosen option carries.
+ *
+ * ONE function for the two places the question is asked — the checklist's
+ * `surface` step and the Status verb's "Where sessions open" row — so the two
+ * cannot drift: same rows, same "(current)" mark, same writes. A copy in the
+ * Status verb would be the second surface picker in a codebase whose whole
+ * argument for `chooseFromTaste` was that there should not be two.
+ */
+async function surfaceFlow(
+  deps: CommandDeps,
+  world: RecommendedWorld,
+): Promise<{ choice: SurfaceChoice | undefined; unwritable: readonly string[] }> {
+  return writeChoice(deps, await chooseSurface(world));
 }
 
 /**
@@ -10736,6 +10768,129 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     );
   });
 
+  // ------------------------------------------------- the settings editor
+  //
+  // No settings page of Flock's own. `contributes.configuration` is an array
+  // of titled categories with ordered rows, tagged and labelled, and the
+  // built-in editor draws it; these two verbs open that editor at the two
+  // filters the design names. See src/status.ts for the query strings.
+
+  register(COMMANDS.openSettings, 'open settings', async () => {
+    await vscode.commands.executeCommand(
+      'workbench.action.openSettings',
+      SETTINGS_QUERY,
+    );
+  });
+
+  register(COMMANDS.openAdvancedSettings, 'open advanced settings', async () => {
+    await vscode.commands.executeCommand(
+      'workbench.action.openSettings',
+      ADVANCED_SETTINGS_QUERY,
+    );
+  });
+
+  // ------------------------------------------------------------- status
+  //
+  // Read-only rows whose pick runs the verb that changes them. The facts are
+  // `statusFacts` (src/status.ts), decided from the same world the checklist
+  // reads plus the two binary probes every launch makes; this side draws the
+  // QuickPick and runs whichever existing flow the picked row names. Nothing
+  // is probed here that the checklist does not probe, and nothing is written
+  // until a row is picked.
+
+  register(COMMANDS.showStatus, 'status', async () => {
+    const world = await deps.recommendedWorld?.();
+    if (!world) {
+      void vscode.window.showInformationMessage(
+        'Flock: status is not available in this window.',
+      );
+      return;
+    }
+    const facts = statusFacts({
+      world,
+      cli: deps.cliBinaries?.(),
+      hasCodexAccount: (deps.accounts?.accounts() ?? []).some(
+        (profile) => profile.provider === 'codex',
+      ),
+    });
+    const items: (vscode.QuickPickItem & { fact: StatusFact })[] = facts.map(
+      (fact) => ({
+        label: `$(${fact.icon}) ${fact.label}`,
+        description: fact.value,
+        detail: fact.next,
+        fact,
+      }),
+    );
+    const chosen = await vscode.window.showQuickPick(items, {
+      title: 'Flock — Status',
+      placeHolder: 'What this machine has and what this window is on — pick a row to change it',
+      matchOnDescription: true,
+      matchOnDetail: true,
+    });
+    if (!chosen) return;
+    await runStatusAction(world, chosen.fact.action);
+  });
+
+  /** The picked row's verb. Every arm is an existing flow reached by its
+   *  existing route — the contributed command, the editor at a key, the
+   *  checklist's own settings write, the shared surface picker. */
+  async function runStatusAction(
+    world: RecommendedWorld,
+    action: StatusAction,
+  ): Promise<void> {
+    switch (action.kind) {
+      case 'command':
+        await vscode.commands.executeCommand(action.command);
+        return;
+      case 'openSetting':
+        await vscode.commands.executeCommand(
+          'workbench.action.openSettings',
+          action.key,
+        );
+        return;
+      case 'tmuxInstall':
+        // A package manager's job, not ours: say how, and no more.
+        void vscode.window.showInformationMessage(
+          'Flock: tmux is not installed. Without it, switching projects closes ' +
+            'the other project’s sessions instead of hiding them.' +
+            (action.hint === undefined
+              ? ' Install it with your package manager.'
+              : ` Install it with \`${action.hint}\`.`),
+        );
+        return;
+      case 'writeSettings': {
+        const unwritable = (await deps.writeSettings?.(action.settings)) ?? [
+          ...action.settings.map((s) => s.key),
+        ];
+        if (unwritable.length > 0) {
+          void vscode.window.showWarningMessage(
+            `Flock: could not write ${unwritable.join(', ')}.`,
+          );
+          return;
+        }
+        deps.refresh();
+        vscode.window.setStatusBarMessage(action.receipt, 5000);
+        return;
+      }
+      case 'chooseSurface': {
+        const { choice, unwritable } = await surfaceFlow(deps, world);
+        if (choice === undefined) return;
+        if (unwritable.length > 0) {
+          void vscode.window.showWarningMessage(
+            `Flock: could not write ${unwritable.join(', ')}. Sessions open where they did.`,
+          );
+          return;
+        }
+        deps.refresh();
+        vscode.window.setStatusBarMessage(
+          `Flock: sessions now open as “${choice.label}”`,
+          5000,
+        );
+        return;
+      }
+    }
+  }
+
   // --------------------------------------------------- the Accounts section
   //
   // The same two-command switch as the filter above, on
@@ -10793,6 +10948,24 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     // here as bare verbs, and a bare verb only helps somebody who already knows
     // what it does. This one says why before it asks.
     group('Setup');
+    // THE SETTINGS PAGE IS THE BUILT-IN EDITOR, filtered to Flock — its
+    // categories, order and tags are the manifest's — and this is its door.
+    // Top of the menu, above the checklist: the person who opens a gear is
+    // usually looking for a setting, and the checklist is for the person who
+    // does not yet know which.
+    items.push({
+      label: '$(settings-gear) Flock Settings...',
+      description: 'Every setting, by category, in the Settings editor',
+      command: COMMANDS.openSettings,
+    });
+    // The facts a settings page is opened to check — tmux, the two installs,
+    // the CLIs, the window model, where sessions open — with the verb that
+    // changes each one a pick away. Read-only until picked.
+    items.push({
+      label: '$(pulse) Status...',
+      description: 'tmux, hooks, verbs, the CLIs, and what this window is on',
+      command: COMMANDS.showStatus,
+    });
     items.push({
       label: '$(checklist) Recommended Setup...',
       description: 'What to turn on, and why — you tick what you want',
@@ -10815,6 +10988,15 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
           ? 'One folder per project, Flock only, or auto-switch'
           : `Currently “${modelNow}” — change it`,
       command: COMMANDS.chooseWindowModel,
+    });
+    // LAST in the group, and plainly named: the rows the manifest tags
+    // `advanced` — paths, timings, diagnostics, previews — are the ones a
+    // first-time reader is meant to be able to skip, so their door sits below
+    // everything a first-time reader is meant to find.
+    items.push({
+      label: '$(settings) Open Advanced Settings',
+      description: 'Paths, timings, diagnostics and previews',
+      command: COMMANDS.openAdvancedSettings,
     });
 
     group('Sessions');

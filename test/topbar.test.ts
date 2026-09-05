@@ -679,6 +679,11 @@ describe('manifest: the view title contributions', () => {
   it('contributes every verb the gear menu delegates to', () => {
     const declared = new Set(pkg.contributes.commands.map((c) => c.command));
     for (const id of [
+      'lineage.openSettings',
+      'lineage.showStatus',
+      'lineage.recommendedSetup',
+      'lineage.chooseWindowModel',
+      'lineage.openAdvancedSettings',
       'lineage.showOnlyActiveSessions',
       'lineage.showAllSessions',
       'lineage.showHidden',
