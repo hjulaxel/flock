@@ -112,6 +112,14 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Changed
 
+- **The missing-tmux notice waits for the moment it matters.** It used to fire
+  a few seconds after activation whenever tmux was not installed. It now fires
+  the first time a project switch is attempted without tmux — by the verb or by
+  the auto-switch — which is the moment the missing detach tier costs
+  something: that switch closes the other project's sessions instead of hiding
+  them. Still once per install, still dismissible for good; the notice for tmux
+  installed-but-switched-off stays where it was. In between, **Status…** shows
+  *tmux: not installed* with the install line for your platform.
 - **One front door on a fresh install.** A genuinely fresh install — no
   projects, no session records — opens the walkthrough, as before; it no longer
   also gets the recommended-setup toast a few seconds later, because the

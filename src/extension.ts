@@ -587,14 +587,62 @@ export async function activate(
   const tmuxSpawn = (): TmuxSpawn | null =>
     resolveTmuxSpawn(cfg().get<string>(CONFIG_KEYS.tmux), tmuxConfPath);
 
-  // One-time nudge about the detach tier. Deferred off the activation path: it
-  // is advice, and nothing about startup should wait on a toast. The decision
-  // itself is `tmuxAdvice` in src/tmux.ts, which is pure and tested; this only
-  // supplies the world and acts on the answer.
+  // One-time nudges about the detach tier. The decision is `tmuxAdvice` in
+  // src/tmux.ts, pure and tested; this only supplies the world and acts on the
+  // answer. TWO moments, one per verdict:
+  //
+  //   * 'enable' — tmux is here and switched off by hand — is said once, a few
+  //     seconds after activation, deferred off the activation path because it
+  //     is advice and nothing about startup should wait on a toast.
+  //   * 'install' — no tmux at all — is said at the first PROJECT SWITCH
+  //     attempted without it (`noteMissingTmux`, run by the verb and by the
+  //     auto-switch alike), which is the moment the missing tier costs
+  //     something: the switch about to happen closes the other project's
+  //     sessions instead of hiding them. Said at activation it was a warning
+  //     about a feature the person might never use; the Status verb carries
+  //     the fact permanently, install line included, for the time in between.
+  //
+  // One dismissal key for both: "Don't remind me" about tmux is one answer,
+  // whichever sentence it was given to.
   const tmuxNoticeShown = (): boolean =>
     context.globalState.get<boolean>(TMUX_NOTICE_KEY) === true;
   const suppressTmuxNotice = (): void => {
     void context.globalState.update(TMUX_NOTICE_KEY, true);
+  };
+  const tmuxVerdict = (): TmuxAdvice =>
+    tmuxAdvice({
+      platform: process.platform,
+      mode: cfg().get<string>(CONFIG_KEYS.tmux),
+      binary: findTmuxBinary(),
+      dismissed: tmuxNoticeShown(),
+    });
+  const NEVER_REMIND = "Don't remind me";
+  const noteMissingTmux = (): void => {
+    try {
+      if (tmuxVerdict() !== 'install') return;
+    } catch (err) {
+      logError('tmux.notice', err);
+      return;
+    }
+    const hint = tmuxInstallHint(process.platform);
+    const HOW = 'How to install';
+    void vscode.window
+      .showWarningMessage(
+        'Flock needs tmux. Without it, switching projects closes the other ' +
+          'project’s sessions instead of hiding them, and anything a session ' +
+          'was in the middle of is lost.' +
+          (hint === undefined ? '' : ` Run: ${hint}`),
+        HOW,
+        NEVER_REMIND,
+      )
+      .then((choice) => {
+        if (choice === HOW) {
+          void vscode.env.openExternal(vscode.Uri.parse(TMUX_INSTALL_URL));
+          suppressTmuxNotice();
+        } else if (choice === NEVER_REMIND) {
+          suppressTmuxNotice();
+        }
+      });
   };
   /** Set by the recommended-setup notice, four seconds earlier, when it speaks.
    *  Not persisted and not a dismissal: it silences the tmux notice for THIS
@@ -606,56 +654,28 @@ export async function activate(
     if (recommendedNoticeOffered) return;
     let advice: TmuxAdvice;
     try {
-      advice = tmuxAdvice({
-        platform: process.platform,
-        mode: cfg().get<string>(CONFIG_KEYS.tmux),
-        binary: findTmuxBinary(),
-        dismissed: tmuxNoticeShown(),
-      });
+      advice = tmuxVerdict();
     } catch (err) {
       logError('tmux.notice', err);
       return;
     }
-    if (advice === 'none') return;
+    // 'install' is not this timer's to say — see noteMissingTmux above.
+    if (advice !== 'enable') return;
 
-    const NEVER = "Don't remind me";
-    if (advice === 'enable') {
-      const TURN_ON = 'Turn it on';
-      void vscode.window
-        .showWarningMessage(
-          'Flock needs tmux to keep sessions running while you work elsewhere. ' +
-            'You have tmux, but it is switched off, so switching projects ' +
-            'closes the other project’s sessions instead of hiding them.',
-          TURN_ON,
-          NEVER,
-        )
-        .then((choice) => {
-          if (choice === TURN_ON) {
-            void cfg().update(CONFIG_KEYS.tmux, 'auto', vscode.ConfigurationTarget.Global);
-            suppressTmuxNotice();
-          } else if (choice === NEVER) {
-            suppressTmuxNotice();
-          }
-        });
-      return;
-    }
-
-    const hint = tmuxInstallHint(process.platform);
-    const HOW = 'How to install';
+    const TURN_ON = 'Turn it on';
     void vscode.window
       .showWarningMessage(
-        'Flock needs tmux. Without it, switching projects closes the other ' +
-          'project’s sessions instead of hiding them, and anything a session ' +
-          'was in the middle of is lost.' +
-          (hint === undefined ? '' : ` Run: ${hint}`),
-        HOW,
-        NEVER,
+        'Flock needs tmux to keep sessions running while you work elsewhere. ' +
+          'You have tmux, but it is switched off, so switching projects ' +
+          'closes the other project’s sessions instead of hiding them.',
+        TURN_ON,
+        NEVER_REMIND,
       )
       .then((choice) => {
-        if (choice === HOW) {
-          void vscode.env.openExternal(vscode.Uri.parse(TMUX_INSTALL_URL));
+        if (choice === TURN_ON) {
+          void cfg().update(CONFIG_KEYS.tmux, 'auto', vscode.ConfigurationTarget.Global);
           suppressTmuxNotice();
-        } else if (choice === NEVER) {
+        } else if (choice === NEVER_REMIND) {
           suppressTmuxNotice();
         }
       });
@@ -5197,6 +5217,10 @@ export async function activate(
         // takes the front of its editor group — so without naming it here the
         // switch ends on whichever session came home last. That is the "clicked
         // progress, landed on update-specs, clicked again and it worked" bug.
+        //
+        // The first switch without tmux is the moment the missing detach tier
+        // costs something — said here, once, and never at activation.
+        noteMissingTmux();
         void workspaceManager.switchTo(match.project.id, {
           auto: true,
           focusSessionId: sessionId,
@@ -6905,8 +6929,12 @@ export async function activate(
         : DEFAULT_BRANCH_DISPLAY,
     }),
 
-    // Project workspaces
-    switchWorkspace: (projectId) => workspaceManager.switchTo(projectId),
+    // Project workspaces. The first switch to a project without tmux is the
+    // moment the missing detach tier costs something — see noteMissingTmux.
+    switchWorkspace: (projectId) => {
+      if (projectId !== null) noteMissingTmux();
+      return workspaceManager.switchTo(projectId);
+    },
     activeWorkspace: () => workspaceManager.activeProjectId(),
 
     // The Explorer follows the project. Both verbs reload the window —

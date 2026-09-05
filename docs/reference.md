@@ -914,8 +914,11 @@ are never wrapped either way.
 Windows always uses the fallback. `findTmuxBinary` returns null there no matter
 what. Set `lineage.tmux` to `off` to force the fallback anywhere else.
 
-Flock says this once, in a notice you can dismiss, if it finds you without tmux
-while workspaces are on. It never asks twice.
+Flock says this once, in a notice you can dismiss, the first time a project
+switch is attempted without tmux — the moment the missing tier would cost you
+something, rather than at startup about a feature you might never use. It never
+asks twice. In between, **Flock: Status…** shows the fact, with the install line
+for your platform, for as long as it is true.
 
 ### `/exit` leaves you at a shell
 
