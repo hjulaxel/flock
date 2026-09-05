@@ -1407,8 +1407,9 @@ export const COMMANDS = {
    *  same mistake the dropdown made. */
   chooseWindowModel: 'lineage.chooseWindowModel',
   /** WHERE SESSIONS OPEN — one pinned tab, editor tabs, the Claude Code
-   *  extension or the terminal panel — as a picker with the current
-   *  arrangement marked. `chooseWindowModel`'s twin: the other taste question
+   *  extension, the terminal panel, or a window of their own — as a picker
+   *  with the current arrangement marked. `chooseWindowModel`'s twin: the
+   *  other taste question
    *  nobody can answer before they have lived with the default, asked as a
    *  verb rather than as three settings rows (`terminalLocation`,
    *  `soloSession`, `launch.mode`) that have to be moved together to mean

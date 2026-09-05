@@ -293,9 +293,14 @@ export function recommendedPlan(world: RecommendedWorld): RecommendedPlan {
 
 // ---------------------------------------------------------- where sessions open
 
-export type SurfaceChoiceId = 'pinnedTab' | 'editorTabs' | 'claudeExtension' | 'panel';
+export type SurfaceChoiceId =
+  | 'pinnedTab'
+  | 'editorTabs'
+  | 'claudeExtension'
+  | 'panel'
+  | 'newWindow';
 
-/** One of the four places a session can open — a row of the picker
+/** One of the five places a session can open — a row of the picker
  *  `Flock: Choose Where Sessions Open…` runs. The settings are written all
  *  together when THIS option is chosen there, and not a moment sooner. */
 export interface SurfaceChoice {
@@ -307,13 +312,13 @@ export interface SurfaceChoice {
   /** Section-relative, `RecommendedSetting`'s own contract. */
   readonly settings: readonly RecommendedSetting[];
   /** Where sessions open TODAY, so the picker can say "(current)" and start
-   *  the cursor there. At most one is current; a `newWindow` world marks none,
-   *  because a fifth place is not one of these four. */
+   *  the cursor there. Exactly one is current: once the launch mode has been
+   *  resolved, every legal `terminalLocation` is one of these five. */
   readonly current: boolean;
 }
 
 /**
- * The four places, with the current one marked.
+ * The five places, with the current one marked.
  *
  * CURRENT IS DERIVED, launch mode first: `resolveLaunchMode` — the exact
  * function every launch runs — decides whether `launch.mode` actually lands in
@@ -325,7 +330,7 @@ export interface SurfaceChoice {
  * absence said in its description instead of the row hidden: the setting is
  * legal to want first and install second, and the launcher already falls back
  * to Flock's own terminal (with a note) until the extension arrives. What the
- * three Flock-side options write includes `launch.mode: flock` for the same
+ * four Flock-side options write includes `launch.mode: flock` for the same
  * honesty in reverse — picked from extension mode, they must actually move you.
  * The extension option writes `launch.mode` ALONE, leaving the Flock-side
  * arrangement where it was for whenever the person comes back.
@@ -350,11 +355,11 @@ export function surfaceChoices(
       ? 'claudeExtension'
       : world.terminalLocation === 'panel'
         ? 'panel'
-        : world.terminalLocation === 'editor'
-          ? world.soloSession
+        : world.terminalLocation === 'newWindow'
+          ? 'newWindow'
+          : world.soloSession
             ? 'pinnedTab'
-            : 'editorTabs'
-          : undefined;
+            : 'editorTabs';
 
   return [
     {
@@ -404,6 +409,21 @@ export function surfaceChoices(
         { key: CONFIG_KEYS.launchMode, value: 'flock' },
       ],
       current: current === 'panel',
+    },
+    // The fifth place. `terminalLocation: newWindow` was a legal value the
+    // picker could not mark current, so a person living there was shown four
+    // rows none of which was theirs; the value is kept and named instead
+    // (design/settings-tiers.md, decisions log).
+    {
+      id: 'newWindow',
+      label: 'Its own window',
+      description: 'Each session opens as a tab in a separate window.',
+      settings: [
+        { key: CONFIG_KEYS.terminalLocation, value: 'newWindow' },
+        { key: CONFIG_KEYS.soloSession, value: false },
+        { key: CONFIG_KEYS.launchMode, value: 'flock' },
+      ],
+      current: current === 'newWindow',
     },
   ];
 }

@@ -6435,6 +6435,7 @@ describe('the add / import flows', () => {
           'Editor tabs',
           'Claude Code extension',
           'Bottom terminal panel',
+          'Its own window',
         ]);
         expect(calls.settings).toEqual([
           { key: 'terminalLocation', value: 'panel' },

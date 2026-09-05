@@ -8,9 +8,12 @@ All notable changes to Flock are recorded here. The format follows
 
 ### Added
 
-- **Choose Where Sessions Open… is a verb.** The surface picker — one pinned
-  session tab, editor tabs, the Claude Code extension, or the bottom terminal
-  panel, with where sessions open today marked — used to be reachable only as
+- **Choose Where Sessions Open… is a verb, and it has a fifth answer.** The
+  surface picker — one pinned session tab, editor tabs, the Claude Code
+  extension, the bottom terminal panel, or **Its own window** (each session as
+  a tab in a separate window, which is `lineage.terminalLocation: newWindow`,
+  a value the picker used to be unable to mark current) — with where sessions
+  open today marked, used to be reachable only as
   a row of the Recommended Setup checklist. It is now **Flock: Choose Where
   Sessions Open…** in the Command Palette and in the gear's Setup group, right
   after **Choose Window Model…**, and the gear entry says which arrangement you

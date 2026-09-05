@@ -220,10 +220,10 @@ export function statusFacts(input: StatusInput): StatusFact[] {
   // ---- the two taste questions ----------------------------------------------
   //
   // Both read through the same functions their pickers use, so the value here
-  // and the "(current)" mark one click later cannot disagree. Exactly one
-  // window model is always current; the surface has a fifth place the picker
-  // does not offer yet (`terminalLocation: newWindow`), which is named rather
-  // than left blank.
+  // and the "(current)" mark one click later cannot disagree. Exactly one of
+  // each is always current — every legal `terminalLocation` is one of the
+  // picker's five places — so the fallbacks below are for a world no wiring
+  // produces.
   const model = windowModelChoices(world).find((c) => c.current);
   facts.push({
     id: 'windowModel',
@@ -239,11 +239,7 @@ export function statusFacts(input: StatusInput): StatusFact[] {
     id: 'surface',
     icon: 'layout',
     label: 'Where sessions open',
-    value:
-      surface?.label ??
-      (world.terminalLocation === 'newWindow'
-        ? 'Own window per session'
-        : 'not one of the picker’s four'),
+    value: surface?.label ?? 'unknown',
     next: 'Choose Where Sessions Open…',
     action: { kind: 'command', command: COMMANDS.chooseSurface },
   });

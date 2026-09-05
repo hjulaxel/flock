@@ -217,6 +217,7 @@ describe('status: the two taste rows read as their pickers do', () => {
       settled,
       { ...settled, soloSession: true },
       { ...settled, terminalLocation: 'panel' as const },
+      { ...settled, terminalLocation: 'newWindow' as const },
       { ...settled, launchMode: 'claudeExtension', claudeExtensionInstalled: true },
     ]) {
       const row = byId(statusFacts({ world, cli, hasCodexAccount: false }), 'surface');
@@ -229,9 +230,10 @@ describe('status: the two taste rows read as their pickers do', () => {
     }
   });
 
-  // The fifth place the picker does not offer yet — a window of its own — is
-  // named rather than left as a blank the reader has to explain to themselves.
-  it('names the own-window arrangement the picker cannot mark current', () => {
+  // The fifth place — a window of its own — is a row of the picker, so the
+  // Status verb names it the way the picker does rather than in words of its
+  // own.
+  it('names the own-window arrangement with the picker’s label', () => {
     const row = byId(
       statusFacts({
         world: { ...settled, terminalLocation: 'newWindow' },
@@ -240,10 +242,7 @@ describe('status: the two taste rows read as their pickers do', () => {
       }),
       'surface',
     );
-    expect(surfaceChoices({ ...settled, terminalLocation: 'newWindow' }).some((c) => c.current)).toBe(
-      false,
-    );
-    expect(row.value).toBe('Own window per session');
+    expect(row.value).toBe('Its own window');
   });
 });
 

@@ -308,12 +308,13 @@ describe('surfaceChoices: where sessions open', () => {
   const currentOf = (w: RecommendedWorld): SurfaceChoiceId | undefined =>
     surfaceChoices(w).find((c) => c.current)?.id;
 
-  it('offers exactly the four places, in a stable order', () => {
+  it('offers exactly the five places, in a stable order', () => {
     expect(surfaceChoices(settled).map((c) => c.id)).toEqual([
       'pinnedTab',
       'editorTabs',
       'claudeExtension',
       'panel',
+      'newWindow',
     ]);
   });
 
@@ -348,8 +349,29 @@ describe('surfaceChoices: where sessions open', () => {
     ).toBe('editorTabs');
   });
 
-  it('marks nothing current in a new-window world — a fifth place is not these four', () => {
-    expect(currentOf(world({ terminalLocation: 'newWindow' }))).toBeUndefined();
+  it('marks its own window, solo or not, when sessions open in new windows', () => {
+    // The fifth place. Before it was a row, a person living here was shown
+    // four options none of which was theirs.
+    expect(currentOf(world({ terminalLocation: 'newWindow' }))).toBe('newWindow');
+    expect(
+      currentOf(world({ terminalLocation: 'newWindow', soloSession: true })),
+    ).toBe('newWindow');
+  });
+
+  it('always marks exactly one place current', () => {
+    // Every legal terminalLocation, with and without the pin, in both launch
+    // modes: one row is current, never none and never two.
+    for (const terminalLocation of ['editor', 'panel', 'newWindow'] as const) {
+      for (const soloSession of [false, true]) {
+        for (const launchMode of ['flock', 'claudeExtension', undefined]) {
+          const w = world({ terminalLocation, soloSession, launchMode });
+          expect(
+            surfaceChoices(w).filter((c) => c.current),
+            JSON.stringify({ terminalLocation, soloSession, launchMode }),
+          ).toHaveLength(1);
+        }
+      }
+    }
   });
 
   it('keeps the extension on offer when it is missing, and says so', () => {
@@ -379,6 +401,11 @@ describe('surfaceChoices: where sessions open', () => {
     ]);
     expect(byId.get('panel')?.settings).toEqual([
       { key: 'terminalLocation', value: 'panel' },
+      { key: 'soloSession', value: false },
+      { key: 'launch.mode', value: 'flock' },
+    ]);
+    expect(byId.get('newWindow')?.settings).toEqual([
+      { key: 'terminalLocation', value: 'newWindow' },
       { key: 'soloSession', value: false },
       { key: 'launch.mode', value: 'flock' },
     ]);

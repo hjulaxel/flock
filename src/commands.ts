@@ -10978,7 +10978,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       label: '$(layout) Choose Where Sessions Open...',
       description:
         surfaceNow === undefined
-          ? 'One pinned tab, editor tabs, the Claude Code extension, or the panel'
+          ? 'One pinned tab, editor tabs, the Claude Code extension, the panel, or their own window'
           : `Currently “${surfaceNow}” — change it`,
       command: COMMANDS.chooseSurface,
     });
