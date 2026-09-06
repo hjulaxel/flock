@@ -48,6 +48,14 @@ import type {
 const SID = '0f0000a1-0000-4000-8000-0000000000a1';
 const REQ_ID = '11111111-2222-4333-8444-555555555555';
 
+/** Mode bits are a POSIX idea; on Windows Node reports 0666/0444 whatever
+ *  the ACL says, so the permission tests have nothing to measure there. */
+const onPosix = process.platform === 'win32' ? it.skip : it;
+
+function modeOf(file: string): number {
+  return fs.statSync(file).mode & 0o777;
+}
+
 const temps: string[] = [];
 const managers: AgentVerbsManager[] = [];
 
@@ -295,6 +303,15 @@ describe('the rendered files', () => {
     expect(script).toContain('LINEAGE_NODE_ID');
     expect(script).toContain("'.lineage', 'requests'");
   });
+
+  it('v4: the CLI creates the requests directory 0700 and the request file 0600', () => {
+    // The request carries --prompt, the user's own words. "the rendered CLI"
+    // below runs the script and measures the modes it actually leaves.
+    const script = renderVerbScript();
+    expect(script).toContain('fs.mkdirSync(DIR, { recursive: true, mode: 0o700 });');
+    expect(script).toContain("{ mode: 0o600 });");
+    expect(VERBS_VERSION).toBeGreaterThanOrEqual(4);
+  });
 });
 
 // ------------------------------------------------- install-state lifecycle
@@ -372,6 +389,21 @@ describe('remove', () => {
 // ----------------------------------------------------------- the watcher
 
 describe('the request watcher', () => {
+  onPosix('creates the requests directory private to the user, and tightens one that is not', async () => {
+    // Fresh home: mkdir without a mode would give 0755 under the usual 022.
+    const fresh = tempHome();
+    makeManager(fresh).manager.startWatcher(makeExecutor({ bound: true }).executor);
+    expect(modeOf(requestsDir(fresh))).toBe(0o700);
+
+    // What a v3 CLI left behind: a 0755 directory. The watcher chmods it.
+    const loose = tempHome();
+    fs.mkdirSync(requestsDir(loose), { recursive: true, mode: 0o755 });
+    fs.chmodSync(requestsDir(loose), 0o755);
+    expect(modeOf(requestsDir(loose))).toBe(0o755);
+    makeManager(loose).manager.startWatcher(makeExecutor({ bound: true }).executor);
+    expect(modeOf(requestsDir(loose))).toBe(0o700);
+  });
+
   it('runs a request and writes the reply the CLI is polling for', async () => {
     const home = tempHome();
     const { manager } = makeManager(home);
@@ -729,6 +761,39 @@ describe('the rendered CLI', () => {
     expect(result.code).toBe(0);
     expect(result.stdout).toContain('Forked 2 new sessions');
     expect(result.stdout).toContain('auth 2, auth 3');
+  });
+
+  onPosix('v4: leaves the request readable by this user alone', async () => {
+    const home = tempHome();
+    fs.mkdirSync(path.dirname(verbsScriptPath(home)), { recursive: true });
+    fs.writeFileSync(verbsScriptPath(home), renderVerbScript());
+
+    const done = runCli(
+      home,
+      ['fork', '--prompt', 'the plan nobody else should read'],
+      { LINEAGE_NODE_ID: SID },
+    );
+    const dir = requestsDir(home);
+    expect(
+      await until(() =>
+        fs.existsSync(dir) &&
+        fs.readdirSync(dir).some((f) => /^[0-9a-f-]{36}\.json$/.test(f)),
+      ),
+    ).toBe(true);
+    const reqName = fs
+      .readdirSync(dir)
+      .find((f) => /^[0-9a-f-]{36}\.json$/.test(f))!;
+    // The CLI created both under the child process's own umask (022 on any
+    // ordinary machine); without explicit modes they would be 0755 and 0644.
+    expect(modeOf(dir)).toBe(0o700);
+    expect(modeOf(path.join(dir, reqName))).toBe(0o600);
+
+    // Let it finish, so the test does not wait out the CLI's 30 s.
+    fs.writeFileSync(
+      path.join(dir, reqName.replace(/\.json$/, '.reply.json')),
+      JSON.stringify({ ok: true, forked: [SID], titles: ['fork 2'] }),
+    );
+    expect((await done).code).toBe(0);
   });
 
   it('relays a refusal and exits nonzero', async () => {

@@ -8,7 +8,8 @@
 // This module depends only on vscode, ./types, ./log, node:crypto and the pure
 // helper modules the verbs share with the views (./projects, ./accounts and
 // ./routing, plus the dependency interface and command ids that live beside the
-// accounts view in ./accountsView). It deliberately does NOT import
+// accounts view in ./accountsView, and — as TYPES only, erased at build — the
+// refresh-plan shapes of ./profileConfig). It deliberately does NOT import
 // terminals/state/windows/hooks, talk to the tree directly, or run `claude`
 // itself: everything with a side effect goes through CommandDeps, which is what
 // lets the whole verb layer be tested against a plain object.
@@ -163,6 +164,12 @@ import {
 // Pure, like projects/accounts/routing above — node builtins only, no vscode.
 // Just the name composer: every tmux CALL still goes through CommandDeps.
 import { tmuxSessionName } from './tmux';
+// Pure too, and the one piece of the terminal launch a verb needs: how a CLI
+// is handed to a pty on Windows. The account sign-in below starts the CLI the
+// way terminals.ts starts a session, and this is what keeps the two spellings
+// one — without importing terminals (see the header).
+import { shimLaunch } from './shim';
+import type { SpawnableLaunch } from './shim';
 import type { ShellRun } from './toolShells';
 import { MAX_AGENT_FORKS } from './agentVerbs';
 import type { AgentForkOutcome } from './agentVerbs';
@@ -196,6 +203,9 @@ import { checkoutAt, planDeepReveal } from './deepSwitch';
 import { branchWebUrl } from './pullRequests';
 import { accountIdOf, usageSummaryOf } from './accountsView';
 import type { AccountDeps } from './accountsView';
+// Types only: profileConfig.ts reads and writes files, so the module itself
+// stays behind the wiring (see `ProfileConfigOps`).
+import type { ReseedPlan, ReseedResult } from './profileConfig';
 
 // --------------------------------------------------------------- constants
 
@@ -417,15 +427,23 @@ async function nameJustCreatedProject(
 
 /**
  * Accepts a validated session-id string, a SessionRef ({type:'session', id}),
- * or any object with a uuid-shaped `id` (a TreeItem, say). Anything else —
- * including a GroupNode and `undefined` — yields undefined, at which point the
+ * or an object with NO `type` and a uuid-shaped `id` (a TreeItem, or the
+ * webview session row's context, which carries `id` for exactly this reader).
+ * Anything else — `undefined`, a junk string, or any row whose `type` says it
+ * is something other than a session — yields undefined, at which point the
  * handler falls back to a QuickPick so palette invocation still works.
+ *
+ * The rule is "type absent or 'session'", not "type is not 'group'": a named
+ * lane's SubprojectNode has `type: 'subproject'` and a uuid `id` (its
+ * SubprojectRecord.id), so the old shape read a lane row as a session. Through
+ * selectedSessionIds that put a lane in every multi-selection that touched
+ * one, and Close/Archive Sessions then wrote a tombstone under the lane's id.
  */
 export function sessionIdFromArg(arg: unknown): string | undefined {
   if (isSessionId(arg)) return arg;
   if (arg === null || typeof arg !== 'object') return undefined;
   const obj = arg as { type?: unknown; id?: unknown };
-  if (obj.type === 'group') return undefined;
+  if (obj.type !== undefined && obj.type !== 'session') return undefined;
   if (isSessionId(obj.id)) return obj.id;
   return undefined;
 }
@@ -4937,7 +4955,9 @@ export async function closeProjectFlow(
         } running, with no row to watch ${running === 1 ? 'it' : 'them'} from ` +
         'until you open the project again.'
       : '',
-    'Open it again from the $(folder-opened) button at the top of the view.',
+    // Words, not `$(folder-opened)`: a modal's detail is plain text, so codicon
+    // syntax prints literally there instead of drawing the icon.
+    'Open it again from the folder icon at the top of the view.',
   ]
     .filter((s) => s !== '')
     .join('\n\n');
@@ -5187,19 +5207,23 @@ async function askSubprojectName(
   deps: CommandDeps,
   project: ProjectRecord,
   dir: string,
-  /** Editing rather than creating: this lane may keep its own name. */
-  selfId?: string,
+  /** Editing rather than creating: this lane may keep its own name, and the
+   *  box opens ON that name, selected — the renameProject shape, so a small
+   *  edit is a small edit and a fresh name is one keystroke away. The box
+   *  used to open empty, and could not have done otherwise: the flow never
+   *  handed it the name. */
+  self?: Pick<SubprojectRecord, 'id' | 'name'>,
 ): Promise<string | undefined> {
   const taken = (deps.allSubprojects?.() ?? []).filter(
-    (l) => l.projectId === project.id && l.id !== selfId,
+    (l) => l.projectId === project.id && l.id !== self?.id,
   );
   const value = await vscode.window.showInputBox({
-    title: selfId === undefined ? `New subproject in ${project.name}` : 'Rename subproject',
+    title: self === undefined ? `New subproject in ${project.name}` : 'Rename subproject',
     prompt: `A lane of work in ${dir}`,
     placeHolder: 'Server rewrite',
-    ...(selfId === undefined
+    ...(self === undefined
       ? {}
-      : { value: taken.length === 0 ? '' : undefined }),
+      : { value: self.name, valueSelection: [0, self.name.length] as [number, number] }),
     ignoreFocusOut: true,
     validateInput: (raw) => {
       const name = raw.trim();
@@ -5232,7 +5256,7 @@ async function renameSubprojectFlow(
     );
     return;
   }
-  const name = await askSubprojectName(deps, project, lane.dir, lane.id);
+  const name = await askSubprojectName(deps, project, lane.dir, lane);
   if (name === undefined || name === lane.name) return;
   await deps.upsertSubproject?.(subprojectId, { name });
   log('subproject:', subprojectId, 'renamed to', name);
@@ -7261,6 +7285,30 @@ async function addAccountFlow(deps: AccountCommandDeps): Promise<void> {
     if (value === undefined || value.trim() === '') return;
     extraEnv = { [key]: value.trim() };
   } else {
+    // What the directory INHERITS, said before it exists. `createProfileDir`
+    // wires the new directory to the machine's configuration (see
+    // src/profileConfig.ts), and one of the keys it copies from ~/.claude.json
+    // is the MCP server list — whose `env` blocks are where MCP API keys
+    // live. Copied once, into a directory that then keeps them after the
+    // default's are rotated or deleted, until "Refresh Account Config from
+    // Default Login…" on the row. That is a consent, so it is asked as one.
+    const CREATE = 'Create Account';
+    const consent = await vscode.window.showWarningMessage(
+      `Give "${name}" its own config directory?`,
+      {
+        modal: true,
+        detail:
+          'Its login is separate: signing in here signs nothing else out. ' +
+          'From ~/.claude.json it inherits the onboarding flags, the theme ' +
+          'and your MCP server definitions, including any keys in their env. ' +
+          'They are copied once and not refreshed automatically — ' +
+          '"Refresh Account Config from Default Login..." on the account row ' +
+          'copies them again.',
+      },
+      CREATE,
+    );
+    if (consent !== CREATE) return;
+
     configDir = await accts.createProfileDir(id);
     if (configDir === undefined || configDir === '') {
       void vscode.window.showErrorMessage(
@@ -7294,21 +7342,47 @@ async function addAccountFlow(deps: AccountCommandDeps): Promise<void> {
   if (choice === SIGN_IN) await loginAccountFlow(deps, id);
 }
 
-/** POSIX single-quoting. The binary path is ours, but it can contain spaces,
- *  and the sign-in line is typed into a real shell. */
-function shellQuote(s: string): string {
-  return `'${s.split("'").join(`'\\''`)}'`;
+/** The CLI's own sign-in verb, per provider — the one argument the sign-in
+ *  terminal starts the binary with. `/login` is a slash command the Claude CLI
+ *  takes as its opening turn, the same trick "Fork and Compact" uses to hand
+ *  it one at start-up; Codex has a real subcommand. */
+const SIGN_IN_ARG = { claude: '/login', codex: 'login' } as const;
+
+/**
+ * Pure. How the sign-in terminal starts: THE CLI AS THE TERMINAL'S OWN
+ * PROCESS, never a line typed into a shell.
+ *
+ * The previous shape opened the user's default shell profile and typed a
+ * POSIX-quoted `'<binary>' /login` into it. On Windows that profile is
+ * PowerShell or cmd, where a single-quoted path is a string and not a command,
+ * so sign-in was a parse error in a terminal the user had already looked away
+ * from. A pty spec has no shell to disagree with; the one platform wrinkle
+ * left — the npm `.cmd` shim — goes through `shimLaunch` exactly as a session
+ * launch does, so both spell a Windows launch the same way.
+ *
+ * Exported for test: the platform is a parameter so the Windows spelling can
+ * be pinned from a Mac.
+ */
+export function signInLaunch(
+  provider: keyof typeof SIGN_IN_ARG,
+  binary: string,
+  platform: string,
+  comSpec: string | undefined,
+): SpawnableLaunch {
+  return shimLaunch(binary, [SIGN_IN_ARG[provider]], platform, comSpec);
 }
 
 /**
- * Sign an account in: a PLAIN SHELL terminal carrying that account's
- * environment, with the login command typed into it.
+ * Sign an account in: a terminal RUNNING THAT CLI'S LOGIN, carrying the
+ * account's environment.
  *
  * Deliberately not a session launch. This terminal is not bound to anything,
  * has no session id and never appears in the tree — it exists for the length
  * of one OAuth round trip. The environment is handed to the pty through
  * `creationOptions.env`, never echoed as an `export` line, because on an
  * API-key profile that line would print the credential into the scrollback.
+ * Nothing is typed into it either: the CLI is the terminal's process (see
+ * signInLaunch), so there is no shell for a typed line to be wrong in.
  */
 async function loginAccountFlow(
   deps: AccountCommandDeps,
@@ -7327,7 +7401,7 @@ async function loginAccountFlow(
     return;
   }
 
-  let command: string;
+  let launch: SpawnableLaunch;
   if (profile.provider === 'claude') {
     const binary = accts.claudeBinary();
     if (!binary) {
@@ -7337,17 +7411,16 @@ async function loginAccountFlow(
       );
       return;
     }
-    // `/login` as the opening turn, the same trick "Fork and Compact" uses to
-    // hand the CLI a slash command at start-up.
-    command = `${shellQuote(binary)} /login`;
+    launch = signInLaunch('claude', binary, process.platform, process.env['ComSpec']);
   } else if (profile.provider === 'codex') {
     // Resolved, never the bare word. `codex` is installed by npm and therefore
     // usually lives under the ACTIVE node version, which the extension host
     // inherits only when VS Code was itself started from a shell that had
-    // selected it. A bare `codex login` typed into the pty is why signing a
+    // selected it. A bare `codex login` typed into a shell is why signing a
     // Codex account in appeared to do nothing: the terminal opened, the line
     // ran, and the shell said "command not found" to a user who had already
-    // looked away.
+    // looked away. As the pty's own process there is no PATH lookup at all —
+    // but the path still has to be the real one.
     const binary = accts.codexBinary?.() ?? null;
     if (!binary) {
       void vscode.window.showErrorMessage(
@@ -7356,7 +7429,7 @@ async function loginAccountFlow(
       );
       return;
     }
-    command = `${shellQuote(binary)} login`;
+    launch = signInLaunch('codex', binary, process.platform, process.env['ComSpec']);
   } else {
     void vscode.window.showInformationMessage(
       `Flock: Flock does not know how to sign "${profile.label}" in — ` +
@@ -7369,11 +7442,12 @@ async function loginAccountFlow(
   if (typeof w.createTerminal !== 'function') return;
   const terminal = w.createTerminal({
     name: `Sign in · ${profile.label}`,
+    shellPath: launch.shellPath,
+    shellArgs: launch.shellArgs,
     env: envForProfile(profile),
     iconPath: new vscode.ThemeIcon('key'),
   });
   terminal.show();
-  terminal.sendText(command);
   log('accounts: sign-in terminal for', profile.id);
 }
 
@@ -7423,6 +7497,101 @@ async function removeAccountFlow(
   }
   accts.refreshAccounts();
   log('accounts: removed', accountId);
+}
+
+/**
+ * Copy the allowlisted keys of `~/.claude.json` into this account's identity
+ * file again, overwriting — the refresh that seeding never does.
+ *
+ * The dialog is built from `plan`, which reads the same two files the write
+ * will, so what the user is shown — which root keys, which MCP servers (env
+ * and keys included), which ones disappear, how many project entries — is
+ * what lands. Refused, in words, for an account with no directory of its own
+ * (the default login is the SOURCE, not a target) and for a provider whose
+ * CLI does not read a `.claude.json` at all.
+ */
+async function reseedAccountConfigFlow(
+  deps: AccountCommandDeps,
+  accountId: string,
+): Promise<void> {
+  const accts = deps.accounts;
+  if (!accts) return;
+  const profile = accts.getAccount(accountId);
+  if (!profile) return;
+
+  const dir = typeof profile.configDir === 'string' ? profile.configDir.trim() : '';
+  if (dir === '') {
+    void vscode.window.showInformationMessage(
+      `Flock: "${profile.label}" has no config directory of its own — it is ` +
+        'the login the other accounts are refreshed from.',
+    );
+    return;
+  }
+  if (profile.provider !== 'claude') {
+    const provider = PROVIDERS[profile.provider]?.label ?? profile.provider;
+    void vscode.window.showInformationMessage(
+      `Flock: "${profile.label}" is a ${provider} account; only Claude ` +
+        'accounts read a .claude.json, so there is nothing to refresh.',
+    );
+    return;
+  }
+  const ops = deps.profileConfig;
+  if (!ops) {
+    void vscode.window.showInformationMessage(
+      'Flock: refreshing account config is not available in this window.',
+    );
+    return;
+  }
+
+  const plan = await ops.plan(profile);
+  if (plan === null) {
+    void vscode.window.showInformationMessage(
+      `Flock: nothing to refresh "${profile.label}" from — the default login ` +
+        'has no readable ~/.claude.json.',
+    );
+    return;
+  }
+
+  const servers =
+    plan.mcpServers.length > 0
+      ? `MCP servers, definitions and env (keys included): ${plan.mcpServers.join(', ')}.` +
+        (plan.droppedMcpServers.length > 0
+          ? ` Dropped, no longer on the default: ${plan.droppedMcpServers.join(', ')}.`
+          : '')
+      : 'MCP servers: the default has none, so yours stay.';
+  const projects =
+    plan.projectCount > 0
+      ? `${plan.projectCount} project ${plan.projectCount === 1 ? 'entry' : 'entries'}: trust flags and tool lists.`
+      : 'Project entries: none on the default.';
+  const REFRESH = 'Refresh Config';
+  const answer = await vscode.window.showWarningMessage(
+    `Refresh "${profile.label}" from the default login?`,
+    {
+      modal: true,
+      detail:
+        `Writes into ${plan.identityPath}, from ~/.claude.json:\n` +
+        `• Root keys: ${plan.rootKeys.length > 0 ? plan.rootKeys.join(', ') : 'none'}.\n` +
+        `• ${servers}\n` +
+        `• ${projects}\n` +
+        'The login (oauthAccount), .credentials.json and everything outside ' +
+        'these keys stay as they are.',
+    },
+    REFRESH,
+  );
+  if (answer !== REFRESH) return;
+
+  const result = await ops.reseed(profile);
+  if (!result.ok) {
+    void vscode.window.showErrorMessage(
+      `Flock: "${profile.label}" was not refreshed — ${result.error ?? 'unknown error.'}`,
+    );
+    return;
+  }
+  vscode.window.setStatusBarMessage(
+    `Flock: refreshed "${profile.label}" from the default login.`,
+    4000,
+  );
+  log('accounts: reseeded config for', profile.id);
 }
 
 /** Reorder. `moveUp`/`moveDown` return only the entries whose order CHANGED —
@@ -8241,8 +8410,29 @@ type Handler = (...args: unknown[]) => void | Promise<void>;
  * only two vscode-facing files use into the file every module reads. The
  * intersection is the cheaper half of that trade: one alias here, nothing
  * anywhere else.
+ *
+ * `profileConfig` rides on the same alias for the same reason, and is a second
+ * optional member rather than a method on `AccountDeps` because it is about a
+ * profile's FILES, not its row: src/profileConfig.ts is the module that reads
+ * and writes them, and this file may not import it.
  */
-export type AccountCommandDeps = CommandDeps & { accounts?: AccountDeps };
+export type AccountCommandDeps = CommandDeps & {
+  accounts?: AccountDeps;
+  profileConfig?: ProfileConfigOps;
+};
+
+/**
+ * The shared-config refresh (profileConfig.planReseed / reseedProfileConfig)
+ * for one account, with the directory resolved by the wiring. Optional like
+ * `accounts`: a host without it has no refresh verb, and the verb says so.
+ */
+export interface ProfileConfigOps {
+  /** Read-only: what a refresh would write into this account's identity
+   *  file, or null when there is nothing to refresh from (or into). */
+  plan(profile: AccountProfile): Promise<ReseedPlan | null>;
+  /** The write. Overwrites the allowlisted keys and nothing else. */
+  reseed(profile: AccountProfile): Promise<ReseedResult>;
+}
 
 export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   const disposables: vscode.Disposable[] = [];
@@ -11622,6 +11812,21 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       const profile = await targetAccount(arg, 'Remove which account?');
       if (!profile) return;
       await removeAccountFlow(deps, profile.id);
+    },
+  );
+
+  // In the palette as well as on the row: `targetAccount` picks the account
+  // when nothing is passed, so a plain invocation works without a `when`.
+  register(
+    COMMANDS.reseedAccountConfig,
+    'refresh account config',
+    async (arg?: unknown) => {
+      const profile = await targetAccount(
+        arg,
+        'Refresh which account’s config from the default login?',
+      );
+      if (!profile) return;
+      await reseedAccountConfigFlow(deps, profile.id);
     },
   );
 

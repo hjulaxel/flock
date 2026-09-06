@@ -66,6 +66,7 @@ import type {
 } from './types';
 import { isEnvVarName } from './accounts';
 import { buildCodexArgs } from './codex';
+import { shimLaunch } from './shim';
 import { isPidAlive, listDescendants, reapSurvivors } from './procs';
 import {
   buildTmuxArgs,
@@ -287,7 +288,17 @@ export function mintSessionId(): string {
  *  - fork    `['--fork-session', '--resume', parentId, '--session-id', child]`
  *  - new     `['--session-id', id]`
  *
- * A non-empty `prompt` is APPENDED as the final positional argument.
+ * A non-empty `prompt` is APPENDED as the final positional argument, behind a
+ * `--`. The CLI's usage is `claude [options] [command] [prompt]` and its
+ * parser (Commander) reads a positional that starts with `-` as an option, so
+ * a prompt of `-v please` was an unknown-option error instead of a session;
+ * the terminator says where the options stop and everything after it is a
+ * positional. What it does NOT do, under Commander as published: the word
+ * after `--` is still matched against the subcommand table, so a prompt that
+ * IS exactly a subcommand name (`mcp`, `doctor`, `auth`) still dispatches that
+ * command. Emitted ONLY with a prompt — a bare `--` on every launch line is
+ * noise, and the mode flags already end `--add-dir`'s list.
+ *
  * `resumeId` wins if both are somehow set — resuming into a fork would be a
  * silent data-losing surprise, so the narrower intent is honoured.
  *
@@ -333,7 +344,7 @@ export function buildShellArgs(opts: LaunchOptions): string[] {
   }
 
   if (typeof opts.prompt === 'string' && opts.prompt.trim().length > 0) {
-    args.push(opts.prompt);
+    args.push('--', opts.prompt);
   }
   return args;
 }
@@ -420,80 +431,12 @@ export function locationValueOf(
   return undefined;
 }
 
-/** How a launch reaches `createTerminal`: the executable and its arguments,
- *  the latter an array everywhere except through a Windows shim, where VS Code
- *  takes a single command-line string (`TerminalOptions.shellArgs` allows a
- *  string on Windows only, for exactly this). */
-export interface SpawnableLaunch {
-  shellPath: string;
-  shellArgs: string[] | string;
-}
-
-/**
- * Pure. A launch made spawnable on this platform.
- *
- * THE WINDOWS SHIM. An npm install puts `claude.cmd` on PATH, a batch file
- * that runs the real CLI. A batch file is not an executable: CreateProcess
- * cannot start one, and only pretends to by silently prepending `cmd.exe` —
- * the behaviour Node closed for CVE-2024-27980, which is why `fetchRoster`
- * (roster.ts) already wraps the same shim in `cmd /d /s /c` for the `agents`
- * call. The terminal launch handed the shim straight to the pty as
- * `shellPath`, so it rode that implicit `cmd.exe`, with an argument vector
- * nobody had quoted for it: a session name with `&` in it was two commands.
- * This puts the command processor there explicitly and quotes for it.
- *
- * `/d` skips AutoRun, `/s` says the first and last quote of what follows `/c`
- * are ours and everything between is the command — which is what makes a
- * quoted executable path AND quoted arguments legal on one line. Each
- * argument is quoted by `quoteForCmd`.
- *
- * WHAT THIS CANNOT DO: `%` is cmd's expansion character and there is no
- * escape for it on a command line (`%%` works only inside a batch file), so
- * an argument containing `%NAME%` for a set variable is expanded before the
- * CLI sees it. A prompt that quotes an environment variable by name is the
- * one input this mangles, and only through the shim. The native installer's
- * `claude.exe` has none of this, which is why discovery prefers it and the
- * README says to install that way.
- *
- * A terminal launched this way has `cmd.exe` as its process, so its
- * `Terminal.processId` is not the CLI's — the same shape as a tmux client,
- * and the same consequence: pid-keyed re-association after an app restart
- * does not fire for it.
- *
- * Off the Windows-shim path this is the identity, so every other launch is
- * untouched.
- */
-export function shimLaunch(
-  binary: string,
-  args: readonly string[],
-  platform: string,
-  comSpec: string | undefined,
-): SpawnableLaunch {
-  if (platform !== 'win32' || !/\.(cmd|bat)$/i.test(binary)) {
-    return { shellPath: binary, shellArgs: [...args] };
-  }
-  const line = [binary, ...args].map(quoteForCmd).join(' ');
-  return {
-    shellPath: typeof comSpec === 'string' && comSpec !== '' ? comSpec : 'cmd.exe',
-    shellArgs: `/d /s /c "${line}"`,
-  };
-}
-
-/**
- * Pure. One argument, spelled for a `cmd /s /c "…"` line.
- *
- * Wrapped in double quotes whenever it holds whitespace, a quote, or a
- * character cmd would otherwise read as syntax (`& | < > ^ ( )`). An embedded
- * `"` becomes `\"` — the escape the C runtime's argument parser reads on the
- * other side, which is what the batch file's `%*` eventually hands to the real
- * CLI. cmd itself only counts quotes for its own toggling, and a `\"` pair
- * toggles twice, so the line stays balanced. A plain word passes untouched.
- */
-export function quoteForCmd(arg: string): string {
-  if (arg === '') return '""';
-  if (!/[\s"&|<>^()]/.test(arg)) return arg;
-  return `"${arg.replace(/"/g, '\\"')}"`;
-}
+// THE WINDOWS SHIM lives in ./shim (shimLaunch, quoteForCmd, SpawnableLaunch):
+// pure, and shared with the account sign-in in commands.ts, which may not
+// import this module. Re-exported here so nothing that learned the helpers
+// under this name has to move.
+export { quoteForCmd, shimLaunch } from './shim';
+export type { SpawnableLaunch } from './shim';
 
 // ------------------------------------------------------------- the registry
 

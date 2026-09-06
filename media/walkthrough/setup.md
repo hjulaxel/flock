@@ -24,7 +24,7 @@ without understanding Flock yet.
 | | What it does | What it writes |
 |---|---|---|
 | **Instant updates** | The tree is a three-second poll without them. With them Claude writes each event as it happens and the tree redraws immediately. | A plugin directory under `~/.claude/skills`. Never `~/.claude/settings.json`. |
-| **Instant updates for Codex** *(offered when Codex is on the machine)* | The same, for Codex sessions: the amber dot while it works, the green dot the moment a turn ends, a waiting mark when Codex asks permission. | One entry per event **merged into** `~/.codex/hooks.json` — every other entry in it kept — and stripped back out on removal. Codex runs them only after you trust them once, with `/hooks` in a Codex session. |
+| **Instant updates for Codex** *(offered when Codex is on the machine)* | The same, for Codex sessions: the amber dot while it works, the red dot the moment a turn ends, a waiting mark when Codex asks permission. | One entry per event **merged into** `~/.codex/hooks.json` — every other entry in it kept — and stripped back out on removal. Codex runs them only after you trust them once, with `/hooks` in a Codex session. |
 | **In-session verbs** | "Fork this session" typed *to Claude* runs the same fork the sidebar button runs, with the same lineage edge. | A skill file and a small CLI. Both `rm -rf`-uninstallable. |
 | **Your first project** | A name and a directory. Sessions group under it, it gets a workspace, it can pin an account. | Nothing on disk. |
 | **Your history** | The bulk import door, if this machine has sessions with no row yet. | A row per session you tick. |

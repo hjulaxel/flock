@@ -1115,7 +1115,7 @@ rollout does.
 | --- | --- | --- |
 | Busy / idle | the CLI's registry, every poll | the rollout's own `task_started` / `task_complete` records, every poll; the hooks, instantly |
 | Waiting for you | the registry | the `PermissionRequest` hook only — the rollout never records a prompt |
-| Turn finished (green dot, bell) | registry transition; `Stop` hook | rollout transition; `Stop` hook |
+| Turn finished (red dot, bell) | registry transition; `Stop` hook | rollout transition; `Stop` hook |
 | Compaction ring | `PreCompact` hook in, roster quiet out | `PreCompact` in, `PostCompact` out — Codex says when it ends |
 | Account meter | the CLI's usage endpoint | the rate limits the CLI writes after every turn, as old as the last turn (the hover says how old) |
 | Signed in as | `.claude.json` | the id token's `email` in `auth.json`, plus the plan |

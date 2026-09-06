@@ -290,7 +290,7 @@ import {
 import { pinnedLaunchProfile, pinnedProfile, rankUsage } from './routing';
 import { delegateFor, hostOfChain, resolveLaunchMode } from './hosts';
 import type { SessionHost } from './hosts';
-import { ensureProfileConfig } from './profileConfig';
+import { ensureProfileConfig, planReseed, reseedProfileConfig } from './profileConfig';
 import type { ProfileConfigSources } from './profileConfig';
 import { AccountUsageCache, registerAccountsView } from './accountsView';
 import type {
@@ -6085,6 +6085,21 @@ export async function activate(
     // on its presence, so a build without it behaves exactly as this extension
     // did before accounts existed.
     accounts: accountDeps,
+
+    // The shared-config refresh for one account's directory. The directory is
+    // resolved the way a launch resolves it, so a profile that shares the
+    // machine's directory refreshes nothing — profileConfig refuses a target
+    // that is its own source, and the verb has already said why.
+    profileConfig: {
+      plan: (profile) => {
+        const sources = profileConfigSources();
+        return planReseed(configDirForProfile(profile, sources.defaultDir), sources);
+      },
+      reseed: (profile) => {
+        const sources = profileConfigSources();
+        return reseedProfileConfig(configDirForProfile(profile, sources.defaultDir), sources);
+      },
+    },
 
     // The dispatch queue: the store persists it, the host (below) acts on it,
     // and the verbs only park, list and cancel. Cancel IS settle — the record

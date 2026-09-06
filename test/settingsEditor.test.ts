@@ -182,14 +182,16 @@ describe('the settings editor: tags', () => {
 
   // VS Code's own tags where they apply: the editor draws its Preview badge
   // for `preview`, and `usesOnlineServices` is its filter for settings that
-  // reach the network — which in Flock is exactly one.
+  // reach the network — which in Flock is exactly two: the usage meter and
+  // the pull-request lookup.
   it("carries VS Code's preview and usesOnlineServices tags on the two rows they describe", () => {
     const settings = contributedSettings();
     expect(settings['lineage.preview.directoryModel']?.tags).toContain('preview');
     const online = Object.entries(settings)
       .filter(([, p]) => p.tags?.includes('usesOnlineServices'))
-      .map(([key]) => key);
-    expect(online).toEqual(['lineage.git.pullRequests']);
+      .map(([key]) => key)
+      .sort();
+    expect(online).toEqual(['lineage.accounts.section', 'lineage.git.pullRequests'].sort());
   });
 
   // Within a category the visible rows come first, so a reader can stop at

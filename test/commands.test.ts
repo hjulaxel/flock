@@ -36,12 +36,14 @@ import {
   skippedForOpenSentence,
   sessionIdFromArg,
   sessionWorkspaceTarget,
+  signInLaunch,
   staleCandidates,
   stripForkCounter,
   tabTitleFrom,
 } from '../src/commands';
-import type { AccountCommandDeps } from '../src/commands';
+import type { AccountCommandDeps, ProfileConfigOps } from '../src/commands';
 import type { AccountDeps, SwitchAccountResult } from '../src/accountsView';
+import type { ReseedPlan } from '../src/profileConfig';
 import { PATHS_FOLD_CASE, isWithin, validateProjectName } from '../src/projects';
 import {
   COMMANDS,
@@ -163,6 +165,41 @@ describe('sessionIdFromArg', () => {
     expect(sessionIdFromArg(null)).toBeUndefined();
     expect(sessionIdFromArg(42)).toBeUndefined();
   });
+
+  it('refuses a SubprojectNode — a named lane has a uuid id of its own', () => {
+    // A lane's id IS a uuid (its SubprojectRecord.id), so the id's shape cannot
+    // tell a lane row from a session; only `type` can, and the old rule looked
+    // for `group` alone. Through selectedSessionIds this is what put a lane
+    // into Close Sessions and Archive Sessions: a tombstone under the lane's id.
+    expect(
+      sessionIdFromArg({
+        type: 'subproject',
+        projectId: 'p1',
+        id: VALID,
+        name: 'Server rewrite',
+        implicit: false,
+        dir: '/code/app',
+        dirKey: '/code/app',
+        label: 'Server rewrite',
+      }),
+    ).toBeUndefined();
+    // The rule is "absent or 'session'", not a list of known other rows.
+    expect(sessionIdFromArg({ type: 'branch', id: VALID })).toBeUndefined();
+  });
+
+  it('accepts the webview session row, which carries no type at all', () => {
+    // viewmodel.ts builds the row's data-vscode-context with `id` for exactly
+    // this reader — see pushSession's `context`.
+    expect(
+      sessionIdFromArg({
+        webviewSection: 'session',
+        webviewId: 'lineage.sessions',
+        id: VALID,
+        viewItem: 'session',
+        preventDefaultContextMenuItems: true,
+      }),
+    ).toBe(VALID);
+  });
 });
 
 // A terminal tab is named from the ROW's name — including on the resume path,
@@ -282,6 +319,30 @@ describe('selectedSessionIds', () => {
         [{ type: 'group', key: '/tmp', cwd: '/tmp', label: 't', rootIds: [] }],
       ]),
     ).toEqual([]);
+  });
+
+  it('drops a lane row from the selection even though its id is a uuid', () => {
+    // Shift-click across a lane header and the sessions under it hands the
+    // verb both; the lane must not come out as a session to close or archive.
+    expect(
+      selectedSessionIds(reporting([]), [
+        { type: 'session', id: A },
+        [
+          { type: 'session', id: A },
+          {
+            type: 'subproject',
+            projectId: 'p1',
+            id: B,
+            name: 'Server rewrite',
+            implicit: false,
+            dir: '/code/app',
+            dirKey: '/code/app',
+            label: 'Server rewrite',
+          },
+          { type: 'session', id: C },
+        ],
+      ]),
+    ).toEqual([A, C]);
   });
 });
 
@@ -1804,6 +1865,17 @@ describe('closeProjectFlow', () => {
     await closeProjectFlow(deps, projectOf());
     expect(state.asked[0].detail).not.toContain('still running');
   });
+
+  it('names the way back in words — a modal detail is plain text, so codicon syntax would print', async () => {
+    const state = scriptConfirm(undefined);
+    const { deps } = chatDeps(projectOf());
+    await closeProjectFlow(deps, projectOf());
+    const detail = state.asked[0].detail;
+    // `$(folder-opened)` draws an icon in a button label and prints literally
+    // in a modal; the sentence used to carry it.
+    expect(detail).not.toContain('$(');
+    expect(detail).toContain('Open it again');
+  });
 });
 
 describe('reopenProject', () => {
@@ -1875,9 +1947,12 @@ type DialogHost = {
 };
 
 /** The name box behind Add Subproject and Rename Subproject. `validateInput` is
- *  the part worth scripting: the per-project name-collision rule lives in it. */
+ *  the part worth scripting: the per-project name-collision rule lives in it.
+ *  `value`/`valueSelection` are what Rename opens the box on. */
 type InputHost = {
   showInputBox?: (opts?: {
+    value?: string;
+    valueSelection?: [number, number];
     validateInput?: (value: string) => string | undefined | null;
   }) => Promise<string | undefined>;
 };
@@ -1936,14 +2011,28 @@ describe('the subproject verbs', () => {
 
   /** Answers the name box, running every candidate past the real validator on the
    *  way — the collision rule is the point of that step. */
+  /** Answers the name box with `name`, runs `validateInput` over each of
+   *  `probe`, and keeps what the box OPENED ON — Rename prefills it. */
   function scriptName(
     name: string | undefined,
     probe: string[] = [],
-  ): { rejected: Record<string, string> } {
-    const state = { rejected: {} as Record<string, string> };
+  ): {
+    rejected: Record<string, string>;
+    opened: Array<{ value?: string; valueSelection?: [number, number] }>;
+  } {
+    const state = {
+      rejected: {} as Record<string, string>,
+      opened: [] as Array<{ value?: string; valueSelection?: [number, number] }>,
+    };
     (mockWindow as InputHost).showInputBox = async (options?: {
+      value?: string;
+      valueSelection?: [number, number];
       validateInput?: (value: string) => string | undefined | null;
     }) => {
+      state.opened.push({
+        value: options?.value,
+        valueSelection: options?.valueSelection,
+      });
       for (const candidate of ['', '   ', ...probe]) {
         const said = options?.validateInput?.(candidate);
         if (typeof said === 'string' && said !== '') {
@@ -2399,6 +2488,42 @@ describe('the subproject verbs', () => {
     });
 
     expect(store.written).toEqual([{ id: 'lane-1', patch: { name: 'CS tooling' } }]);
+  });
+
+  it("opens the rename box on the lane's current name, selected", async () => {
+    // The renameProject shape: a small edit is a small edit, and a fresh name is
+    // one keystroke away. The box used to open empty — and could not have done
+    // otherwise, since the flow never handed it the name.
+    const box = scriptName('CS tooling', ['Server rewrite']);
+    const store = laneStore([lane()]);
+    const { deps } = chatDeps(app(), { projects: [app()] });
+    Object.assign(deps as object, store.deps);
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.renameSubproject, {
+      type: 'subproject',
+      projectId: 'p1',
+      dir: '/code/app',
+      id: 'lane-1',
+    });
+
+    expect(box.opened).toEqual([
+      { value: 'Server rewrite', valueSelection: [0, 'Server rewrite'.length] },
+    ]);
+    // Its own name is not a collision: keeping it is a legal answer.
+    expect(box.rejected['Server rewrite']).toBeUndefined();
+  });
+
+  it('opens the NEW-lane box empty', async () => {
+    scriptPicks('app');
+    const box = scriptName('Server rewrite');
+    const { deps } = chatDeps(app(), { projects: [app()] });
+    Object.assign(deps as object, laneStore().deps);
+    const { run } = withRegisteredCommands(deps as never);
+
+    await run(COMMANDS.newSubproject, { type: 'project', projectId: 'p1' });
+
+    expect(box.opened).toEqual([{ value: undefined, valueSelection: undefined }]);
   });
 
   it('removes a lane once confirmed, and leaves the directory alone', async () => {
@@ -3977,6 +4102,113 @@ describe('an existing conversation keeps its own CLI', () => {
   });
 });
 
+// ------------------------------------------------------------------ sign in
+//
+// The sign-in terminal runs the CLI as its OWN process, with the login verb as
+// the one argument. It used to open the user's default shell profile and type a
+// POSIX-quoted line into it — a parse error in PowerShell and cmd, so signing in
+// on Windows opened a terminal and did nothing.
+
+describe('signInLaunch (the sign-in terminal starts the CLI itself)', () => {
+  it('starts the binary with the login verb, per provider', () => {
+    expect(signInLaunch('claude', '/usr/local/bin/claude', 'darwin', undefined)).toEqual({
+      shellPath: '/usr/local/bin/claude',
+      shellArgs: ['/login'],
+    });
+    expect(signInLaunch('codex', '/opt/node/bin/codex', 'linux', undefined)).toEqual({
+      shellPath: '/opt/node/bin/codex',
+      shellArgs: ['login'],
+    });
+  });
+
+  it('rides the npm .cmd shim through cmd.exe on Windows, like a session launch', () => {
+    expect(
+      signInLaunch('claude', 'C:\\x\\claude.cmd', 'win32', 'C:\\Windows\\system32\\cmd.exe'),
+    ).toEqual({
+      shellPath: 'C:\\Windows\\system32\\cmd.exe',
+      // `/login` is plain to both of cmd's reads (see quoteForCmd), so it
+      // passes unquoted; the shim's path keeps its real quotes.
+      shellArgs: '/d /s /c ""C:\\x\\claude.cmd" /login"',
+    });
+    expect(signInLaunch('codex', 'C:\\npm\\codex.cmd', 'win32', undefined)).toEqual({
+      shellPath: 'cmd.exe',
+      shellArgs: '/d /s /c ""C:\\npm\\codex.cmd" login"',
+    });
+    // A real executable needs no shim on Windows either.
+    expect(signInLaunch('claude', 'C:\\bin\\claude.exe', 'win32', undefined)).toEqual({
+      shellPath: 'C:\\bin\\claude.exe',
+      shellArgs: ['/login'],
+    });
+  });
+});
+
+describe('loginAccount opens a terminal running the CLI, and types nothing into it', () => {
+  type TerminalHost = {
+    createTerminal?: (opts: Record<string, unknown>) => unknown;
+  };
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockWindow as TerminalHost).createTerminal;
+    delete (mockWindow as InfoHost).showInformationMessage;
+  });
+
+  /** A createTerminal that keeps its options and every line typed into it. */
+  function scriptTerminal(): { created: Record<string, unknown>[]; typed: string[] } {
+    const state = { created: [] as Record<string, unknown>[], typed: [] as string[] };
+    (mockWindow as TerminalHost).createTerminal = (opts) => {
+      state.created.push(opts);
+      return {
+        show: () => undefined,
+        sendText: (text: string) => {
+          state.typed.push(text);
+        },
+      };
+    };
+    return state;
+  }
+
+  it('hands the Claude CLI to the pty as shellPath/shellArgs, with the account env', async () => {
+    const term = scriptTerminal();
+    const WORK = accountProfile('work', { configDir: '/work/.claude' });
+    const { accounts } = fakeAccountDeps([WORK], {
+      claudeBinary: () => '/usr/local/bin/claude',
+    });
+    const { deps } = chatDeps(undefined);
+    const harness = withRegisteredCommands({ ...deps, accounts });
+
+    await harness.run(COMMANDS.loginAccount, WORK.id);
+
+    expect(term.created).toHaveLength(1);
+    expect(term.created[0]).toMatchObject({
+      shellPath: '/usr/local/bin/claude',
+      shellArgs: ['/login'],
+      env: { CLAUDE_CONFIG_DIR: '/work/.claude' },
+    });
+    // No shell, so nothing to type: the old line was the whole Windows bug.
+    expect(term.typed).toEqual([]);
+  });
+
+  it('uses the resolved codex binary and its `login` subcommand', async () => {
+    const term = scriptTerminal();
+    const CODEX = accountProfile('codex-acct', { provider: 'codex', configDir: '/codex/home' });
+    const { accounts } = fakeAccountDeps([CODEX], {
+      codexBinary: () => '/opt/node/bin/codex',
+    });
+    const { deps } = chatDeps(undefined);
+    const harness = withRegisteredCommands({ ...deps, accounts });
+
+    await harness.run(COMMANDS.loginAccount, CODEX.id);
+
+    expect(term.created).toHaveLength(1);
+    expect(term.created[0]).toMatchObject({
+      shellPath: '/opt/node/bin/codex',
+      shellArgs: ['login'],
+      env: { CODEX_HOME: '/codex/home' },
+    });
+    expect(term.typed).toEqual([]);
+  });
+});
+
 describe('removeAccount removes only the list entry, never the config directory', () => {
   afterEach(() => {
     delete (mockCommands as { registerCommand?: unknown }).registerCommand;
@@ -4053,6 +4285,262 @@ describe('removeAccount removes only the list entry, never the config directory'
     await harness.run(COMMANDS.removeAccount, WORK.id);
 
     expect(acctCalls.deleted).toEqual([]);
+  });
+});
+
+// ------------------------------------- refreshing a profile from the default
+//
+// Seeding copies `mcpServers` — env blocks, so MCP API keys, included — into a
+// profile once and never again. The refresh verb writes the same allowlisted
+// keys over again, from ~/.claude.json, after a modal that names what will be
+// written. The mechanism is profileConfig.reseedProfileConfig (its own suite);
+// this proves the verb's half: the dialog is built from the plan, cancel
+// writes nothing, and an account with no directory of its own is refused
+// in words rather than reseeded from itself.
+
+describe('reseedAccountConfig refreshes one profile from the default login, after asking', () => {
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockWindow as WarningHost).showWarningMessage;
+    delete (mockWindow as InfoHost).showInformationMessage;
+    delete (mockWindow as StatusHost).setStatusBarMessage;
+  });
+
+  const PLAN: ReseedPlan = {
+    identityPath: '/work/.claude/.claude.json',
+    rootKeys: ['hasCompletedOnboarding', 'mcpServers', 'theme'],
+    mcpServers: ['magma', 'github'],
+    droppedMcpServers: ['old-server'],
+    projectCount: 2,
+  };
+
+  function fakeProfileConfig(plan: ReseedPlan | null = PLAN): {
+    ops: ProfileConfigOps;
+    reseeded: string[];
+  } {
+    const reseeded: string[] = [];
+    const ops: ProfileConfigOps = {
+      plan: async () => plan,
+      reseed: async (profile) => {
+        reseeded.push(profile.id);
+        return { ok: true, ...(plan ? { plan } : {}) };
+      },
+    };
+    return { ops, reseeded };
+  }
+
+  function scriptModal(answer: string | undefined): {
+    shown: Array<{ message: string; detail: string }>;
+  } {
+    const shown: Array<{ message: string; detail: string }> = [];
+    (mockWindow as WarningHost).showWarningMessage = async (message, opts) => {
+      const detail = (opts as { modal?: boolean; detail?: string } | undefined)?.detail ?? '';
+      shown.push({ message, detail });
+      return answer;
+    };
+    return { shown };
+  }
+
+  function scriptInfo(): { infos: string[] } {
+    const infos: string[] = [];
+    (mockWindow as InfoHost).showInformationMessage = async (message) => {
+      infos.push(message);
+      return undefined;
+    };
+    return { infos };
+  }
+
+  it('shows a modal naming the profile, the root keys and the MCP servers — and does nothing on cancel', async () => {
+    const { shown } = scriptModal(undefined);
+    const WORK = accountProfile('work', { label: 'Work', configDir: '/work/.claude' });
+    const { accounts } = fakeAccountDeps([WORK]);
+    const { ops, reseeded } = fakeProfileConfig();
+    const { deps } = chatDeps(undefined);
+    const harness = withRegisteredCommands({ ...deps, accounts, profileConfig: ops });
+
+    await harness.run(COMMANDS.reseedAccountConfig, WORK.id);
+
+    expect(shown).toHaveLength(1);
+    expect(shown[0].message).toContain('"Work"');
+    for (const key of PLAN.rootKeys) expect(shown[0].detail).toContain(key);
+    expect(shown[0].detail).toContain('magma, github');
+    expect(shown[0].detail).toContain('old-server');
+    expect(shown[0].detail).toContain('2 project entries');
+    expect(shown[0].detail).toContain(PLAN.identityPath);
+    // What is promised to stay is said too.
+    expect(shown[0].detail).toContain('oauthAccount');
+    expect(shown[0].detail).toContain('.credentials.json');
+    expect(reseeded).toEqual([]);
+  });
+
+  it('reseeds exactly the chosen profile once confirmed', async () => {
+    scriptModal('Refresh Config');
+    const status: string[] = [];
+    (mockWindow as StatusHost).setStatusBarMessage = (text) => {
+      status.push(text);
+    };
+    const WORK = accountProfile('work', { label: 'Work', configDir: '/work/.claude' });
+    const OTHER = accountProfile('other', { configDir: '/other/.claude' });
+    const { accounts } = fakeAccountDeps([WORK, OTHER]);
+    const { ops, reseeded } = fakeProfileConfig();
+    const { deps } = chatDeps(undefined);
+    const harness = withRegisteredCommands({ ...deps, accounts, profileConfig: ops });
+
+    await harness.run(COMMANDS.reseedAccountConfig, { kind: 'account', profile: WORK });
+
+    expect(reseeded).toEqual([WORK.id]);
+    expect(status.join('\n')).toContain('"Work"');
+  });
+
+  it('refuses, in words and without a modal, an account with no directory of its own', async () => {
+    const { shown } = scriptModal('Refresh Config');
+    const { infos } = scriptInfo();
+    const DEFAULT = accountProfile('default', { label: 'Default' }); // no configDir
+    const { accounts } = fakeAccountDeps([DEFAULT]);
+    const { ops, reseeded } = fakeProfileConfig();
+    const { deps } = chatDeps(undefined);
+    const harness = withRegisteredCommands({ ...deps, accounts, profileConfig: ops });
+
+    await harness.run(COMMANDS.reseedAccountConfig, DEFAULT.id);
+
+    expect(shown).toEqual([]);
+    expect(reseeded).toEqual([]);
+    expect(infos.join('\n')).toContain('no config directory of its own');
+  });
+
+  it('refuses a provider whose CLI never reads a .claude.json', async () => {
+    const { shown } = scriptModal('Refresh Config');
+    const { infos } = scriptInfo();
+    const CODEX = accountProfile('codex', {
+      label: 'Codex',
+      provider: 'codex',
+      configDir: '/codex-home',
+    });
+    const { accounts } = fakeAccountDeps([CODEX]);
+    const { ops, reseeded } = fakeProfileConfig();
+    const { deps } = chatDeps(undefined);
+    const harness = withRegisteredCommands({ ...deps, accounts, profileConfig: ops });
+
+    await harness.run(COMMANDS.reseedAccountConfig, CODEX.id);
+
+    expect(shown).toEqual([]);
+    expect(reseeded).toEqual([]);
+    expect(infos.join('\n')).toContain('nothing to refresh');
+  });
+
+  it('says so when there is no default identity file to refresh from', async () => {
+    const { shown } = scriptModal('Refresh Config');
+    const { infos } = scriptInfo();
+    const WORK = accountProfile('work', { label: 'Work', configDir: '/work/.claude' });
+    const { accounts } = fakeAccountDeps([WORK]);
+    const { ops, reseeded } = fakeProfileConfig(null);
+    const { deps } = chatDeps(undefined);
+    const harness = withRegisteredCommands({ ...deps, accounts, profileConfig: ops });
+
+    await harness.run(COMMANDS.reseedAccountConfig, WORK.id);
+
+    expect(shown).toEqual([]);
+    expect(reseeded).toEqual([]);
+    expect(infos.join('\n')).toContain('nothing to refresh');
+  });
+
+  it('is a wordy no-op on a wiring without the profile-config half', async () => {
+    const { shown } = scriptModal('Refresh Config');
+    const { infos } = scriptInfo();
+    const WORK = accountProfile('work', { configDir: '/work/.claude' });
+    const { accounts } = fakeAccountDeps([WORK]);
+    const { deps } = chatDeps(undefined);
+    const harness = withRegisteredCommands({ ...deps, accounts });
+
+    await harness.run(COMMANDS.reseedAccountConfig, WORK.id);
+
+    expect(shown).toEqual([]);
+    expect(infos.join('\n')).toContain('not available');
+  });
+});
+
+// ------------------------------------------ what a new account is told it gets
+//
+// The config directory a Claude or Codex account is given inherits, from
+// ~/.claude.json, the onboarding flags, the theme and the MCP server
+// definitions — env blocks and so API keys included — copied once and never
+// refreshed. That is a consent, so Add Account asks it as one, before the
+// directory exists: cancelling the modal creates neither directory nor row.
+
+describe('addAccount discloses what the new directory inherits before creating it', () => {
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockWindow as QuickPickHost).showQuickPick;
+    delete (mockWindow as InputHost).showInputBox;
+    delete (mockWindow as WarningHost).showWarningMessage;
+    delete (mockWindow as InfoHost).showInformationMessage;
+    delete (mockWindow as StatusHost).setStatusBarMessage;
+  });
+
+  /** Pick the first provider (Claude), name it "Work", then answer the modal. */
+  function scriptAddAccount(answer: string | undefined): {
+    modals: Array<{ message: string; detail: string }>;
+  } {
+    const modals: Array<{ message: string; detail: string }> = [];
+    (mockWindow as QuickPickHost).showQuickPick = async (items) =>
+      (items as Array<{ provider: string }>).find((i) => i.provider === 'claude');
+    (mockWindow as InputHost).showInputBox = async () => 'Work';
+    (mockWindow as WarningHost).showWarningMessage = async (message, opts) => {
+      const detail = (opts as { modal?: boolean; detail?: string } | undefined)?.detail ?? '';
+      modals.push({ message, detail });
+      return answer;
+    };
+    (mockWindow as InfoHost).showInformationMessage = async () => undefined;
+    return { modals };
+  }
+
+  function recordingAccounts(): {
+    accounts: AccountDeps;
+    createdDirs: string[];
+    upserted: string[];
+  } {
+    const upserted: string[] = [];
+    const { accounts, calls } = fakeAccountDeps([], {
+      upsertAccount: async (id) => {
+        upserted.push(id);
+      },
+    });
+    return { accounts, createdDirs: calls.createdDirs, upserted };
+  }
+
+  it('names the onboarding flags, the theme, the MCP servers and their env keys, and that nothing refreshes them', async () => {
+    const { modals } = scriptAddAccount(undefined);
+    const { accounts, createdDirs, upserted } = recordingAccounts();
+    const { deps } = chatDeps(undefined);
+    const harness = withRegisteredCommands({ ...deps, accounts });
+
+    await harness.run(COMMANDS.addAccount);
+
+    expect(modals).toHaveLength(1);
+    expect(modals[0].message).toContain('"Work"');
+    const detail = modals[0].detail;
+    expect(detail).toContain('~/.claude.json');
+    expect(detail).toContain('onboarding flags');
+    expect(detail).toContain('theme');
+    expect(detail).toContain('MCP server definitions');
+    expect(detail).toContain('keys in their env');
+    expect(detail).toContain('not refreshed automatically');
+    expect(detail).toContain('Refresh Account Config from Default Login');
+    // Cancelled: no directory, no row.
+    expect(createdDirs).toEqual([]);
+    expect(upserted).toEqual([]);
+  });
+
+  it('creates the directory and the row only once the modal is accepted', async () => {
+    scriptAddAccount('Create Account');
+    const { accounts, createdDirs, upserted } = recordingAccounts();
+    const { deps } = chatDeps(undefined);
+    const harness = withRegisteredCommands({ ...deps, accounts });
+
+    await harness.run(COMMANDS.addAccount);
+
+    expect(createdDirs).toEqual(['work']);
+    expect(upserted).toEqual(['work']);
   });
 });
 
