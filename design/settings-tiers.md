@@ -392,3 +392,49 @@ plan.
   row ("Its own window"), and the Status verb's row now reads it rather than
   naming the arrangement in words of its own.
 
+
+**2026-09-06** — the editor's page regrouped after a first read of 0.2.0.
+
+- **Seven groups, not ten, each behind a symbol.** The ten categories of §4
+  were the tier C groups of §3 plus one category per advanced cluster, and
+  read as a list of overlapping answers: *Sessions*, *Window* and *What the
+  tree shows* all sounded like the place for the setting about the thing in
+  front of you. The groups are now the seven nouns a person would look under —
+  ▷ Sessions (a session's whole life: where it opens, tmux, forking, closing),
+  ⊞ Window, ◫ Sidebar (what the tree shows, the two sections, the token
+  count), ◉ Notifications, ⎇ Branches and worktrees, ◷ Timers (every
+  duration), ⌁ Hooks and CLI — with one symbol in front of each, because the
+  table of contents is the one place the editor can carry a figure at all.
+  Tier membership (§3) is unchanged: the `advanced` tag still marks tier D,
+  and the advanced rows still sit last in every group. The rule for a group is
+  now *the noun a person would look under*, not *the tier cluster*.
+- **A row is a name and a sentence or two.** The editor titles each row from
+  its key (`Lineage › Git: Branch Prefix`), which is not a name, so every
+  `markdownDescription` opens with a bold name and then says what the row
+  does, what it needs and why the default, in one paragraph of at most 400
+  characters. The manifest stays the one source of truth for the row's words;
+  the paragraphs that came off the rows moved to a hand-kept **The long
+  version** section at the end of `docs/settings.md`, one note per setting that
+  had more to say, in the editor's order. That section is documentation, not
+  a second copy of the description: the generated table carries the row's
+  sentence, the notes carry the rest, and `test/settingsEditor.test.ts` holds
+  the bold-name-and-length rule the way it already held the categories.
+- **Not done, and named so it is not forgotten:** the `lineage.` prefix. Every
+  row's title begins "Lineage", the one word on the page that is not Flock's
+  name, and no amount of grouping fixes that. Renaming the keys needs a read-
+  both-keys migration under the §2 rule (never write a user's settings.json
+  unasked) and is a change of its own.
+- **Nine groups, after a second read, and contrast between rows.** Seven
+  groups left two of them crowded — *Sessions* held a session's whole life and
+  *Branches and worktrees* held ten rows whose worktree half and branch half
+  were separated by the advanced-last rule — and the descriptions, though
+  short, were all the same length, which reads as one grey block. Now the
+  fork and close verbs are their own group (⋔ Forking and closing), making a
+  checkout and drawing branch rows are two groups (▣ Worktrees, ⎇ Branches),
+  and every description is either one line or, where the row has a cost or a
+  condition, two sentences: the cap is 300 characters and at least half the
+  rows must fit in 160, so a row that needs reading stands out from the rows
+  that do not. The table of contents stays visible — it follows the scroll
+  and highlights the group in view, which is exactly the map a nine-group
+  page needs — so `workbench.settings.settingsSearchTocBehavior` is left at
+  VS Code's default and is not recommended by the docs.

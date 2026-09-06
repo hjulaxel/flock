@@ -27,6 +27,47 @@ All notable changes to Flock are recorded here. The format follows
   workspace file VS Code refuses cost one reload rather than a loop, and a
   file this build cannot read is refused before anything reloads. The decision
   is pure and tested (`planAutoConvert`, `src/explorer.ts`).
+- **The settings page reads at a glance: nine groups behind symbols, and a
+  name on every row.** The Settings editor's table of contents listed ten
+  Flock categories whose names overlapped — *Sessions*, *Window* and *What the
+  tree shows* were three answers to "where is the setting about the thing I am
+  looking at" — and below them forty-five rows whose descriptions ran to five
+  paragraphs, so the page was read by scrolling and searching rather than by
+  looking. There are now nine groups, each one plain noun behind one
+  monochrome symbol so the sidebar can be scanned — and the sidebar is worth
+  scanning, because it follows the scroll: ▷ **Sessions** (where a session
+  opens and how it runs), ⋔ **Forking and closing**, ⊞ **Window**,
+  ◫ **Sidebar** (the old *What the tree shows* plus the two section switches
+  and the token count), ◉ **Notifications** (the old *Attention*, plus the
+  offer to switch account at the limit), ▣ **Worktrees** (the checkout a new
+  session gets), ⎇ **Branches** (the rows, the line under a session, the pull
+  request), ◷ **Timers** (every duration in one place — the old
+  *Housekeeping*) and ⌁ **Hooks and CLI** (the old *CLI* and *Hooks and
+  verbs*, one group). The everyday rows still come first in each group and
+  the advanced rows last. Every description now opens with a short name in
+  bold — the editor names a row after its key, and *Lineage › Git: Branch
+  Prefix* is a spelling, not a name — and then says what the row does in one
+  line, or two sentences where the row has a cost or a condition worth
+  knowing: at most 300 characters, most of them under 160, where the longest
+  ran past 1,800. The contrast is the point — a page where every row is the
+  same length reads as one grey block.
+  Every dropdown keeps its labels in words. Nothing about any setting's key,
+  type, default or behaviour changed, so no configuration moves. The
+  paragraphs that came off the rows were not thrown away: the twenty-eight
+  settings that had more to say than two sentences carry
+  [the long version](docs/settings.md#the-long-version) at the end of the
+  settings page, and the reference points there.
+- **The extension is called Flock, in the Settings editor and everywhere
+  else.** The editor's table of contents files every extension's settings
+  under a node named after the extension's `displayName`, so Flock's nine
+  groups sat under *Flock for Claude Code* — the marketplace title, three words
+  of which are not the product's name — beneath VS Code's own *Extensions*
+  node. The display name is now **Flock**, which is what the activity bar, the
+  sidebar header, the walkthrough and every command already said. The README
+  keeps the fuller title, so the marketplace page still says what Flock is
+  for. The *Extensions* node above it, and the *User* and *Workspace* tabs
+  above that, are VS Code's and the same for every extension; the settings
+  page now says what they are.
 
 ## [0.2.0] — 2026-09-05
 

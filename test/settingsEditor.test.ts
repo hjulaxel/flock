@@ -16,18 +16,20 @@ import { contributedSettings, settingsCategories } from './manifest';
 
 /** The categories, in the order the editor should list them. Pinned as a
  *  list rather than counted: a category renamed or moved is a change to the
- *  page a reader has learned, and should show up in review by name. */
+ *  page a reader has learned, and should show up in review by name. Each
+ *  title is a plain noun behind one symbol — the symbol is the only figure the
+ *  editor's table of contents can carry, and it is what lets the seven be told
+ *  apart at a glance in a sidebar that is otherwise nothing but words. */
 const CATEGORY_TITLES = [
-  'Sessions',
-  'Attention',
-  'Forking and closing',
-  'Worktrees and branches',
-  'Accounts and sections',
-  'Window',
-  'What the tree shows',
-  'Housekeeping',
-  'CLI',
-  'Hooks and verbs',
+  '▷ Sessions',
+  '⋔ Forking and closing',
+  '⊞ Window',
+  '◫ Sidebar',
+  '◉ Notifications',
+  '▣ Worktrees',
+  '⎇ Branches',
+  '◷ Timers',
+  '⌁ Hooks and CLI',
 ];
 
 describe('the settings editor: categories', () => {
@@ -67,9 +69,13 @@ describe('the settings editor: categories', () => {
 
   // The placements that decide what a reader meets first. Not the whole
   // table — that is the manifest's to carry — but the rows whose category is
-  // the argument of the design: tmux is the Sessions question, the window
-  // model is what a window IS, the binaries are a CLI matter, and the two
-  // reader gates the installs flip belong together.
+  // the argument of the design: how a session opens and runs is one group and
+  // the two verbs that fork and close it are another; the window model is
+  // what a window IS; the two sections and the clean-slate switch are about
+  // what the sidebar shows; making checkouts and drawing branch rows are two
+  // groups, not one; every number that is a duration sits together; and the
+  // binaries and the two reader gates the installs flip are the one group
+  // about the CLIs.
   it('puts the load-bearing rows in the categories the design names', () => {
     const categoryOf = new Map<string, string>();
     for (const category of settingsCategories()) {
@@ -77,19 +83,56 @@ describe('the settings editor: categories', () => {
         categoryOf.set(key, category.title);
       }
     }
-    expect(categoryOf.get('lineage.tmux')).toBe('Sessions');
-    expect(categoryOf.get('lineage.terminalLocation')).toBe('Sessions');
-    expect(categoryOf.get('lineage.notifications.enabled')).toBe('Attention');
-    expect(categoryOf.get('lineage.close.summaryMode')).toBe('Forking and closing');
-    expect(categoryOf.get('lineage.git.branches')).toBe('Worktrees and branches');
-    expect(categoryOf.get('lineage.accounts.section')).toBe('Accounts and sections');
-    expect(categoryOf.get('lineage.shells.section')).toBe('Accounts and sections');
-    expect(categoryOf.get('lineage.mode')).toBe('Window');
-    expect(categoryOf.get('lineage.showForeignSessions')).toBe('What the tree shows');
-    expect(categoryOf.get('lineage.session.closeAfterMinutes')).toBe('Housekeeping');
-    expect(categoryOf.get('lineage.claudeBinary')).toBe('CLI');
-    expect(categoryOf.get('lineage.hooks.enabled')).toBe('Hooks and verbs');
-    expect(categoryOf.get('lineage.verbs.enabled')).toBe('Hooks and verbs');
+    expect(categoryOf.get('lineage.tmux')).toBe('▷ Sessions');
+    expect(categoryOf.get('lineage.terminalLocation')).toBe('▷ Sessions');
+    expect(categoryOf.get('lineage.close.summaryMode')).toBe('⋔ Forking and closing');
+    expect(categoryOf.get('lineage.fork.notifyParent')).toBe('⋔ Forking and closing');
+    expect(categoryOf.get('lineage.mode')).toBe('⊞ Window');
+    expect(categoryOf.get('lineage.showForeignSessions')).toBe('◫ Sidebar');
+    expect(categoryOf.get('lineage.accounts.section')).toBe('◫ Sidebar');
+    expect(categoryOf.get('lineage.shells.section')).toBe('◫ Sidebar');
+    expect(categoryOf.get('lineage.notifications.enabled')).toBe('◉ Notifications');
+    expect(categoryOf.get('lineage.git.newSessionInWorktree')).toBe('▣ Worktrees');
+    expect(categoryOf.get('lineage.git.worktreePath')).toBe('▣ Worktrees');
+    expect(categoryOf.get('lineage.git.branches')).toBe('⎇ Branches');
+    expect(categoryOf.get('lineage.git.pullRequests')).toBe('⎇ Branches');
+    expect(categoryOf.get('lineage.session.closeAfterMinutes')).toBe('◷ Timers');
+    expect(categoryOf.get('lineage.claudeBinary')).toBe('⌁ Hooks and CLI');
+    expect(categoryOf.get('lineage.hooks.enabled')).toBe('⌁ Hooks and CLI');
+    expect(categoryOf.get('lineage.verbs.enabled')).toBe('⌁ Hooks and CLI');
+  });
+
+  // Every number that is a duration is in one category, so "how long until…"
+  // has one place to be answered; and a category named for durations holds
+  // nothing that is not one.
+  it('keeps every duration in Timers, and Timers to durations', () => {
+    const timers = settingsCategories().find((c) => c.title === '◷ Timers');
+    expect(timers).toBeDefined();
+    const keys = Object.keys(timers?.properties ?? {});
+    for (const key of keys) expect(key, key).toMatch(/Minutes$|Seconds$/);
+    const durations = Object.keys(contributedSettings()).filter((k) => /Minutes$|Seconds$/.test(k));
+    expect(keys.sort()).toEqual(durations.sort());
+  });
+
+  // The editor names each row after its key — "Lineage › Git: Branch Prefix" —
+  // which is a spelling, not a name. The first thing in every description is
+  // therefore a bold name that says what the row is, and the rest is at most
+  // two sentences: the row is read at a glance or not at all. The cap is low
+  // enough that a simple row cannot grow an essay back, and the second check
+  // keeps the contrast — most rows are one line, so the few that need two
+  // sentences stand out as the ones worth reading.
+  it('starts every description with a bold name and keeps it short', () => {
+    const lengths: number[] = [];
+    for (const [key, p] of Object.entries(contributedSettings())) {
+      const text = p.markdownDescription ?? '';
+      expect(text, `${key} has a markdownDescription`).not.toBe('');
+      expect(text.startsWith('**'), `${key} opens with a bold name`).toBe(true);
+      expect(text.length, `${key} is ${text.length} characters`).toBeLessThanOrEqual(300);
+      expect(text.includes('\n'), `${key} is one paragraph`).toBe(false);
+      lengths.push(text.length);
+    }
+    const oneLiners = lengths.filter((n) => n <= 160).length;
+    expect(oneLiners, 'rows short enough to be one line').toBeGreaterThanOrEqual(lengths.length / 2);
   });
 
   // The deprecation marker step A verified is a per-property field, and a
