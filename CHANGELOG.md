@@ -4,6 +4,30 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **A window opened on nothing becomes the Flock workspace by itself.** In the
+  Auto-switch model the Explorer follows the session you are in, but only in a
+  window that *is* a Flock workspace — and a window is what it opened, so
+  reopening VS Code without picking a folder gave a window that could not
+  follow until **Flock: Follow the Session I Am In** was run in it, again. The
+  docs called that "once per window", which was true and was the wrong
+  promise. Now a window with no folder, no workspace and nothing unsaved
+  converts itself on activation, and again the moment Auto-switch is picked in
+  it: one reload, into the workspace file it already had when there is one —
+  so the tree comes back where it was and the anchor row keeps its name — or
+  into a fresh one holding only the anchor, which fills the moment a session
+  is focused. VS Code then restores that workspace on every launch, and the
+  verb drops out of the daily route. A window opened on a folder is never
+  rearranged unasked: it keeps the **Set up…** row in the Project view and the
+  verb, which now also reopens the file on disk rather than rewriting it when
+  it has no folders to carry. A five-minute machine-wide cooldown makes a
+  workspace file VS Code refuses cost one reload rather than a loop, and a
+  file this build cannot read is refused before anything reloads. The decision
+  is pure and tested (`planAutoConvert`, `src/explorer.ts`).
+
 ## [0.2.0] — 2026-09-05
 
 ### Added
