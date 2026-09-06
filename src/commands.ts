@@ -7285,31 +7285,46 @@ async function addAccountFlow(deps: AccountCommandDeps): Promise<void> {
     if (value === undefined || value.trim() === '') return;
     extraEnv = { [key]: value.trim() };
   } else {
-    // What the directory INHERITS, said before it exists. `createProfileDir`
-    // wires the new directory to the machine's configuration (see
-    // src/profileConfig.ts), and one of the keys it copies from ~/.claude.json
-    // is the MCP server list — whose `env` blocks are where MCP API keys
-    // live. Copied once, into a directory that then keeps them after the
-    // default's are rotated or deleted, until "Refresh Account Config from
-    // Default Login…" on the row. That is a consent, so it is asked as one.
+    // What the directory INHERITS, said before it exists. For a Claude
+    // account `createProfileDir` wires the new directory to the machine's
+    // configuration (see src/profileConfig.ts), and one of the keys it copies
+    // from ~/.claude.json is the MCP server list — whose `env` blocks are
+    // where MCP API keys live. Copied once, into a directory that then keeps
+    // them after the default's are rotated or deleted, until "Refresh Account
+    // Config from Default Login..." on the row. That is a consent, so it is
+    // asked as one.
+    //
+    // A Codex account's directory is its CODEX_HOME, and NOTHING is copied
+    // into it: the Claude-side wiring means nothing to the Codex CLI (through
+    // 0.4.0 it was written there anyway — a copy of the default login's MCP
+    // env keys that no program read). Said before the directory exists, so
+    // the first `codex` there starting like a fresh install is no surprise.
+    const codex = provider.provider === 'codex';
     const CREATE = 'Create Account';
     const consent = await vscode.window.showWarningMessage(
-      `Give "${name}" its own config directory?`,
+      codex
+        ? `Give "${name}" its own Codex home?`
+        : `Give "${name}" its own config directory?`,
       {
         modal: true,
-        detail:
-          'Its login is separate: signing in here signs nothing else out. ' +
-          'From ~/.claude.json it inherits the onboarding flags, the theme ' +
-          'and your MCP server definitions, including any keys in their env. ' +
-          'They are copied once and not refreshed automatically — ' +
-          '"Refresh Account Config from Default Login..." on the account row ' +
-          'copies them again.',
+        detail: codex
+          ? 'Its login is separate: signing in here signs nothing else out. ' +
+            'Nothing is copied into the directory — not from ~/.codex and ' +
+            'not from ~/.claude.json — so the first codex session there ' +
+            'starts as on a fresh install: sign in once, and add a ' +
+            'config.toml if you want one.'
+          : 'Its login is separate: signing in here signs nothing else out. ' +
+            'From ~/.claude.json it inherits the onboarding flags, the theme ' +
+            'and your MCP server definitions, including any keys in their env. ' +
+            'They are copied once and not refreshed automatically — ' +
+            '"Refresh Account Config from Default Login..." on the account row ' +
+            'copies them again.',
       },
       CREATE,
     );
     if (consent !== CREATE) return;
 
-    configDir = await accts.createProfileDir(id);
+    configDir = await accts.createProfileDir(id, provider.provider);
     if (configDir === undefined || configDir === '') {
       void vscode.window.showErrorMessage(
         'Flock: could not create a config directory for this account, so ' +

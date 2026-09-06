@@ -3234,6 +3234,8 @@ interface AccountCalls {
   defaultRoutingSet: Array<RoutingChoice | null>;
   refreshed: number;
   createdDirs: string[];
+  /** The provider each `createProfileDir` call named, in order. */
+  createdProviders: string[];
 }
 
 function fakeAccountDeps(
@@ -3246,6 +3248,7 @@ function fakeAccountDeps(
     defaultRoutingSet: [],
     refreshed: 0,
     createdDirs: [],
+    createdProviders: [],
   };
   const accounts: AccountDeps = {
     accounts: () => profiles,
@@ -3268,8 +3271,9 @@ function fakeAccountDeps(
     usageMap: () => new Map(),
     refreshUsage: async () => undefined,
     onUsageChanged: () => ({ dispose: () => undefined }),
-    createProfileDir: async (id) => {
+    createProfileDir: async (id, provider) => {
       calls.createdDirs.push(id);
+      calls.createdProviders.push(provider);
       return `/created/${id}`;
     },
     claudeBinary: () => null,
@@ -4477,13 +4481,19 @@ describe('addAccount discloses what the new directory inherits before creating i
     delete (mockWindow as StatusHost).setStatusBarMessage;
   });
 
-  /** Pick the first provider (Claude), name it "Work", then answer the modal. */
-  function scriptAddAccount(answer: string | undefined): {
+  /** Pick a provider (Claude unless told otherwise), name it "Work", then
+   *  answer the modal. */
+  function scriptAddAccount(
+    answer: string | undefined,
+    provider: 'claude' | 'codex' = 'claude',
+  ): {
     modals: Array<{ message: string; detail: string }>;
   } {
     const modals: Array<{ message: string; detail: string }> = [];
     (mockWindow as QuickPickHost).showQuickPick = async (items) =>
-      (items as Array<{ provider: string }>).find((i) => i.provider === 'claude');
+      (items as Array<{ provider: string; apiKey?: boolean }>).find(
+        (i) => i.provider === provider && i.apiKey !== true,
+      );
     (mockWindow as InputHost).showInputBox = async () => 'Work';
     (mockWindow as WarningHost).showWarningMessage = async (message, opts) => {
       const detail = (opts as { modal?: boolean; detail?: string } | undefined)?.detail ?? '';
@@ -4497,6 +4507,7 @@ describe('addAccount discloses what the new directory inherits before creating i
   function recordingAccounts(): {
     accounts: AccountDeps;
     createdDirs: string[];
+    createdProviders: string[];
     upserted: string[];
   } {
     const upserted: string[] = [];
@@ -4505,7 +4516,12 @@ describe('addAccount discloses what the new directory inherits before creating i
         upserted.push(id);
       },
     });
-    return { accounts, createdDirs: calls.createdDirs, upserted };
+    return {
+      accounts,
+      createdDirs: calls.createdDirs,
+      createdProviders: calls.createdProviders,
+      upserted,
+    };
   }
 
   it('names the onboarding flags, the theme, the MCP servers and their env keys, and that nothing refreshes them', async () => {
@@ -4533,13 +4549,37 @@ describe('addAccount discloses what the new directory inherits before creating i
 
   it('creates the directory and the row only once the modal is accepted', async () => {
     scriptAddAccount('Create Account');
-    const { accounts, createdDirs, upserted } = recordingAccounts();
+    const { accounts, createdDirs, createdProviders, upserted } = recordingAccounts();
     const { deps } = chatDeps(undefined);
     const harness = withRegisteredCommands({ ...deps, accounts });
 
     await harness.run(COMMANDS.addAccount);
 
     expect(createdDirs).toEqual(['work']);
+    // The provider travels with the request: it decides what the directory is
+    // wired to (extension.ts seeds the Claude layout for 'claude' only).
+    expect(createdProviders).toEqual(['claude']);
+    expect(upserted).toEqual(['work']);
+  });
+
+  it('a Codex home is promised nothing — and the request says it is Codex', async () => {
+    // Through 0.4.0 a Codex account's directory was wired the Claude way, so
+    // its CODEX_HOME held a `.claude.json` seeded with MCP env keys that the
+    // Codex CLI never reads. The dialog now says nothing is copied, and the
+    // provider on the request is what lets `createProfileDir` honour that.
+    const { modals } = scriptAddAccount('Create Account', 'codex');
+    const { accounts, createdDirs, createdProviders, upserted } = recordingAccounts();
+    const { deps } = chatDeps(undefined);
+    const harness = withRegisteredCommands({ ...deps, accounts });
+
+    await harness.run(COMMANDS.addAccount);
+
+    expect(modals).toHaveLength(1);
+    expect(modals[0].message).toContain('Codex home');
+    expect(modals[0].detail).toContain('Nothing is copied');
+    expect(modals[0].detail).not.toContain('MCP server definitions');
+    expect(createdDirs).toEqual(['work']);
+    expect(createdProviders).toEqual(['codex']);
     expect(upserted).toEqual(['work']);
   });
 });

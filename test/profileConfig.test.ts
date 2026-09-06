@@ -17,9 +17,11 @@ import {
   ROOT_SEED_KEYS,
   SHARED_PROFILE_ITEMS,
   ensureProfileConfig,
+  isSeedOnlyIdentity,
   planReseed,
   reseedKeys,
   reseedProfileConfig,
+  retractIdentitySeed,
 } from '../src/profileConfig';
 import type { ProfileConfigSources } from '../src/profileConfig';
 
@@ -459,5 +461,94 @@ describe('profileConfig: the allowlists themselves', () => {
   it('the trust flag the user actually feels is present', () => {
     expect(PROJECT_SEED_KEYS).toContain('hasTrustDialogAccepted');
     expect(ROOT_SEED_KEYS).toContain('hasCompletedOnboarding');
+  });
+});
+
+describe('retracting a seed that landed where no Claude CLI reads it', () => {
+  // Through 0.4.0 every new account directory was wired the Claude way, so a
+  // Codex account's CODEX_HOME received a `.claude.json` seeded with the
+  // default login's mcpServers — env keys included — that Codex never opens.
+  const seeded = (): Record<string, unknown> => ({
+    hasCompletedOnboarding: true,
+    theme: 'dark',
+    mcpServers: { db: { command: 'db-mcp', env: { DB_TOKEN: 'secret' } } },
+    projects: {
+      '/code/api': { hasTrustDialogAccepted: true, allowedTools: ['Bash'] },
+    },
+  });
+
+  it('isSeedOnlyIdentity: true for exactly what seeding writes, root and per project', () => {
+    expect(isSeedOnlyIdentity(seeded())).toBe(true);
+    expect(isSeedOnlyIdentity({})).toBe(true);
+    expect(isSeedOnlyIdentity({ mcpServers: {} })).toBe(true);
+  });
+
+  it('isSeedOnlyIdentity: false the moment the CLI or the user has been there', () => {
+    // The login itself — the one key the whole feature exists to keep apart.
+    expect(isSeedOnlyIdentity({ ...seeded(), oauthAccount: { id: 'x' } })).toBe(false);
+    // A counter the CLI bumps on every start.
+    expect(isSeedOnlyIdentity({ ...seeded(), numStartups: 3 })).toBe(false);
+    // A project key seeding never writes.
+    expect(
+      isSeedOnlyIdentity({
+        projects: { '/code/api': { hasTrustDialogAccepted: true, lastCost: 0.2 } },
+      }),
+    ).toBe(false);
+    // Not an object at all.
+    expect(isSeedOnlyIdentity(null)).toBe(false);
+    expect(isSeedOnlyIdentity([])).toBe(false);
+    expect(isSeedOnlyIdentity({ projects: [] })).toBe(false);
+  });
+
+  it('removes a seed-only identity file and reports it', async () => {
+    const codexHome = path.join(root, '.lineage', 'profiles', 'openai');
+    fs.mkdirSync(codexHome, { recursive: true });
+    const file = path.join(codexHome, '.claude.json');
+    fs.writeFileSync(file, JSON.stringify(seeded(), null, 2));
+
+    expect(await retractIdentitySeed(codexHome)).toBe(true);
+    expect(fs.existsSync(file)).toBe(false);
+    // Nothing else in the directory was touched.
+    expect(fs.existsSync(codexHome)).toBe(true);
+  });
+
+  it('leaves a file that carries anything beyond the seed — it is somebody’s', async () => {
+    const codexHome = path.join(root, '.lineage', 'profiles', 'openai');
+    fs.mkdirSync(codexHome, { recursive: true });
+    const file = path.join(codexHome, '.claude.json');
+    const text = JSON.stringify({ ...seeded(), oauthAccount: { id: 'x' } }, null, 2);
+    fs.writeFileSync(file, text);
+
+    expect(await retractIdentitySeed(codexHome)).toBe(false);
+    expect(fs.readFileSync(file, 'utf-8')).toBe(text);
+  });
+
+  it('leaves a file that does not parse, a symlink, and a directory with no file', async () => {
+    const codexHome = path.join(root, '.lineage', 'profiles', 'openai');
+    fs.mkdirSync(codexHome, { recursive: true });
+    const file = path.join(codexHome, '.claude.json');
+
+    expect(await retractIdentitySeed(codexHome)).toBe(false); // no file
+
+    fs.writeFileSync(file, '{not json');
+    expect(await retractIdentitySeed(codexHome)).toBe(false);
+    expect(fs.existsSync(file)).toBe(true);
+
+    fs.rmSync(file);
+    fs.writeFileSync(identityFile, JSON.stringify(seeded()));
+    fs.symlinkSync(identityFile, file);
+    expect(await retractIdentitySeed(codexHome)).toBe(false); // a link is a choice
+    expect(fs.lstatSync(file).isSymbolicLink()).toBe(true);
+
+    expect(await retractIdentitySeed('')).toBe(false);
+  });
+
+  it('is a caller decision: the seed a CLAUDE profile gets is the same bytes', async () => {
+    // The function does not infer the provider — handed a Claude profile by
+    // mistake it would remove its seed. extension.ts keys the call on
+    // provider === 'codex' and on the directory not being any Claude one.
+    fs.writeFileSync(identityFile, JSON.stringify(seeded()));
+    await ensureProfileConfig(profileDir, sources());
+    expect(isSeedOnlyIdentity(readIdentity())).toBe(true);
   });
 });

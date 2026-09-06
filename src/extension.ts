@@ -290,7 +290,12 @@ import {
 import { pinnedLaunchProfile, pinnedProfile, rankUsage } from './routing';
 import { delegateFor, hostOfChain, resolveLaunchMode } from './hosts';
 import type { SessionHost } from './hosts';
-import { ensureProfileConfig, planReseed, reseedProfileConfig } from './profileConfig';
+import {
+  ensureProfileConfig,
+  planReseed,
+  reseedProfileConfig,
+  retractIdentitySeed,
+} from './profileConfig';
 import type { ProfileConfigSources } from './profileConfig';
 import { AccountUsageCache, registerAccountsView } from './accountsView';
 import type {
@@ -3856,11 +3861,29 @@ export async function activate(
     try {
       const sources = profileConfigSources();
       if (sources.defaultDir === '') return;
-      for (const profile of store.getAccounts()) {
-        const dir =
-          typeof profile.configDir === 'string' ? profile.configDir.trim() : '';
-        if (dir === '' || profile.provider !== 'claude') continue;
-        await ensureProfileConfig(dir, sources);
+      const accounts = store.getAccounts();
+      const dirOf = (p: { configDir?: unknown }): string =>
+        typeof p.configDir === 'string' ? p.configDir.trim() : '';
+      // Every directory a Claude login reads — the default and each Claude
+      // account's — so a Codex account that was pointed at one of them by hand
+      // is never "cleaned up" underneath the Claude CLI.
+      const claudeDirs = new Set<string>([path.resolve(sources.defaultDir)]);
+      for (const p of accounts) {
+        const dir = dirOf(p);
+        if (dir !== '' && p.provider === 'claude') claudeDirs.add(path.resolve(dir));
+      }
+      for (const profile of accounts) {
+        const dir = dirOf(profile);
+        if (dir === '') continue;
+        if (profile.provider === 'claude') {
+          await ensureProfileConfig(dir, sources);
+        } else if (profile.provider === 'codex' && !claudeDirs.has(path.resolve(dir))) {
+          // Through 0.4.0 `createProfileDir` seeded a Claude identity file
+          // into every new directory, Codex homes included — the default
+          // login's mcpServers and their env keys, read by nothing. One pass
+          // here takes a seed-only copy back out; see `retractIdentitySeed`.
+          await retractIdentitySeed(dir);
+        }
       }
     } catch (err) {
       logError('extension.wireProfileConfigs', err);
@@ -4543,7 +4566,7 @@ export async function activate(
     usageMap: () => usageCache.mapFor(store.getAccounts()),
     refreshUsage: (profiles, force) => usageCache.refresh(profiles, { force }),
     onUsageChanged: (listener) => usageCache.onDidChange(listener),
-    createProfileDir: async (id) => {
+    createProfileDir: async (id, provider) => {
       try {
         const dir = profileConfigDirFor(id, profileHome());
         if (dir === '') return undefined;
@@ -4551,7 +4574,16 @@ export async function activate(
         // A new profile isolates the LOGIN, not the person. Wire the
         // shared settings/skills/trust in before the first session ever runs,
         // so account number two does not greet the user like a fresh install.
-        await ensureProfileConfig(dir, profileConfigSources());
+        //
+        // CLAUDE ONLY. The wiring is the Claude CLI's layout — settings.json,
+        // skills, an identity file seeded from `~/.claude.json`, mcpServers and
+        // their env keys included. A Codex account's directory is a
+        // CODEX_HOME, and the Codex CLI reads none of that: seeding it there
+        // (which every creation through 0.4.0 did) was a copy of secrets with
+        // no reader. `wireProfileConfigs` retracts those on activation.
+        if (provider === 'claude') {
+          await ensureProfileConfig(dir, profileConfigSources());
+        }
         return dir;
       } catch (err) {
         logError('extension.createProfileDir', err);

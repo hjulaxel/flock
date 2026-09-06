@@ -176,12 +176,15 @@ export const HOOK_COMMAND =
  * is the quote and `[char]10` the newline. The line ends in LF alone, which is
  * what the reader splits on.
  *
- * PERMISSIONS ARE A FOLLOW-UP HERE. The POSIX command's `umask 077` (v5) has
- * no PowerShell one-liner equivalent: NTFS access is ACLs, and a file under
- * the profile folder inherits the profile's ACL, which on a default Windows
- * install already grants access to the owning user, SYSTEM and Administrators
- * only. Tightening it explicitly (Set-Acl on `~/.lineage`) is deliberately
- * not attempted from inside a hook that must stay a single instant append.
+ * PERMISSIONS ARE DECIDED HERE, NOT DEFERRED. The POSIX command's `umask 077`
+ * (v5) has no PowerShell one-liner equivalent — NTFS access is ACLs, not mode
+ * bits — and it needs none: `~/.lineage` sits under the profile folder, and a
+ * file there inherits the profile's ACL, which on a default Windows install
+ * grants the owning user, SYSTEM and Administrators and nobody else — the same
+ * circle 0700 draws on POSIX. The one shape this does not cover is a profile
+ * folder whose ACL somebody widened by hand, and a hook that must stay a
+ * single instant append is the wrong place to run Set-Acl for that case.
+ * `restrictEventsPermissions` skips win32 for the same reason.
  */
 export const HOOK_COMMAND_WINDOWS =
   '$q=[char]34;$p=[Console]::In.ReadToEnd().Trim();if(-not $p){$p=\'null\'};' +

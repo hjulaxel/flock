@@ -11,6 +11,13 @@ All notable changes to Flock are recorded here. The format follows
 - **Hook commands, the events log and the CLI's request files are now created privately.** Both `/bin/sh` hook commands open with `umask 077` (`PLUGIN_VERSION` 4→5, `CODEX_HOOKS_VERSION` 1→2 — existing installs self-heal with a notice), `~/.lineage` and `~/.lineage/requests` are created and tightened to `0700`, `events.ndjson` and request files to `0600` (`VERBS_VERSION` 3→4), and both hook installers now say plainly that the log records every prompt and reply on the machine.
 - **Removing either hook set empties the events log instead of deleting it.** `HooksManager.remove()` and `CodexHooksManager.remove()` truncate `~/.lineage/events.ndjson` to zero bytes through a shared `clearEventsFile()` — never unlink, never recreate — so a window still watching the file sees the reset rather than a vanished file, and the removal toast says so.
 - **The state store on disk is now private to the user.** `state.ts` and `stateHome.ts` create their directories `0700` and their files `0600`, tightening an existing looser directory best-effort, with the same treatment for the atomic-write and corrupt-backup paths.
+- **A Codex account's home no longer receives a Claude identity file.**
+  Creating an account wired every new directory the Claude way, so a
+  `CODEX_HOME` got a `.claude.json` seeded with the default login's MCP server
+  definitions and their env keys — read by nothing. Only Claude accounts are
+  wired now, the add-account dialog says what a Codex home does and does not
+  inherit, and on activation Flock removes a seed-only identity file it wrote
+  into a Codex home; a file the CLI or you have touched is left alone.
 - **Signing in no longer types a shell command.** The account sign-in flow runs `claude`/`codex login` as the terminal's own process (`signInLaunch`, in a new `src/shim.ts` shared with a normal session launch) instead of sending a POSIX-quoted line into the default shell.
 
 ### Fixed

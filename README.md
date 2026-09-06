@@ -392,8 +392,8 @@ other kind, if still installed, keep appending to the emptied file. Until then,
 everything recorded is on disk in plain text, and you can empty or delete the
 file yourself at any time.
 
-**Adding an account copies part of your existing configuration into its own
-config directory.** A fresh profile gets its own `.claude.json`, seeded once
+**Adding a Claude account copies part of your existing configuration into its
+own config directory.** A fresh profile gets its own `.claude.json`, seeded once
 from the default account's (and, when a live conversation moves onto it, from
 the account it is leaving too) — but only an allowlist of keys, and only where
 the new file doesn't already have them. `mcpServers` is one of the seeded
@@ -405,8 +405,14 @@ conversation is moved onto it, so a later change to the shared file still
 reaches an account that missed it the first time. What it never does is replace
 a value the account already has, so a key rotated or a server removed in the
 default's file lives on in the account's copy until you ask: **Refresh Account
-Config from Default Login…** on the account's row writes the same allowlisted
+Config from Default Login...** on the account's row writes the same allowlisted
 keys over again, this time replacing the account's copy with the default's.
+A **Codex** account's directory is its `CODEX_HOME`, and nothing is copied into
+it — not from `~/.codex` and not from `~/.claude.json`; the first `codex`
+session there starts as on a fresh install. Releases through 0.4.0 seeded a
+`.claude.json` into Codex homes too, a file the Codex CLI never reads; on
+startup Flock now removes such a file when it holds nothing but that seed, and
+leaves it alone if anything else has been written to it.
 
 ## Development
 

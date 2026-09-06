@@ -47,6 +47,14 @@
 //      a key outside ROOT_SEED_KEYS / PROJECT_SEED_KEYS. `planReseed` is the
 //      read-only half, so the dialog can name what is about to be written.
 //
+//   4. RETRACTING (`retractIdentitySeed`). All of the above is the CLAUDE
+//      CLI's layout. Through 0.4.0 account creation ran it for every new
+//      directory, Codex homes included, so a CODEX_HOME received a seeded
+//      `.claude.json` — mcpServers and their env keys — that no program ever
+//      read. Activation now removes such a file, but only when it is purely
+//      seeding's product (`isSeedOnlyIdentity`); a file the CLI or the user has
+//      touched is evidence the directory is a Claude config dir after all.
+//
 // Imports: node builtins + ./log only. NEVER vscode — extension.ts calls this
 // at activation and after profile creation; tests drive it on real tmp dirs.
 
@@ -484,5 +492,61 @@ export async function reseedProfileConfig(
   } catch (err) {
     logError('profileConfig: reseed failed', err);
     return { ok: false, error: 'the identity file could not be rewritten — see the Flock log.' };
+  }
+}
+
+// ------------------------------------------------------------ retraction
+
+/**
+ * Pure. Is this identity file NOTHING BUT what seeding wrote? True when every
+ * top-level key is one of ROOT_SEED_KEYS or `projects`, and every project entry
+ * holds only PROJECT_SEED_KEYS. `oauthAccount`, `numStartups`, a cache, a key
+ * added by hand — any of those means the CLI or the user has been here, and
+ * the file is theirs to keep.
+ */
+export function isSeedOnlyIdentity(root: unknown): boolean {
+  if (!isPlainObject(root)) return false;
+  for (const [key, value] of Object.entries(root)) {
+    if (key === 'projects') {
+      if (!isPlainObject(value)) return false;
+      for (const entry of Object.values(value)) {
+        if (!isPlainObject(entry)) return false;
+        if (!Object.keys(entry).every((k) => PROJECT_SEED_KEYS.includes(k))) {
+          return false;
+        }
+      }
+      continue;
+    }
+    if (!ROOT_SEED_KEYS.includes(key)) return false;
+  }
+  return true;
+}
+
+/**
+ * Remove a `.claude.json` that seeding put where no Claude CLI will read it.
+ *
+ * Through 0.4.0 `createProfileDir` wired EVERY new account's directory the
+ * Claude way, so a Codex account's CODEX_HOME received an identity file
+ * carrying the default login's `mcpServers` — env keys included — that Codex
+ * never opens: a copy of secrets with no reader. The file is removed only when
+ * `isSeedOnlyIdentity` says it is purely seeding's product; a symlink, a file
+ * that does not parse, or one carrying anything else is left exactly where it
+ * is. Returns whether a file was removed. Never throws.
+ */
+export async function retractIdentitySeed(profileDir: string): Promise<boolean> {
+  const dir = typeof profileDir === 'string' ? profileDir.trim() : '';
+  if (dir === '') return false;
+  const identityPath = path.join(dir, IDENTITY_FILE);
+  try {
+    const stats = await lstatOrNull(identityPath);
+    if (stats === null || !stats.isFile()) return false;
+    const root = await readJsonOrNull(identityPath);
+    if (root === null || !isSeedOnlyIdentity(root)) return false;
+    await fsp.unlink(identityPath);
+    log('profileConfig: removed a seed-only identity file', identityPath);
+    return true;
+  } catch (err) {
+    logError('profileConfig: retract failed', err);
+    return false;
   }
 }
