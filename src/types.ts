@@ -1483,7 +1483,7 @@ export const COMMANDS = {
    *  All Sessions" say which way they go rather than needing a `when` clause and
    *  a second command id each. */
   settingsMenu: 'lineage.settingsMenu',
-  // ACCOUNTS. Ten verbs, and they live here rather than in a table of their own
+  // ACCOUNTS. Eleven verbs, and they live here rather than in a table of their own
   // next to the view for the reason every other id does: a test cross-checks
   // THIS object against the manifest in both directions, so a second table is a
   // set of commands nothing checks — invisible when it is missing from
@@ -1497,6 +1497,15 @@ export const COMMANDS = {
    *  token this extension has no business holding. */
   loginAccount: 'lineage.loginAccount',
   removeAccount: 'lineage.removeAccount',
+  /** Copy the allowlisted keys of `~/.claude.json` into this account's own
+   *  identity file AGAIN, overwriting: the MCP server definitions (their `env`
+   *  — and so their API keys — included), the onboarding flags, the theme and
+   *  the per-project trust. Creating the account copied them once and nothing
+   *  refreshes them, so a key rotated or a server deleted on the default login
+   *  lives on in every profile until this runs. Never the login, never
+   *  `.credentials.json` — see profileConfig.reseedProfileConfig. The dialog
+   *  names what will be written before anything is. */
+  reseedAccountConfig: 'lineage.reseedAccountConfig',
   /** Make this profile the machine-wide default route. */
   setDefaultAccount: 'lineage.setDefaultAccount',
   // The view's arrangement, which is also the auto-picker's final tiebreak —
@@ -3263,6 +3272,16 @@ export interface HookInstallState {
   pluginDir?: string;
   installedAt?: string;  // ISO
   pluginVersion?: number;
+  /** ISO; the merge clock. This record is one of the store's SINGLETONS, and
+   *  before it carried a clock two editors sharing the store merged it
+   *  memory-wins: whichever window wrote next re-asserted its own stale
+   *  opinion, so an uninstall in one editor flipped back to installed the
+   *  moment the other wrote anything at all. The store's three setters stamp
+   *  it; `mergeStates` picks the newer stamp the way it does for
+   *  accountSettings. Optional because records written by older builds lack
+   *  it — an unstamped side loses to a stamped one, and two unstamped sides
+   *  merge memory-wins exactly as they always did. */
+  updatedAt?: string;
 }
 
 /**

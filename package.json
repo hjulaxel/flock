@@ -553,6 +553,12 @@
         "icon": "$(key)"
       },
       {
+        "command": "lineage.reseedAccountConfig",
+        "title": "Refresh Account Config from Default Login...",
+        "category": "Flock",
+        "icon": "$(sync)"
+      },
+      {
         "command": "lineage.removeAccount",
         "title": "Remove Account",
         "category": "Flock"
@@ -1014,6 +1020,11 @@
           "command": "lineage.setDefaultAccount",
           "when": "view == lineageAccounts && viewItem =~ /;account;/",
           "group": "1_actions@2"
+        },
+        {
+          "command": "lineage.reseedAccountConfig",
+          "when": "view == lineageAccounts && viewItem =~ /;account;/",
+          "group": "1_actions@3"
         },
         {
           "command": "lineage.moveAccountUp",
@@ -1711,11 +1722,6 @@
         "contents": "No Claude Code sessions here yet — Flock starts with a clean slate.\n[Recommended Setup...](command:lineage.recommendedSetup)\nA checklist of what a fresh install should turn on, with the reason on every line. You tick what you want; nothing is written until you do.\n[New Project](command:lineage.newProject)\n[New Claude Session](command:lineage.newSession)\nA project is a name and a directory; every session running in it groups under it. Add a second directory later and each one gets a row of its own.\n[Import Previous Sessions...](command:lineage.importSessions)\nSessions from before Flock — or running in some other terminal — stay off the tree until you import them, all at once or one folder at a time.\nIf sessions you started here are missing, set `lineage.claudeBinary` to the full path of your claude CLI."
       },
       {
-        "view": "lineageSessions",
-        "when": "!lineage.onlyActive",
-        "contents": "No Claude Code sessions here yet — Flock starts with a clean slate.\n[Recommended Setup...](command:lineage.recommendedSetup)\nA checklist of what a fresh install should turn on, with the reason on every line. You tick what you want; nothing is written until you do.\n[New Project](command:lineage.newProject)\n[New Claude Session](command:lineage.newSession)\nA project is a name and a directory; every session running in it groups under it. Add a second directory later and each one gets a row of its own.\n[Import Previous Sessions...](command:lineage.importSessions)\nSessions from before Flock — or running in some other terminal — stay off the tree until you import them, all at once or one folder at a time.\nIf sessions you started here are missing, set `lineage.claudeBinary` to the full path of your claude CLI."
-      },
-      {
         "view": "lineageAccounts",
         "contents": "No AI accounts yet.\n[Add Account](command:lineage.addAccount)\nAn account is one subscription you can launch sessions on — a Claude plan, a ChatGPT / Codex plan, an API key. Flock lists the CLIs it finds on this machine on its own; add a second login of either here. Each gets its own config directory, so you sign in once per account and never again."
       },
@@ -1977,7 +1983,10 @@
             "type": "boolean",
             "default": true,
             "order": 5,
-            "markdownDescription": "**Accounts section.** One row per subscription: plan, usage, and which one new sessions use. Off moves the sidebar's buttons up onto the FLOCK header."
+            "markdownDescription": "**Accounts section.** One row per subscription: plan, usage, and which one new sessions use. The usage meter calls Anthropic's usage endpoint with the account's own token. Off moves the sidebar's buttons up onto the FLOCK header.",
+            "tags": [
+              "usesOnlineServices"
+            ]
           },
           "lineage.shells.section": {
             "type": "boolean",
@@ -2118,7 +2127,7 @@
             "type": "boolean",
             "default": false,
             "order": 3,
-            "markdownDescription": "**Pull request on each branch row.** The one setting that reaches the network: `gh pr list`, at most every five minutes, through your own signed-in `gh`. Flock never sees a token.",
+            "markdownDescription": "**Pull request on each branch row.** Reaches the network through your own signed-in `gh`: `gh pr list`, at most every five minutes per repository. Flock never reads the `gh` token.",
             "tags": [
               "usesOnlineServices"
             ]

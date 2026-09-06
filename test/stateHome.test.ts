@@ -339,3 +339,53 @@ describe('the adoption lock', () => {
     expect(fs.existsSync(path.join(shared, 'state.json.adopt.lock'))).toBe(false);
   });
 });
+
+// The shared directory holds every account's env — API keys — so it is born
+// owner-only and so is the file. POSIX-only: mode bits are not Windows'
+// permission model.
+const posix = process.platform === 'win32' ? it.skip : it;
+
+function mode(p: string): number {
+  return fs.statSync(p).mode & 0o777;
+}
+
+describe('the shared directory is owner-only', () => {
+  posix('is born 0700, with the seeded file 0600', () => {
+    const legacy = tempDir();
+    const shared = path.join(tempHome(), '.lineage', 'state');
+    seed(legacy, blob({ projectId: 'flock' }));
+    fs.chmodSync(stateFile(legacy), 0o644); // the per-app file an older build wrote
+
+    expect(adoptLegacyState({ sharedDir: shared, legacyDir: legacy }).status).toBe('seeded');
+    expect(mode(shared)).toBe(0o700);
+    expect(mode(stateFile(shared))).toBe(0o600);
+  });
+
+  posix('writes the merged file 0600 too', () => {
+    const legacy = tempDir();
+    const shared = path.join(tempHome(), '.lineage', 'state');
+    seed(shared, blob({ projectId: 'flock' }));
+    fs.chmodSync(stateFile(shared), 0o644);
+    seed(legacy, blob({ projectId: 'basalt' }));
+
+    expect(adoptLegacyState({ sharedDir: shared, legacyDir: legacy }).status).toBe('merged');
+    expect(mode(stateFile(shared))).toBe(0o600);
+  });
+
+  posix('a shared directory that already exists too open is tightened by the store it opens', async () => {
+    const home = tempHome();
+    const shared = path.join(home, '.lineage', 'state');
+    seed(shared, blob({ projectId: 'flock' }));
+    fs.chmodSync(shared, 0o755);
+    fs.chmodSync(stateFile(shared), 0o644);
+    const legacy = tempDir();
+
+    const store = new StateStore(resolveStateDir({ legacyDir: legacy, homeDir: home }).dir);
+    stores.push(store);
+    await store.load();
+    expect(mode(shared)).toBe(0o700);
+
+    await store.upsert(S1, { title: 'first' });
+    expect(mode(stateFile(shared))).toBe(0o600);
+  });
+});

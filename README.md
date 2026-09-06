@@ -79,7 +79,7 @@ chats, and much more.
   A session on a Codex account runs the `codex` CLI under that account's own
   `CODEX_HOME`, and gets the same tree row, age, attention dot, fork and resume
   as a Claude one — and, with **Install Codex Hooks…**, the same instant
-  updates: the amber dot while it works, the green dot the moment a turn ends,
+  updates: the amber dot while it works, the red dot the moment a turn ends,
   and a waiting mark when Codex asks for permission. Without hooks the row
   still gets busy and idle, one poll late, from the rollout itself. Two
   differences remain: Codex has no start-time naming flag, so those tabs wear
@@ -127,7 +127,7 @@ chats, and much more.
 
 - **Open and close projects.** A project you are not working on this month
   doesn't have to be deleted to get out of the way: **Close Project** takes it
-  out of the tree and changes nothing else. The `$(folder-opened)` button at the
+  out of the tree and changes nothing else. The open-folder button at the
   top of the view lists every closed project.
 
 - **Nothing is lost.** Closing a tab does not remove its row. It's dimmed and
@@ -339,11 +339,20 @@ this release.
 
 ## Privacy
 
-Nothing leaves your machine unless you turn on one setting, named below. Flock
-reads the local session roster and local transcript files, and writes only to
-`~/.lineage/state/` and its own extension storage — plus, if you explicitly opt
-in, the hooks plugin directory and `~/.lineage/events.ndjson`, and the
-in-session verbs files
+**The Accounts section reads your usage from Anthropic, and it does this by
+default.** For every row that is a Claude plan account, Flock makes a `GET` to
+Anthropic's own usage endpoint, `https://api.anthropic.com/api/oauth/usage`,
+authenticated with that account's own OAuth access token — read from its
+`.credentials.json`, or, on macOS when that file isn't there, from the login
+keychain instead. It asks at most once every five minutes, and only while the
+Accounts section is actually on screen; turning `lineage.accounts.section` off
+stops it. A Codex plan account's usage never touches the network at all: it is
+read from the rate limits the Codex CLI itself writes to disk after every turn.
+
+Beyond that one call, Flock reads the local session roster and local
+transcript files, and writes only to `~/.lineage/state/` and its own extension
+storage — plus, if you explicitly opt in, the hooks plugin directory and
+`~/.lineage/events.ndjson`, and the in-session verbs files
 (`~/.claude/skills/flock/`, `~/.lineage/flock-verbs.mjs`, `~/.lineage/requests/`).
 
 **Your repositories are read on a timer and changed only when you ask.** By
@@ -353,8 +362,8 @@ Worktree** run `git worktree add` and `git worktree remove` — after a
 confirmation that shows you the exact command, and a second one before anything
 uncommitted is deleted.
 
-**`lineage.git.pullRequests` is the one thing in Flock that reaches the network,
-and it is off by default.** With it on, Flock shells out to the
+**`lineage.git.pullRequests` is the other thing that reaches the network, and
+it is off by default.** With it on, Flock shells out to the
 [`gh` CLI](https://cli.github.com) that you installed and signed in yourself:
 `gh pr list` while the Sessions view is visible, at most once every five minutes
 per repository, and `gh pr create --web` when you ask for it. Flock makes no HTTP
@@ -364,10 +373,46 @@ render exactly as they do with the setting off — one line in the **Flock** out
 channel, no dialog.
 
 A **branch name in the tree is a link** to that branch on the remote it tracks,
-and that is not an exception to the promise above: the url is built from `git
-remote get-url` and the branch's own upstream, both reads of the local
+and that is not a third thing reaching the network on its own: the url is built
+from `git remote get-url` and the branch's own upstream, both reads of the local
 repository, and the only thing that leaves your machine is the browser your click
 hands the url to.
+
+**The opt-in events log keeps a plain record of what you typed and what Claude
+answered.** Turning on instant updates installs hooks that fire in every Claude
+Code session on the machine — not only the ones Flock is watching — and append
+one line per event to `~/.lineage/events.ndjson`, among them each prompt you
+type and the last assistant message of each turn. Nothing in it ever leaves
+your machine; the file is created the first time a hook fires. Removing either
+set of hooks (**Remove Instant-Update Hooks** for Claude, **Remove Codex
+Hooks** for Codex) clears it as well — the file is emptied rather than deleted,
+so a Flock window still watching it sees the reset instead of a vanished file,
+and the confirmation says whether there was anything to clear; hooks of the
+other kind, if still installed, keep appending to the emptied file. Until then,
+everything recorded is on disk in plain text, and you can empty or delete the
+file yourself at any time.
+
+**Adding a Claude account copies part of your existing configuration into its
+own config directory.** A fresh profile gets its own `.claude.json`, seeded once
+from the default account's (and, when a live conversation moves onto it, from
+the account it is leaving too) — but only an allowlist of keys, and only where
+the new file doesn't already have them. `mcpServers` is one of the seeded
+keys, so a new account inherits your MCP server definitions verbatim,
+including any keys sitting in their `env`. Flock re-applies this seeding —
+idempotent, additive, never overwriting what is already there — every time it
+wires a profile: at startup, when the account is created, and when a
+conversation is moved onto it, so a later change to the shared file still
+reaches an account that missed it the first time. What it never does is replace
+a value the account already has, so a key rotated or a server removed in the
+default's file lives on in the account's copy until you ask: **Refresh Account
+Config from Default Login...** on the account's row writes the same allowlisted
+keys over again, this time replacing the account's copy with the default's.
+A **Codex** account's directory is its `CODEX_HOME`, and nothing is copied into
+it — not from `~/.codex` and not from `~/.claude.json`; the first `codex`
+session there starts as on a fresh install. Releases through 0.4.0 seeded a
+`.claude.json` into Codex homes too, a file the Codex CLI never reads; on
+startup Flock now removes such a file when it holds nothing but that seed, and
+leaves it alone if anything else has been written to it.
 
 ## Development
 

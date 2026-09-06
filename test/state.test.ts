@@ -2870,3 +2870,372 @@ describe('minted branches', () => {
     );
   });
 });
+
+// ------------------------------------------------------------- file modes
+
+// state.json holds every account's `extraEnv` — API keys — so the directory
+// and every file carrying the store's bytes are owner-only. POSIX-only: mode
+// bits are not Windows' permission model.
+const posix = process.platform === 'win32' ? it.skip : it;
+
+function mode(p: string): number {
+  return fs.statSync(p).mode & 0o777;
+}
+
+describe('StateStore: file modes (the store holds API keys)', () => {
+  posix('creates the storage dir 0700 and state.json 0600 on a fresh write', async () => {
+    const base = tempDir();
+    const dir = path.join(base, 'nested', 'state');
+    const store = makeStore(dir);
+    await store.load();
+    expect(mode(dir)).toBe(0o700);
+
+    await store.upsert(S1, { title: 'first' });
+    expect(mode(store.filePath)).toBe(0o600);
+    expect(listing(dir).filter((n) => n.endsWith('.tmp'))).toEqual([]);
+  });
+
+  posix('tightens an existing group/other-readable dir to 0700 on load', async () => {
+    const dir = path.join(tempDir(), 'state');
+    fs.mkdirSync(dir);
+    fs.chmodSync(dir, 0o755); // chmod, not mkdir's mode: the umask must not decide the precondition
+    expect(mode(dir) & 0o077).not.toBe(0);
+
+    const store = makeStore(dir);
+    await store.load();
+    expect(mode(dir)).toBe(0o700);
+  });
+
+  posix('rewrites a 0644 state.json an older build left behind as 0600', async () => {
+    const dir = tempDir();
+    seedStateFile(dir, state({ records: { [S1]: record(S1, '2026-01-01T00:00:00.000Z') } }));
+    fs.chmodSync(path.join(dir, 'state.json'), 0o644);
+    const store = makeStore(dir);
+    await store.load();
+
+    await store.upsert(S2, { title: 'second' });
+    expect(mode(store.filePath)).toBe(0o600);
+    expect(store.get(S1)).toBeDefined();
+  });
+
+  posix('backs a corrupt file up owner-only — it is the same bytes as the store', async () => {
+    const dir = tempDir();
+    fs.writeFileSync(path.join(dir, 'state.json'), '{ not json');
+    fs.chmodSync(path.join(dir, 'state.json'), 0o644);
+    const store = makeStore(dir);
+    await store.load();
+
+    const backup = listing(dir).find((n) => n.startsWith('state.json.corrupt-'));
+    expect(backup).toBeDefined();
+    expect(mode(path.join(dir, backup ?? ''))).toBe(0o600);
+  });
+});
+
+// ------------------------------------------- a file we cannot read is sacred
+
+// A hard read error at write time used to merge memory with an EMPTY state and
+// write the result: under a transient EACCES/EBUSY that replaced the whole
+// store with this window's memory plus one mutation. The batch now reaches
+// memory — this window shows the edit — and waits for the disk.
+describe('StateStore: a file that cannot be read is never written over', () => {
+  it('holds the mutation, then applies it on the reload that finds the file readable', async () => {
+    const dir = tempDir();
+    const a = makeStore(dir, { reloadDebounceMs: 1 });
+    await a.load();
+    await a.upsert(S1, { title: 'mine' });
+    // Another window writes a record this store has not reloaded.
+    const b = makeStore(dir);
+    await b.load();
+    await b.upsert(S3, { title: 'theirs' });
+    expect(a.get(S3)).toBeUndefined();
+    const writesBefore = a.stats.writes;
+
+    // The file is there but unreadable: a directory in its place gives EISDIR
+    // (root can read a chmod-000 file, so a mode change would not do here).
+    const saved = path.join(dir, 'state.json.saved');
+    fs.renameSync(a.filePath, saved);
+    fs.mkdirSync(a.filePath);
+
+    await a.upsert(S2, { title: 'held' });
+    expect(a.stats.writes).toBe(writesBefore);
+    expect(a.get(S2)?.title).toBe('held'); // in memory: the window shows it
+    expect(fs.statSync(a.filePath).isDirectory()).toBe(true); // nothing written
+
+    // Readable again — the watcher would fire here.
+    fs.rmdirSync(a.filePath);
+    fs.renameSync(saved, a.filePath);
+    await a.reloadFromDisk();
+
+    expect(a.get(S2)?.title).toBe('held');
+    expect(a.get(S3)?.title).toBe('theirs'); // the other window's record survived
+    expect(a.get(S1)?.title).toBe('mine');
+    const blob = readFile(dir) as LineageState;
+    expect(Object.keys(blob.records).sort()).toEqual([S1, S2, S3].sort());
+  });
+
+  // Why the BATCH is kept and not just memory: an unhide deletes a key, and a
+  // key missing from memory loses to the disk's copy in the merge. Only
+  // running the mutation again against the real file makes the delete stick.
+  it('runs held mutations against the file on the next mutation, deletions included, in order', async () => {
+    const dir = tempDir();
+    const a = makeStore(dir);
+    await a.load();
+    await a.upsert(S1, { title: 'first' });
+    await a.hideFolder('/tmp/junk');
+
+    const saved = path.join(dir, 'state.json.saved');
+    fs.renameSync(a.filePath, saved);
+    fs.mkdirSync(a.filePath);
+    await a.upsert(S1, { title: 'held-1' });
+    await a.unhideFolder('/tmp/junk');
+    await a.upsert(S1, { title: 'held-2' });
+    expect(a.get(S1)?.title).toBe('held-2');
+    expect(a.getHiddenFolders()).toEqual([]);
+    expect(JSON.parse(fs.readFileSync(saved, 'utf8')).records[S1].title).toBe('first');
+
+    fs.rmdirSync(a.filePath);
+    fs.renameSync(saved, a.filePath);
+    await a.upsert(S2, { title: 'after' });
+
+    expect(a.get(S1)?.title).toBe('held-2');
+    expect(a.get(S2)?.title).toBe('after');
+    expect(a.getHiddenFolders()).toEqual([]);
+    const blob = readFile(dir) as LineageState;
+    expect(blob.records[S1]?.title).toBe('held-2');
+    expect(blob.records[S2]?.title).toBe('after');
+    expect(blob.hiddenFolders).toEqual({});
+  });
+
+  // The real-world shape: the read fails but a rename over the file would
+  // succeed, so the old code clobbered. Root reads through chmod 000, and
+  // Windows has no such mode, so this one runs unprivileged on POSIX only.
+  const unprivileged =
+    process.platform !== 'win32' &&
+    typeof process.getuid === 'function' &&
+    process.getuid() !== 0
+      ? it
+      : it.skip;
+
+  unprivileged('leaves the other window’s bytes alone under EACCES', async () => {
+    const dir = tempDir();
+    const a = makeStore(dir);
+    await a.load();
+    await a.upsert(S1, { title: 'mine' });
+    const b = makeStore(dir);
+    await b.load();
+    await b.upsert(S3, { title: 'theirs' });
+    const bytesBefore = fs.readFileSync(a.filePath, 'utf8');
+
+    fs.chmodSync(a.filePath, 0o000);
+    await a.upsert(S2, { title: 'held' });
+    fs.chmodSync(a.filePath, 0o600);
+
+    expect(fs.readFileSync(a.filePath, 'utf8')).toBe(bytesBefore);
+    expect(a.get(S2)?.title).toBe('held');
+
+    await a.upsert(S4, { title: 'later' });
+    const blob = readFile(dir) as LineageState;
+    expect(Object.keys(blob.records).sort()).toEqual([S1, S2, S3, S4].sort());
+    expect(blob.records[S3]?.title).toBe('theirs');
+  });
+});
+
+// ------------------------------------------ a vanished file does not empty us
+
+// ENOENT and corrupt-and-backed-up both yield an empty disk state, and the
+// reload used to adopt it — after which the next mutation persisted a
+// near-empty store. Memory with content stays, and goes back to disk.
+describe('StateStore.reloadFromDisk: a vanished file does not empty a loaded store', () => {
+  it('keeps records and projects when state.json is deleted under it, and writes them back', async () => {
+    const dir = tempDir();
+    const store = makeStore(dir, { reloadDebounceMs: 1 });
+    await store.load();
+    await store.upsert(S1, { title: 'kept' });
+    await store.upsertProject('flock', { rootDir: '/tmp/flock', name: 'Flock' });
+    let events = 0;
+    store.onDidChange(() => {
+      events++;
+    });
+
+    fs.unlinkSync(store.filePath);
+    await store.reloadFromDisk();
+
+    expect(store.get(S1)?.title).toBe('kept');
+    expect(store.getProject('flock')?.name).toBe('Flock');
+    expect(events).toBe(0); // nothing changed for a listener
+    expect(fs.existsSync(store.filePath)).toBe(true);
+    const blob = readFile(dir) as LineageState;
+    expect(blob.records[S1]?.title).toBe('kept');
+    expect(blob.projects['flock']?.name).toBe('Flock');
+  });
+
+  it('keeps records when the file turns to garbage: backs it up and rewrites', async () => {
+    const dir = tempDir();
+    const store = makeStore(dir, { reloadDebounceMs: 1 });
+    await store.load();
+    await store.upsert(S1, { title: 'kept' });
+
+    fs.writeFileSync(store.filePath, '{ not json');
+    await store.reloadFromDisk();
+
+    expect(store.stats.corruptBackups).toBe(1);
+    expect(store.get(S1)?.title).toBe('kept');
+    const blob = readFile(dir) as LineageState;
+    expect(blob.records[S1]?.title).toBe('kept');
+  });
+
+  it('keeps an account — the record that carries the keys', async () => {
+    const dir = tempDir();
+    const store = makeStore(dir, { reloadDebounceMs: 1 });
+    await store.load();
+    await store.upsertAccount('work', { label: 'Work', configDir: '/tmp/work' });
+    expect(store.getAccounts().map((a) => a.id)).toEqual(['work']);
+
+    fs.unlinkSync(store.filePath);
+    await store.reloadFromDisk();
+
+    expect(store.getAccounts().map((a) => a.id)).toEqual(['work']);
+    expect(fs.existsSync(store.filePath)).toBe(true);
+  });
+
+  it('still adopts an empty disk when memory holds nothing a user would miss', async () => {
+    const dir = tempDir();
+    const store = makeStore(dir, { reloadDebounceMs: 1 });
+    await store.load();
+    await store.setHookState({ installed: true });
+    expect(fs.existsSync(store.filePath)).toBe(true);
+
+    fs.unlinkSync(store.filePath);
+    await store.reloadFromDisk();
+
+    expect(store.getHookState().installed).toBe(false);
+    expect(fs.existsSync(store.filePath)).toBe(false); // nothing was put back
+  });
+});
+
+// ------------------------------------------- install records carry a clock
+
+// The three install singletons merged memory-wins with no clock, so two
+// editors sharing the store flipped "installed" back and forth. They now
+// carry `updatedAt` and merge the way accountSettings does.
+describe('mergeStates: install records merge by clock', () => {
+  const keys = ['hookInstall', 'verbsInstall', 'codexHookInstall'] as const;
+  const T1 = '2026-09-01T00:00:00.000Z';
+  const T2 = '2026-09-02T00:00:00.000Z';
+
+  function withInstall(key: (typeof keys)[number], value: LineageState[typeof key]): LineageState {
+    const s = state();
+    s[key] = value;
+    return s;
+  }
+
+  it('takes the newer stamp whichever side it is on', () => {
+    for (const key of keys) {
+      const older = { installed: true, updatedAt: T1 };
+      const newer = { installed: false, updatedAt: T2 };
+      expect(mergeStates(withInstall(key, newer), withInstall(key, older))[key]).toEqual(newer);
+      expect(mergeStates(withInstall(key, older), withInstall(key, newer))[key]).toEqual(newer);
+    }
+  });
+
+  it('lets a stamped side beat an unstamped one, in both directions', () => {
+    for (const key of keys) {
+      const stamped = { installed: false, updatedAt: T1 };
+      const legacy = { installed: true };
+      expect(mergeStates(withInstall(key, stamped), withInstall(key, legacy))[key]).toEqual(stamped);
+      expect(mergeStates(withInstall(key, legacy), withInstall(key, stamped))[key]).toEqual(stamped);
+    }
+  });
+
+  it('falls back to memory-wins when neither side is stamped, and on a tie', () => {
+    for (const key of keys) {
+      expect(
+        mergeStates(withInstall(key, { installed: true }), withInstall(key, { installed: false }))[key],
+      ).toEqual({ installed: false });
+      const diskTie = { installed: true, updatedAt: T1 };
+      const memTie = { installed: false, updatedAt: T1 };
+      expect(mergeStates(withInstall(key, diskTie), withInstall(key, memTie))[key]).toEqual(memTie);
+    }
+  });
+
+  it('merges the three independently of one another', () => {
+    const disk = state({
+      hookInstall: { installed: true, updatedAt: T2 },
+      verbsInstall: { installed: true, updatedAt: T1 },
+    });
+    const mem = state({
+      hookInstall: { installed: false, updatedAt: T1 },
+      verbsInstall: { installed: false, updatedAt: T2 },
+      codexHookInstall: { installed: true, updatedAt: T1 },
+    });
+    const merged = mergeStates(disk, mem);
+    expect(merged.hookInstall?.installed).toBe(true);
+    expect(merged.verbsInstall?.installed).toBe(false);
+    expect(merged.codexHookInstall?.installed).toBe(true);
+  });
+});
+
+describe('migrateState: the install clock', () => {
+  it('keeps updatedAt when it is a string and drops it otherwise', () => {
+    const T1 = '2026-09-01T00:00:00.000Z';
+    expect(migrateState({ hookInstall: { installed: true, updatedAt: T1 } }).hookInstall)
+      .toEqual({ installed: true, updatedAt: T1 });
+    expect(migrateState({ verbsInstall: { installed: true, updatedAt: 5 } }).verbsInstall)
+      .toEqual({ installed: true });
+    expect(migrateState({ codexHookInstall: { installed: false } }).codexHookInstall)
+      .toEqual({ installed: false }); // never invented
+  });
+});
+
+describe('StateStore: install records carry the store clock', () => {
+  it('stamps updatedAt on every setter and keeps it across a reload', async () => {
+    const dir = tempDir();
+    const store = makeStore(dir);
+    await store.load();
+    const before = nowIso();
+    await store.setHookState({ installed: true, pluginVersion: 1 });
+    await store.setVerbsState({ installed: true });
+    await store.setCodexHookState({ installed: false });
+
+    for (const s of [store.getHookState(), store.getVerbsState(), store.getCodexHookState()]) {
+      expect(typeof s.updatedAt).toBe('string');
+      expect((s.updatedAt ?? '') >= before).toBe(true);
+      expect(Number.isFinite(Date.parse(s.updatedAt ?? ''))).toBe(true);
+    }
+
+    const b = makeStore(dir);
+    await b.load();
+    expect(b.getHookState()).toEqual(store.getHookState());
+    expect(b.getCodexHookState()).toEqual(store.getCodexHookState());
+  });
+
+  it('overwrites a caller-supplied updatedAt with the store clock', async () => {
+    const dir = tempDir();
+    const store = makeStore(dir);
+    await store.load();
+    const before = nowIso();
+    await store.setHookState({ installed: true, updatedAt: '1999-01-01T00:00:00.000Z' });
+    expect(store.getHookState().updatedAt).not.toBe('1999-01-01T00:00:00.000Z');
+    expect((store.getHookState().updatedAt ?? '') >= before).toBe(true);
+  });
+
+  it('an uninstall in one editor is not flipped back by the other editor’s next unrelated write', async () => {
+    const dir = tempDir();
+    const a = makeStore(dir);
+    await a.load();
+    await a.setHookState({ installed: true, pluginVersion: 1 });
+
+    const b = makeStore(dir);
+    await b.load(); // b now believes "installed", with a's first stamp
+    expect(b.getHookState().installed).toBe(true);
+
+    await delay(5); // the clock is millisecond ISO; the uninstall must be strictly later
+    await a.setHookState({ installed: false });
+
+    // b has not reloaded. Before the clock, its stale memory won this merge.
+    await b.upsert(S1, { title: 'unrelated' });
+    expect(b.getHookState().installed).toBe(false);
+    expect((readFile(dir) as LineageState).hookInstall?.installed).toBe(false);
+    expect((readFile(dir) as LineageState).records[S1]?.title).toBe('unrelated');
+  });
+});

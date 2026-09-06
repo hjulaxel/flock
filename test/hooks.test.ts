@@ -8,6 +8,7 @@
 // so against the mock's empty `window` they are silent no-ops.
 
 import { afterEach, describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -15,6 +16,7 @@ import * as process from 'node:process';
 import * as vscodeMock from 'vscode';
 
 import {
+  CODEX_HOOK_COMMAND,
   HOOK_COMMAND,
   HOOK_COMMAND_WINDOWS,
   hookCommandFor,
@@ -22,14 +24,24 @@ import {
   PLUGIN_NAME,
   PLUGIN_VERSION,
   eventsFile,
+  isRotated,
   parseEventLine,
   pluginDir,
   renderHooksJson,
   renderPluginJson,
 } from '../src/hooks';
+import type { FileIdentity } from '../src/hooks';
 import type { HookEvent, HookInstallState } from '../src/types';
 
 const SID = '0f0000a1-0000-4000-8000-0000000000a1';
+
+/** Mode bits are a POSIX idea; on Windows Node reports 0666/0444 whatever
+ *  the ACL says, so the permission tests have nothing to measure there. */
+const onPosix = process.platform === 'win32' ? it.skip : it;
+
+function modeOf(file: string): number {
+  return fs.statSync(file).mode & 0o777;
+}
 
 const temps: string[] = [];
 const managers: HooksManager[] = [];
@@ -221,6 +233,45 @@ describe('hooks: generated plugin files', () => {
     expect(HOOK_COMMAND.split('>>').length).toBe(2);
   });
 
+  it('v5: both /bin/sh commands open with umask 077, before anything is created', () => {
+    // The payload is the user's prompts and the model's replies. umask governs
+    // creation, so it has to come before the mkdir and before the `>>`.
+    expect(HOOK_COMMAND.startsWith("/bin/sh -c 'umask 077; mkdir -p")).toBe(true);
+    expect(CODEX_HOOK_COMMAND.startsWith("/bin/sh -c 'umask 077; mkdir -p")).toBe(true);
+  });
+
+  onPosix('v5: run for real, the hook creates ~/.lineage 0700 and events.ndjson 0600', () => {
+    const home = tempHome();
+    const NODE = '0e000000-0000-4000-8000-00000000000e';
+    const payload = { hook_event_name: 'UserPromptSubmit', session_id: SID, prompt: 'secret' };
+    // Exactly how the CLI runs a shell-form hook: `sh -c "<command>"`, with the
+    // payload on stdin and LINEAGE_NODE_ID inherited from the terminal.
+    const run = (command: string): void => {
+      execFileSync('/bin/sh', ['-c', command], {
+        env: { PATH: process.env.PATH ?? '', HOME: home, LINEAGE_NODE_ID: NODE },
+        input: JSON.stringify(payload),
+      });
+    };
+    run(HOOK_COMMAND);
+    run(CODEX_HOOK_COMMAND);
+
+    const file = eventsFile(home);
+    // Without the umask both would inherit the test process's own — 0755 and
+    // 0644 on any ordinary machine, which is what a v4 install left behind.
+    expect(modeOf(path.dirname(file))).toBe(0o700);
+    expect(modeOf(file)).toBe(0o600);
+
+    // And the appended lines are still the v3 envelope the parser reads.
+    const lines = fs.readFileSync(file, 'utf8').split('\n').filter((l) => l.length > 0);
+    expect(lines).toHaveLength(2);
+    const claude = parseEventLine(lines[0]!);
+    expect(claude?.event).toBe('UserPromptSubmit');
+    expect(claude?.sessionId).toBe(SID);
+    expect(claude?.nodeId).toBe(NODE);
+    expect(claude?.cli).toBe('claude');
+    expect(parseEventLine(lines[1]!)?.cli).toBe('codex');
+  });
+
   it('renders a parseable plugin manifest named lineage-events', () => {
     const parsed = JSON.parse(renderPluginJson()) as Record<string, unknown>;
     expect(parsed.name).toBe(PLUGIN_NAME);
@@ -390,6 +441,36 @@ describe('hooks: install writes the plugin after exactly one confirmation', () =
     expect(fs.existsSync(path.dirname(eventsFile(home)))).toBe(true);
   });
 
+  onPosix('creates the events directory private to the user (0700)', async () => {
+    const home = tempHome();
+    stubConsent('Install');
+    const { manager } = makeManager(home);
+    await manager.install();
+    // mkdir without a mode would give 0755 under the ordinary 022 umask.
+    expect(modeOf(path.dirname(eventsFile(home)))).toBe(0o700);
+  });
+
+  posix('the consent text says what the file records and that it is private', async () => {
+    const home = tempHome();
+    const details: string[] = [];
+    messageApi.showInformationMessage = async (_message, options) => {
+      const detail = (options as { detail?: unknown }).detail;
+      if (typeof detail === 'string') details.push(detail);
+      return undefined; // dismissed: the text is what is under test
+    };
+    const { manager } = makeManager(home);
+    await manager.install();
+    expect(details).toHaveLength(1);
+    const detail = details[0]!;
+    // "Session events are appended" was the whole of it before; a user could
+    // not learn from it that their prompts are in the file.
+    expect(detail).toContain('each prompt you type');
+    expect(detail).toContain('last assistant message');
+    expect(detail).toContain('every Claude Code session on this');
+    expect(detail).toContain('private');
+    expect(detail).toContain(eventsFile(home));
+  });
+
   posix('never touches ~/.claude/settings.json', async () => {
     const home = tempHome();
     const settings = path.join(home, '.claude', 'settings.json');
@@ -500,15 +581,63 @@ describe('hooks: remove is safety-gated and idempotent', () => {
     expect(state.installed).toBe(false);
   });
 
-  it('keeps the events file', async () => {
+  // The events file holds every prompt and last assistant message since the
+  // install. Removing the hooks CLEARS it — and by truncation, not unlink: a
+  // watcher in another window holds the inode and rewinds on `size < offset`,
+  // where an unlinked file would leave it tailing a ghost.
+  it('clears the recorded events but keeps the file: same inode, zero bytes', async () => {
     const home = tempHome();
     writePlugin(home);
-    fs.mkdirSync(path.dirname(eventsFile(home)), { recursive: true });
-    fs.writeFileSync(eventsFile(home), '{}\n');
+    const file = eventsFile(home);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, '{"payload":{"prompt":"my secret plan"}}\n');
+    const ino = fs.statSync(file).ino;
+    const prompts = stubConsent(undefined);
     const { manager } = makeManager(home, { installed: true });
 
     await manager.remove();
-    expect(fs.existsSync(eventsFile(home))).toBe(true);
+    expect(fs.existsSync(file)).toBe(true);
+    expect(fs.statSync(file).size).toBe(0);
+    expect(fs.statSync(file).ino).toBe(ino);
+    // The message says so, in words: "remain in" was the old copy.
+    const said = prompts.map((p) => p.message).join('\n');
+    expect(said).toContain('were cleared');
+    expect(said).toContain('every prompt and last assistant message');
+    expect(said).not.toContain('remain in');
+  });
+
+  it('clears the recorded events even when there is no plugin left to remove', async () => {
+    // `rm -rf`-ed by hand, then "Remove" clicked for good measure: the
+    // gesture still means "stop keeping my prompts".
+    const home = tempHome();
+    const file = eventsFile(home);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, '{}\n{}\n');
+    const { manager } = makeManager(home, { installed: true });
+
+    await manager.remove();
+    expect(fs.statSync(file).size).toBe(0);
+  });
+
+  it('does not create an events file that was never there', async () => {
+    const home = tempHome();
+    writePlugin(home);
+    const { manager } = makeManager(home, { installed: true });
+    await manager.remove();
+    expect(fs.existsSync(eventsFile(home))).toBe(false);
+  });
+
+  it('leaves the events alone when it refuses a foreign directory', async () => {
+    const home = tempHome();
+    writePlugin(home, JSON.stringify({ name: 'someone-elses-plugin' }));
+    const file = eventsFile(home);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, '{}\n');
+    const { manager } = makeManager(home, { installed: true });
+
+    await manager.remove();
+    // Nothing was removed, so nothing is cleared: the two go together.
+    expect(fs.readFileSync(file, 'utf8')).toBe('{}\n');
   });
 });
 
@@ -605,6 +734,93 @@ describe('hooks: activate-time self-heal', () => {
     expect(state.pluginVersion).toBe(PLUGIN_VERSION);
     expect(state.pluginDir).toBe(pluginDir(home));
   });
+
+  // The upgrade every existing install takes on the first activate after v5:
+  // hooks.json on disk still runs the v4 command (no umask), the stored
+  // version says 4. Without the bump this would read as "hand-edited but
+  // still ours" and be left alone — and the file would go on being created
+  // world-readable.
+  it('v5: rewrites a v4 install whose hooks.json still runs the umask-less command', async () => {
+    const home = tempHome();
+    const V4_COMMAND =
+      '/bin/sh -c \'mkdir -p "$HOME/.lineage"; p=$(cat); [ -n "$p" ] || p=null; ' +
+      'printf "{\\"lineage_node_id\\":\\"%s\\",\\"payload\\":%s}\\n" ' +
+      '"${LINEAGE_NODE_ID:-}" "$p" >> "$HOME/.lineage/events.ndjson"\'';
+    expect(V4_COMMAND).not.toBe(HOOK_COMMAND);
+    const v4 = JSON.parse(renderHooksJson('linux')) as {
+      hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+    };
+    for (const matchers of Object.values(v4.hooks)) matchers[0]!.hooks[0]!.command = V4_COMMAND;
+    writePlugin(home, renderPluginJson(), JSON.stringify(v4, null, 2));
+    const { manager, stored } = makeManager(home, {
+      installed: true,
+      pluginDir: pluginDir(home),
+      pluginVersion: 4,
+    });
+    expect(manager.isInstalled()).toBe(false); // verify() knows only the current command
+
+    const state = await manager.selfHeal();
+    expect(state.installed).toBe(true);
+    expect(state.pluginVersion).toBe(PLUGIN_VERSION);
+    expect(stored().pluginVersion).toBe(PLUGIN_VERSION);
+    expect(
+      fs.readFileSync(path.join(pluginDir(home), 'hooks', 'hooks.json'), 'utf8'),
+    ).toBe(renderHooksJson());
+    expect(manager.isInstalled()).toBe(true);
+  });
+});
+
+// The rotation decision, on its own. The integration test above can only
+// produce whatever THIS machine's filesystem does with a freed inode; these
+// pin every case, including the one ubuntu CI produces and APFS never will.
+describe('hooks: isRotated', () => {
+  const id = (ino: number, birthtimeMs: number, size: number): FileIdentity => ({
+    ino,
+    birthtimeMs,
+    size,
+  });
+
+  it('is false for the same file, grown or unchanged', () => {
+    expect(isRotated(id(7, 1000, 40), id(7, 1000, 40), 40)).toBe(false);
+    expect(isRotated(id(7, 1000, 40), id(7, 1000, 120), 40)).toBe(false);
+  });
+
+  it('is true when the inode changed, whatever the size', () => {
+    expect(isRotated(id(7, 1000, 40), id(8, 1000, 120), 40)).toBe(true);
+    expect(isRotated(id(7, 1000, 40), id(8, 1000, 40), 40)).toBe(true);
+  });
+
+  it('ext4: is true for the SAME inode born again, even when the file is larger', () => {
+    // rm + recreate on ext4 reuses the inode number. The size exceeds our
+    // offset, the inode is unchanged — only the birth time moved. Reading on
+    // from the stale offset here is what produced garbage in CI.
+    expect(isRotated(id(7, 1000, 40), id(7, 2000, 120), 40)).toBe(true);
+  });
+
+  it('ignores a birth time the filesystem does not report (0 on either side)', () => {
+    // Zero means "no creation time here", not "born at the epoch": a change
+    // to or from zero must not read as a rotation.
+    expect(isRotated(id(7, 0, 40), id(7, 2000, 120), 40)).toBe(false);
+    expect(isRotated(id(7, 1000, 40), id(7, 0, 120), 40)).toBe(false);
+    expect(isRotated(id(7, 0, 40), id(7, 0, 120), 40)).toBe(false);
+  });
+
+  it('ignores an inode of 0 (platforms that report none), and falls back to the other signals', () => {
+    expect(isRotated(id(0, 1000, 40), id(0, 1000, 120), 40)).toBe(false);
+    expect(isRotated(id(7, 1000, 40), id(0, 1000, 120), 40)).toBe(false);
+    expect(isRotated(id(0, 1000, 40), id(0, 2000, 120), 40)).toBe(true);
+  });
+
+  it('is true when the file is shorter than what was read from it', () => {
+    // In-place truncation: same inode, same birth time, only the size says.
+    expect(isRotated(id(7, 1000, 40), id(7, 1000, 10), 40)).toBe(true);
+    expect(isRotated(null, id(7, 1000, 10), 40)).toBe(true);
+  });
+
+  it('with nothing to compare against, only the size can speak', () => {
+    expect(isRotated(null, id(7, 1000, 120), 0)).toBe(false);
+    expect(isRotated(null, id(7, 1000, 120), 40)).toBe(false);
+  });
 });
 
 describe('hooks: events watcher', () => {
@@ -652,8 +868,11 @@ describe('hooks: events watcher', () => {
     expect(seen[0]!.event).toBe('Stop');
     expect(seen[0]!.sessionId).toBeNull();
 
-    // Rotation: a new inode whose size still exceeds our old offset — only the
-    // inode check can see this.
+    // Rotation: a recreated file whose size still exceeds our old offset, so
+    // the size check cannot see it. On APFS the new file wears a new inode;
+    // on ext4 it very often wears the SAME one (freed inode numbers are
+    // handed straight back), and only the birth time tells — see isRotated
+    // and its unit tests below. Both filesystems run this test in CI.
     fs.rmSync(file);
     fs.writeFileSync(
       file,
@@ -696,6 +915,30 @@ describe('hooks: events watcher', () => {
       await until(() => seen.some((e) => e.event === 'Notification')),
     ).toBe(true);
   }, 20_000);
+
+  onPosix('tightens a world-readable events file and directory on start', async () => {
+    // What a v4 hook left behind: 0644 in 0755. umask in the v5 command only
+    // governs creation, so the extension has to chmod what already exists.
+    const home = tempHome();
+    const file = eventsFile(home);
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o755 });
+    fs.chmodSync(path.dirname(file), 0o755);
+    fs.writeFileSync(file, '{"hook_event_name":"Stop"}\n', { mode: 0o644 });
+    fs.chmodSync(file, 0o644);
+    expect(modeOf(file)).toBe(0o644);
+
+    const { manager } = makeManager(home, { installed: true });
+    const seen: HookEvent[] = [];
+    manager.startWatcher((e) => seen.push(e));
+
+    expect(modeOf(path.dirname(file))).toBe(0o700);
+    expect(modeOf(file)).toBe(0o600);
+    // ...and the tail still works afterwards, from the end, as before.
+    fs.appendFileSync(file, '{"hook_event_name":"Notification"}\n');
+    expect(await until(() => seen.length > 0)).toBe(true);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.event).toBe('Notification');
+  });
 
   it('never throws when a listener does', async () => {
     const home = tempHome();

@@ -61,8 +61,12 @@ export const VERBS_SKILL_NAME = 'flock';
  *  shell yes, PowerShell and cmd.exe — the shells Claude Code runs the Bash
  *  tool through on a Windows without Git — no. The rendered path is the one
  *  the extension itself wrote the script to, so it is right by construction,
- *  and it is what lets the install run on Windows at all. */
-export const VERBS_VERSION = 3;
+ *  and it is what lets the install run on Windows at all.
+ *  v4: the CLI creates `~/.lineage/requests` 0700 and each request file
+ *  0600. A request carries the `--prompt` — the opening message for every
+ *  fork, i.e. the user's own words — and v3 left it world-readable for the
+ *  seconds it sat on disk. Same reason hooks.PLUGIN_VERSION went to v5. */
+export const VERBS_VERSION = 4;
 
 const SCRIPT_BASENAME = 'flock-verbs.mjs';
 const REQUESTS_DIR_BASENAME = 'requests';
@@ -279,7 +283,10 @@ export function renderVerbScript(): string {
     "    'CLAUDE_SESSION_ID).');",
     '}',
     '',
-    'fs.mkdirSync(DIR, { recursive: true });',
+    '// The request carries the prompt, so the directory is 0700 and the file',
+    '// 0600 — readable by this user alone (v4). Modes are creation-only and',
+    '// ignored on Windows, where the profile folder\'s ACL already does this.',
+    'fs.mkdirSync(DIR, { recursive: true, mode: 0o700 });',
     'const id = randomUUID();',
     "const reqFile = path.join(DIR, id + '.json');",
     "const replyFile = path.join(DIR, id + '.reply.json');",
@@ -287,7 +294,7 @@ export function renderVerbScript(): string {
     "if (typeof prompt === 'string' && prompt.length > 0) body.prompt = prompt;",
     'if (names.length > 0) body.titles = names.map((n) => n.trim());',
     "const tmp = path.join(DIR, '.' + id + '.tmp');",
-    "fs.writeFileSync(tmp, JSON.stringify(body) + '\\n');",
+    "fs.writeFileSync(tmp, JSON.stringify(body) + '\\n', { mode: 0o600 });",
     'fs.renameSync(tmp, reqFile);',
     '',
     'const deadline = Date.now() + WAIT_MS;',
@@ -760,11 +767,25 @@ export class AgentVerbsManager implements DisposableLike {
     return { ok: true };
   }
 
+  /** mkdir -p `~/.lineage/requests`, 0700, and tighten it if it already
+   *  exists looser. Request files hold the fork prompt — the user's words —
+   *  and the CLI (v4) creates both directory and file private; a directory a
+   *  v3 CLI created is 0755 until this chmods it. The chmod is best effort:
+   *  it must never stop the watcher, so a failure is logged and ignored (and
+   *  skipped outright on Windows, where NTFS has ACLs, not mode bits). */
   private ensureRequestsDir(): void {
+    const dir = this.requestsPath();
     try {
-      fs.mkdirSync(this.requestsPath(), { recursive: true });
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     } catch (err) {
       logError('verbs: create requests directory', err);
+      return;
+    }
+    if (process.platform === 'win32') return;
+    try {
+      if ((fs.statSync(dir).mode & 0o777) !== 0o700) fs.chmodSync(dir, 0o700);
+    } catch (err) {
+      logError('verbs: restrict requests directory', err);
     }
   }
 

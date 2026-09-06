@@ -165,6 +165,16 @@ export function sessionIdOfRollout(basename: unknown): string | null {
  * `sessionName` is DROPPED, and this is the one place that says so. Codex has
  * no start-time naming flag, so a Codex row is named by Flock's terminal title
  * and by nothing on the CLI side.
+ *
+ * The opening prompt sits behind a `--`, the same terminator buildShellArgs
+ * (terminals.ts) puts in front of a Claude prompt, so a prompt that begins
+ * with `-` is a prompt and not an option. Codex's parser is clap
+ * (`codex [OPTIONS] [PROMPT]`, `codex resume [SESSION_ID] [PROMPT]`), and clap
+ * honours `--` the standard way — checked against codex-cli 0.153.0 without
+ * starting a session: `codex archive --zz-probe` is "unexpected argument",
+ * `codex archive -- --zz-probe` reaches the runtime. The terminator is emitted
+ * only when there is a prompt to protect; a launch with no opening turn keeps
+ * its argv as it was.
  */
 export function buildCodexArgs(opts: LaunchOptions): string[] {
   const args: string[] = [];
@@ -204,7 +214,7 @@ export function buildCodexArgs(opts: LaunchOptions): string[] {
       : preamble !== ''
         ? preamble
         : prompt;
-  if (opening !== '') args.push(opening);
+  if (opening !== '') args.push('--', opening);
 
   return args;
 }

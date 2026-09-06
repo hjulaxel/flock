@@ -33,6 +33,28 @@
 //      the user never opened on the default account is still asked for; that
 //      prompt is real security, not lost settings.
 //
+// And one mechanism that is deliberately NOT additive, run only by hand:
+//
+//   3. RESEEDING (`reseedProfileConfig`, behind the account row's "Refresh
+//      Account Config from Default Login…"). Seeding copies `mcpServers` — and
+//      MCP server definitions carry `env` blocks, which is where MCP API keys
+//      live — once, into every profile, and then never looks again. A key
+//      rotated or a server deleted in `~/.claude.json` therefore lives on in N
+//      profile directories until somebody notices. The reseed writes the SAME
+//      allowlisted keys over again, overwriting this time, from the default
+//      identity file only. The allowlists are the whole contract: never
+//      `oauthAccount`, never `.credentials.json`, never a symlinked item, never
+//      a key outside ROOT_SEED_KEYS / PROJECT_SEED_KEYS. `planReseed` is the
+//      read-only half, so the dialog can name what is about to be written.
+//
+//   4. RETRACTING (`retractIdentitySeed`). All of the above is the CLAUDE
+//      CLI's layout. Through 0.4.0 account creation ran it for every new
+//      directory, Codex homes included, so a CODEX_HOME received a seeded
+//      `.claude.json` — mcpServers and their env keys — that no program ever
+//      read. Activation now removes such a file, but only when it is purely
+//      seeding's product (`isSeedOnlyIdentity`); a file the CLI or the user has
+//      touched is evidence the directory is a Claude config dir after all.
+//
 // Imports: node builtins + ./log only. NEVER vscode — extension.ts calls this
 // at activation and after profile creation; tests drive it on real tmp dirs.
 
@@ -57,7 +79,10 @@ export const SHARED_PROFILE_ITEMS: readonly string[] = [
 /** Top-level identity-file keys a fresh profile inherits. Onboarding and the
  *  bypass acknowledgement are one-time consents the user already gave;
  *  `mcpServers` is the global server list, without which every custom-account
- *  session loses its tools; `theme` is cosmetic continuity. */
+ *  session loses its tools — and it is also the one key here that carries
+ *  SECRETS, since a server definition's `env` is where its API key goes. The
+ *  add-account dialog says so, and `reseedProfileConfig` is how a copy is
+ *  brought up to date; `theme` is cosmetic continuity. */
 export const ROOT_SEED_KEYS: readonly string[] = [
   'hasCompletedOnboarding',
   'bypassPermissionsModeAccepted',
@@ -141,6 +166,16 @@ async function readJsonOrNull(p: string): Promise<Record<string, unknown> | null
   }
 }
 
+/** A JSON deep clone, or undefined for a value that cannot make the trip — an
+ *  unserialisable value has no business being copied into another file. */
+function cloneValue(value: unknown): unknown {
+  try {
+    return JSON.parse(JSON.stringify(value)) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Copy `keys` from `from` into `into` WITHOUT overwriting. Returns whether
  *  anything landed. Values are deep-cloned through JSON so the two files can
  *  never share a mutable object. */
@@ -154,14 +189,41 @@ function seedKeys(
     if (key in into) continue;
     const value = from[key];
     if (value === undefined) continue;
-    try {
-      into[key] = JSON.parse(JSON.stringify(value)) as unknown;
-      changed = true;
-    } catch {
-      /* an unserialisable value has no business being copied */
-    }
+    const copy = cloneValue(value);
+    if (copy === undefined) continue;
+    into[key] = copy;
+    changed = true;
   }
   return changed;
+}
+
+/**
+ * Copy `keys` from `from` into `into`, OVERWRITING whatever `into` had for
+ * them. Returns the keys written, in allowlist order.
+ *
+ * `seedKeys`'s deliberate opposite on exactly one point, and its twin on every
+ * other: only the listed keys move, values are clones, and a key the source
+ * has no value for is left as it is — "refresh from the default" means the
+ * default's answers replace the profile's, not that the profile is emptied of
+ * answers the default never gave. A whole `mcpServers` object is one key, so
+ * a server deleted from the default is gone from the profile after this, and
+ * a rotated `env` value arrives with the definition it belongs to.
+ */
+export function reseedKeys(
+  into: Record<string, unknown>,
+  from: Record<string, unknown>,
+  keys: readonly string[],
+): string[] {
+  const written: string[] = [];
+  for (const key of keys) {
+    const value = from[key];
+    if (value === undefined) continue;
+    const copy = cloneValue(value);
+    if (copy === undefined) continue;
+    into[key] = copy;
+    written.push(key);
+  }
+  return written;
 }
 
 /**
@@ -265,4 +327,226 @@ export async function ensureProfileConfig(
     log('profileConfig: wired', dir, 'linked:', result.linked.join(',') || '(none)');
   }
   return result;
+}
+
+// ------------------------------------------------------------- 3. reseeding
+
+/** What a refresh would write into one profile — the dialog's material. Read
+ *  from disk, nothing written. */
+export interface ReseedPlan {
+  /** The file that will be rewritten: `<profileDir>/.claude.json`. */
+  identityPath: string;
+  /** The allowlisted root keys the default identity file has a value for.
+   *  Every one of them is written over; a key the default lacks is not here
+   *  and is not touched. */
+  rootKeys: string[];
+  /** The `mcpServers` entries the profile will hold afterwards — the default's
+   *  list, definitions and `env` included. Empty when the default has no
+   *  `mcpServers` key, in which case the profile's entries stay. */
+  mcpServers: string[];
+  /** The profile's own `mcpServers` entries the default no longer has. They are
+   *  gone after the refresh — the deleted-key case this exists for. */
+  droppedMcpServers: string[];
+  /** Project entries whose allowlisted keys (trust flags, tool lists, the
+   *  per-project `mcpServers`) will be written over. */
+  projectCount: number;
+}
+
+export interface ReseedResult {
+  ok: boolean;
+  /** What was written, when `ok`. */
+  plan?: ReseedPlan;
+  /** Why nothing was, when not. Human-readable, safe to show. */
+  error?: string;
+}
+
+interface ReseedInputs {
+  identityPath: string;
+  identity: Record<string, unknown>;
+  source: Record<string, unknown>;
+}
+
+/** The two files a reseed reads, or the sentence that says why it cannot. The
+ *  refusals mirror `ensureProfileConfig`'s: an empty or default directory, or a
+ *  profile whose identity file IS the source. */
+async function readReseedInputs(
+  profileDir: string,
+  sources: ProfileConfigSources,
+): Promise<ReseedInputs | string> {
+  const dir = typeof profileDir === 'string' ? profileDir.trim() : '';
+  const srcDir = typeof sources?.defaultDir === 'string' ? sources.defaultDir.trim() : '';
+  const srcFile =
+    typeof sources?.defaultIdentityFile === 'string' ? sources.defaultIdentityFile.trim() : '';
+  if (dir === '' || srcDir === '' || srcFile === '') {
+    return 'this account has no config directory of its own to refresh.';
+  }
+  if (path.resolve(dir) === path.resolve(srcDir)) {
+    return 'this is the default login — it is what the other accounts are refreshed from.';
+  }
+  const identityPath = path.join(dir, IDENTITY_FILE);
+  if (path.resolve(srcFile) === path.resolve(identityPath)) {
+    return 'this account reads the default identity file itself; there is nothing to copy.';
+  }
+  const source = await readJsonOrNull(srcFile);
+  if (source === null) {
+    return `the default login has no readable identity file at ${srcFile}.`;
+  }
+  const identity = (await readJsonOrNull(identityPath)) ?? {};
+  return { identityPath, identity, source };
+}
+
+function planFrom(inputs: ReseedInputs): ReseedPlan {
+  const { identityPath, identity, source } = inputs;
+  const rootKeys = ROOT_SEED_KEYS.filter((key) => source[key] !== undefined);
+
+  const sourceServers = source['mcpServers'];
+  const ownServers = identity['mcpServers'];
+  const mcpServers = isPlainObject(sourceServers) ? Object.keys(sourceServers) : [];
+  const droppedMcpServers =
+    isPlainObject(sourceServers) && isPlainObject(ownServers)
+      ? Object.keys(ownServers).filter((name) => !(name in sourceServers))
+      : [];
+
+  let projectCount = 0;
+  const sourceProjects = source['projects'];
+  if (isPlainObject(sourceProjects)) {
+    for (const entry of Object.values(sourceProjects)) {
+      if (!isPlainObject(entry)) continue;
+      if (PROJECT_SEED_KEYS.some((key) => entry[key] !== undefined)) projectCount += 1;
+    }
+  }
+
+  return { identityPath, rootKeys, mcpServers, droppedMcpServers, projectCount };
+}
+
+/**
+ * What `reseedProfileConfig` would write, without writing it — or null when it
+ * would refuse (no directory of its own, the default login itself, no source
+ * to read). The dialog in front of the refresh is built from this, so what the
+ * user is told is computed from the same two files the write will read.
+ */
+export async function planReseed(
+  profileDir: string,
+  sources: ProfileConfigSources,
+): Promise<ReseedPlan | null> {
+  try {
+    const inputs = await readReseedInputs(profileDir, sources);
+    return typeof inputs === 'string' ? null : planFrom(inputs);
+  } catch (err) {
+    logError('profileConfig: reseed plan failed', err);
+    return null;
+  }
+}
+
+/**
+ * Write the allowlisted keys from the default identity file into
+ * `<profileDir>/.claude.json` again, OVERWRITING the profile's copies.
+ *
+ * Only ever from `sources.defaultIdentityFile` — the switch's second source
+ * (`alsoSeedFrom`) is a source of one directory's trust answer, not of a
+ * refresh. Only ever the two allowlists, through `reseedKeys`: the login, the
+ * caches, the counters, `.credentials.json` and the symlinked items are not
+ * read and not written. A profile with no identity file yet gets one, which
+ * is what seeding would have given it. Never throws.
+ */
+export async function reseedProfileConfig(
+  profileDir: string,
+  sources: ProfileConfigSources,
+): Promise<ReseedResult> {
+  try {
+    const inputs = await readReseedInputs(profileDir, sources);
+    if (typeof inputs === 'string') return { ok: false, error: inputs };
+    const { identityPath, identity, source } = inputs;
+    const plan = planFrom(inputs);
+
+    reseedKeys(identity, source, ROOT_SEED_KEYS);
+
+    const sourceProjects = source['projects'];
+    if (isPlainObject(sourceProjects)) {
+      const existing = identity['projects'];
+      const projects: Record<string, unknown> = isPlainObject(existing) ? existing : {};
+      let touched = false;
+      for (const [projectPath, entry] of Object.entries(sourceProjects)) {
+        if (!isPlainObject(entry)) continue;
+        const current = projects[projectPath];
+        const target: Record<string, unknown> = isPlainObject(current) ? current : {};
+        if (reseedKeys(target, entry, PROJECT_SEED_KEYS).length > 0) {
+          projects[projectPath] = target;
+          touched = true;
+        }
+      }
+      // As in seeding: attached only when something landed in it.
+      if (touched && !isPlainObject(existing)) identity['projects'] = projects;
+    }
+
+    await fsp.writeFile(identityPath, JSON.stringify(identity, null, 2) + '\n', 'utf-8');
+    log(
+      'profileConfig: reseeded',
+      identityPath,
+      'root:',
+      plan.rootKeys.join(',') || '(none)',
+      'projects:',
+      plan.projectCount,
+    );
+    return { ok: true, plan };
+  } catch (err) {
+    logError('profileConfig: reseed failed', err);
+    return { ok: false, error: 'the identity file could not be rewritten — see the Flock log.' };
+  }
+}
+
+// ------------------------------------------------------------ retraction
+
+/**
+ * Pure. Is this identity file NOTHING BUT what seeding wrote? True when every
+ * top-level key is one of ROOT_SEED_KEYS or `projects`, and every project entry
+ * holds only PROJECT_SEED_KEYS. `oauthAccount`, `numStartups`, a cache, a key
+ * added by hand — any of those means the CLI or the user has been here, and
+ * the file is theirs to keep.
+ */
+export function isSeedOnlyIdentity(root: unknown): boolean {
+  if (!isPlainObject(root)) return false;
+  for (const [key, value] of Object.entries(root)) {
+    if (key === 'projects') {
+      if (!isPlainObject(value)) return false;
+      for (const entry of Object.values(value)) {
+        if (!isPlainObject(entry)) return false;
+        if (!Object.keys(entry).every((k) => PROJECT_SEED_KEYS.includes(k))) {
+          return false;
+        }
+      }
+      continue;
+    }
+    if (!ROOT_SEED_KEYS.includes(key)) return false;
+  }
+  return true;
+}
+
+/**
+ * Remove a `.claude.json` that seeding put where no Claude CLI will read it.
+ *
+ * Through 0.4.0 `createProfileDir` wired EVERY new account's directory the
+ * Claude way, so a Codex account's CODEX_HOME received an identity file
+ * carrying the default login's `mcpServers` — env keys included — that Codex
+ * never opens: a copy of secrets with no reader. The file is removed only when
+ * `isSeedOnlyIdentity` says it is purely seeding's product; a symlink, a file
+ * that does not parse, or one carrying anything else is left exactly where it
+ * is. Returns whether a file was removed. Never throws.
+ */
+export async function retractIdentitySeed(profileDir: string): Promise<boolean> {
+  const dir = typeof profileDir === 'string' ? profileDir.trim() : '';
+  if (dir === '') return false;
+  const identityPath = path.join(dir, IDENTITY_FILE);
+  try {
+    const stats = await lstatOrNull(identityPath);
+    if (stats === null || !stats.isFile()) return false;
+    const root = await readJsonOrNull(identityPath);
+    if (root === null || !isSeedOnlyIdentity(root)) return false;
+    await fsp.unlink(identityPath);
+    log('profileConfig: removed a seed-only identity file', identityPath);
+    return true;
+  } catch (err) {
+    logError('profileConfig: retract failed', err);
+    return false;
+  }
 }

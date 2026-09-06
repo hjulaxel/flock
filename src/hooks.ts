@@ -62,8 +62,13 @@ export const PLUGIN_NAME = 'lineage-events';
  *  compaction has STARTED — the roster reports such a session as plainly
  *  `busy`, indistinguishable from a turn, and the transcript's
  *  `compact_boundary` record is only written once the compaction is already
- *  over. Without it the purple ring has nothing to key on. */
-export const PLUGIN_VERSION = 4;
+ *  over. Without it the purple ring has nothing to key on.
+ *  v5: the command opens with `umask 077`, so the hook creates `~/.lineage`
+ *  0700 and events.ndjson 0600. The payload it appends is not metadata: a
+ *  UserPromptSubmit carries the full prompt and a Stop the last assistant
+ *  message, and a v4 install left them world-readable (0644 in a 0755
+ *  directory). The bump is what gets every existing install rewritten. */
+export const PLUGIN_VERSION = 5;
 /** semver stamped into plugin.json (the plugin loader wants a semver). */
 const PLUGIN_SEMVER = '0.1.0';
 
@@ -129,9 +134,18 @@ export function eventsFile(home?: string): string {
  * yields an empty string, and empty stdin degrades to `payload:null` — both
  * still parse, both still poke. Still ONE write(2); see the v2 note above on
  * why the append must stay a single printf.
+ *
+ * `umask 077` first (v5). The two paths the command creates — the directory
+ * with mkdir -p, the file with `>>` — inherit the hook process's umask, which
+ * is the user's default (022) and made both world-readable. The payload is
+ * the user's prompts and the model's replies, so they are created 0700 and
+ * 0600 instead. umask only governs CREATION: a file that already exists keeps
+ * its bits, which is why the extension also chmods on start (see
+ * restrictEventsPermissions). The umask is scoped to this /bin/sh, so nothing
+ * the CLI does afterwards is affected.
  */
 export const HOOK_COMMAND =
-  '/bin/sh -c \'mkdir -p "$HOME/.lineage"; p=$(cat); [ -n "$p" ] || p=null; ' +
+  '/bin/sh -c \'umask 077; mkdir -p "$HOME/.lineage"; p=$(cat); [ -n "$p" ] || p=null; ' +
   'printf "{\\"lineage_node_id\\":\\"%s\\",\\"payload\\":%s}\\n" ' +
   '"${LINEAGE_NODE_ID:-}" "$p" >> "$HOME/.lineage/events.ndjson"\'';
 
@@ -161,6 +175,16 @@ export const HOOK_COMMAND =
  * the one character every layer on that path has an opinion about. `[char]34`
  * is the quote and `[char]10` the newline. The line ends in LF alone, which is
  * what the reader splits on.
+ *
+ * PERMISSIONS ARE DECIDED HERE, NOT DEFERRED. The POSIX command's `umask 077`
+ * (v5) has no PowerShell one-liner equivalent — NTFS access is ACLs, not mode
+ * bits — and it needs none: `~/.lineage` sits under the profile folder, and a
+ * file there inherits the profile's ACL, which on a default Windows install
+ * grants the owning user, SYSTEM and Administrators and nobody else — the same
+ * circle 0700 draws on POSIX. The one shape this does not cover is a profile
+ * folder whose ACL somebody widened by hand, and a hook that must stay a
+ * single instant append is the wrong place to run Set-Acl for that case.
+ * `restrictEventsPermissions` skips win32 for the same reason.
  */
 export const HOOK_COMMAND_WINDOWS =
   '$q=[char]34;$p=[Console]::In.ReadToEnd().Trim();if(-not $p){$p=\'null\'};' +
@@ -188,12 +212,15 @@ export function hookCommandFor(platform: string): string {
  * Codex events, because a Codex hook that the user has not yet trusted (see
  * codexHooks.ts) is silent while Claude's keeps writing.
  *
- * Still ONE write(2), for the reason HOOK_COMMAND's note gives. Not a change
- * to HOOK_COMMAND itself: that string is persisted into every user's plugin
- * directory and changing it is a PLUGIN_VERSION bump and a rewrite.
+ * Still ONE write(2), for the reason HOOK_COMMAND's note gives, and the same
+ * `umask 077` for the same reason (v5 there, CODEX_HOOKS_VERSION 2 here). Not
+ * a change to HOOK_COMMAND itself: that string is persisted into every user's
+ * plugin directory and changing it is a PLUGIN_VERSION bump and a rewrite —
+ * and this one is persisted into every Codex hooks.json, so changing IT is a
+ * CODEX_HOOKS_VERSION bump (codexHooks.ts) and a re-trust in Codex.
  */
 export const CODEX_HOOK_COMMAND =
-  '/bin/sh -c \'mkdir -p "$HOME/.lineage"; p=$(cat); [ -n "$p" ] || p=null; ' +
+  '/bin/sh -c \'umask 077; mkdir -p "$HOME/.lineage"; p=$(cat); [ -n "$p" ] || p=null; ' +
   'printf "{\\"lineage_node_id\\":\\"%s\\",\\"cli\\":\\"codex\\",\\"payload\\":%s}\\n" ' +
   '"${LINEAGE_NODE_ID:-}" "$p" >> "$HOME/.lineage/events.ndjson"\'';
 
@@ -320,11 +347,14 @@ export class HooksManager implements DisposableLike {
   private fallbackTimer: NodeJS.Timeout | null = null;
   private silenceTimer: NodeJS.Timeout | null = null;
   private offset = 0;
-  private ino: number | null = null;
+  /** Which file `offset` is an offset INTO — see isRotated(). Null until the
+   *  events file has been stat'ed once. */
+  private identity: FileIdentity | null = null;
   private pending: Buffer = EMPTY;
   private draining = false;
   private disposed = false;
   private watchErrorLogged = false;
+  private permissionsWarned = false;
 
   // liveness signals
   private lastEvent: number | null = null;
@@ -488,12 +518,23 @@ export class HooksManager implements DisposableLike {
   }
 
   /** Safety-gated `rm -rf`: only when <pluginDir>/.claude-plugin/plugin.json
-   *  parses with name === PLUGIN_NAME. The events file is kept. Idempotent. */
+   *  parses with name === PLUGIN_NAME. Idempotent.
+   *
+   *  The recorded events go too — TRUNCATED, never unlinked. The file holds
+   *  every prompt the user typed and every last assistant message since the
+   *  install, and "remove the hooks" is the one gesture that says stop
+   *  keeping them; leaving it behind used to be justified as harmless
+   *  history, which it is not. Truncation keeps the inode, so a watcher still
+   *  running in another window (or in this one) sees `size < offset` and
+   *  rewinds; an unlink would leave that watcher holding a dead inode and
+   *  the next hook recreating the file beside it. The Codex hooks, if still
+   *  installed, keep appending to the emptied file — they share it. */
   async remove(): Promise<HookInstallState> {
     const dir = this.directory();
     const manifest = readTextSync(this.manifestPath());
     if (manifest === null) {
       log('hooks: nothing to remove at', dir);
+      clearEventsFile(this.eventsPath());
       return this.markRemoved();
     }
     if (path.basename(dir) !== PLUGIN_NAME || manifestName(manifest) !== PLUGIN_NAME) {
@@ -513,10 +554,14 @@ export class HooksManager implements DisposableLike {
       );
       return this.getState();
     }
+    const cleared = clearEventsFile(this.eventsPath());
     const state = await this.markRemoved();
     void showInfo(
       'Flock hook plugin removed. Existing Claude sessions keep it until ' +
-        `/reload-plugins or a restart. Recorded events remain in ${this.eventsPath()}.`,
+        '/reload-plugins or a restart. ' +
+        (cleared
+          ? `The recorded events (every prompt and last assistant message) in ${this.eventsPath()} were cleared.`
+          : `No recorded events were found at ${this.eventsPath()}.`),
     );
     log('hooks: removed', dir);
     return state;
@@ -597,9 +642,10 @@ export class HooksManager implements DisposableLike {
 
     const file = this.eventsPath();
     this.ensureEventsDir();
+    this.restrictEventsPermissions();
     try {
       const st = fs.statSync(file);
-      this.ino = st.ino;
+      this.identity = identityOf(st);
       if (st.size > MAX_EVENTS_BYTES) {
         fs.truncateSync(file, 0);
         this.offset = 0;
@@ -608,7 +654,7 @@ export class HooksManager implements DisposableLike {
         this.offset = st.size;
       }
     } catch {
-      this.ino = null;
+      this.identity = null;
       this.offset = 0;
     }
     this.pending = EMPTY;
@@ -680,7 +726,12 @@ export class HooksManager implements DisposableLike {
       '',
       `    ${hookCommandFor(process.platform)}`,
       '',
-      `Session events are appended to ${this.eventsPath()}.`,
+      'What it records. Every hook appends its payload to',
+      `${this.eventsPath()} — and for every Claude Code session on this`,
+      'machine that payload includes each prompt you type (UserPromptSubmit)',
+      'and the last assistant message of each turn (Stop). The file is private',
+      'to your user: it is created readable and writable by you alone (0600, in',
+      'a 0700 directory), and removing the hooks clears it.',
       '',
       'Existing Claude sessions pick the plugin up after /reload-plugins or a',
       'restart. Remove it any time with "Remove Instant-Update Hooks", or',
@@ -721,11 +772,49 @@ export class HooksManager implements DisposableLike {
     return { ok: true };
   }
 
+  /** mkdir -p `~/.lineage`, 0700: the hook command creates it that way too
+   *  (umask 077, v5), and whichever of the two gets there first must not
+   *  leave a world-readable directory for the other to fill. */
   private ensureEventsDir(): void {
     try {
-      fs.mkdirSync(path.dirname(this.eventsPath()), { recursive: true });
+      fs.mkdirSync(path.dirname(this.eventsPath()), {
+        recursive: true,
+        mode: 0o700,
+      });
     } catch (err) {
       logError('hooks: create events directory', err);
+    }
+  }
+
+  /** chmod the events directory to 0700 and the file to 0600 if they exist.
+   *  The v5 hook command creates them that way, but umask governs creation
+   *  only: a file a v4 hook created is 0644 in a 0755 directory and stays so
+   *  until somebody chmods it — that somebody is this, on every watcher
+   *  start. Best effort throughout: a read-only home, a filesystem without
+   *  POSIX bits, a file owned by another user — none of those may stop the
+   *  watcher, so a failure is logged once and otherwise ignored. */
+  private restrictEventsPermissions(): void {
+    // NTFS has ACLs, not mode bits; see HOOK_COMMAND_WINDOWS. Node's chmod
+    // there only flips the read-only attribute, and the mode never reads
+    // back as 0600, so this would "restrict" the same file on every start.
+    if (process.platform === 'win32') return;
+    const file = this.eventsPath();
+    const targets: Array<[string, number]> = [
+      [path.dirname(file), 0o700],
+      [file, 0o600],
+    ];
+    for (const [target, mode] of targets) {
+      try {
+        if (!fs.existsSync(target)) continue;
+        if ((fs.statSync(target).mode & 0o777) === mode) continue;
+        fs.chmodSync(target, mode);
+        log('hooks: restricted', target, 'to', mode.toString(8));
+      } catch (err) {
+        if (!this.permissionsWarned) {
+          logError('hooks: restrict events permissions', err);
+          this.permissionsWarned = true;
+        }
+      }
     }
   }
 
@@ -854,25 +943,28 @@ export class HooksManager implements DisposableLike {
       } catch {
         // File not created yet (or removed): rewind and wait.
         this.offset = 0;
-        this.ino = null;
+        this.identity = null;
         this.pending = EMPTY;
         this.closeWatcher('file');
         return;
       }
       const size = st.size;
+      const next = identityOf(st);
       // Rotation (rm + recreate) leaves the size larger than our offset, so a
-      // size check alone cannot see it — the inode can.
-      if (this.ino !== null && st.ino !== 0 && st.ino !== this.ino) {
+      // size check alone cannot see it; the inode usually can, and the birth
+      // time covers the filesystems where it cannot — see isRotated().
+      if (isRotated(this.identity, next, this.offset)) {
         this.offset = 0;
         this.pending = EMPTY;
         this.closeWatcher('file');
-        log('hooks: events file was replaced; reading from the start');
+        log(
+          'hooks: events file was replaced or truncated; reading from the start',
+          `(ino ${String(this.identity?.ino)}→${String(next.ino)},`,
+          `born ${String(this.identity?.birthtimeMs)}→${String(next.birthtimeMs)},`,
+          `size ${String(size)})`,
+        );
       }
-      this.ino = st.ino;
-      if (size < this.offset) {
-        this.offset = 0;
-        this.pending = EMPTY;
-      }
+      this.identity = next;
       if (size === this.offset) return;
       if (size - this.offset > MAX_DRAIN_BYTES) {
         log(
@@ -936,7 +1028,7 @@ export class HooksManager implements DisposableLike {
         try {
           fs.truncateSync(file, 0);
           this.offset = 0;
-          this.ino = fs.statSync(file).ino;
+          this.identity = identityOf(fs.statSync(file));
           log(
             'hooks: truncated the events file at',
             String(MAX_EVENTS_BYTES),
@@ -1015,6 +1107,84 @@ export function homeDir(home?: string): string {
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/** What the tail reader remembers about the file its byte offset points
+ *  into — enough to tell, on the next stat, whether it is still the same
+ *  file. `birthtimeMs` is 0 where the filesystem has no creation time. */
+export interface FileIdentity {
+  ino: number;
+  birthtimeMs: number;
+  size: number;
+}
+
+export function identityOf(st: fs.Stats): FileIdentity {
+  return { ino: st.ino, birthtimeMs: st.birthtimeMs, size: st.size };
+}
+
+/**
+ * Pure. Is `next` a different file — or a shorter one — than the `prev` that
+ * `offset` bytes have been read from? True means: rewind to 0.
+ *
+ * Three signals, any one of which is enough:
+ *
+ *   - the inode changed. The classic rotation test (rm + recreate), but NOT
+ *     sufficient on its own: ext4 hands a freshly unlinked inode number
+ *     straight back to the next creat(2) in the same directory, so rm +
+ *     recreate on Linux routinely returns the SAME ino with a larger size.
+ *     The tail is then read from a stale offset and the first "line" is the
+ *     middle of somebody's JSON. (This is how "survives rotation" passed on
+ *     APFS, which never reuses an inode that fast, and failed on ubuntu CI.)
+ *   - the birth time changed, where both stats report one. A recreated file
+ *     is born anew whatever inode it wears; APFS, NTFS, and ext4/xfs/btrfs
+ *     through statx all report it, and a filesystem without it reports 0,
+ *     which the guard reads as "no opinion" rather than as a change. (The
+ *     one way this misfires is a libuv that could not use statx at all —
+ *     kernels before 4.11, or a seccomp filter that rejects it — where it
+ *     substitutes ctime for birth time; that is ancient Docker, and the
+ *     cost there is a replay of the file, never a lost event.)
+ *   - the file is shorter than what has been read from it. In-place
+ *     truncation keeps both inode and birth time; only the size says.
+ *
+ * With no `prev` there is nothing to compare, and only the size can speak.
+ */
+export function isRotated(
+  prev: FileIdentity | null,
+  next: FileIdentity,
+  offset: number,
+): boolean {
+  if (next.size < offset) return true;
+  if (prev === null) return false;
+  if (next.ino !== 0 && prev.ino !== 0 && next.ino !== prev.ino) return true;
+  if (
+    next.birthtimeMs > 0 &&
+    prev.birthtimeMs > 0 &&
+    next.birthtimeMs !== prev.birthtimeMs
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Truncate the events file to zero bytes. True when there was a file to
+ * clear; false when there was none or it could not be cleared (logged, never
+ * thrown — removal must finish either way). Exported for codexHooks.ts: both
+ * removals clear the same file, for the reason HooksManager.remove() gives,
+ * and both must do it the same way — truncate, never unlink, so a watcher
+ * holding the inode rewinds instead of going stale. Never CREATES the file:
+ * a user who has nothing recorded should not gain an empty file for asking.
+ */
+export function clearEventsFile(file: string): boolean {
+  try {
+    if (!fs.existsSync(file)) return false;
+    fs.truncateSync(file, 0);
+    log('hooks: cleared recorded events in', file);
+    return true;
+  } catch (err) {
+    logError('hooks: clear events file', err);
+    return false;
+  }
 }
 
 /** The `name` field of a plugin manifest, or undefined when it does not

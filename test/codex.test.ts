@@ -102,7 +102,7 @@ describe('buildCodexArgs: flags and ordering', () => {
     ]);
   });
 
-  it('the prompt is LAST, after every flag', () => {
+  it('the prompt is LAST, after every flag, behind the terminator', () => {
     const args = buildCodexArgs(
       opts({ resumeId: ID_B, cwd: '/w', addDirs: ['/x'], prompt: 'go' }),
     );
@@ -113,9 +113,21 @@ describe('buildCodexArgs: flags and ordering', () => {
       '/w',
       '--add-dir',
       '/x',
+      '--',
       'go',
     ]);
     expect(args[args.length - 1]).toBe('go');
+  });
+
+  it('a prompt that starts with - is a prompt, not an option', () => {
+    // clap stops option parsing at `--`, the same way Commander does for the
+    // Claude CLI; without it `-x` is "unexpected argument" and the tab dies.
+    const args = buildCodexArgs(opts({ prompt: '-x marks the spot' }));
+    expect(args).toEqual(['--', '-x marks the spot']);
+  });
+
+  it('emits the terminator only when there is a prompt to protect', () => {
+    expect(buildCodexArgs(opts({ resumeId: ID_B }))).not.toContain('--');
   });
 
   it('the id sits flush against its subcommand, out of reach of any flag', () => {
@@ -133,11 +145,12 @@ describe('buildCodexArgs: what codex cannot do natively', () => {
     const args = buildCodexArgs(
       opts({ appendSystemPrompt: 'You are in project API.', prompt: 'hello' }),
     );
-    expect(args).toEqual(['You are in project API.\n\nhello']);
+    expect(args).toEqual(['--', 'You are in project API.\n\nhello']);
   });
 
   it('carries appendSystemPrompt alone when there is no user prompt', () => {
     expect(buildCodexArgs(opts({ appendSystemPrompt: 'context' }))).toEqual([
+      '--',
       'context',
     ]);
   });

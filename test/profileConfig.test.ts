@@ -17,6 +17,11 @@ import {
   ROOT_SEED_KEYS,
   SHARED_PROFILE_ITEMS,
   ensureProfileConfig,
+  isSeedOnlyIdentity,
+  planReseed,
+  reseedKeys,
+  reseedProfileConfig,
+  retractIdentitySeed,
 } from '../src/profileConfig';
 import type { ProfileConfigSources } from '../src/profileConfig';
 
@@ -271,6 +276,179 @@ describe('profileConfig: seeding from the account being LEFT', () => {
   });
 });
 
+describe('profileConfig: reseedKeys — the overwriting twin of seeding', () => {
+  it('overwrites the listed keys, returns them, and leaves the rest alone', () => {
+    const into: Record<string, unknown> = {
+      theme: 'light',
+      mcpServers: { stale: { env: { KEY: 'old' } } },
+      oauthAccount: { emailAddress: 'mine@example.com' },
+      numStartups: 7,
+    };
+    const from: Record<string, unknown> = {
+      theme: 'dark',
+      mcpServers: { fresh: { env: { KEY: 'new' } } },
+      oauthAccount: { emailAddress: 'theirs@example.com' },
+      numStartups: 999,
+    };
+    const written = reseedKeys(into, from, ROOT_SEED_KEYS);
+    expect(written).toEqual(['mcpServers', 'theme']);
+    expect(into['theme']).toBe('dark');
+    // The whole object is one key: the stale server is GONE, not merged over.
+    expect(into['mcpServers']).toEqual({ fresh: { env: { KEY: 'new' } } });
+    expect(into['oauthAccount']).toEqual({ emailAddress: 'mine@example.com' });
+    expect(into['numStartups']).toBe(7);
+  });
+
+  it('leaves a key the source has no value for — a refresh is not an erasure', () => {
+    const into: Record<string, unknown> = { theme: 'light', hasCompletedOnboarding: true };
+    const written = reseedKeys(into, { mcpServers: {} }, ROOT_SEED_KEYS);
+    expect(written).toEqual(['mcpServers']);
+    expect(into['theme']).toBe('light');
+    expect(into['hasCompletedOnboarding']).toBe(true);
+  });
+
+  it('writes clones, never the source object itself', () => {
+    const servers = { a: { env: { KEY: 'x' } } };
+    const into: Record<string, unknown> = {};
+    reseedKeys(into, { mcpServers: servers }, ROOT_SEED_KEYS);
+    servers.a.env.KEY = 'mutated';
+    expect((into['mcpServers'] as typeof servers).a.env.KEY).toBe('x');
+  });
+});
+
+describe('profileConfig: reseeding a profile from the default login', () => {
+  // The case the verb exists for: a profile seeded months ago holds an MCP
+  // server whose key has since been rotated on the default login, and a
+  // second server that the default no longer has at all. Seeding
+  // (`ensureProfileConfig`) is additive and will never fix either.
+  const staleProfile = (): Record<string, unknown> => ({
+    oauthAccount: { emailAddress: 'work@example.com' },
+    theme: 'light',
+    mcpServers: {
+      magma: { command: 'magma-mcp', env: { MAGMA_KEY: 'rotated-away' } },
+      retired: { command: 'old-mcp', env: { OLD_KEY: 'should-not-survive' } },
+    },
+    numStartups: 41,
+    projects: {
+      '/Users/x/repo': {
+        hasTrustDialogAccepted: false,
+        allowedTools: [],
+        lastCost: 9.99,
+      },
+    },
+  });
+  const freshDefault = (): Record<string, unknown> => ({
+    oauthAccount: { emailAddress: 'axel@magmamath.com' },
+    hasCompletedOnboarding: true,
+    theme: 'dark',
+    mcpServers: {
+      magma: { command: 'magma-mcp', env: { MAGMA_KEY: 'current' } },
+    },
+    numStartups: 412,
+    projects: {
+      '/Users/x/repo': {
+        hasTrustDialogAccepted: true,
+        allowedTools: ['Bash'],
+        lastCost: 1.23,
+      },
+    },
+  });
+
+  it('seeding alone leaves the rotated and the deleted key in place — the gap this closes', async () => {
+    fs.writeFileSync(identityFile, JSON.stringify(freshDefault()));
+    fs.writeFileSync(path.join(profileDir, '.claude.json'), JSON.stringify(staleProfile()));
+    await ensureProfileConfig(profileDir, sources());
+    const servers = readIdentity()['mcpServers'] as Record<string, { env: Record<string, string> }>;
+    expect(servers['magma']?.env['MAGMA_KEY']).toBe('rotated-away');
+    expect(servers['retired']).toBeDefined();
+  });
+
+  it('overwrites the allowlisted keys, drops the deleted server, and touches nothing else', async () => {
+    fs.writeFileSync(identityFile, JSON.stringify(freshDefault()));
+    fs.writeFileSync(path.join(profileDir, '.claude.json'), JSON.stringify(staleProfile()));
+    const credentials = path.join(profileDir, '.credentials.json');
+    fs.writeFileSync(credentials, '{"claudeAiOauth":{"accessToken":"secret"}}\n');
+
+    const result = await reseedProfileConfig(profileDir, sources());
+    expect(result.ok).toBe(true);
+    expect(result.plan?.rootKeys).toEqual(['hasCompletedOnboarding', 'mcpServers', 'theme']);
+    expect(result.plan?.mcpServers).toEqual(['magma']);
+    expect(result.plan?.droppedMcpServers).toEqual(['retired']);
+    expect(result.plan?.projectCount).toBe(1);
+
+    const after = readIdentity();
+    // The rotated key arrives, the deleted server goes.
+    expect(after['mcpServers']).toEqual({
+      magma: { command: 'magma-mcp', env: { MAGMA_KEY: 'current' } },
+    });
+    expect(after['theme']).toBe('dark');
+    expect(after['hasCompletedOnboarding']).toBe(true);
+    // The login and the junk are the profile's own, before and after.
+    expect(after['oauthAccount']).toEqual({ emailAddress: 'work@example.com' });
+    expect(after['numStartups']).toBe(41);
+    // Per project: the allowlisted keys refresh, the rest stays.
+    const project = (after['projects'] as Record<string, unknown>)['/Users/x/repo'] as Record<
+      string,
+      unknown
+    >;
+    expect(project['hasTrustDialogAccepted']).toBe(true);
+    expect(project['allowedTools']).toEqual(['Bash']);
+    expect(project['lastCost']).toBe(9.99);
+    // The credentials file is not a party to any of this.
+    expect(fs.readFileSync(credentials, 'utf-8')).toBe(
+      '{"claudeAiOauth":{"accessToken":"secret"}}\n',
+    );
+  });
+
+  it('leaves a key the default has no value for', async () => {
+    fs.writeFileSync(identityFile, JSON.stringify({ mcpServers: {} }));
+    fs.writeFileSync(
+      path.join(profileDir, '.claude.json'),
+      JSON.stringify({ theme: 'light', mcpServers: { retired: {} } }),
+    );
+    const result = await reseedProfileConfig(profileDir, sources());
+    expect(result.ok).toBe(true);
+    const after = readIdentity();
+    expect(after['theme']).toBe('light');
+    expect(after['mcpServers']).toEqual({});
+  });
+
+  it('refuses the default directory itself, and a missing source', async () => {
+    fs.writeFileSync(identityFile, JSON.stringify(freshDefault()));
+    const self = await reseedProfileConfig(defaultDir, sources());
+    expect(self.ok).toBe(false);
+    expect(self.error).toContain('default login');
+
+    fs.rmSync(identityFile);
+    fs.writeFileSync(path.join(profileDir, '.claude.json'), JSON.stringify(staleProfile()));
+    const orphan = await reseedProfileConfig(profileDir, sources());
+    expect(orphan.ok).toBe(false);
+    expect(readIdentity()).toEqual(staleProfile());
+  });
+
+  it('refuses an empty directory — an account with no directory of its own is the source, not a target', async () => {
+    fs.writeFileSync(identityFile, JSON.stringify(freshDefault()));
+    const result = await reseedProfileConfig('', sources());
+    expect(result.ok).toBe(false);
+    expect(await planReseed('', sources())).toBeNull();
+  });
+
+  it('planReseed names what the write will do, and writes nothing', async () => {
+    fs.writeFileSync(identityFile, JSON.stringify(freshDefault()));
+    fs.writeFileSync(path.join(profileDir, '.claude.json'), JSON.stringify(staleProfile()));
+    const plan = await planReseed(profileDir, sources());
+    expect(plan).toEqual({
+      identityPath: path.join(profileDir, '.claude.json'),
+      rootKeys: ['hasCompletedOnboarding', 'mcpServers', 'theme'],
+      mcpServers: ['magma'],
+      droppedMcpServers: ['retired'],
+      projectCount: 1,
+    });
+    expect(readIdentity()).toEqual(staleProfile());
+    expect(await planReseed(profileDir, { ...sources(), defaultIdentityFile: '/nowhere' })).toBeNull();
+  });
+});
+
 describe('profileConfig: the allowlists themselves', () => {
   it('the one key the whole design forbids is on NO list', () => {
     expect(ROOT_SEED_KEYS).not.toContain('oauthAccount');
@@ -283,5 +461,94 @@ describe('profileConfig: the allowlists themselves', () => {
   it('the trust flag the user actually feels is present', () => {
     expect(PROJECT_SEED_KEYS).toContain('hasTrustDialogAccepted');
     expect(ROOT_SEED_KEYS).toContain('hasCompletedOnboarding');
+  });
+});
+
+describe('retracting a seed that landed where no Claude CLI reads it', () => {
+  // Through 0.4.0 every new account directory was wired the Claude way, so a
+  // Codex account's CODEX_HOME received a `.claude.json` seeded with the
+  // default login's mcpServers — env keys included — that Codex never opens.
+  const seeded = (): Record<string, unknown> => ({
+    hasCompletedOnboarding: true,
+    theme: 'dark',
+    mcpServers: { db: { command: 'db-mcp', env: { DB_TOKEN: 'secret' } } },
+    projects: {
+      '/code/api': { hasTrustDialogAccepted: true, allowedTools: ['Bash'] },
+    },
+  });
+
+  it('isSeedOnlyIdentity: true for exactly what seeding writes, root and per project', () => {
+    expect(isSeedOnlyIdentity(seeded())).toBe(true);
+    expect(isSeedOnlyIdentity({})).toBe(true);
+    expect(isSeedOnlyIdentity({ mcpServers: {} })).toBe(true);
+  });
+
+  it('isSeedOnlyIdentity: false the moment the CLI or the user has been there', () => {
+    // The login itself — the one key the whole feature exists to keep apart.
+    expect(isSeedOnlyIdentity({ ...seeded(), oauthAccount: { id: 'x' } })).toBe(false);
+    // A counter the CLI bumps on every start.
+    expect(isSeedOnlyIdentity({ ...seeded(), numStartups: 3 })).toBe(false);
+    // A project key seeding never writes.
+    expect(
+      isSeedOnlyIdentity({
+        projects: { '/code/api': { hasTrustDialogAccepted: true, lastCost: 0.2 } },
+      }),
+    ).toBe(false);
+    // Not an object at all.
+    expect(isSeedOnlyIdentity(null)).toBe(false);
+    expect(isSeedOnlyIdentity([])).toBe(false);
+    expect(isSeedOnlyIdentity({ projects: [] })).toBe(false);
+  });
+
+  it('removes a seed-only identity file and reports it', async () => {
+    const codexHome = path.join(root, '.lineage', 'profiles', 'openai');
+    fs.mkdirSync(codexHome, { recursive: true });
+    const file = path.join(codexHome, '.claude.json');
+    fs.writeFileSync(file, JSON.stringify(seeded(), null, 2));
+
+    expect(await retractIdentitySeed(codexHome)).toBe(true);
+    expect(fs.existsSync(file)).toBe(false);
+    // Nothing else in the directory was touched.
+    expect(fs.existsSync(codexHome)).toBe(true);
+  });
+
+  it('leaves a file that carries anything beyond the seed — it is somebody’s', async () => {
+    const codexHome = path.join(root, '.lineage', 'profiles', 'openai');
+    fs.mkdirSync(codexHome, { recursive: true });
+    const file = path.join(codexHome, '.claude.json');
+    const text = JSON.stringify({ ...seeded(), oauthAccount: { id: 'x' } }, null, 2);
+    fs.writeFileSync(file, text);
+
+    expect(await retractIdentitySeed(codexHome)).toBe(false);
+    expect(fs.readFileSync(file, 'utf-8')).toBe(text);
+  });
+
+  it('leaves a file that does not parse, a symlink, and a directory with no file', async () => {
+    const codexHome = path.join(root, '.lineage', 'profiles', 'openai');
+    fs.mkdirSync(codexHome, { recursive: true });
+    const file = path.join(codexHome, '.claude.json');
+
+    expect(await retractIdentitySeed(codexHome)).toBe(false); // no file
+
+    fs.writeFileSync(file, '{not json');
+    expect(await retractIdentitySeed(codexHome)).toBe(false);
+    expect(fs.existsSync(file)).toBe(true);
+
+    fs.rmSync(file);
+    fs.writeFileSync(identityFile, JSON.stringify(seeded()));
+    fs.symlinkSync(identityFile, file);
+    expect(await retractIdentitySeed(codexHome)).toBe(false); // a link is a choice
+    expect(fs.lstatSync(file).isSymbolicLink()).toBe(true);
+
+    expect(await retractIdentitySeed('')).toBe(false);
+  });
+
+  it('is a caller decision: the seed a CLAUDE profile gets is the same bytes', async () => {
+    // The function does not infer the provider — handed a Claude profile by
+    // mistake it would remove its seed. extension.ts keys the call on
+    // provider === 'codex' and on the directory not being any Claude one.
+    fs.writeFileSync(identityFile, JSON.stringify(seeded()));
+    await ensureProfileConfig(profileDir, sources());
+    expect(isSeedOnlyIdentity(readIdentity())).toBe(true);
   });
 });

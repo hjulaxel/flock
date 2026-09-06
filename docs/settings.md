@@ -109,7 +109,7 @@ Flock contributes **45 settings**. **16** of them are switches that ship off, an
 | `lineage.unclaimedSessions` | `"grouped"` | **Sessions no project claims.** Hidden is ignored while you have no projects, and never hides a running session. Values: `grouped` — Grouped by folder; `flat` — Flat; `hidden` — Hidden. |
 | `lineage.onlyActiveSessions` | `false` | **Only running sessions.** The same switch as the button in the view title. |
 | `lineage.showTokens` | `false` | **Token count on each row.** The context the last turn ran with, as `/context` reports it. |
-| `lineage.accounts.section` | `true` | **Accounts section.** One row per subscription: plan, usage, and which one new sessions use. Off moves the sidebar's buttons up onto the FLOCK header. |
+| `lineage.accounts.section` | `true` | **Accounts section.** One row per subscription: plan, usage, and which one new sessions use. The usage meter calls Anthropic's usage endpoint with the account's own token. Off moves the sidebar's buttons up onto the FLOCK header. |
 | `lineage.shells.section` | `true` | **Shells section.** The commands your sessions are running right now, with a clock on each. Every live session on this machine is covered, not only this window's. |
 | `lineage.viewStyle` | `"inline"` | Advanced — **How the Sessions view is drawn.** Takes effect on the next reload. Values: `inline` — Inline (rename on the row); `native` — Native tree. |
 | `lineage.showArchived` | `false` | Advanced — **Every closed session on disk**, even ones this tree never knew. Not the archive: that is **Archived Sessions…** on the project row. |
@@ -138,7 +138,7 @@ Flock contributes **45 settings**. **16** of them are switches that ship off, an
 | --- | --- | --- |
 | `lineage.git.branches` | `false` | **Branch rows.** A project's branches as rows, with the worktree verbs, the colours and the pull-request chip. Off: it is a lot of rows. |
 | `lineage.git.branchDisplay` | `"inline"` | **How a session shows its worktree.** Needs `lineage.git.branches`. Values: `inline` — Branch under the session; `color` — Colour by branch. |
-| `lineage.git.pullRequests` | `false` | **Pull request on each branch row.** The one setting that reaches the network: `gh pr list`, at most every five minutes, through your own signed-in `gh`. Flock never sees a token. |
+| `lineage.git.pullRequests` | `false` | **Pull request on each branch row.** Reaches the network through your own signed-in `gh`: `gh pr list`, at most every five minutes per repository. Flock never reads the `gh` token. |
 | `lineage.git.sessionBranchDetail` | `"standard"` | Advanced — **How much the branch line says.** Inline display only. The pull request needs `lineage.git.pullRequests`. Values: `standard` — Branch and local state; `detailed` — Also the pull request. |
 | `lineage.groupSessionsByBranch` | `false` | Advanced — **Nest sessions under their branch.** Each branch row becomes a container with its own `+`. Projects with two or more worktrees only. |
 | `lineage.branchColors` | `[]` | Advanced — **Colours for the branch chips**, in order. Hex or theme colour ids; empty uses the Source Control Graph's colours. Colour mode only. |

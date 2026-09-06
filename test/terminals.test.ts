@@ -20,6 +20,7 @@ import {
   quoteForCmd,
   shimLaunch,
 } from '../src/terminals';
+import { tmuxNameOfTerminal } from '../src/tmux';
 import { ENV_NODE_ID, SESSION_ID_RE } from '../src/types';
 
 const CHILD = '0f0000c1-0000-4000-8000-0000000000c1';
@@ -43,9 +44,9 @@ describe('buildShellArgs', () => {
     ]);
   });
 
-  it('appends a prompt as the final positional argument', () => {
+  it('appends a prompt as the final positional argument, behind --', () => {
     expect(buildShellArgs({ sessionId: CHILD, prompt: 'do the thing' })).toEqual(
-      ['--session-id', CHILD, 'do the thing'],
+      ['--session-id', CHILD, '--', 'do the thing'],
     );
   });
 
@@ -62,8 +63,51 @@ describe('buildShellArgs', () => {
       PARENT,
       '--session-id',
       CHILD,
+      '--',
       'do the thing',
     ]);
+  });
+
+  // ------------------------------------------------- the option terminator
+
+  it('a prompt that starts with - is a prompt, not an option', () => {
+    // `claude [options] [command] [prompt]`: without the terminator Commander
+    // read this as an unknown option and the launch died on a usage error.
+    expect(buildShellArgs({ sessionId: CHILD, prompt: '-v please' })).toEqual([
+      '--session-id',
+      CHILD,
+      '--',
+      '-v please',
+    ]);
+    expect(
+      buildShellArgs({ sessionId: CHILD, prompt: '--resume everything' }),
+    ).toEqual(['--session-id', CHILD, '--', '--resume everything']);
+  });
+
+  it('emits the terminator exactly once, immediately before the prompt', () => {
+    const args = buildShellArgs({
+      sessionId: CHILD,
+      parentId: PARENT,
+      addDirs: ['/a'],
+      sessionName: 'n',
+      appendSystemPrompt: 'sys',
+      prompt: 'hi',
+    });
+    expect(args.filter((a) => a === '--')).toHaveLength(1);
+    expect(args.indexOf('--')).toBe(args.length - 2);
+    expect(args[args.length - 1]).toBe('hi');
+  });
+
+  it('emits no terminator when there is no prompt', () => {
+    // A bare `--` on every launch line is noise; the mode flags already end
+    // --add-dir's list, so nothing needs it.
+    expect(buildShellArgs({ sessionId: CHILD })).not.toContain('--');
+    expect(
+      buildShellArgs({ sessionId: PARENT, resumeId: PARENT, addDirs: ['/a'] }),
+    ).not.toContain('--');
+    expect(buildShellArgs({ sessionId: CHILD, prompt: '  \n' })).not.toContain(
+      '--',
+    );
   });
 
   it('ignores an empty or whitespace-only prompt', () => {
@@ -99,7 +143,7 @@ describe('buildShellArgs', () => {
   it('appends a prompt after the resume form', () => {
     expect(
       buildShellArgs({ sessionId: PARENT, resumeId: PARENT, prompt: 'go on' }),
-    ).toEqual(['--resume', PARENT, 'go on']);
+    ).toEqual(['--resume', PARENT, '--', 'go on']);
   });
 
   it('resume wins over fork when both are somehow set', () => {
@@ -132,7 +176,7 @@ describe('buildShellArgs', () => {
         addDirs: ['/a'],
         prompt: 'do the thing',
       }),
-    ).toEqual(['--add-dir', '/a', '--session-id', CHILD, 'do the thing']);
+    ).toEqual(['--add-dir', '/a', '--session-id', CHILD, '--', 'do the thing']);
   });
 
   it('emits --add-dir before the resume form too', () => {
@@ -177,6 +221,7 @@ describe('buildShellArgs', () => {
       'Chat · demo',
       '--append-system-prompt',
       'sys',
+      '--',
       'hi',
     ]);
   });
@@ -269,25 +314,189 @@ describe('shimLaunch (a Windows .cmd needs the command processor in front of it)
     expect(out.shellPath).toBe('C:\\Windows\\system32\\cmd.exe');
     // A STRING, not an array: VS Code takes shell args in command-line form
     // on Windows only, and that is the one way to hand cmd a /s /c line.
+    // The shim's path keeps real quotes (cmd reads the command token once, in
+    // quote mode); every argument is caret-quoted, twice — see quoteForCmd.
     expect(out.shellArgs).toBe(
-      '/d /s /c ""C:\\Users\\a b\\AppData\\Roaming\\npm\\claude.cmd" --session-id abc --name "flock 3""',
+      '/d /s /c ""C:\\Users\\a b\\AppData\\Roaming\\npm\\claude.cmd" --session-id abc --name ^^^"flock 3^^^""',
     );
     expect(shimLaunch('C:\\x\\claude.BAT', [], 'win32', undefined).shellPath).toBe('cmd.exe');
   });
 
-  it('quotes exactly what cmd would otherwise read as syntax', () => {
+  it('carries the prompt terminator through the shim and quotes the prompt behind it', () => {
+    const out = shimLaunch(
+      'C:\\npm\\claude.cmd',
+      buildShellArgs({ sessionId: CHILD, prompt: 'fix "it" & go' }),
+      'win32',
+      undefined,
+    );
+    // `--` is plain to both parsers and passes untouched; the prompt behind it
+    // gets the full treatment, so the `&` never reaches cmd as an operator.
+    expect(out.shellArgs).toBe(
+      `/d /s /c ""C:\\npm\\claude.cmd" --session-id ${CHILD} -- ^^^"fix \\^^^"it\\^^^" ^^^& go^^^""`,
+    );
+  });
+
+  it('leaves a word that is plain to both parsers untouched', () => {
     expect(quoteForCmd('abc')).toBe('abc');
     expect(quoteForCmd('--session-id')).toBe('--session-id');
-    expect(quoteForCmd('')).toBe('""');
-    expect(quoteForCmd('two words')).toBe('"two words"');
+    expect(quoteForCmd('--')).toBe('--');
+    expect(quoteForCmd(CHILD)).toBe(CHILD);
+    // A trailing backslash is only a problem when a closing quote follows it.
+    expect(quoteForCmd('C:\\proj\\')).toBe('C:\\proj\\');
+  });
+
+  it('caret-quotes for cmd, twice, so the shim\'s %* re-read still sees no syntax', () => {
+    expect(quoteForCmd('')).toBe('^^^"^^^"');
+    expect(quoteForCmd('two words')).toBe('^^^"two words^^^"');
     // The character that turned one command into two through the implicit
     // cmd.exe the shim used to ride.
-    expect(quoteForCmd('fix a & b')).toBe('"fix a & b"');
-    expect(quoteForCmd('a|b')).toBe('"a|b"');
-    expect(quoteForCmd('say "hi"')).toBe('"say \\"hi\\""');
-    expect(quoteForCmd('(x)')).toBe('"(x)"');
+    expect(quoteForCmd('fix a & b')).toBe('^^^"fix a ^^^& b^^^"');
+    // A pipe would have handed the CLI's output to whatever followed.
+    expect(quoteForCmd('a|b')).toBe('^^^"a^^^|b^^^"');
+    // Parentheses group commands for cmd; bare, a `)` can end a block that
+    // the shim's own batch file opened.
+    expect(quoteForCmd('(x)')).toBe('^^^"^^^(x^^^)^^^"');
+    // An embedded quote: `\` for the CRT, then the quote itself escaped for
+    // cmd so it never toggles cmd's quote state.
+    expect(quoteForCmd('say "hi"')).toBe('^^^"say \\^^^"hi\\^^^"^^^"');
+  });
+
+  it('an odd number of quotes cannot let a later & run a second command', () => {
+    // The old `\"` spelling escaped for the CRT only. cmd counted three
+    // quotes here, was OUTSIDE quote mode after the second, and ran `del x`.
+    // Now no quote on the line is ever unescaped, so cmd has no quote state
+    // to lose.
+    expect(quoteForCmd('"hi & del x')).toBe('^^^"\\^^^"hi ^^^& del x^^^"');
+  });
+
+  it('doubles a trailing backslash so the closing quote survives the CRT', () => {
+    // `"C:\my proj\"` reads to the CRT as an escaped quote and an unterminated
+    // string: the argument swallowed the closing quote and everything after.
+    expect(quoteForCmd('C:\\my proj\\')).toBe('^^^"C:\\my proj\\\\^^^"');
+  });
+
+  it('carets a %NAME% token — best effort, the README caveat stands', () => {
+    // `%` expands in cmd's first phase, before carets mean anything; the
+    // caret splits the name cross-spawn-style but nothing here has verified
+    // it against a live shim, so this asserts the spelling, not the outcome.
+    expect(quoteForCmd('%NAME%')).toBe('^^^"^^^%NAME^^^%^^^"');
+  });
+
+  it('escapes a caret in the input, so it is not read as the escape', () => {
+    // A literal `^` would otherwise eat the character after it on each pass.
+    expect(quoteForCmd('a^b')).toBe('^^^"a^^^^b^^^"');
+  });
+
+  it('round-trips every argument through two cmd reads and the CRT splitter', () => {
+    // Models the two parsers the spelling is for (see quoteForCmd): cmd's
+    // caret-and-quote pass, run twice because the shim's %* re-parses the
+    // line, then the C runtime's argv rules. Not a substitute for a live
+    // Windows shim — it is the algorithm checked against its own model —
+    // but the old spelling fails it on exactly the two shapes named above.
+    const cases = [
+      'plain',
+      '',
+      'two words',
+      'fix a & b',
+      'a|b',
+      '(x)',
+      'say "hi"',
+      '"hi & del x',
+      'C:\\my proj\\',
+      'C:\\x\\',
+      'ends with a quote"',
+      '\\"both\\" ends\\',
+      'a^b',
+      '<in >out',
+      'trailing space ',
+      '!bang!',
+    ];
+    for (const original of cases) {
+      const line = quoteForCmd(original);
+      const afterCmd = cmdRead(cmdRead(line));
+      expect(crtArgv(afterCmd), original).toEqual([original]);
+    }
   });
 });
+
+/** cmd.exe's phase two, reduced to what the shim line exercises: a caret
+ *  escapes the next character; an unescaped `"` toggles quote mode, inside
+ *  which nothing is special; an unescaped operator outside quote mode is
+ *  syntax — a second command, a redirection, a block — and the test fails. */
+function cmdRead(line: string): string {
+  let out = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i] as string;
+    if (inQuotes) {
+      if (c === '"') inQuotes = false;
+      out += c;
+      continue;
+    }
+    if (c === '^') {
+      out += line[i + 1] ?? '';
+      i++;
+      continue;
+    }
+    if (c === '"') {
+      inQuotes = true;
+      out += c;
+      continue;
+    }
+    if ('&|<>()'.includes(c)) {
+      throw new Error(`cmd read '${c}' as syntax at ${String(i)} in: ${line}`);
+    }
+    out += c;
+  }
+  return out;
+}
+
+/** The C runtime's argv splitter (what the real CLI receives): 2n backslashes
+ *  before a quote are n backslashes and the quote toggles; 2n+1 are n
+ *  backslashes and a literal quote; backslashes elsewhere are literal;
+ *  whitespace splits only outside quotes. */
+function crtArgv(line: string): string[] {
+  const argv: string[] = [];
+  let current = '';
+  let inQuotes = false;
+  let started = false;
+  for (let i = 0; i < line.length; ) {
+    const c = line[i] as string;
+    if (c === '\\') {
+      let n = 0;
+      while (line[i + n] === '\\') n++;
+      if (line[i + n] === '"') {
+        current += '\\'.repeat(Math.floor(n / 2));
+        if (n % 2 === 1) current += '"';
+        else inQuotes = !inQuotes;
+        i += n + 1;
+      } else {
+        current += '\\'.repeat(n);
+        i += n;
+      }
+      started = true;
+      continue;
+    }
+    if (c === '"') {
+      inQuotes = !inQuotes;
+      started = true;
+      i++;
+      continue;
+    }
+    if (!inQuotes && (c === ' ' || c === '\t')) {
+      if (started) argv.push(current);
+      current = '';
+      started = false;
+      i++;
+      continue;
+    }
+    current += c;
+    started = true;
+    i++;
+  }
+  if (started) argv.push(current);
+  return argv;
+}
 
 describe('launchEnv (cleans a chosen account\'s environment)', () => {
   it('passes through legal string entries untouched', () => {
@@ -475,6 +684,36 @@ describe('launch wraps in the private tmux server when the wiring says so', () =
       '--session-id',
       CHILD,
     ]);
+    registry.dispose();
+  });
+
+  it('a wrapped launch carries claude\'s -- once, after tmux\'s own', async () => {
+    // Two terminators on one line, each ending a different program's options:
+    // tmux's before the command, claude's before the prompt. The name scan
+    // that re-associates a revived wrap stops at the FIRST one, so the second
+    // must not disturb it.
+    const captured: Array<Record<string, unknown>> = [];
+    fakeHost(captured);
+    const registry = new TerminalRegistry({
+      claudeBinary: () => '/bin/claude',
+      tmux: () => ({ binary: '/bin/tmux' }),
+    });
+
+    await registry.launch({ sessionId: CHILD, prompt: '-v please' });
+
+    const args = captured[0]?.['shellArgs'] as string[];
+    expect(args.slice(args.indexOf('--'))).toEqual([
+      '--',
+      '/bin/claude',
+      '--session-id',
+      CHILD,
+      '--',
+      '-v please',
+    ]);
+    expect(args.filter((a) => a === '--')).toHaveLength(2);
+    expect(tmuxNameOfTerminal({ creationOptions: captured[0] })).toBe(
+      `lineage-${CHILD}`,
+    );
     registry.dispose();
   });
 

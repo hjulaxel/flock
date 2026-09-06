@@ -1,5 +1,5 @@
 name: Bug report
-description: Something in Canopy behaves differently than it should.
+description: Something in Flock behaves differently than it should.
 labels: [bug]
 body:
   - type: textarea
@@ -13,7 +13,7 @@ body:
   - type: input
     id: canopy
     attributes:
-      label: Canopy version
+      label: Flock version
       placeholder: "0.1.0"
     validations:
       required: true
@@ -47,7 +47,7 @@ body:
     attributes:
       label: Output channel
       description: >-
-        Anything relevant from `View → Output → Canopy`. Session ids and
+        Anything relevant from `View → Output → Flock`. Session ids and
         directory paths appear there, so redact whatever you would rather not
         post.
       render: text

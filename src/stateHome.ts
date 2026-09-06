@@ -43,7 +43,12 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { log, logError } from './log';
-import { mergeStates, migrateState } from './state';
+import {
+  STORE_DIR_MODE,
+  STORE_FILE_MODE,
+  mergeStates,
+  migrateState,
+} from './state';
 
 /** The state file's name, in both the shared and the legacy directory. */
 export const STATE_FILE_NAME = 'state.json';
@@ -175,7 +180,10 @@ export function adoptLegacyState(opts: {
       return { status: 'none' };
     }
 
-    fs.mkdirSync(sharedDir, { recursive: true });
+    // Owner-only, like the store's own ensureDir makes it: the file about to
+    // land here carries every account's env. The store tightens an existing
+    // directory on load(); this is the one place the directory is BORN.
+    fs.mkdirSync(sharedDir, { recursive: true, mode: STORE_DIR_MODE });
 
     // Everything from here to the marker is one critical section: the read of
     // the shared file and the write that answers it have to be the same
@@ -320,11 +328,20 @@ export function resolveStateDir(opts: {
 
 /** Write-then-rename, in the target's own directory (a cross-filesystem
  *  rename gives EXDEV). The pid suffix keeps two apps adopting at the same
- *  moment off each other's temp file. */
+ *  moment off each other's temp file. Owner-only from the first byte, the way
+ *  state.ts writes the same file: the legacy blob being copied holds the
+ *  accounts' env, and the rename keeps the temp file's mode. The chmod after
+ *  it is best effort, for a filesystem that ignored the create mode. */
 function writeAtomic(file: string, text: string): void {
   const tmp = `${file}.${String(process.pid)}.adopt.tmp`;
-  fs.writeFileSync(tmp, text);
+  fs.writeFileSync(tmp, text, { mode: STORE_FILE_MODE });
   fs.renameSync(tmp, file);
+  if (process.platform === 'win32') return; // chmod only toggles read-only
+  try {
+    fs.chmodSync(file, STORE_FILE_MODE);
+  } catch {
+    /* best effort */
+  }
 }
 
 /** Best-effort: a marker we could not write costs one redundant merge on the

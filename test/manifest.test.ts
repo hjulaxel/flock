@@ -110,6 +110,25 @@ describe('the manifest: what the editor and the generator both read', () => {
   });
 });
 
+describe('the manifest: viewsWelcome', () => {
+  // Two entries for the same view with the same `when` are the same welcome
+  // screen twice — VS Code picks one, silently, and the other is dead JSON
+  // that a future edit is just as likely to touch as the live copy.
+  it('has no two viewsWelcome entries for the same view and when', () => {
+    const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')) as {
+      contributes: { viewsWelcome: Array<{ view: string; when?: string }> };
+    };
+    const seen = new Set<string>();
+    for (const entry of pkg.contributes.viewsWelcome) {
+      const identity = `${entry.view} ${entry.when ?? ''}`;
+      expect(seen.has(identity), `duplicate viewsWelcome for ${entry.view} (${entry.when})`).toBe(
+        false,
+      );
+      seen.add(identity);
+    }
+  });
+});
+
 describe('CONFIG_KEYS is the manifest, and LEGACY_KEYS is what left it', () => {
   // The same cross-check COMMANDS gets, for the same reason: a key in one
   // table and not the other is a setting the code reads but the editor never

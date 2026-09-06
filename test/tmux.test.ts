@@ -313,9 +313,11 @@ describe('resolveExitShell', () => {
       '/run/current-system/sw/bin/zsh',
     );
     // Relative, or carrying something that cannot survive the conf: the
-    // default is what the pty would have used anyway.
-    expect(resolveExitShell('zsh', 'darwin')).toBe('/bin/zsh');
-    expect(resolveExitShell("/bin/z'sh", 'darwin')).toBe('/bin/zsh');
+    // default is what the pty would have used anyway. A stubbed `has` keeps
+    // this off the real filesystem — CI's Linux runners have no /bin/zsh, and
+    // an unstubbed call here would fall through to the real fs.existsSync.
+    expect(resolveExitShell('zsh', 'darwin', () => true)).toBe('/bin/zsh');
+    expect(resolveExitShell("/bin/z'sh", 'darwin', () => true)).toBe('/bin/zsh');
   });
 
   it('is null on Windows, where the whole detach tier is absent', () => {

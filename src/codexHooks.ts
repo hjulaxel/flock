@@ -55,6 +55,8 @@ import * as process from 'node:process';
 import { codexHooksPath, defaultCodexHome } from './codex';
 import {
   CODEX_HOOK_COMMAND,
+  clearEventsFile,
+  eventsFile,
   homeDir,
   readTextSync,
   showInfo,
@@ -79,8 +81,28 @@ export const CODEX_HOOK_EVENTS = [
 ] as const;
 
 /** Bumped whenever the entries this module writes change (the command, the
- *  event list). Drives self-heal exactly as hooks.PLUGIN_VERSION does. */
-export const CODEX_HOOKS_VERSION = 1;
+ *  event list). Drives self-heal exactly as hooks.PLUGIN_VERSION does.
+ *  v2: CODEX_HOOK_COMMAND opens with `umask 077` (hooks.PLUGIN_VERSION v5, for
+ *  the same reason: the payload is prompts and replies, and the file was
+ *  world-readable). A changed command is a new hash to Codex, so every user
+ *  is asked to trust the entry once more; selfHeal says so. */
+export const CODEX_HOOKS_VERSION = 2;
+
+/** Commands earlier versions of this module wrote, which it must still
+ *  recognise as its own. Everything here is keyed by exact command text —
+ *  merge asks "is this command here?", strip removes "this command" — so a
+ *  changed CODEX_HOOK_COMMAND would otherwise leave the old entry an orphan:
+ *  still firing on every event, invisible to Remove, and doubled by the next
+ *  install. So every retired command is stripped wherever the current one is
+ *  merged, removed by strip, and counts as ours wherever self-heal asks whose
+ *  a file is. Append here when CODEX_HOOK_COMMAND changes; never edit or drop
+ *  an entry while a user could still have it. */
+export const RETIRED_CODEX_HOOK_COMMANDS: readonly string[] = [
+  // v1 (CODEX_HOOKS_VERSION 1): before `umask 077`.
+  '/bin/sh -c \'mkdir -p "$HOME/.lineage"; p=$(cat); [ -n "$p" ] || p=null; ' +
+    'printf "{\\"lineage_node_id\\":\\"%s\\",\\"cli\\":\\"codex\\",\\"payload\\":%s}\\n" ' +
+    '"${LINEAGE_NODE_ID:-}" "$p" >> "$HOME/.lineage/events.ndjson"\'',
+];
 
 // ------------------------------------------------------------------ merge
 
@@ -122,6 +144,50 @@ function matchersCarry(matchers: readonly unknown[], command: string): boolean {
   return false;
 }
 
+/** `hooksRaw` with every hook running one of `commands` removed — the shared
+ *  core of strip, and of merge's replace-an-earlier-version step. A matcher
+ *  left with no hooks is dropped; an event left with no matchers is dropped;
+ *  an event whose value is not an array is not ours to judge and is carried
+ *  through as it is. */
+function withoutCommands(
+  hooksRaw: Record<string, unknown>,
+  commands: ReadonlySet<string>,
+): { hooks: Record<string, unknown>; changed: boolean } {
+  let changed = false;
+  const hooks: Record<string, unknown> = {};
+  for (const [event, raw] of Object.entries(hooksRaw)) {
+    if (!Array.isArray(raw)) {
+      hooks[event] = raw; // not ours to judge; carried through
+      continue;
+    }
+    const kept: unknown[] = [];
+    for (const matcher of raw) {
+      if (!isRecord(matcher) || !Array.isArray(matcher['hooks'])) {
+        kept.push(matcher);
+        continue;
+      }
+      const remaining = matcher['hooks'].filter(
+        (hook: unknown) =>
+          !(
+            isRecord(hook) &&
+            typeof hook['command'] === 'string' &&
+            commands.has(hook['command'])
+          ),
+      );
+      if (remaining.length === matcher['hooks'].length) {
+        kept.push(matcher);
+        continue;
+      }
+      changed = true;
+      if (remaining.length > 0) kept.push({ ...matcher, hooks: remaining });
+    }
+    if (kept.length > 0) hooks[event] = kept;
+    else if (raw.length > 0) changed = true; // every matcher was ours
+    else hooks[event] = raw; // was already empty; not our doing
+  }
+  return { hooks, changed };
+}
+
 /**
  * Pure. `existing` with one Flock entry per event added wherever it is
  * missing. Null when the file is not something this module may edit: text that
@@ -131,20 +197,31 @@ function matchersCarry(matchers: readonly unknown[], command: string): boolean {
  * lost.
  *
  * Entries already present — this exact command, under any matcher — are left
- * alone, which is what makes install idempotent and self-heal cheap.
+ * alone, which is what makes install idempotent and self-heal cheap. Entries
+ * running a RETIRED command (an earlier version's, see
+ * RETIRED_CODEX_HOOK_COMMANDS) are removed first, so the current command
+ * replaces its predecessor instead of joining it — two entries would mean
+ * every event recorded twice.
  */
 export function mergeCodexHooks(
   existing: string | null,
   command: string = CODEX_HOOK_COMMAND,
   events: readonly string[] = CODEX_HOOK_EVENTS,
+  retired: readonly string[] = RETIRED_CODEX_HOOK_COMMANDS,
 ): HooksEdit | null {
   const doc = parseDocument(existing);
   if (doc === null) return null;
   const hooksRaw = doc['hooks'];
   if (hooksRaw !== undefined && !isRecord(hooksRaw)) return null;
-  const hooks: Record<string, unknown> = hooksRaw === undefined ? {} : { ...hooksRaw };
+  // The command being merged is never "retired" relative to itself, whatever
+  // a caller passes — tests build old-version files by merging an old command.
+  const stripped = withoutCommands(
+    hooksRaw === undefined ? {} : hooksRaw,
+    new Set(retired.filter((c) => c !== command)),
+  );
+  const hooks = stripped.hooks;
 
-  let changed = false;
+  let changed = stripped.changed;
   for (const event of events) {
     const raw = hooks[event];
     if (raw !== undefined && !Array.isArray(raw)) return null;
@@ -161,11 +238,12 @@ export function mergeCodexHooks(
 }
 
 /**
- * Pure. `existing` with every hook running `command` removed. A matcher entry
- * left with no hooks is dropped; an event left with no matchers is dropped; a
- * `hooks` map left empty is kept as `{}` rather than the file being deleted,
- * because whether Flock created the file is not something this module
- * records, and an empty map is harmless where a missing file might not be.
+ * Pure. `existing` with every hook running `command` — or any retired
+ * command — removed. A matcher entry left with no hooks is dropped; an event
+ * left with no matchers is dropped; a `hooks` map left empty is kept as `{}`
+ * rather than the file being deleted, because whether Flock created the file
+ * is not something this module records, and an empty map is harmless where a
+ * missing file might not be.
  *
  * Null for the same non-JSON-object inputs merge refuses. A file that carries
  * none of our entries comes back unchanged.
@@ -173,6 +251,7 @@ export function mergeCodexHooks(
 export function stripCodexHooks(
   existing: string | null,
   command: string = CODEX_HOOK_COMMAND,
+  retired: readonly string[] = RETIRED_CODEX_HOOK_COMMANDS,
 ): HooksEdit | null {
   const doc = parseDocument(existing);
   if (doc === null) return null;
@@ -180,55 +259,40 @@ export function stripCodexHooks(
   if (hooksRaw === undefined) return { text: existing ?? '', changed: false };
   if (!isRecord(hooksRaw)) return null;
 
-  let changed = false;
-  const hooks: Record<string, unknown> = {};
-  for (const [event, raw] of Object.entries(hooksRaw)) {
-    if (!Array.isArray(raw)) {
-      hooks[event] = raw; // not ours to judge; carried through
-      continue;
-    }
-    const kept: unknown[] = [];
-    for (const matcher of raw) {
-      if (!isRecord(matcher) || !Array.isArray(matcher['hooks'])) {
-        kept.push(matcher);
-        continue;
-      }
-      const remaining = matcher['hooks'].filter(
-        (hook: unknown) => !(isRecord(hook) && hook['command'] === command),
-      );
-      if (remaining.length === matcher['hooks'].length) {
-        kept.push(matcher);
-        continue;
-      }
-      changed = true;
-      if (remaining.length > 0) kept.push({ ...matcher, hooks: remaining });
-    }
-    if (kept.length > 0) hooks[event] = kept;
-    else if (raw.length > 0) changed = true; // every matcher was ours
-    else hooks[event] = raw; // was already empty; not our doing
-  }
+  const { hooks, changed } = withoutCommands(hooksRaw, new Set([command, ...retired]));
   if (!changed) return { text: existing ?? '', changed: false };
   return { text: `${JSON.stringify({ ...doc, hooks }, null, 2)}\n`, changed: true };
 }
 
 /** Which of `events` carry `command` in this document. `missing` is empty for
  *  a fully installed file; both are empty for text that is not a document at
- *  all, which callers read as "not installed" rather than as an error. */
+ *  all, which callers read as "not installed" rather than as an error.
+ *  `retired` lists the events (any event, not only ours — the list may have
+ *  shrunk since) under which an earlier version's command still sits: such
+ *  a file is OURS for self-heal's purposes and STALE for verify's. */
 export function codexHooksCoverage(
   text: string | null,
   command: string = CODEX_HOOK_COMMAND,
   events: readonly string[] = CODEX_HOOK_EVENTS,
-): { present: string[]; missing: string[] } {
+  retiredCommands: readonly string[] = RETIRED_CODEX_HOOK_COMMANDS,
+): { present: string[]; missing: string[]; retired: string[] } {
   const doc = parseDocument(text);
   const hooks = doc === null ? undefined : doc['hooks'];
   const present: string[] = [];
   const missing: string[] = [];
+  const retired: string[] = [];
   for (const event of events) {
     const raw = isRecord(hooks) ? hooks[event] : undefined;
     if (Array.isArray(raw) && matchersCarry(raw, command)) present.push(event);
     else missing.push(event);
   }
-  return { present, missing };
+  if (isRecord(hooks)) {
+    for (const [event, raw] of Object.entries(hooks)) {
+      if (!Array.isArray(raw)) continue;
+      if (retiredCommands.some((c) => matchersCarry(raw, c))) retired.push(event);
+    }
+  }
+  return { present, missing, retired };
 }
 
 // ---------------------------------------------------------------- manager
@@ -402,7 +466,13 @@ export class CodexHooksManager implements DisposableLike {
   }
 
   /** Strip our entries from every file that has them. Nothing else in any
-   *  file is touched, and a file with none of our entries is not rewritten. */
+   *  file is touched, and a file with none of our entries is not rewritten.
+   *  The recorded events are cleared as well — the shared
+   *  ~/.lineage/events.ndjson, truncated and never unlinked, exactly as
+   *  HooksManager.remove() does and for the reasons it gives: the file holds
+   *  prompts and replies, and this is the gesture that says stop keeping
+   *  them. The Claude plugin, if still installed, keeps appending to the
+   *  emptied file. */
   async remove(): Promise<HookInstallState> {
     const files = this.files();
     let removedFrom = 0;
@@ -428,13 +498,18 @@ export class CodexHooksManager implements DisposableLike {
         return this.getState();
       }
     }
+    const events = this.eventsPath();
+    const cleared = clearEventsFile(events);
     const state = await this.markRemoved();
+    const eventsNote = cleared
+      ? `The recorded events (every prompt and last assistant message) in ${events} were cleared.`
+      : `No recorded events were found at ${events}.`;
     void showInfo(
       removedFrom === 0
-        ? "Flock's Codex hook entries were not present; nothing to remove."
+        ? `Flock's Codex hook entries were not present; nothing to remove. ${eventsNote}`
         : `Flock's Codex hook entries removed from ${String(removedFrom)} ` +
             `file${removedFrom === 1 ? '' : 's'}. Running Codex sessions keep ` +
-            'them until restarted. Recorded events remain in ~/.lineage.',
+            `them until restarted. ${eventsNote}`,
     );
     return state;
   }
@@ -443,12 +518,15 @@ export class CodexHooksManager implements DisposableLike {
    * ACTIVATE-time reconciliation, HooksManager.selfHeal's rules translated to
    * a merged file:
    *   - stored says not installed → no-op.
-   *   - NO file carries any of our entries → the user removed them by hand;
-   *     clear the stored flag and never re-add what was deleted.
-   *   - a file carries SOME of our entries, or the version bumped → re-merge
-   *     the missing ones into the files that already have ours (the user
-   *     consented to exactly this content). Files with none of ours are left
-   *     alone: a new account home gets its entries from an explicit install.
+   *   - NO file carries any of our entries — current OR retired command → the
+   *     user removed them by hand; clear the stored flag and never re-add
+   *     what was deleted.
+   *   - a file carries SOME of our entries, or an earlier version's command,
+   *     or the version bumped → re-merge into the files that already have
+   *     ours (the user consented to exactly this content): the missing events
+   *     are added and the earlier command is replaced. Files with none of
+   *     ours are left alone: a new account home gets its entries from an
+   *     explicit install.
    */
   async selfHeal(): Promise<HookInstallState> {
     const stored = this.getState();
@@ -458,25 +536,27 @@ export class CodexHooksManager implements DisposableLike {
     const files = this.files();
     const texts = files.map((f) => readTextSync(f));
     const coverage = texts.map((t) => codexHooksCoverage(t));
-    const carrying = files.filter((_, i) => (coverage[i]?.present.length ?? 0) > 0);
+    const ours = (i: number): boolean =>
+      (coverage[i]?.present.length ?? 0) > 0 || (coverage[i]?.retired.length ?? 0) > 0;
+    const carrying = files.filter((_, i) => ours(i));
     if (carrying.length === 0) {
       log('codex hooks: no file carries our entries; clearing stored install state');
       return this.markRemoved();
     }
 
     const versionBumped = stored.pluginVersion !== CODEX_HOOKS_VERSION;
-    const partial = files.filter(
+    const stale = files.filter(
       (_, i) =>
-        (coverage[i]?.present.length ?? 0) > 0 &&
-        (coverage[i]?.missing.length ?? 0) > 0,
+        ours(i) &&
+        ((coverage[i]?.missing.length ?? 0) > 0 || (coverage[i]?.retired.length ?? 0) > 0),
     );
-    if (partial.length === 0 && !versionBumped) {
+    if (stale.length === 0 && !versionBumped) {
       if (stored.pluginDir === this.defaultFile()) return stored;
       return this.markInstalled();
     }
 
     let healed = 0;
-    for (const file of partial.length > 0 ? partial : carrying) {
+    for (const file of stale.length > 0 ? stale : carrying) {
       const edit = mergeCodexHooks(readTextSync(file));
       if (edit === null || !edit.changed) continue;
       try {
@@ -507,10 +587,17 @@ export class CodexHooksManager implements DisposableLike {
     return codexHooksPath(this.defaultHome());
   }
 
+  /** <home>/.lineage/events.ndjson — the SAME file the Claude plugin writes;
+   *  hooks.ts owns the path, this only asks for it. */
+  private eventsPath(): string {
+    return eventsFile(this.home);
+  }
+
   private consentDetail(files: string[]): string {
     return [
       'Flock will MERGE one entry per event into each of these files — every',
-      'other entry in them is kept; a file that does not exist is created:',
+      'other entry in them is kept (an entry an earlier Flock version wrote is',
+      'replaced); a file that does not exist is created:',
       '',
       ...files.map((f) => `    ${f}`),
       '',
@@ -520,8 +607,13 @@ export class CodexHooksManager implements DisposableLike {
       '',
       `    ${CODEX_HOOK_COMMAND}`,
       '',
-      'Session events are appended to ~/.lineage/events.ndjson, the same file',
-      'the Claude hooks write.',
+      'What it records. Every hook appends its payload to',
+      `${this.eventsPath()}, the same file the Claude hooks write — and for`,
+      'every Codex session on this machine that payload includes each prompt',
+      'you type (UserPromptSubmit) and the last assistant message of each turn',
+      '(Stop). The file is private to your user: it is created readable and',
+      'writable by you alone (0600, in a 0700 directory), and removing the',
+      'hooks clears it.',
       '',
       'One step Flock cannot do for you: Codex runs a new hook only after you',
       'trust it. In your next Codex session, run /hooks and approve the Flock',
@@ -539,11 +631,19 @@ export class CodexHooksManager implements DisposableLike {
     if (parseDocument(text) === null) {
       return { ok: false, reason: `${file} is not a JSON object` };
     }
-    const { missing } = codexHooksCoverage(text);
+    const { missing, retired } = codexHooksCoverage(text);
     if (missing.length > 0) {
       return {
         ok: false,
         reason: `${file} lacks the Flock entry for ${missing.join(', ')}`,
+      };
+    }
+    if (retired.length > 0) {
+      // Both versions firing means every event recorded twice; a write that
+      // left the old entry behind did not do its job.
+      return {
+        ok: false,
+        reason: `${file} still carries an earlier Flock entry for ${retired.join(', ')}`,
       };
     }
     return { ok: true };

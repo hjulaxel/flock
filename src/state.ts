@@ -112,6 +112,17 @@ const MAX_CORRUPT_BACKUPS = 5;
  *  still hand us something exotic). */
 const CANONICAL_MAX_DEPTH = 24;
 
+/** Owner-only, for the directory and for every file that holds the store's
+ *  bytes: state.json, its temp files, its corrupt-file backups. The
+ *  accounts' `extraEnv` is where API keys live, and the default 0755/0644 an
+ *  unqualified mkdir and open produce hands them to every user on the
+ *  machine. stateHome.ts applies the same two numbers when it seeds the
+ *  shared directory; they are exported so the two cannot drift. */
+export const STORE_DIR_MODE = 0o700;
+export const STORE_FILE_MODE = 0o600;
+/** The bits ensureDir tightens away when it finds them on an existing dir. */
+const GROUP_OTHER_BITS = 0o077;
+
 /** INFERRED lineage sources are NEVER persisted — what survives a round trip
  *  is exact knowledge only: edges we minted ourselves, edges the user drew by
  *  hand, and edges the CLI daemon's own dispatch log recorded for a native
@@ -166,6 +177,20 @@ function emptyState(): LineageState {
   };
 }
 
+/** Whether a state holds anything a user would miss: a record, a project or
+ *  an account. Window records, install flags and the settings singleton do
+ *  not count — every one of them is re-published or re-consented by the
+ *  window that owns it, so losing them to a vanished file costs nothing that
+ *  the next activation does not put back. This is the test doReload applies
+ *  before letting an empty disk replace memory. */
+function hasContent(state: LineageState): boolean {
+  return (
+    Object.keys(state.records).length > 0 ||
+    Object.keys(state.projects ?? {}).length > 0 ||
+    Object.keys(state.accounts ?? {}).length > 0
+  );
+}
+
 /** Accounts are handed out as copies like every other record, and `extraEnv`
  *  gets its own copy: it is the one nested object in this file, and a caller
  *  mutating it would be editing the store's memory in place. */
@@ -177,6 +202,20 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+/** chmod a store file to owner-only, best effort. The file was created 0600
+ *  already (writeAtomic opens the temp file with the mode, and a rename keeps
+ *  it), so this is belt and braces for the file an older build left behind
+ *  with 0644 and for a filesystem that ignored the open mode. Never throws:
+ *  a mode we cannot set is not a reason to fail the write that just landed. */
+async function tightenFile(file: string): Promise<void> {
+  if (process.platform === 'win32') return; // chmod only toggles read-only
+  try {
+    await fsp.chmod(file, STORE_FILE_MODE);
+  } catch {
+    /* best effort */
+  }
 }
 
 /** Deep clone with sorted keys so the serialised file is byte-identical for
@@ -763,7 +802,10 @@ function sanitizeHookState(value: unknown): HookInstallState | undefined {
   if (!isPlainObject(value)) return undefined;
   if (typeof value.installed !== 'boolean') return undefined;
   const h: Record<string, unknown> = { ...value };
-  for (const k of ['pluginDir', 'installedAt'] as const) {
+  // `updatedAt` is the merge clock (see HookInstallState): kept when it is a
+  // string, dropped when it is not, never invented here — an unstamped record
+  // is a legitimate state (an older build wrote it) with its own merge rule.
+  for (const k of ['pluginDir', 'installedAt', 'updatedAt'] as const) {
     if (h[k] !== undefined && typeof h[k] !== 'string') delete h[k];
   }
   if (h.pluginVersion !== undefined && typeof h.pluginVersion !== 'number') {
@@ -1327,15 +1369,18 @@ export function mergeStates(
   // "the later opinion" is a better answer than a blend of two.
   out.accountSettings = newerSettings(disk.accountSettings, mem.accountSettings);
 
-  const hook = mem.hookInstall ?? disk.hookInstall;
+  // The three install records are singletons like accountSettings, and merge
+  // by the same clock: two editors sharing the store each hold an opinion of
+  // "installed", and the later one is the answer. See newerHookState.
+  const hook = newerHookState(disk.hookInstall, mem.hookInstall);
   if (hook) out.hookInstall = hook;
   else delete out.hookInstall;
 
-  const verbs = mem.verbsInstall ?? disk.verbsInstall;
+  const verbs = newerHookState(disk.verbsInstall, mem.verbsInstall);
   if (verbs) out.verbsInstall = verbs;
   else delete out.verbsInstall;
 
-  const codexHook = mem.codexHookInstall ?? disk.codexHookInstall;
+  const codexHook = newerHookState(disk.codexHookInstall, mem.codexHookInstall);
   if (codexHook) out.codexHookInstall = codexHook;
   else delete out.codexHookInstall;
 
@@ -1357,6 +1402,25 @@ function newerSettings(
   return ds > ms ? { ...d } : { ...m };
 }
 
+/** Newest-wins over one install record, by the `updatedAt` its setter
+ *  stamps — the rule newerSettings applies to the other singleton, with the
+ *  same tie-break: an unstamped side loses to a stamped one, and when neither
+ *  is stamped memory wins, which is exactly the merge this record had before
+ *  it carried a clock. Without the clock two editors flipped it: window A
+ *  uninstalled, window B's next write of anything re-asserted "installed"
+ *  from its stale memory, and A read that back as the truth. A side with no
+ *  record at all yields to the other, as before. */
+function newerHookState(
+  disk: HookInstallState | undefined,
+  mem: HookInstallState | undefined,
+): HookInstallState | undefined {
+  if (!mem) return disk;
+  if (!disk) return mem;
+  const ds = typeof disk.updatedAt === 'string' ? disk.updatedAt : '';
+  const ms = typeof mem.updatedAt === 'string' ? mem.updatedAt : '';
+  return ds > ms ? disk : mem;
+}
+
 // ------------------------------------------------------------------ store
 
 type Mutator = (state: LineageState, stamp: string) => void;
@@ -1368,6 +1432,12 @@ interface DiskRead {
   /** false only for a hard read error (NOT for "missing" and NOT for
    *  "corrupt", both of which are recoverable and yield an empty state). */
   ok: boolean;
+  /** true when `state` is empty because there was NOTHING USABLE to read —
+   *  no file (ENOENT), or a corrupt blob that was just moved aside — as
+   *  opposed to a file that genuinely holds an empty state. The distinction
+   *  matters to doReload: an empty disk of the first kind must not replace a
+   *  memory that still holds the user's records. */
+  missing: boolean;
 }
 
 export interface StateStoreOptions {
@@ -1394,7 +1464,11 @@ export interface StateStoreOptions {
  *      a lock-free write rather than dropping the user's edit);
  *   3. it re-reads and re-migrates the file at write time and merges
  *      `mergeStates(freshDisk, memory)` — no parsed disk copy is ever held
- *      across an await before the write;
+ *      across an await before the write; a file that exists but cannot be
+ *      read is NOT replaced by memory — the batch reaches memory and waits
+ *      for a read that succeeds (flushLocked), and a file that has vanished
+ *      under a memory with content is written back rather than adopted
+ *      (doReload);
  *   4. it writes a temp file in the SAME directory, fsyncs it, re-reads and
  *      re-parses the bytes, then renames over state.json (retrying
  *      EPERM/EBUSY once);
@@ -1444,6 +1518,15 @@ export class StateStore implements DisposableLike {
   private disposed = false;
   private tmpCounter = 0;
   private lastCorruptText: string | null = null;
+
+  /** Set while a batch sits in `pendingMutations` because the file could not
+   *  be READ at write time (see flushLocked). One log line per outage, not
+   *  one per attempt: a wedged file would otherwise fill the channel. */
+  private deferredForRead = false;
+  /** One log line per store for the mode tightening in ensureDir, and one for
+   *  a reload that kept memory over a vanished file. */
+  private tightenLogged = false;
+  private keptOverMissingLogged = false;
 
   private reloadTimer: unknown = null;
   private pendingReload: {
@@ -2141,24 +2224,29 @@ export class StateStore implements DisposableLike {
     });
   }
 
+  /** The three install records are stamped with the store's own clock — the
+   *  `stamp` every mutator in a pass shares — so `mergeStates` can tell which
+   *  editor's opinion of "installed" is the later one. The caller's own
+   *  `updatedAt`, if it sent one, is overwritten: the clock belongs to the
+   *  write, not to whoever built the record. */
   setHookState(s: HookInstallState): Promise<void> {
     const clean = sanitizeHookState(s) ?? { installed: false };
-    return this.enqueue((state) => {
-      state.hookInstall = clean;
+    return this.enqueue((state, stamp) => {
+      state.hookInstall = { ...clean, updatedAt: stamp };
     });
   }
 
   setVerbsState(s: HookInstallState): Promise<void> {
     const clean = sanitizeHookState(s) ?? { installed: false };
-    return this.enqueue((state) => {
-      state.verbsInstall = clean;
+    return this.enqueue((state, stamp) => {
+      state.verbsInstall = { ...clean, updatedAt: stamp };
     });
   }
 
   setCodexHookState(s: HookInstallState): Promise<void> {
     const clean = sanitizeHookState(s) ?? { installed: false };
-    return this.enqueue((state) => {
-      state.codexHookInstall = clean;
+    return this.enqueue((state, stamp) => {
+      state.codexHookInstall = { ...clean, updatedAt: stamp };
     });
   }
 
@@ -2701,53 +2789,71 @@ export class StateStore implements DisposableLike {
     // it here rather than failing the lock and every write after it.
     await this.ensureDir();
     const locked = await this.acquireLock();
+    let persisted = false;
     try {
-      await this.flushLocked(batch);
+      persisted = await this.flushLocked(batch);
     } finally {
       if (locked) await this.releaseLock();
+    }
+    if (!persisted) {
+      // The file could not be read, so the batch reached memory and nothing
+      // else. It goes back to the FRONT of the queue — ahead of anything
+      // enqueued while this pass ran — and the next flush runs it against the
+      // disk in the order the caller issued it. That next flush is the next
+      // mutation, or a reload that finds the file readable again (doReload).
+      this.pendingMutations.unshift(...batch);
+      if (!this.deferredForRead) {
+        this.deferredForRead = true;
+        log(
+          'state: cannot read state.json — keeping',
+          batch.length,
+          'mutation(s) in memory until it is readable again',
+        );
+      }
+    } else if (this.deferredForRead) {
+      this.deferredForRead = false;
+      log('state: state.json is readable again — held mutations written');
     }
     if (this.serialized !== before) this.emitChange();
   }
 
   /** The read → merge → patch → write → verify pass itself. Runs under the
    *  advisory lock when we got it; the verify/re-merge loop is what keeps it
-   *  correct when we did not. */
-  private async flushLocked(batch: Mutator[]): Promise<void> {
+   *  correct when we did not.
+   *
+   *  Returns false when the file exists but cannot be read. The batch is then
+   *  applied to MEMORY ONLY — this window still shows the edit, which is the
+   *  degrade load() promises for a broken storage dir — and nothing is
+   *  written; the caller keeps the batch for a pass that can read. Merging
+   *  from an empty state and writing anyway used to be the behaviour, and
+   *  under a transient EACCES or EBUSY (an AV scanner, a permissions hiccup)
+   *  it replaced a full store with memory plus one mutation: everything
+   *  another window had written since our last reload, or everything at all
+   *  when load() itself had failed to read. A write we cannot base on the
+   *  file's real content is a write we must not make. */
+  private async flushLocked(batch: Mutator[]): Promise<boolean> {
     const stamp = nowIso();
 
     for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt++) {
-      const disk = await this.readDisk();
+      let disk = await this.readDisk();
+      if (!disk.ok) {
+        // Windows likes to fail a read that raced an AV scanner as much as a
+        // rename; one retry before giving the batch back, so the common
+        // transient case still lands inside the caller's await.
+        await delay(RENAME_RETRY_MS);
+        disk = await this.readDisk();
+      }
+      if (!disk.ok) {
+        this.patchMemory(emptyState(), batch, stamp);
+        return false;
+      }
       // Nothing parsed survives across an await from here to the write: the
       // merge, patch and serialise below are synchronous, and the queue keeps
       // any other mutator out until this pass finishes.
-      const merged = mergeStates(
-        disk.ok ? disk.state : emptyState(),
-        this.memory,
-      );
-      // Re-applied on EVERY attempt, not just the first. A retry happens
-      // because another window clobbered us, so it re-reads their content —
-      // and a mutation that removes something (a tombstone, an unhide) would
-      // otherwise be undone by the very merge that noticed the conflict. Every
-      // mutator is idempotent given a fixed `stamp`, which is why this is safe.
-      for (const mutate of batch) {
-        try {
-          mutate(merged, stamp);
-        } catch (e) {
-          logError('state: mutation threw', e);
-        }
-      }
+      const text = this.patchMemory(disk.state, batch, stamp);
+      if (text === null) return true; // the batch ran; a retry fixes nothing
 
-      let text: string;
-      try {
-        text = stableStringify(merged);
-      } catch (e) {
-        logError('state: could not serialise state', e);
-        return;
-      }
-      this.memory = merged;
-      this.serialized = text;
-
-      if (disk.ok && text === disk.text) break; // disk already agrees
+      if (text === disk.text) break; // disk already agrees
 
       try {
         await this.writeAtomic(text);
@@ -2768,6 +2874,43 @@ export class StateStore implements DisposableLike {
         );
       }
     }
+    return true;
+  }
+
+  /** `mergeStates(base, memory)`, the batch run over the result, and that
+   *  result made this window's memory. Returns its canonical text, or null
+   *  when it could not be serialised (memory is left as it was).
+   *
+   *  The batch is re-applied on EVERY pass through here, not just the first.
+   *  A retry happens because another window clobbered us, so it re-reads
+   *  their content — and a mutation that removes something (a tombstone, an
+   *  unhide) would otherwise be undone by the very merge that noticed the
+   *  conflict. Every mutator is idempotent given a fixed `stamp`, which is
+   *  why this is safe; the same property is what lets a batch that reached
+   *  memory during a read outage run again, later, against the real file. */
+  private patchMemory(
+    base: LineageState,
+    batch: Mutator[],
+    stamp: string,
+  ): string | null {
+    const merged = mergeStates(base, this.memory);
+    for (const mutate of batch) {
+      try {
+        mutate(merged, stamp);
+      } catch (e) {
+        logError('state: mutation threw', e);
+      }
+    }
+    let text: string;
+    try {
+      text = stableStringify(merged);
+    } catch (e) {
+      logError('state: could not serialise state', e);
+      return null;
+    }
+    this.memory = merged;
+    this.serialized = text;
+    return text;
   }
 
   /**
@@ -2823,9 +2966,37 @@ export class StateStore implements DisposableLike {
 
   private async doReload(): Promise<void> {
     if (this.disposed) return;
+    if (this.pendingMutations.length > 0) {
+      // A batch is waiting on a file we could not read (see flush). The
+      // watcher firing is the likeliest sign it is readable again, and a
+      // flush IS a reload — read, merge with memory, patch — so run that
+      // instead of adopting the disk first and re-patching it afterwards.
+      await this.flush();
+      return;
+    }
     const disk = await this.readDisk();
     if (!disk.ok) return; // transient IO error: keep what we have
     if (disk.text === this.serialized) return; // byte-identical: no event
+    if (disk.missing && hasContent(this.memory)) {
+      // The file is gone — deleted under us, or corrupt and just moved aside
+      // — while memory still holds records, projects or accounts. Adopting
+      // the empty disk here used to be the behaviour, and it turned the next
+      // mutation into a write of a near-empty store: the user's whole
+      // editorial layer, and every account's env, replaced by one record.
+      // Memory is the fuller account of the world, so it stays, and it goes
+      // back to disk now rather than at the next mutation: the merge at
+      // write time already treats memory as authoritative, so an empty
+      // mutator is enough to carry it. The cost is that deleting state.json
+      // while an editor is open does not reset anything — quit the editors
+      // first, or the store puts the file back.
+      if (!this.keptOverMissingLogged) {
+        this.keptOverMissingLogged = true;
+        log('state: state.json vanished — keeping memory and writing it back');
+      }
+      this.pendingMutations.push(() => undefined);
+      await this.flush();
+      return;
+    }
     this.memory = disk.state;
     this.serialized = disk.text;
     this.emitChange();
@@ -2850,12 +3021,12 @@ export class StateStore implements DisposableLike {
         // previous version" rather than "we could not tell".
         this.captureSchemaVersion(null);
         const state = emptyState();
-        return { state, text: stableStringify(state), ok: true };
+        return { state, text: stableStringify(state), ok: true, missing: true };
       }
       // Deliberately NOT captured: a hard read error dates nothing, and the
       // next read may well succeed and have the real answer.
       logError('state: cannot read ' + this.filePath, e);
-      return { state: emptyState(), text: '', ok: false };
+      return { state: emptyState(), text: '', ok: false, missing: false };
     }
 
     let parsed: unknown;
@@ -2874,14 +3045,14 @@ export class StateStore implements DisposableLike {
       await this.backupCorrupt(raw);
       this.captureSchemaVersion(null);
       const state = emptyState();
-      return { state, text: stableStringify(state), ok: true };
+      return { state, text: stableStringify(state), ok: true, missing: true };
     }
     if (!isPlainObject(parsed)) {
       logError('state: state.json is not an object', new Error(typeof parsed));
       await this.backupCorrupt(raw);
       this.captureSchemaVersion(null);
       const state = emptyState();
-      return { state, text: stableStringify(state), ok: true };
+      return { state, text: stableStringify(state), ok: true, missing: true };
     }
 
     // Read BEFORE the ladder runs — migrateState stamps the current version
@@ -2892,7 +3063,7 @@ export class StateStore implements DisposableLike {
     );
 
     const state = migrateState(parsed);
-    return { state, text: stableStringify(state), ok: true };
+    return { state, text: stableStringify(state), ok: true, missing: false };
   }
 
   /** A corrupt file must never brick the extension: move it aside loudly and
@@ -2916,12 +3087,15 @@ export class StateStore implements DisposableLike {
     } catch (e) {
       logError('state: could not move corrupt state aside', e);
       try {
-        await fsp.writeFile(dest, raw, 'utf8');
+        await fsp.writeFile(dest, raw, { encoding: 'utf8', mode: STORE_FILE_MODE });
       } catch (e2) {
         logError('state: could not back up corrupt state', e2);
         return;
       }
     }
+    // The backup is the same bytes as the store — keys included — and a file
+    // an older build wrote may still carry 0644; owner-only either way.
+    await tightenFile(dest);
     this.stats.corruptBackups++;
     logError(
       'state: corrupt state.json backed up to ' + dest + ' — starting fresh',
@@ -2947,7 +3121,10 @@ export class StateStore implements DisposableLike {
     try {
       let handle: fsp.FileHandle | undefined;
       try {
-        handle = await fsp.open(tmp, 'w');
+        // Owner-only from the first byte: the temp file IS the future
+        // state.json (the rename keeps its inode and its mode), and it holds
+        // the accounts' env from the moment it is written.
+        handle = await fsp.open(tmp, 'w', STORE_FILE_MODE);
         await handle.writeFile(text, 'utf8');
         await handle.sync();
       } finally {
@@ -2959,6 +3136,7 @@ export class StateStore implements DisposableLike {
       }
       JSON.parse(back); // proves the bytes on disk are parseable
       await this.renameWithRetry(tmp, this.filePath);
+      await tightenFile(this.filePath);
     } catch (e) {
       try {
         await fsp.rm(tmp, { force: true });
@@ -2969,12 +3147,38 @@ export class StateStore implements DisposableLike {
     }
   }
 
-  /** globalStorageUri is NOT guaranteed to exist, and can vanish at runtime. */
+  /** globalStorageUri is NOT guaranteed to exist, and can vanish at runtime.
+   *
+   *  Created owner-only, and tightened to owner-only when it already exists
+   *  with group or other bits: state.json holds every account's `extraEnv`,
+   *  which is where API keys live, and a 0755 directory around a 0644 file —
+   *  what an unqualified mkdir and open gave us before — let every other user
+   *  on the machine read them. The tightening is best effort and logged once;
+   *  a directory we cannot chmod is still a directory we can write, and the
+   *  file inside it is created 0600 regardless (see writeAtomic). Skipped on
+   *  Windows, where POSIX mode bits are not the permission model and chmod
+   *  only toggles read-only. */
   private async ensureDir(): Promise<void> {
     try {
-      await fsp.mkdir(this.storageDir, { recursive: true });
+      await fsp.mkdir(this.storageDir, { recursive: true, mode: STORE_DIR_MODE });
     } catch (e) {
       logError('state: cannot create storage dir ' + this.storageDir, e);
+      return;
+    }
+    if (process.platform === 'win32') return;
+    try {
+      const st = await fsp.stat(this.storageDir);
+      if ((st.mode & GROUP_OTHER_BITS) === 0) return;
+      await fsp.chmod(this.storageDir, STORE_DIR_MODE);
+      if (!this.tightenLogged) {
+        this.tightenLogged = true;
+        log('state: tightened the storage dir to owner-only', this.storageDir);
+      }
+    } catch (e) {
+      if (!this.tightenLogged) {
+        this.tightenLogged = true;
+        logError('state: could not tighten the storage dir to owner-only', e);
+      }
     }
   }
 

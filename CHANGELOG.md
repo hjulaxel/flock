@@ -4,6 +4,44 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- **Hook commands, the events log and the CLI's request files are now created privately.** Both `/bin/sh` hook commands open with `umask 077` (`PLUGIN_VERSION` 4→5, `CODEX_HOOKS_VERSION` 1→2 — existing installs self-heal with a notice), `~/.lineage` and `~/.lineage/requests` are created and tightened to `0700`, `events.ndjson` and request files to `0600` (`VERBS_VERSION` 3→4), and both hook installers now say plainly that the log records every prompt and reply on the machine.
+- **Removing either hook set empties the events log instead of deleting it.** `HooksManager.remove()` and `CodexHooksManager.remove()` truncate `~/.lineage/events.ndjson` to zero bytes through a shared `clearEventsFile()` — never unlink, never recreate — so a window still watching the file sees the reset rather than a vanished file, and the removal toast says so.
+- **The state store on disk is now private to the user.** `state.ts` and `stateHome.ts` create their directories `0700` and their files `0600`, tightening an existing looser directory best-effort, with the same treatment for the atomic-write and corrupt-backup paths.
+- **A Codex account's home no longer receives a Claude identity file.**
+  Creating an account wired every new directory the Claude way, so a
+  `CODEX_HOME` got a `.claude.json` seeded with the default login's MCP server
+  definitions and their env keys — read by nothing. Only Claude accounts are
+  wired now, the add-account dialog says what a Codex home does and does not
+  inherit, and on activation Flock removes a seed-only identity file it wrote
+  into a Codex home; a file the CLI or you have touched is left alone.
+- **Signing in no longer types a shell command.** The account sign-in flow runs `claude`/`codex login` as the terminal's own process (`signInLaunch`, in a new `src/shim.ts` shared with a normal session launch) instead of sending a POSIX-quoted line into the default shell.
+
+### Fixed
+
+- **A prompt beginning with `-` is a prompt again, on both CLIs.** Launch argv
+  now carries a `--` terminator immediately before the opening prompt, for
+  `claude` (Commander) and `codex` (clap) alike, so an opening turn such as
+  `-> port to TS` is no longer read as an unknown option that kills the tab.
+  The Windows `.cmd` shim's quoting was rewritten on cross-spawn's model at the
+  same time: cmd.exe has no backslash escape, so an argument with an odd number
+  of quotes could let a later `&` run a second command; every cmd metacharacter
+  is now caret-escaped for both of cmd's reads.
+- **The README's Privacy section told the wrong story.** It now names the Accounts section's default `GET` to `api.anthropic.com/api/oauth/usage` (credentials-file or keychain, five-minute cadence, the `accounts.section` toggle), the opt-in events log, and what adding an account actually copies from the default login; the matching settings descriptions in `package.json` were corrected and `docs/settings.md` regenerated.
+- **"Green dot" became "red dot" everywhere it still said green** (README, the walkthrough, `docs/reference.md`), matching `lineage.done`'s actual `charts.red`; a literal `$(folder-opened)` codicon and the last three "Canopy" mentions (in `bug_report.yml`) were fixed too.
+- **Two small manifest/CI bugs were fixed:** a byte-identical duplicate `viewsWelcome` entry for the Sessions view is gone (a new test catches a repeat), and two `tmux.test.ts` assertions stopped touching the real filesystem, which was failing them on Linux CI (no `/bin/zsh` there).
+- **A subproject node could reach session-only commands.** `sessionIdFromArg` now accepts only a bare uuid or a session-typed object, so a `SubprojectNode` selected alongside sessions can no longer flow into Close/Archive Sessions.
+- **The state store could lose data on a bad read.** A hard read error during a flush no longer falls back to `emptyState()` — it keeps the batch queued for the next reload — and `doReload` now keeps in-memory content (writing it back) rather than adopting an empty disk when memory still holds real records.
+- **Two editors sharing the store could flip a hook install back to "installed" after an uninstall.** `HookInstallState` now carries an `updatedAt` clock that `mergeStates` uses to resolve the three install singletons, the same way account settings already were.
+
+### Changed
+
+- **A new command refreshes an account's copied config on request.** **Refresh Account Config from Default Login…** overwrites the allowlisted keys (`mcpServers` included) an account's config directory was seeded with; a new confirmation dialog also now shows what a fresh account will inherit before its config directory is created.
+- **Two session dialogs got small corrections:** the Close Project confirmation no longer names a `$(...)` icon literal, and Rename Subproject now opens pre-filled with the current name, fully selected.
+
 ## [0.4.0] — 2026-09-06
 
 ### Changed

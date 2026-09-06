@@ -265,8 +265,13 @@ export interface AccountDeps {
   onUsageChanged(listener: () => void): DisposableLike;
   /** Create `~/.lineage/profiles/<id>` and return it, or undefined when it
    *  could not be created — the caller must then NOT create the account, since
-   *  a profile with no config dir silently shares the machine's login. */
-  createProfileDir(id: string): Promise<string | undefined>;
+   *  a profile with no config dir silently shares the machine's login. The
+   *  provider decides what the directory is wired to: a Claude account's gets
+   *  the shared settings and the seeded identity file (src/profileConfig.ts);
+   *  a Codex account's is a bare CODEX_HOME, because the Codex CLI reads none
+   *  of that and a seeded `.claude.json` there is a copy of MCP env keys with
+   *  no reader. */
+  createProfileDir(id: string, provider: ProviderId): Promise<string | undefined>;
   /** The claude CLI the extension located, for the sign-in terminal. */
   claudeBinary(): string | null;
   /** The codex CLI, same job. Optional: a wiring without it falls back to the
