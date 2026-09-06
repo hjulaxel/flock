@@ -245,15 +245,18 @@ import { parseCompactSummary } from './closeSummary';
 import { WorkspaceManager } from './workspaces';
 import {
   ANCHOR_DIR_NAME,
+  ANCHOR_LABEL,
   ExplorerSync,
   WORKSPACE_FILE_NAME,
   anchorLabelFor,
+  anchoredWorkspaceFile,
   desiredFolders,
   nonAnchorFolders,
+  planAutoConvert,
   withAnchorName,
   workspaceFileJson,
 } from './explorer';
-import type { ExplorerScope } from './explorer';
+import type { ExplorerScope, FolderSpec } from './explorer';
 import { planFollow } from './follow';
 import { SourceControlSync } from './sourceControl';
 import type { GitHost } from './sourceControl';
@@ -373,6 +376,14 @@ const OFFER_KEYS: Record<ContextualOfferId, string> = {
   windowModel: 'lineage.windowModelOfferAnswered',
   surface: 'lineage.surfaceOfferAnswered',
 };
+/** globalState, and deliberately MACHINE-WIDE rather than per window: when an
+ *  empty window last converted itself into the Flock workspace, ms since epoch.
+ *  The loop breaker for `autoConvertEmptyWindow` — see `planAutoConvert` in
+ *  src/explorer.ts for why a reload that lands back in an empty window must
+ *  not be tried again at once, and why the memory has to outlive the window
+ *  that did the trying (a reload is the end of that window's workspaceState
+ *  as far as an empty window is concerned). */
+const AUTO_CONVERT_ATTEMPT_KEY = 'lineage.autoConvertAttemptedAt';
 /** What `workbench.action.openWalkthrough` takes: publisher.name#walkthroughId.
  *  The id half is `EXTENSION_ID`, which a test holds equal to the manifest;
  *  the fragment is the walkthrough's `id` in package.json. A walkthrough
@@ -3574,6 +3585,63 @@ export async function activate(
     explorerAnchorPath,
   );
 
+  /** The generated workspace file as it is on disk, or null when there is
+   *  none. Two callers — the verb and the empty window's own conversion — both
+   *  want to REOPEN a valid one rather than rewrite it, because the file
+   *  remembers where the tree was and what the anchor row said. Any failure
+   *  other than absence reads as "there is one and it cannot be read", which
+   *  `anchoredWorkspaceFile` then refuses: an unreadable file must never be
+   *  mistaken for a missing one and silently overwritten. */
+  const readFlockWorkspaceFile = async (): Promise<string | null> => {
+    try {
+      const raw = await vscode.workspace.fs.readFile(
+        vscode.Uri.file(explorerWorkspaceFile),
+      );
+      return new TextDecoder().decode(raw);
+    } catch (err) {
+      if ((err as { code?: unknown } | null)?.code === 'FileNotFound') {
+        return null;
+      }
+      logError('extension.readFlockWorkspaceFile', err);
+      return '';
+    }
+  };
+
+  /** Reopen this window on the Flock workspace — the one reload the auto-switch
+   *  model costs, in one place. With `write`, the file is (re)written first:
+   *  the anchor at folder[0], `tail` below it, `label` on the anchor row — the
+   *  verb pays the reload to carry a folder window's folders across. With
+   *  `null` the file on disk is opened exactly as it is, which is what the
+   *  empty window does, and what the verb does when it has nothing to carry.
+   *  The anchor directory is created either way and stays EMPTY forever: it
+   *  exists only to hold folder[0] still, so that every later splice lands at
+   *  index >= 1 and never restarts the extension host. */
+  const openFlockWorkspace = async (
+    write: { tail: FolderSpec[]; label: string } | null,
+  ): Promise<void> => {
+    await vscode.workspace.fs.createDirectory(
+      vscode.Uri.file(explorerAnchorPath),
+    );
+    if (write !== null) {
+      await vscode.workspace.fs.writeFile(
+        vscode.Uri.file(explorerWorkspaceFile),
+        new TextEncoder().encode(
+          workspaceFileJson(explorerAnchorPath, write.tail, write.label),
+        ),
+      );
+    }
+    log(
+      'explorer: reopening this window on',
+      explorerWorkspaceFile,
+      write === null ? '(as it is on disk)' : '(rewritten)',
+    );
+    await vscode.commands.executeCommand(
+      'vscode.openFolder',
+      vscode.Uri.file(explorerWorkspaceFile),
+      { forceNewWindow: false },
+    );
+  };
+
   // SOURCE CONTROL, the second half of the auto-switch follow.
   //
   // The SPLICE above is the mechanism: the built-in git extension listens on
@@ -5804,6 +5872,64 @@ export async function activate(
     }
   }
 
+  // THE WINDOW OPENED ON NOTHING CONVERTS ITSELF. In the auto-switch model a
+  // window with no folder, no workspace and nothing unsaved has exactly one
+  // thing it can usefully become, and asking for a verb to get there — every
+  // time VS Code was reopened without a folder — was the question this
+  // answers. `planAutoConvert` (src/explorer.ts, pure and tested) decides;
+  // this reads the window and pays the reload. A folder window is never
+  // touched here: it keeps the Set up… row in the Project view and the verb.
+  //
+  // Run once at activation and again when the model or the follow setting
+  // changes, so picking Auto-switch in an empty window is followed by the
+  // window becoming what it just chose. The two silent skip reasons are the
+  // two everyday states — a model that does not follow, a window already
+  // converted; every other reason is logged, because then the user IS in the
+  // model and the tree is NOT following, and one line saying why beats an
+  // Explorer that silently stayed put.
+  const autoConvertEmptyWindow = async (trigger: string): Promise<void> => {
+    try {
+      const plan = planAutoConvert({
+        followOn: explorerFollowOn(
+          lineageMode(),
+          boolCfg(CONFIG_KEYS.explorerFollowProject, true),
+        ),
+        anchored: explorerSync.anchored(),
+        inWorkspace: vscode.workspace.workspaceFile !== undefined,
+        folderCount: realWorkspaceFolders().length,
+        dirtyEditors: vscode.workspace.textDocuments.filter((d) => d.isDirty)
+          .length,
+        existingFile: await readFlockWorkspaceFile(),
+        fileDir: path.dirname(explorerWorkspaceFile),
+        anchorPath: explorerAnchorPath,
+        lastAttemptAt:
+          context.globalState.get<number>(AUTO_CONVERT_ATTEMPT_KEY) ?? null,
+        now: Date.now(),
+      });
+      if (plan.kind === 'skip') {
+        if (plan.reason !== 'off' && plan.reason !== 'anchored') {
+          log(
+            `explorer: not converting this window by itself (${plan.reason}, ` +
+              `on ${trigger}) — the Explorer will not follow until it is a ` +
+              'Flock workspace; "Flock: Follow the Session I Am In" makes it one',
+          );
+        }
+        return;
+      }
+      await context.globalState.update(AUTO_CONVERT_ATTEMPT_KEY, Date.now());
+      log(
+        `explorer: empty window in the auto-switch model (${trigger}) — ` +
+          `becoming the Flock workspace (${plan.kind})`,
+      );
+      await openFlockWorkspace(
+        plan.kind === 'create' ? { tail: [], label: ANCHOR_LABEL } : null,
+      );
+    } catch (err) {
+      logError('extension.autoConvertEmptyWindow', err);
+    }
+  };
+  void autoConvertEmptyWindow('activation');
+
   // THE TREE FOLLOWS ATTENTION under `'directory'` scope — no verb, no click,
   // the file tree is wherever you are — and there is no listener here any more
   // because that is now `applyFollow`, driven from `updateWorkspaceStatusBar`
@@ -7141,24 +7267,30 @@ export async function activate(
             path: f.uri.fsPath,
             name: f.name,
           }));
-      // The anchor is an EMPTY directory Flock owns, and it stays empty: it
-      // exists only to hold workspace folder[0] still forever, so that every
-      // later splice lands at index >= 1 and never restarts the extension host.
-      await vscode.workspace.fs.createDirectory(
-        vscode.Uri.file(explorerAnchorPath),
-      );
-      await vscode.workspace.fs.writeFile(
-        vscode.Uri.file(explorerWorkspaceFile),
-        new TextEncoder().encode(
-          workspaceFileJson(explorerAnchorPath, tail, anchorLabelFor(project)),
-        ),
-      );
+      // A window with NOTHING to carry across reopens the file already on
+      // disk when it is ours: that file remembers where the tree was and what
+      // the anchor row said, and rewriting it would forget both for no
+      // folder's sake. The same choice the empty window makes for itself
+      // (`autoConvertEmptyWindow`) — the verb still exists for that window
+      // because the cooldown, or a file this build cannot read, may have
+      // stopped the automatic one, and for the unreadable file the rewrite
+      // below IS the repair.
+      if (tail.length === 0) {
+        const existing = await readFlockWorkspaceFile();
+        if (
+          existing !== null &&
+          anchoredWorkspaceFile(
+            existing,
+            explorerAnchorPath,
+            path.dirname(explorerWorkspaceFile),
+          )
+        ) {
+          await openFlockWorkspace(null);
+          return;
+        }
+      }
       log('explorer: converting this window to', explorerWorkspaceFile);
-      await vscode.commands.executeCommand(
-        'vscode.openFolder',
-        vscode.Uri.file(explorerWorkspaceFile),
-        { forceNewWindow: false },
-      );
+      await openFlockWorkspace({ tail, label: anchorLabelFor(project) });
     },
     // Re-root the tree at one directory, and HOLD it there. No reload, no
     // confirmation: it is the same in-place splice a switch does, and the way
@@ -7882,6 +8014,20 @@ export async function activate(
         e.affectsConfiguration(`${CONFIG_SECTION}.${CONFIG_KEYS.mode}`)
       ) {
         updateWorkspaceStatusBar();
+      }
+      // An empty window that has just been put into the auto-switch model —
+      // or had tree-following turned back on — becomes the Flock workspace
+      // now rather than at its next reload; see `autoConvertEmptyWindow`.
+      if (
+        e.affectsConfiguration(
+          `${CONFIG_SECTION}.${CONFIG_KEYS.workspacesEnabled}`,
+        ) ||
+        e.affectsConfiguration(`${CONFIG_SECTION}.${CONFIG_KEYS.mode}`) ||
+        e.affectsConfiguration(
+          `${CONFIG_SECTION}.${CONFIG_KEYS.explorerFollowProject}`,
+        )
+      ) {
+        void autoConvertEmptyWindow('settings change');
       }
       // The mode's when-clause mirror follows the setting wherever it was
       // edited; the grouping change (folder scope on/off) rides the rebuild

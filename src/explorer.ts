@@ -63,6 +63,8 @@
 // the splice arithmetic — the part that is actually easy to get wrong — is unit
 // tested without a workbench.
 
+import * as path from 'node:path';
+
 import { baseName, normalizeDir, pathKey, projectDirs } from './projects';
 import { log, logError } from './log';
 import type { ProjectRecord } from './types';
@@ -396,6 +398,148 @@ export function withAnchorName(text: string, name: string): string | null {
   if ((first as { name?: unknown }).name === name) return text;
   (first as { name?: unknown }).name = name;
   return `${JSON.stringify(parsed, null, 2)}\n`;
+}
+
+// ------------------------------------------- the window opened on nothing
+
+/**
+ * THE EMPTY WINDOW BECOMES THE FLOCK WORKSPACE BY ITSELF.
+ *
+ * The auto-switch model was described from the start as "you open VS Code, you
+ * don't open it in any specific folder, and from there ..." (src/follow.ts) —
+ * and yet the window that description begins with could not follow anything
+ * until somebody ran a command in it. Following needs the anchor at folder[0]
+ * (see the header), the anchor needs the window to BE the generated
+ * `.code-workspace`, and a window is what it opened: reopen VS Code on nothing
+ * and the conversion done last week is in a workspace this window is not.
+ * "Once per window" was true and was the wrong promise; the question it left
+ * was "why do I have to do this every time", and this is the answer.
+ *
+ * ONLY THE WINDOW WITH NOTHING IN IT. A window opened on a folder was opened
+ * on it on purpose, and rearranging it unasked is exactly what the other two
+ * models exist to rule out — that window keeps the Set up… row in the Project
+ * view and the verb. A window that is already some other workspace, saved or
+ * untitled, is left alone for the same reason. A window with unsaved editors
+ * is left alone because the reload would put a save prompt in front of
+ * somebody who asked for nothing. What is left is the window with no folder,
+ * no workspace and nothing unsaved, in the one model that follows — and in
+ * that window a reload costs nothing, because there is nothing in it to lose.
+ *
+ * WHY A COOLDOWN, and why the wiring keeps it MACHINE-WIDE (globalState). The
+ * action is a reload into a file this module wrote, and a reload that lands
+ * back in an empty window — a workspace file VS Code refuses, a storage
+ * directory that stopped being writable — would be attempted again on the next
+ * activation, forever. `unreadable-file` catches the file we can read and
+ * reject ourselves; the cooldown catches everything we cannot foresee. Five
+ * minutes makes a loop one reload rather than a hundred, and is short enough
+ * that a person who genuinely opens a second empty window a little later is
+ * not refused for long — and the verb ignores it, so they are never stuck.
+ *
+ * OPEN, DON'T REWRITE, when a valid file already exists. That file remembers
+ * the last directory the tree was rooted at and the label on the anchor row,
+ * which is why reopening it reads as coming back rather than starting over.
+ * The verb (`followInExplorer`) rewrites when it has a tail to carry — the
+ * folders of the window it converts; here there are none by construction.
+ */
+export const AUTO_CONVERT_COOLDOWN_MS = 5 * 60_000;
+
+/** The world one automatic-conversion decision reads. */
+export interface AutoConvertInput {
+  /** `modes.explorerFollowOn`: the auto-switch model, with the tree allowed
+   *  to move. */
+  followOn: boolean;
+  /** Already a Flock workspace — `ExplorerSync.anchored()`. */
+  anchored: boolean;
+  /** `workspace.workspaceFile` is set: the window is some `.code-workspace`,
+   *  saved or untitled, that is not ours. */
+  inWorkspace: boolean;
+  /** Real folders this window opened, anchor excluded. */
+  folderCount: number;
+  /** Editors with unsaved changes. */
+  dirtyEditors: number;
+  /** The generated workspace file as found on disk, or null when there is
+   *  none. Unreadable is not absent: hand in '' and it is refused. */
+  existingFile: string | null;
+  /** The directory that file lives in — relative paths in it resolve from
+   *  here. */
+  fileDir: string;
+  anchorPath: string;
+  /** When the last automatic attempt was made, ms since epoch, or null. */
+  lastAttemptAt: number | null;
+  now: number;
+}
+
+export type AutoConvertPlan =
+  /** A valid Flock workspace file exists: open it exactly as it is. */
+  | { kind: 'open' }
+  /** None exists: write one holding only the anchor, then open it. */
+  | { kind: 'create' }
+  | {
+      kind: 'skip';
+      reason:
+        | 'off'
+        | 'anchored'
+        | 'in-workspace'
+        | 'has-folders'
+        | 'dirty'
+        | 'cooldown'
+        | 'unreadable-file';
+    };
+
+/**
+ * Should this window become the Flock workspace on its own, and how? The
+ * cheap gates come first and in the order of how ordinary they are — a model
+ * that does not follow and a window already converted are the two everyday
+ * answers and the wiring logs neither — so that a file is only ever read
+ * about in a window that would actually use it.
+ */
+export function planAutoConvert(input: AutoConvertInput): AutoConvertPlan {
+  if (!input.followOn) return { kind: 'skip', reason: 'off' };
+  if (input.anchored) return { kind: 'skip', reason: 'anchored' };
+  if (input.inWorkspace) return { kind: 'skip', reason: 'in-workspace' };
+  if (input.folderCount > 0) return { kind: 'skip', reason: 'has-folders' };
+  if (input.dirtyEditors > 0) return { kind: 'skip', reason: 'dirty' };
+  if (
+    input.lastAttemptAt !== null &&
+    input.now - input.lastAttemptAt < AUTO_CONVERT_COOLDOWN_MS
+  ) {
+    return { kind: 'skip', reason: 'cooldown' };
+  }
+  if (input.existingFile === null) return { kind: 'create' };
+  return anchoredWorkspaceFile(input.existingFile, input.anchorPath, input.fileDir)
+    ? { kind: 'open' }
+    : { kind: 'skip', reason: 'unreadable-file' };
+}
+
+/**
+ * Is this the text of a Flock workspace — plain JSON whose folders[0] is the
+ * anchor? The check `isAnchored` makes on the live folder list, made on the
+ * file before opening it. VS Code rewrites the `folders` array on every
+ * splice and writes a path RELATIVE when it can (the anchor sits beside the
+ * file, so "anchor" is exactly what it may say), so a relative path is
+ * resolved against the file's own directory before it is compared. Anything
+ * else — unparseable text, an empty list, a list that starts somewhere else —
+ * is not ours to open.
+ */
+export function anchoredWorkspaceFile(
+  text: string,
+  anchorPath: string,
+  fileDir: string,
+): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return false;
+  const folders = (parsed as { folders?: unknown }).folders;
+  if (!Array.isArray(folders) || folders.length === 0) return false;
+  const first = folders[0] as { path?: unknown } | null;
+  const raw = typeof first?.path === 'string' ? first.path.trim() : '';
+  if (raw === '') return false;
+  const resolved = path.isAbsolute(raw) ? raw : path.resolve(fileDir, raw);
+  return isAnchored([{ path: resolved }], anchorPath);
 }
 
 // ------------------------------------------------------------------ driver

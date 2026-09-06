@@ -77,7 +77,7 @@ describe('the manifest: what the editor and the generator both read', () => {
           continue;
         }
         deprecated += 1;
-        const placed = category.title === 'Window' || (p.tags?.includes('advanced') ?? false);
+        const placed = category.title === '⊞ Window' || (p.tags?.includes('advanced') ?? false);
         expect(placed, `${key} is deprecated in ${category.title} without the advanced tag`).toBe(
           true,
         );

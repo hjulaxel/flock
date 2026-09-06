@@ -562,7 +562,8 @@ export function windowModelChoices(
         'window goes there — its tabs, its files, its branch. The most ' +
         'convenient of the three and the hardest to keep straight. Costs you ' +
         'a window that rearranges itself, tmux to keep what you left running, ' +
-        'and one reload before the file tree follows too.',
+        'and one reload before the file tree follows too — which a window ' +
+        'opened with no folder pays by itself.',
       settings: [
         { key: CONFIG_KEYS.mode, value: 'project' },
         { key: CONFIG_KEYS.workspacesEnabled, value: true },

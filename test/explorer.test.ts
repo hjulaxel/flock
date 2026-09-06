@@ -13,13 +13,17 @@ import { describe, expect, it } from 'vitest';
 
 import {
   ANCHOR_LABEL,
+  AUTO_CONVERT_COOLDOWN_MS,
   ExplorerSync,
+  anchoredWorkspaceFile,
   desiredFolders,
   isAnchored,
   nonAnchorFolders,
+  planAutoConvert,
   planSplice,
   withAnchorName,
   workspaceFileJson,
+  type AutoConvertInput,
   type ExplorerHost,
   type FolderSpec,
 } from '../src/explorer';
@@ -747,5 +751,166 @@ describe('explorer: withAnchorName', () => {
     expect(withAnchorName('not json at all', 'X')).toBeNull();
     expect(withAnchorName('{"folders":[]}', 'X')).toBeNull();
     expect(withAnchorName('{}', 'X')).toBeNull();
+  });
+});
+
+// ------------------------------------------- the window opened on nothing
+//
+// The decision that lets an EMPTY window in the auto-switch model become the
+// Flock workspace without a verb. What has to hold: a folder window, a window
+// that is already some other workspace, and a window with unsaved editors are
+// never touched; a valid file on disk is reopened rather than rewritten; a
+// file that is not ours is refused before anything reloads; and two attempts
+// inside the cooldown are one attempt, because the action is a reload and a
+// reload that lands back here must not become a loop.
+
+/** The workspace file lives beside the anchor, as it does in globalStorage. */
+const FILE_DIR = '/Users/x/.lineage';
+
+function emptyWindow(over: Partial<AutoConvertInput> = {}): AutoConvertInput {
+  return {
+    followOn: true,
+    anchored: false,
+    inWorkspace: false,
+    folderCount: 0,
+    dirtyEditors: 0,
+    existingFile: null,
+    fileDir: FILE_DIR,
+    anchorPath: ANCHOR,
+    lastAttemptAt: null,
+    now: 1_000_000,
+    ...over,
+  };
+}
+
+describe('planAutoConvert', () => {
+  it('creates the workspace for an empty window with no file on disk', () => {
+    expect(planAutoConvert(emptyWindow())).toEqual({ kind: 'create' });
+  });
+
+  it('reopens a valid file as it is rather than rewriting it', () => {
+    const existingFile = workspaceFileJson(
+      ANCHOR,
+      [{ path: '/Users/x/code/web', name: 'web' }],
+      'Magma Web',
+    );
+    expect(planAutoConvert(emptyWindow({ existingFile }))).toEqual({
+      kind: 'open',
+    });
+  });
+
+  it('accepts the anchor written relative to the file, as VS Code rewrites it', () => {
+    const existingFile = JSON.stringify({
+      folders: [{ path: 'anchor', name: 'Magma Web' }, { path: '../code/web' }],
+      settings: {},
+    });
+    expect(planAutoConvert(emptyWindow({ existingFile }))).toEqual({
+      kind: 'open',
+    });
+  });
+
+  it('refuses a file it cannot read or that is not ours, before any reload', () => {
+    for (const existingFile of [
+      '',
+      'not json at all',
+      '{}',
+      '{"folders":[]}',
+      JSON.stringify({ folders: [{ path: '/Users/x/code/web' }] }),
+      JSON.stringify({ folders: [{ path: '/Users/x/code/web' }, { path: ANCHOR }] }),
+    ]) {
+      expect(planAutoConvert(emptyWindow({ existingFile }))).toEqual({
+        kind: 'skip',
+        reason: 'unreadable-file',
+      });
+    }
+  });
+
+  it('never touches a window that has anything in it', () => {
+    expect(planAutoConvert(emptyWindow({ folderCount: 1 }))).toEqual({
+      kind: 'skip',
+      reason: 'has-folders',
+    });
+    expect(planAutoConvert(emptyWindow({ inWorkspace: true }))).toEqual({
+      kind: 'skip',
+      reason: 'in-workspace',
+    });
+    expect(planAutoConvert(emptyWindow({ dirtyEditors: 1 }))).toEqual({
+      kind: 'skip',
+      reason: 'dirty',
+    });
+  });
+
+  it('does nothing outside the following model or in a converted window', () => {
+    expect(planAutoConvert(emptyWindow({ followOn: false }))).toEqual({
+      kind: 'skip',
+      reason: 'off',
+    });
+    expect(planAutoConvert(emptyWindow({ anchored: true }))).toEqual({
+      kind: 'skip',
+      reason: 'anchored',
+    });
+    // The everyday reasons win over every other one: a folder window in
+    // folder mode reads as "off", not as a complaint about its folders — the
+    // wiring keeps "off" and "anchored" silent and logs the rest.
+    expect(
+      planAutoConvert(
+        emptyWindow({ followOn: false, folderCount: 3, existingFile: 'junk' }),
+      ),
+    ).toEqual({ kind: 'skip', reason: 'off' });
+  });
+
+  it('refuses a second attempt inside the cooldown and allows one after it', () => {
+    const now = 10_000_000;
+    expect(
+      planAutoConvert(emptyWindow({ now, lastAttemptAt: now - 1 })),
+    ).toEqual({ kind: 'skip', reason: 'cooldown' });
+    expect(
+      planAutoConvert(
+        emptyWindow({ now, lastAttemptAt: now - AUTO_CONVERT_COOLDOWN_MS + 1 }),
+      ),
+    ).toEqual({ kind: 'skip', reason: 'cooldown' });
+    expect(
+      planAutoConvert(
+        emptyWindow({ now, lastAttemptAt: now - AUTO_CONVERT_COOLDOWN_MS }),
+      ),
+    ).toEqual({ kind: 'create' });
+  });
+});
+
+describe('anchoredWorkspaceFile', () => {
+  it('recognises the file this module writes', () => {
+    expect(
+      anchoredWorkspaceFile(workspaceFileJson(ANCHOR, []), ANCHOR, FILE_DIR),
+    ).toBe(true);
+    expect(
+      anchoredWorkspaceFile(
+        workspaceFileJson(ANCHOR, [{ path: '/Users/x/code/web' }], 'Web'),
+        ANCHOR,
+        FILE_DIR,
+      ),
+    ).toBe(true);
+  });
+
+  it('resolves a relative folder[0] against the file directory only', () => {
+    const rel = JSON.stringify({ folders: [{ path: 'anchor' }] });
+    expect(anchoredWorkspaceFile(rel, ANCHOR, FILE_DIR)).toBe(true);
+    expect(anchoredWorkspaceFile(rel, ANCHOR, '/somewhere/else')).toBe(false);
+  });
+
+  it('compares the way the platform compares paths', () => {
+    const upper = JSON.stringify({ folders: [{ path: ANCHOR.toUpperCase() }] });
+    expect(anchoredWorkspaceFile(upper, ANCHOR, FILE_DIR)).toBe(PATHS_FOLD_CASE);
+  });
+
+  it('refuses anything that is not a folder list starting with the anchor', () => {
+    expect(anchoredWorkspaceFile('', ANCHOR, FILE_DIR)).toBe(false);
+    expect(anchoredWorkspaceFile('null', ANCHOR, FILE_DIR)).toBe(false);
+    expect(anchoredWorkspaceFile('[]', ANCHOR, FILE_DIR)).toBe(false);
+    expect(
+      anchoredWorkspaceFile('{"folders":[{"path":""}]}', ANCHOR, FILE_DIR),
+    ).toBe(false);
+    expect(
+      anchoredWorkspaceFile('{"folders":[{"name":"x"}]}', ANCHOR, FILE_DIR),
+    ).toBe(false);
   });
 });

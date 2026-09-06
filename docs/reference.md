@@ -1324,8 +1324,13 @@ evidence is singular. It disappears while the tree is empty.
 The **gear** opens a menu that starts with setup and holds everything that used
 to be behind the `...`. First **Flock Settings…**, which opens VS Code's own
 Settings editor filtered to Flock — there is no settings page of Flock's own; the
-editor draws the settings in ten categories, in the order they are worth
-reading, with the advanced rows last in each. Then **Status…**: what this machine
+editor draws the settings in nine groups, each behind a symbol (Sessions,
+Forking and closing, Window, Sidebar, Notifications, Worktrees, Branches,
+Timers, Hooks and CLI), in the order they are worth reading, with the advanced
+rows last in each; every row opens with its name in bold and says what it does
+in a line, or two sentences where it has to, and
+[the long version](settings.md#the-long-version) of the ones with more to say
+is in the settings page. Then **Status…**: what this machine
 has and what this window is on — is tmux installed and on, are the hooks (and,
 where there is a Codex to hook, the Codex hooks) and the in-session verbs
 installed, which `claude` and `codex` were found and where, which window model
