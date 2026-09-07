@@ -766,6 +766,42 @@ describe('codexRowIds: one row per CONVERSATION, not per id', () => {
     ).toEqual([GEN_2]);
   });
 
+  // ---- the one place the reduction yields -----------------------------
+
+  it('never collapses two generations that each have a terminal here', () => {
+    // One process cannot be two terminals, so a chain claiming these are one
+    // conversation is provably wrong — and the safe reading of a contradiction
+    // is two rows, not a hidden session. `boundHere` is the only fact that can
+    // prove it: a rebind MOVES the binding, so a stamp can go stale on an old
+    // generation while this cannot.
+    expect(
+      codexRowIds([
+        facts({ sessionId: GEN_1, boundHere: true }),
+        facts({ sessionId: GEN_2, boundHere: true }),
+      ]),
+    ).toEqual([GEN_1, GEN_2].sort());
+  });
+
+  it('a bound generation still absorbs its conversation`s stale stamps', () => {
+    // The duplicate-row case, which is the common one: one terminal, and a
+    // stamp left behind on the generation it used to be bound under.
+    expect(
+      codexRowIds([
+        facts({ sessionId: GEN_1, windowStamped: true, updatedAtMs: 9999 }),
+        facts({ sessionId: GEN_2, boundHere: true, updatedAtMs: 1 }),
+      ]),
+    ).toEqual([GEN_2]);
+  });
+
+  it('a closed record with a terminal here still gets its row', () => {
+    expect(
+      codexRowIds([
+        facts({ sessionId: GEN_1, boundHere: true, closed: true }),
+        facts({ sessionId: GEN_2, windowStamped: true, closed: true }),
+      ]),
+    ).toEqual([GEN_1]);
+  });
+
   // ---- totality ------------------------------------------------------
 
   it('is stable under input order and tolerates junk', () => {

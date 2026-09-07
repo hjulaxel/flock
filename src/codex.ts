@@ -846,48 +846,70 @@ export interface CodexRowFacts {
  * Pure and total, so the rule is unit-testable without a store, a registry or
  * an extension host — the same discipline matchRollout keeps.
  *
- * PICKING THE GENERATION, in order:
- *   1. one bound in THIS window. It is the id every terminal verb resolves, so
- *      putting the row anywhere else would give the user a row whose Focus and
- *      Close reach nothing.
- *   2. the newest `updatedAt`. This is the honest "which generation did Flock
+ * A GENERATION WITH A TERMINAL ON SCREEN IS NEVER COLLAPSED AWAY, and this is
+ * the one place the reduction yields. Two members of one chain that are each
+ * bound in this window are two terminals, and one process cannot be two
+ * terminals — so the chain saying they are one conversation is provably wrong,
+ * and the honest reading of the contradiction is two rows. This keeps the
+ * property generations.ts guards (never hide a running session) exactly where
+ * it is load-bearing, while still collapsing the stale STAMPS that caused the
+ * duplicates: a rebind moves the binding, so a stamp can go stale on an old
+ * generation but `boundHere` cannot.
+ *
+ * PICKING THE GENERATION otherwise, in order:
+ *   1. the newest `updatedAt`. This is the honest "which generation did Flock
  *      last write about" signal, and it is what correctly prefers a park's
  *      fresh `tmux` claim over the `boundWindowId` a since-detached terminal
  *      left on an older member.
- *   3. the greater id, purely so the answer is total and stable across ticks
+ *   2. the greater id, purely so the answer is total and stable across ticks
  *      rather than dependent on record iteration order.
  */
 export function codexRowIds(facts: readonly CodexRowFacts[]): string[] {
   const best = new Map<string, CodexRowFacts>();
+  const boundRows: string[] = [];
 
   const stampedAt = (f: CodexRowFacts): number =>
     typeof f.updatedAtMs === 'number' && Number.isFinite(f.updatedAtMs)
       ? f.updatedAtMs
       : 0;
 
-  /** Does `a` have a better claim to carrying the row than `b`? */
+  /** Does `a` have a better claim to carrying its conversation's row than `b`?
+   *  Only ever asked of generations with no terminal here — a bound one took
+   *  the lane above and is not a candidate for reduction at all. */
   const beats = (a: CodexRowFacts, b: CodexRowFacts): boolean => {
-    const ab = a.boundHere === true;
-    const bb = b.boundHere === true;
-    if (ab !== bb) return ab;
     const da = stampedAt(a) - stampedAt(b);
     if (da !== 0) return da > 0;
     return a.sessionId > b.sessionId;
   };
 
+  const boundConversations = new Set<string>();
+  const keyOf = (f: CodexRowFacts): string =>
+    isSessionId(f.conversationId) ? f.conversationId : f.sessionId;
+
   for (const f of facts ?? []) {
     if (!f || !isSessionId(f.sessionId)) continue;
-    const boundHere = f.boundHere === true;
-    const recorded = f.windowStamped === true || f.tmuxNamed === true;
-    if (!boundHere && !(recorded && f.closed !== true)) continue;
-    const key = isSessionId(f.conversationId) ? f.conversationId : f.sessionId;
+    if (f.boundHere !== true) continue;
+    boundRows.push(f.sessionId);
+    boundConversations.add(keyOf(f));
+  }
+
+  for (const f of facts ?? []) {
+    if (!f || !isSessionId(f.sessionId)) continue;
+    if (f.boundHere === true) continue; // already a row of its own
+    if (f.windowStamped !== true && f.tmuxNamed !== true) continue;
+    if (f.closed === true) continue;
+    const key = keyOf(f);
+    // A conversation with a terminal here is already represented, and by the
+    // id the terminal verbs resolve; a stamp on some other generation of it
+    // adds nothing and is exactly the stale fact this function exists to drop.
+    if (boundConversations.has(key)) continue;
     const cur = best.get(key);
     if (cur === undefined || beats(f, cur)) best.set(key, f);
   }
 
-  return [...best.values()]
-    .map((f) => f.sessionId)
-    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  return [...boundRows, ...[...best.values()].map((f) => f.sessionId)].sort(
+    (a, b) => (a < b ? -1 : a > b ? 1 : 0),
+  );
 }
 
 // ------------------------------------------------------------- rate limits

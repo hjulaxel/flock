@@ -21,7 +21,11 @@ All notable changes to Flock are recorded here. The format follows
   reported from a real tree. Liveness is now decided per **conversation**
   rather than per id: one row, on the generation with the best claim to being
   the current one — the one bound in this window, else the one most recently
-  written to. Adoption also hands the stamp over instead of copying it, moving
+  written to. The reduction yields in exactly one place, and it is the one that
+  matters: two generations that each have a terminal open here are two
+  terminals, one process cannot be two, so the chain calling them one
+  conversation is provably wrong and both rows stand. A stamp can go stale on
+  an old generation; a live binding cannot, because a re-key moves it. Adoption also hands the stamp over instead of copying it, moving
   a `tmux` claim forward rather than dropping it, so the stale sibling usually
   never exists.
 - **Closing a Codex session closes it once.** The close wrote `closed` onto the
