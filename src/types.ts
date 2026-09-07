@@ -4381,6 +4381,32 @@ export interface CommandDeps {
    *  reading the tip record, which is exactly the pre-chain behaviour every
    *  unit double already relies on. */
   detachedClaimHolder?(sessionId: string): string | undefined;
+  /** A close has settled this conversation: drop THIS window's liveness stamp
+   *  from every OTHER generation of it, so no sibling id is left presenting
+   *  itself as a running session.
+   *
+   *  THE BUG THIS EXISTS TO CLOSE, and it is the `detachedClaimHolder` bug
+   *  seen from the other end. A close writes `closed` and `boundWindowId:
+   *  null` onto the one id it was given, and `INHERITED_RECORD_KEYS`
+   *  deliberately does not carry view-state across generations — so an older
+   *  member keeps the `boundWindowId` its own bind once wrote. For a CLAUDE
+   *  row that is harmless, because the roster decides liveness and a dead
+   *  session simply leaves it. For a CODEX row there is no roster to ask: the
+   *  stamp IS the liveness, so the sibling stayed live, became its
+   *  conversation's only live generation, and the closed session went on
+   *  showing a row that reported itself as running. Closing it a second time
+   *  was the only way out, which is precisely the "I keep seeing closed Codex
+   *  runs" complaint.
+   *
+   *  ONLY this window's stamp, and never the `tmux` claim. A stamp naming
+   *  ANOTHER live window is that window's cross-window focus and must not be
+   *  cleared from here (the same restraint the `closedTerminal` guard shows at
+   *  the call site); a `tmux` name is a claim over a real process, and one
+   *  cleared without being re-made is how a live wrap becomes an orphan.
+   *
+   *  Optional: absent — an older wiring, every unit double — is the
+   *  pre-fix behaviour, which is why no caller checks a return value. */
+  releaseOtherGenerations?(sessionId: string): void;
   // windows (F)
   focusWindowFor(sessionId: string): Promise<boolean>;
   /** Raise the window whose opened folder contains `dir` (deepest wins — see

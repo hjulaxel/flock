@@ -145,13 +145,14 @@ import {
   sameRoster,
 } from './roster';
 import {
+  codexRowIds,
   codexSessionsDir,
   findCodexBinary,
   matchRollout,
   readRolloutActivity,
   scanRollouts,
 } from './codex';
-import type { RolloutActivity } from './codex';
+import type { CodexRowFacts, RolloutActivity } from './codex';
 import { CodexHooksManager } from './codexHooks';
 import { handoffRefusal } from './handoff';
 import { CODEX_HOME_ENV } from './accounts';
@@ -6363,6 +6364,18 @@ export async function activate(
     sessionProvider: (id) => sessionProviderFor(id),
     allRecords: () => store.all(),
     upsertRecord: (id, patch) => store.upsert(id, patch),
+    releaseOtherGenerations: (id) => {
+      // See CommandDeps.releaseOtherGenerations. `boundWindowId` only, only
+      // where it names THIS window, and only on the generations the close
+      // itself did not write to.
+      for (const alias of chainAliases(id)) {
+        if (alias === id) continue;
+        const rec = store.get(alias);
+        if (rec === undefined) continue;
+        if (rec.boundWindowId !== focusIntegration.windowId) continue;
+        void store.upsert(alias, { boundWindowId: null });
+      }
+    },
     recordLaunch: async (childId, parentId, cwd) => {
       // Every create verb calls this BEFORE launching, which is exactly when
       // the optimistic row wants to exist: the record is written, the row
@@ -7810,6 +7823,19 @@ export async function activate(
   // session Flock ever started immortal in the tree. Ownership is a permanent
   // fact and liveness is not, and this is the seam where they part company.
   //
+  // AND THEY ARE FACTS ABOUT A CONVERSATION, NOT ABOUT AN ID — the correction
+  // that makes this list safe to believe. A Codex conversation wears several
+  // ids over its life (no `--session-id`, so a launch is bound provisionally
+  // and re-keyed once its rollout appears), the stamps above were written on
+  // different generations at different moments, and nothing cleared the old
+  // one. Read per id, three stale stamps are three live rows for one chat, and
+  // generations.ts will not suppress them because it must never hide a session
+  // it believes is running. So the facts are gathered per id and then reduced
+  // per CONVERSATION by codex.codexRowIds, which also settles which generation
+  // carries the row. `closed` joins the test there, for the same reason: a
+  // conversation the user closed must not be resurrected by a stamp somebody
+  // forgot to clear.
+  //
   // A Codex session that is NOT live by this test is not lost — the rollout
   // index gives it an archived row, exactly as a closed Claude session gets
   // one from its transcript.
@@ -7822,16 +7848,47 @@ export async function activate(
       logError('extension.codexLiveEntries', err);
       return out;
     }
+    // ONE ROW PER CONVERSATION, decided by codex.codexRowIds. The grouping key
+    // is the generation chain's root, read from the PERSISTED chains rather
+    // than from `chainIndex`: this function's output is what builds the
+    // liveIds that chainIndex is itself built from, so consulting the index
+    // here would close a loop and, on the first tick of an activation, consult
+    // an index that chains nothing. The persisted records are the same edges a
+    // moment earlier, which is exactly the right amount of stale.
+    const rootOf = new Map<string, string>();
+    try {
+      for (const chain of store.getChains()) {
+        if (!isSessionId(chain?.rootId) || !Array.isArray(chain?.members)) {
+          continue;
+        }
+        for (const member of chain.members) {
+          if (isSessionId(member)) rootOf.set(member, chain.rootId);
+        }
+      }
+    } catch (err) {
+      logError('extension.codexLiveEntries.chains', err);
+    }
+
+    const facts: CodexRowFacts[] = [];
     for (const [id, rec] of Object.entries(records)) {
       if (!rec || rec.provider !== 'codex') continue;
       if (!isSessionId(id)) continue;
-      const held =
-        registry.isBoundHere(id) ||
-        (typeof rec.boundWindowId === 'string' && rec.boundWindowId !== '') ||
-        (typeof rec.tmux === 'string' && rec.tmux !== '');
-      if (!held) continue;
+      facts.push({
+        sessionId: id,
+        boundHere: registry.isBoundHere(id),
+        windowStamped:
+          typeof rec.boundWindowId === 'string' && rec.boundWindowId !== '',
+        tmuxNamed: typeof rec.tmux === 'string' && rec.tmux !== '',
+        closed: typeof rec.closed === 'string' && rec.closed !== '',
+        updatedAtMs: Date.parse(rec.updatedAt ?? '') || 0,
+        conversationId: rootOf.get(id) ?? id,
+      });
+    }
+
+    for (const id of codexRowIds(facts)) {
+      const rec = records[id];
       const entry: RosterEntry = { sessionId: id, kind: 'interactive' };
-      if (typeof rec.cwd === 'string' && rec.cwd !== '') entry.cwd = rec.cwd;
+      if (typeof rec?.cwd === 'string' && rec.cwd !== '') entry.cwd = rec.cwd;
       const status = codexStatusFor(id);
       if (status !== undefined) entry.status = status;
       out.push(entry);
@@ -8023,6 +8080,31 @@ export async function activate(
       }
       void store.appendChainMember(provisionalId, realId);
       registry.rebind(provisionalId, realId);
+      // HAND THE LIVENESS OVER, do not merely copy it. `rebind` moves the
+      // binding and its `onDidBind` stamps `boundWindowId` on the real id, but
+      // nothing was clearing it on the provisional one — and for a Codex row
+      // that stamp IS the liveness (there is no process to poll), so the
+      // superseded generation went on presenting itself as a running session
+      // for as long as this window lived. That is the duplicate row: one
+      // conversation, two ids, both stamped, and generations.ts refusing —
+      // rightly — to hide either.
+      //
+      // A tmux claim is MOVED rather than dropped, because unlike the window
+      // stamp it names a process: the wrap is real and still running, and a
+      // claim cleared without being re-made is how a live wrap becomes an
+      // orphan the next reconcile reaps.
+      //
+      // Unconditional, and not gated on `rebind`'s result: the chain edge above
+      // has already declared these two ids to be one conversation, and a
+      // rebind that failed means the provisional holds no terminal here, which
+      // makes its stamp MORE stale rather than less.
+      const stale = store.get(provisionalId);
+      const handover: Record<string, unknown> = { boundWindowId: null };
+      if (typeof stale?.tmux === 'string' && stale.tmux !== '') {
+        void store.upsert(realId, { tmux: stale.tmux });
+        handover.tmux = null;
+      }
+      void store.upsert(provisionalId, handover);
       if (haveRoster) void scheduleRebuild(lastEntries);
     };
 

@@ -6505,6 +6505,10 @@ async function closeFlow(
     ...(closedTerminal ? { boundWindowId: null } : {}),
     ...extra,
   });
+  // The write above named ONE generation; the conversation may have several,
+  // and a sibling still stamped with this window would go on rendering as a
+  // live row for the session just closed. See releaseOtherGenerations.
+  deps.releaseOtherGenerations?.(sessionId);
   // REPAIR AT REST (the 1→2 transition): every archived row should be
   // provably resumable the moment it becomes one, not only when clicked. The
   // repair's own quiet-window gate may skip a transcript the dying process
@@ -6892,6 +6896,9 @@ async function closeNowFlow(deps: CommandDeps, sessionId: string): Promise<void>
     stowedBySwitch: false,
     ...(closedTerminal ? { boundWindowId: null } : {}),
   });
+  // Same reason as closeFlow: one write, one generation, and a stamped sibling
+  // is a live row for a session that has ended.
+  deps.releaseOtherGenerations?.(sessionId);
   deps.repairResumeLeaf?.(sessionId);
   deps.refresh();
 }

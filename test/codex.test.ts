@@ -23,6 +23,7 @@ import {
   DEFAULT_MATCH_WINDOW_MS,
   buildCodexArgs,
   codexAuthPath,
+  codexRowIds,
   codexSessionsDir,
   extractJsonString,
   findCodexBinary,
@@ -32,7 +33,7 @@ import {
   scanRollouts,
   sessionIdOfRollout,
 } from '../src/codex';
-import type { RolloutMeta } from '../src/codex';
+import type { CodexRowFacts, RolloutMeta } from '../src/codex';
 import type { LaunchOptions } from '../src/types';
 
 const ID_A = '019ff30e-c6bd-79d1-83c9-800e9a651496';
@@ -242,15 +243,30 @@ describe('the rollout store on disk', () => {
   function writeRollout(
     day: string,
     id: string,
-    meta: { cwd?: string; timestamp?: string } = {},
+    meta: {
+      cwd?: string;
+      timestamp?: string;
+      /** `payload.session_id`, which for an interactive session equals the id
+       *  in the FILENAME and for a spawned thread does not. */
+      sessionId?: string;
+      parentThreadId?: string;
+      originator?: string;
+    } = {},
   ): string {
     const [y, m, d] = day.split('-');
     const dir = path.join(root, 'sessions', y, m, d);
     fs.mkdirSync(dir, { recursive: true });
     const file = path.join(dir, `rollout-${day}T01-00-00-${id}.jsonl`);
     const payload = {
-      session_id: id,
+      // Ordered as codex-cli 0.153.4 writes it: the conversation's id first,
+      // then this file's own, then the parent when there is one.
+      session_id: meta.sessionId ?? id,
+      id,
+      ...(meta.parentThreadId !== undefined
+        ? { parent_thread_id: meta.parentThreadId }
+        : {}),
       cwd: meta.cwd ?? '/code/api',
+      ...(meta.originator !== undefined ? { originator: meta.originator } : {}),
       // A stand-in for the tens of kilobytes of system prompt a real rollout
       // carries here — the reason the head parser cannot use JSON.parse.
       base_instructions: { text: 'x'.repeat(40_000) },
@@ -297,6 +313,93 @@ describe('the rollout store on disk', () => {
     fs.writeFileSync(notOne, '{}');
     expect(readRolloutMeta(notOne)).toBeNull();
     expect(readRolloutMeta(path.join(root, 'nope.jsonl'))).toBeNull();
+  });
+
+  // ---- a thread is not a session -------------------------------------
+  //
+  // Measured on codex-cli 0.153.4 with `features.multi_agent`: each thread
+  // Codex spawns opens its OWN rollout, named for that thread's `payload.id`
+  // while `payload.session_id` still names the conversation. Reading the name
+  // as the session id turned one headless run's threads into session ids no
+  // `codex resume` can reopen — and, because they share the parent's cwd,
+  // into adoption candidates for an unrelated launch.
+
+  it('readRolloutMeta MARKS a thread file rather than refusing it', () => {
+    // The reader reports and the scan decides: one caller (the meter) wants
+    // these files, and it does not care what id they carry.
+    const file = writeRollout('2026-08-12', ID_A, {
+      sessionId: ID_B,
+      parentThreadId: ID_B,
+      originator: 'codex_exec',
+    });
+    expect(readRolloutMeta(file)?.threadOf).toBe(ID_B);
+  });
+
+  it('readRolloutMeta marks on session_id alone, with no parent_thread_id', () => {
+    const file = writeRollout('2026-08-12', ID_A, { sessionId: ID_B });
+    expect(readRolloutMeta(file)?.threadOf).toBe(ID_B);
+  });
+
+  it('readRolloutMeta marks on parent_thread_id alone', () => {
+    // A future shape that drops `session_id` but keeps the parent link is
+    // still a thread, and each witness has to be enough on its own.
+    const file = writeRollout('2026-08-12', ID_A, { parentThreadId: ID_B });
+    expect(readRolloutMeta(file)?.threadOf).toBe(ID_B);
+  });
+
+  it('leaves threadOf unset on a session of its own', () => {
+    const file = writeRollout('2026-08-12', ID_A, { sessionId: ID_A });
+    expect(readRolloutMeta(file)?.threadOf).toBeUndefined();
+  });
+
+  it('readRolloutMeta keeps a file whose head AGREES with its name', () => {
+    // The interactive case, and the reason the check is a disagreement test
+    // rather than a "has a session_id" test: 0.153.4 writes the field on every
+    // rollout, thread or not.
+    const file = writeRollout('2026-08-12', ID_A, {
+      sessionId: ID_A,
+      originator: 'codex-tui',
+    });
+    const meta = readRolloutMeta(file);
+    expect(meta?.sessionId).toBe(ID_A);
+    expect(meta?.originator).toBe('codex-tui');
+  });
+
+  it('readRolloutMeta keeps a file with no session_id at all', () => {
+    // The old robustness argument survives: a head truncated before the field
+    // is written still gets its id from the name.
+    const dir = path.join(root, 'sessions', '2026', '08', '12');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `rollout-2026-08-12T01-00-00-${ID_A}.jsonl`);
+    fs.writeFileSync(file, '{"timestamp":"2026-08-12T01:00:00.000Z"');
+    expect(readRolloutMeta(file)?.sessionId).toBe(ID_A);
+  });
+
+  it('scanRollouts leaves thread files out of the store by default', () => {
+    writeRollout('2026-08-12', ID_A, { originator: 'codex-tui' });
+    writeRollout('2026-08-12', ID_B, {
+      sessionId: ID_A,
+      parentThreadId: ID_A,
+      originator: 'codex_exec',
+    });
+    const found = scanRollouts({ sessionsDirs: [path.join(root, 'sessions')] });
+    expect(found.map((r) => r.sessionId)).toEqual([ID_A]);
+  });
+
+  it('scanRollouts hands threads back when a caller asks for them', () => {
+    // The meter's case: it reads the newest `token_count` record on a login
+    // and never touches an id, so hiding threads from it would only make the
+    // reading staler than it has to be.
+    writeRollout('2026-08-12', ID_A, { originator: 'codex-tui' });
+    writeRollout('2026-08-12', ID_B, {
+      sessionId: ID_A,
+      parentThreadId: ID_A,
+    });
+    const found = scanRollouts({
+      sessionsDirs: [path.join(root, 'sessions')],
+      includeThreads: true,
+    });
+    expect(found.map((r) => r.sessionId).sort()).toEqual([ID_A, ID_B].sort());
   });
 
   it('scanRollouts walks the YYYY/MM/DD tree', () => {
@@ -447,6 +550,52 @@ describe('matchRollout: which rollout did this launch produce', () => {
     expect(hit).toBeNull();
   });
 
+  // ---- whose front end opened it ------------------------------------
+
+  it('refuses a thread even when one is handed to it directly', () => {
+    // scanRollouts already drops these, so this clause is the second lock:
+    // the guarantee has to hold for any caller, not only the one that filters.
+    const hit = matchRollout([meta({ sessionId: ID_A, threadOf: ID_B })], {
+      spawnedAt: T,
+      cwd: '/code/api',
+    });
+    expect(hit).toBeNull();
+  });
+
+  it('refuses a headless exec run that fits the window and the directory', () => {
+    // The shape that cost two rows on a real machine: a `codex exec` harness
+    // running in the very directory the user launches in. Every other clause
+    // is satisfied, so the originator is the only thing left to tell them
+    // apart — and Flock never spawns `exec`.
+    const hit = matchRollout(
+      [meta({ sessionId: ID_A, originator: 'codex_exec' })],
+      { spawnedAt: T, cwd: '/code/api' },
+    );
+    expect(hit).toBeNull();
+  });
+
+  it('matches an interactive run, both spellings of the field', () => {
+    for (const originator of ['codex-tui', 'codex_tui']) {
+      const hit = matchRollout([meta({ sessionId: ID_A, originator })], {
+        spawnedAt: T,
+        cwd: '/code/api',
+      });
+      expect(hit?.sessionId).toBe(ID_A);
+    }
+  });
+
+  it('matches a rollout that names no originator at all', () => {
+    // Absence is not evidence. An older file carries no such field, and a
+    // future rename of the value would otherwise stop every re-key silently —
+    // which is a worse failure than the one this clause exists to prevent,
+    // because it has no symptom.
+    const hit = matchRollout([meta({ sessionId: ID_A })], {
+      spawnedAt: T,
+      cwd: '/code/api',
+    });
+    expect(hit?.sessionId).toBe(ID_A);
+  });
+
   it('refuses a different directory', () => {
     const hit = matchRollout([meta({ sessionId: ID_A, cwd: '/elsewhere' })], {
       spawnedAt: T,
@@ -504,5 +653,180 @@ describe('matchRollout: which rollout did this launch produce', () => {
 
   it('returns null for an empty candidate list — "not yet", never "no session"', () => {
     expect(matchRollout([], { spawnedAt: T, cwd: '/code/api' })).toBeNull();
+  });
+});
+
+// --------------------------------------------------------------- live rows
+
+describe('codexRowIds: one row per CONVERSATION, not per id', () => {
+  // The bug, as it looked in the tree: two rows named `plan2` and two named
+  // `BIG_BOI`, same branch, same project. A Codex conversation wears several
+  // ids over its life — no `--session-id`, so a launch binds provisionally and
+  // is re-keyed once its rollout appears — and the liveness stamps were
+  // written on different generations at different moments with nothing
+  // clearing the old one. Read per id, that is two live rows for one chat.
+  const CONV = ID_A;
+  const GEN_1 = ID_A; // the provisional id the launch was bound under
+  const GEN_2 = ID_B; // the id codex minted, adopted a moment later
+  const OTHER = '019ff400-0000-7000-8000-000000000001';
+
+  function facts(over: Partial<CodexRowFacts> & { sessionId: string }): CodexRowFacts {
+    return { conversationId: CONV, updatedAtMs: 1000, ...over };
+  }
+
+  it('collapses two stamped generations of one conversation into one row', () => {
+    expect(
+      codexRowIds([
+        facts({ sessionId: GEN_1, windowStamped: true, updatedAtMs: 1000 }),
+        facts({ sessionId: GEN_2, windowStamped: true, updatedAtMs: 2000 }),
+      ]),
+    ).toEqual([GEN_2]);
+  });
+
+  it('puts the row on the generation bound in THIS window', () => {
+    // Ahead of every stamp and every timestamp: it is the id the terminal
+    // verbs resolve, so a row anywhere else would have a Focus and a Close
+    // that reach nothing.
+    expect(
+      codexRowIds([
+        facts({ sessionId: GEN_1, boundHere: true, updatedAtMs: 1 }),
+        facts({ sessionId: GEN_2, windowStamped: true, updatedAtMs: 9999 }),
+      ]),
+    ).toEqual([GEN_1]);
+  });
+
+  it('otherwise prefers the newest write, which is what makes a park win', () => {
+    // The real pairing this settles: a since-detached terminal left a
+    // `boundWindowId` on an older member, and the park that followed wrote its
+    // `tmux` claim onto the current one. The claim is the later fact.
+    expect(
+      codexRowIds([
+        facts({ sessionId: GEN_1, windowStamped: true, updatedAtMs: 1000 }),
+        facts({ sessionId: GEN_2, tmuxNamed: true, updatedAtMs: 1001 }),
+      ]),
+    ).toEqual([GEN_2]);
+  });
+
+  it('gives two different conversations a row each', () => {
+    expect(
+      codexRowIds([
+        facts({ sessionId: GEN_1, windowStamped: true }),
+        facts({
+          sessionId: OTHER,
+          conversationId: OTHER,
+          windowStamped: true,
+        }),
+      ]),
+    ).toEqual([GEN_1, OTHER].sort());
+  });
+
+  it('treats an id in no chain as its own conversation', () => {
+    expect(
+      codexRowIds([
+        { sessionId: GEN_1, windowStamped: true },
+        { sessionId: OTHER, tmuxNamed: true },
+      ]),
+    ).toEqual([GEN_1, OTHER].sort());
+  });
+
+  it('drops a generation nothing vouches for', () => {
+    expect(codexRowIds([facts({ sessionId: GEN_1 })])).toEqual([]);
+  });
+
+  // ---- what `closed` may and may not overrule -------------------------
+
+  it('a closed record is not resurrected by a stamp nobody cleared', () => {
+    // The "I keep seeing closed Codex runs" complaint. A close writes onto ONE
+    // generation, and the sibling kept the stamp its own bind once wrote; with
+    // the stamp believed unconditionally the sibling became the conversation's
+    // only live generation and the closed session went on showing a row.
+    expect(
+      codexRowIds([
+        facts({ sessionId: GEN_1, windowStamped: true, closed: true }),
+        facts({ sessionId: GEN_2, tmuxNamed: true, closed: true }),
+      ]),
+    ).toEqual([]);
+  });
+
+  it('but a live binding outranks `closed` — never hide a session on screen', () => {
+    // A stamp is bookkeeping and can be stale; a terminal this window is
+    // holding is not. Suppressing THAT would be the one destructive rendering
+    // mistake available here.
+    expect(
+      codexRowIds([facts({ sessionId: GEN_1, boundHere: true, closed: true })]),
+    ).toEqual([GEN_1]);
+  });
+
+  it('a closed generation loses the row to a live sibling of the same chat', () => {
+    expect(
+      codexRowIds([
+        facts({ sessionId: GEN_1, windowStamped: true, closed: true, updatedAtMs: 9999 }),
+        facts({ sessionId: GEN_2, windowStamped: true, updatedAtMs: 1 }),
+      ]),
+    ).toEqual([GEN_2]);
+  });
+
+  // ---- the one place the reduction yields -----------------------------
+
+  it('never collapses two generations that each have a terminal here', () => {
+    // One process cannot be two terminals, so a chain claiming these are one
+    // conversation is provably wrong — and the safe reading of a contradiction
+    // is two rows, not a hidden session. `boundHere` is the only fact that can
+    // prove it: a rebind MOVES the binding, so a stamp can go stale on an old
+    // generation while this cannot.
+    expect(
+      codexRowIds([
+        facts({ sessionId: GEN_1, boundHere: true }),
+        facts({ sessionId: GEN_2, boundHere: true }),
+      ]),
+    ).toEqual([GEN_1, GEN_2].sort());
+  });
+
+  it('a bound generation still absorbs its conversation`s stale stamps', () => {
+    // The duplicate-row case, which is the common one: one terminal, and a
+    // stamp left behind on the generation it used to be bound under.
+    expect(
+      codexRowIds([
+        facts({ sessionId: GEN_1, windowStamped: true, updatedAtMs: 9999 }),
+        facts({ sessionId: GEN_2, boundHere: true, updatedAtMs: 1 }),
+      ]),
+    ).toEqual([GEN_2]);
+  });
+
+  it('a closed record with a terminal here still gets its row', () => {
+    expect(
+      codexRowIds([
+        facts({ sessionId: GEN_1, boundHere: true, closed: true }),
+        facts({ sessionId: GEN_2, windowStamped: true, closed: true }),
+      ]),
+    ).toEqual([GEN_1]);
+  });
+
+  // ---- totality ------------------------------------------------------
+
+  it('is stable under input order and tolerates junk', () => {
+    const a = facts({ sessionId: GEN_1, windowStamped: true, updatedAtMs: 5 });
+    const b = facts({ sessionId: GEN_2, windowStamped: true, updatedAtMs: 5 });
+    // Equal claims: the tie-break has to be total, or the row would flicker
+    // between generations from one poll to the next.
+    expect(codexRowIds([a, b])).toEqual(codexRowIds([b, a]));
+    expect(
+      codexRowIds([
+        { sessionId: 'not-an-id', windowStamped: true },
+        facts({ sessionId: GEN_1, windowStamped: true }),
+      ]),
+    ).toEqual([GEN_1]);
+    expect(codexRowIds([])).toEqual([]);
+  });
+
+  it('an unknown updatedAt reads as oldest rather than as newest', () => {
+    // An id nobody has written to since the launch is exactly the one that
+    // should lose to a generation something has touched.
+    expect(
+      codexRowIds([
+        { sessionId: GEN_1, conversationId: CONV, windowStamped: true },
+        facts({ sessionId: GEN_2, windowStamped: true, updatedAtMs: 1 }),
+      ]),
+    ).toEqual([GEN_2]);
   });
 });

@@ -4,6 +4,55 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A Codex conversation is one row again, not one row per id it has worn.**
+  Codex has no `--session-id`, so Flock binds a launch under a provisional id
+  and re-keys it onto the real one once the rollout appears. Each generation
+  gets its own record, and the liveness stamps — `boundWindowId` at launch,
+  again on the re-key, a `tmux` name written by a later park — were left
+  standing on every one of them. A Claude row survives this because the roster
+  decides its liveness; a Codex row has no roster to ask, so the stamp *is* the
+  liveness, and `generations.ts` will not hide a member it believes is running
+  (correctly — suppressing a live session is the one destructive mistake it
+  could make). The result was two rows named the same thing on the same branch,
+  reported from a real tree. Liveness is now decided per **conversation**
+  rather than per id: one row, on the generation with the best claim to being
+  the current one — the one bound in this window, else the one most recently
+  written to. The reduction yields in exactly one place, and it is the one that
+  matters: two generations that each have a terminal open here are two
+  terminals, one process cannot be two, so the chain calling them one
+  conversation is provably wrong and both rows stand. A stamp can go stale on
+  an old generation; a live binding cannot, because a re-key moves it. Adoption also hands the stamp over instead of copying it, moving
+  a `tmux` claim forward rather than dropping it, so the stale sibling usually
+  never exists.
+- **Closing a Codex session closes it once.** The close wrote `closed` onto the
+  single id it was given, and view-state is deliberately not inherited across a
+  generation chain, so an older member kept the stamp its own bind had written.
+  That sibling then became the conversation's only live generation and the
+  closed session went on showing a row that reported itself as running — with
+  closing it a second time as the only way out. A close now settles the whole
+  conversation, dropping this window's stamp from every other generation of it,
+  and `closed` joins the Codex liveness test. A stamp another live window owns
+  is still never touched, and neither is a `tmux` claim, which names a real
+  process.
+- **Flock no longer adopts another conversation's rollout file.** Measured on
+  `codex-cli 0.153.4` with `features.multi_agent`: every thread Codex spawns
+  opens its own rollout, whose *filename* carries that thread's id while the
+  header still names the conversation it belongs to. Flock read the filename.
+  For an interactive session the two agree, so this was right by coincidence
+  for years; for a spawned thread they do not, and since a thread shares its
+  parent's directory it satisfied every clause of the adoption test. On one
+  machine two named rows ended up pointing inside a `codex exec` harness run
+  the user had never opened — and in the store that produced them, 77 of the 92
+  rollout files were threads rather than sessions. A rollout whose header disagrees with its name is
+  now not a session at all — not a match, not an archived row — and a launch
+  will not adopt a rollout opened by a front end Flock cannot have started.
+  Rows already mis-adopted are not repaired retroactively; the next resume of
+  the conversation re-keys it onto a correct id.
+
 ## [0.8.0] — 2026-09-07
 
 ### Security

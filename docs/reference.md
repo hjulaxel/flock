@@ -1109,6 +1109,15 @@ a row, an age, a fork and a resume exactly like a Claude one, and a Codex
 session started in some other terminal shows up as history the moment its
 rollout does.
 
+One thing that is deliberately *not* a row: a rollout Codex opened for a
+**thread it spawned itself**. With `features.multi_agent` on, each spawned
+thread gets its own rollout file whose name carries that thread's id while its
+header still names the conversation it belongs to. Those are not sessions you
+can open — `codex resume` does not know them — so Flock reads the header,
+recognises the disagreement, and leaves them out of both the tree and the id
+adoption a launch does. The account's usage meter still reads them, because a
+thread's turns carry the same rate-limit records as any other.
+
 **What a Codex row gets, and where each fact comes from.**
 
 | Fact | Claude row | Codex row |

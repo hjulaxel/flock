@@ -4793,6 +4793,7 @@ describe('close refuses a session running outside Flock', () => {
   function closeHarness(
     host: 'here' | 'flock' | 'foreign' | 'none' | undefined,
     answer?: string,
+    overrides?: Partial<AccountCommandDeps>,
   ): CloseHarness {
     const patches: Array<{ id: string; patch: Partial<EditorialRecord> }> = [];
     const closed: string[] = [];
@@ -4825,6 +4826,7 @@ describe('close refuses a session running outside Flock', () => {
         return true;
       },
       ...(host === undefined ? {} : { hostOf: () => host }),
+      ...(overrides ?? {}),
     };
     const harness = withRegisteredCommands(withHost);
     return {
@@ -4874,6 +4876,32 @@ describe('close refuses a session running outside Flock', () => {
       expect(h.patches.map((p) => p.id)).toEqual([SESSION]);
       expect(h.patches[0]?.patch.closed).toBeTruthy();
     }
+  });
+
+  // A close writes onto ONE generation, and view-state is deliberately not
+  // inherited across a chain, so an older member keeps whatever liveness stamp
+  // its own bind once wrote. For a Claude row the roster settles it; a CODEX
+  // row has no roster to ask, so the sibling stayed live, became its
+  // conversation's only live generation, and the closed session went on
+  // showing a row. See CommandDeps.releaseOtherGenerations.
+  it('settles the conversation`s OTHER generations, not just the id it was given', async () => {
+    const released: string[] = [];
+    const h = closeHarness('here', undefined, {
+      releaseOtherGenerations: (id) => {
+        released.push(id);
+      },
+    });
+    await h.run(COMMANDS.closeSession, SESSION);
+    expect(h.patches[0]?.patch.closed).toBeTruthy();
+    expect(released).toEqual([SESSION]);
+  });
+
+  it('closes exactly as before when the wiring has no such dep', async () => {
+    // Optional, and an older wiring or a unit double must reach the same
+    // record write it always did rather than throwing on the way past.
+    const h = closeHarness('here');
+    await h.run(COMMANDS.closeSession, SESSION);
+    expect(h.patches[0]?.patch.closed).toBeTruthy();
   });
 });
 
