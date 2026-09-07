@@ -364,6 +364,25 @@ export interface RolloutMeta {
   /** File mtime — last activity, the same role `ArchivedSession.endedAt` has. */
   endedAt: number;
   bytes: number;
+  /** `session_meta.payload.originator` — which front end opened this rollout.
+   *  Measured spellings on codex-cli 0.153.4: `codex-tui` for an interactive
+   *  session, `codex_exec` for a headless `codex exec` run. Absent on older
+   *  files, which is why matchRollout treats absence as "no information"
+   *  rather than as a rejection. */
+  originator?: string;
+}
+
+/** Originators a Flock launch can possibly have produced. Flock only ever
+ *  starts the interactive TUI (see buildCodexArgs — no `exec` subcommand
+ *  anywhere), so anything else in this field is somebody else's process. */
+const TUI_ORIGINATORS: readonly string[] = ['codex-tui', 'codex_tui'];
+
+/** Is this rollout's front end one Flock could have started? Absence answers
+ *  YES: a file too old to carry the field must stay adoptable, or an upgrade
+ *  path that changes the spelling would silently stop every re-key. */
+export function isAdoptableOriginator(originator: unknown): boolean {
+  if (typeof originator !== 'string' || originator.trim() === '') return true;
+  return TUI_ORIGINATORS.includes(originator.trim());
 }
 
 /**
@@ -417,13 +436,32 @@ export function extractJsonString(text: string, key: string): string | undefined
 }
 
 /**
- * Read one rollout's facts. Bounded, never throws, returns null only when the
- * file is not a rollout at all or cannot be stat'ed.
+ * Read one rollout's facts. Bounded, never throws. Returns null when the file
+ * is not a rollout at all, cannot be stat'ed, or is a SUBAGENT THREAD rather
+ * than a session — see below, because that last case is a correctness fix and
+ * not a tidy-up.
  *
- * The id comes from the FILENAME rather than from `session_meta.payload
- * .session_id`, which also carries it. That is not laziness — it is the
- * cheaper and the more robust of the two: it costs no read, and it still
- * produces a correct id for a rollout whose head was truncated mid-write.
+ * THE FILENAME IS NOT THE SESSION ID, and this module believed it was.
+ * Measured on codex-cli 0.153.4 with `features.multi_agent` on: every thread
+ * Codex spawns gets its OWN rollout file, whose name carries that THREAD's
+ * `payload.id` while `payload.session_id` still names the conversation the
+ * thread belongs to. For an interactive session the two are the same value, so
+ * the old reading was right by coincidence for years; for a spawned thread they
+ * differ, and the old reading turned one headless run's four threads into four
+ * session ids that no `codex resume` can reopen.
+ *
+ * WHAT IT COST, on this machine, on 2026-09-07: a Flock Codex launch in
+ * `~/Documents/Magma/research/BASALT` adopted a subagent thread of a `codex
+ * exec` harness running in the SAME directory, because matchRollout's window is
+ * a directory and a minute and a thread file satisfies both. Two named rows
+ * ended up pointing at threads nicknamed `Franklin` and `Euclid` inside a
+ * conversation the user never opened. A wrong edge is worse than no edge, so a
+ * thread file is now not a candidate for anything: not a match, not a row.
+ *
+ * The id therefore comes from the HEADER when the header speaks, and from the
+ * filename only when it does not. That keeps the old robustness argument
+ * (a rollout truncated before `session_id` is written still gets an id) while
+ * making the two disagreeing a rejection rather than a silent mis-identity.
  */
 export function readRolloutMeta(file: string): RolloutMeta | null {
   const sessionId = sessionIdOfRollout(path.basename(file));
@@ -462,6 +500,20 @@ export function readRolloutMeta(file: string): RolloutMeta | null {
   }
 
   if (head !== '') {
+    // The identity check FIRST, so a thread file costs nothing else. Both
+    // spellings are consulted: `session_id` is what 0.153.4 writes, and
+    // `parent_thread_id` is present only on a spawned thread, which makes it
+    // an independent witness for the same verdict.
+    const headerId = extractJsonString(head, 'session_id');
+    const parentThread = extractJsonString(head, 'parent_thread_id');
+    if (
+      (headerId !== undefined && headerId !== sessionId) ||
+      (parentThread !== undefined && parentThread !== sessionId)
+    ) {
+      return null; // a thread of another conversation, not a session
+    }
+    const originator = extractJsonString(head, 'originator');
+    if (originator !== undefined) out.originator = originator;
     const cwd = extractJsonString(head, 'cwd');
     if (cwd !== undefined) out.cwd = cwd;
     const ts = extractJsonString(head, 'timestamp');
@@ -621,7 +673,19 @@ export const DEFAULT_MATCH_WINDOW_MS = 60_000;
  *   4. name the SAME directory, compared after normalisation — trailing
  *      slashes and `/tmp` vs `/private/tmp` are the same place, and a launch
  *      whose cwd we never knew skips this clause rather than matching
- *      everything.
+ *      everything;
+ *   5. have been opened by a front end Flock could have started. Clauses 1-4
+ *      are all satisfied by a `codex exec` harness running in the directory
+ *      the user happens to be launching in, which is how two rows on this
+ *      machine came to point inside a conversation nobody opened. Flock never
+ *      spawns `exec`, so a non-TUI originator is proof the file is somebody
+ *      else's. Absence of the field is not — see isAdoptableOriginator.
+ *
+ * Note that clause 5 is the SECOND half of that fix and not the whole of it:
+ * readRolloutMeta already refuses to return a thread file at all, so the
+ * commonest shape of the wrong match never reaches this function. This clause
+ * covers the top-level `exec` run, whose header is a perfectly ordinary
+ * session header that simply is not ours.
  *
  * Among survivors the EARLIEST start wins, not the latest. That is deliberate:
  * the launch we are matching happened first, so if a second Codex session
@@ -656,6 +720,7 @@ export function matchRollout(
   for (const meta of candidates ?? []) {
     if (!meta || !isSessionId(meta.sessionId)) continue;
     if (taken.has(meta.sessionId)) continue;
+    if (!isAdoptableOriginator(meta.originator)) continue;
     const startedAt = meta.startedAt;
     if (typeof startedAt !== 'number' || !Number.isFinite(startedAt)) continue;
     if (startedAt < floor || startedAt > ceiling) continue;
@@ -695,6 +760,107 @@ function normalizeDir(raw: unknown): string | undefined {
   }
   const slashed = resolved.replace(/\\/g, '/').replace(/\/+$/, '');
   return slashed === '' ? '/' : slashed;
+}
+
+// --------------------------------------------------------------- live rows
+//
+// WHICH CODEX IDS GET A ROW. `claude agents --json` is a Claude registry and
+// will never list a Codex session, so a Codex row's liveness is not observed —
+// it is whatever Flock wrote down when it acted. That difference is the whole
+// reason this function exists, and the bug it fixes was visible in the tree:
+// two rows named `plan2` and two named `BIG_BOI`, same branch, same project.
+//
+// THE MECHANISM, stated once. Codex has no `--session-id`, so a launch binds
+// under a provisional id and is re-keyed onto the real one when its rollout
+// appears. Every generation of the conversation therefore has a record, and
+// the liveness stamps were written on different ones at different moments: the
+// provisional got `boundWindowId` at launch, a later generation got it again
+// on the re-key, a park wrote `tmux` onto whichever id was current then. For a
+// Claude row none of this matters, because the roster overrules every stamp.
+// For a Codex row the stamps ARE the roster, and generations.ts deliberately
+// never suppresses a member it believes is live — correctly, since suppressing
+// a running session is the one truly destructive rendering mistake it could
+// make. So two stale stamps became two rows for one conversation.
+//
+// THE RULE. One row per CONVERSATION, not per id. A conversation is live when
+// any generation of it is, and the row goes on the generation with the best
+// claim to being the current one.
+//
+// `closed` SUPPRESSES A RECORDED FACT BUT NEVER A LIVE BINDING. A stamp is
+// bookkeeping and can be stale; `registry.isBoundHere` is a terminal this
+// window is holding right now, and no timestamp in a file outranks that. This
+// asymmetry is what stops a closed conversation from coming back as a live row
+// while still refusing to hide a session the user is looking at.
+export interface CodexRowFacts {
+  sessionId: string;
+  /** A terminal in THIS window holds it — direct observation, and the only
+   *  fact here that needs no record. */
+  boundHere?: boolean;
+  /** `EditorialRecord.boundWindowId` is set: some live window hosts it.
+   *  Self-cleaning only for windows that have GONE (state.ts prunes those), so
+   *  on its own it is the stamp most likely to be stale. */
+  windowStamped?: boolean;
+  /** `EditorialRecord.tmux` is set: parked into the private tmux server. */
+  tmuxNamed?: boolean;
+  /** `EditorialRecord.closed` is set. */
+  closed?: boolean;
+  /** `EditorialRecord.updatedAt` as epoch ms. Absent or 0 reads as "oldest",
+   *  which is the right default: an id nobody has written to since the launch
+   *  is exactly the one that should lose to a generation that was touched. */
+  updatedAtMs?: number;
+  /** The CONVERSATION this id belongs to: its generation chain's root, or the
+   *  id itself when it belongs to no chain. */
+  conversationId?: string;
+}
+
+/**
+ * The Codex session ids that deserve a live row, one per conversation.
+ *
+ * Pure and total, so the rule is unit-testable without a store, a registry or
+ * an extension host — the same discipline matchRollout keeps.
+ *
+ * PICKING THE GENERATION, in order:
+ *   1. one bound in THIS window. It is the id every terminal verb resolves, so
+ *      putting the row anywhere else would give the user a row whose Focus and
+ *      Close reach nothing.
+ *   2. the newest `updatedAt`. This is the honest "which generation did Flock
+ *      last write about" signal, and it is what correctly prefers a park's
+ *      fresh `tmux` claim over the `boundWindowId` a since-detached terminal
+ *      left on an older member.
+ *   3. the greater id, purely so the answer is total and stable across ticks
+ *      rather than dependent on record iteration order.
+ */
+export function codexRowIds(facts: readonly CodexRowFacts[]): string[] {
+  const best = new Map<string, CodexRowFacts>();
+
+  const stampedAt = (f: CodexRowFacts): number =>
+    typeof f.updatedAtMs === 'number' && Number.isFinite(f.updatedAtMs)
+      ? f.updatedAtMs
+      : 0;
+
+  /** Does `a` have a better claim to carrying the row than `b`? */
+  const beats = (a: CodexRowFacts, b: CodexRowFacts): boolean => {
+    const ab = a.boundHere === true;
+    const bb = b.boundHere === true;
+    if (ab !== bb) return ab;
+    const da = stampedAt(a) - stampedAt(b);
+    if (da !== 0) return da > 0;
+    return a.sessionId > b.sessionId;
+  };
+
+  for (const f of facts ?? []) {
+    if (!f || !isSessionId(f.sessionId)) continue;
+    const boundHere = f.boundHere === true;
+    const recorded = f.windowStamped === true || f.tmuxNamed === true;
+    if (!boundHere && !(recorded && f.closed !== true)) continue;
+    const key = isSessionId(f.conversationId) ? f.conversationId : f.sessionId;
+    const cur = best.get(key);
+    if (cur === undefined || beats(f, cur)) best.set(key, f);
+  }
+
+  return [...best.values()]
+    .map((f) => f.sessionId)
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
 // ------------------------------------------------------------- rate limits
