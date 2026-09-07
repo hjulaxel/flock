@@ -17,6 +17,48 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  *  CI runner is slow. */
 const STORE_WAIT_MS = 15_000;
 
+/** How long activation gets. Well inside the launcher's own deadline on
+ *  purpose: a stall reported here can quote the extension's log and name the
+ *  phase, where the launcher timing out can only say that nothing came back. */
+const ACTIVATE_WAIT_MS = 120_000;
+
+/** Reject with `what`, plus whatever the extension last logged, if `promise`
+ *  has not settled in time. The log is the only account of activation there is
+ *  (an OutputChannel cannot be read back), which is why the extension mirrors
+ *  it into FLOCK_LOG_FILE for this. */
+function withTimeout(promise, ms, what) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${what} within ${ms / 1000}s.${logTail()}`));
+    }, ms);
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
+/** The last few lines the extension logged, for a failure message. */
+function logTail(limit = 12) {
+  const file = process.env.FLOCK_LOG_FILE;
+  if (!file) return '';
+  let text = '';
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch {
+    return ' The extension logged nothing.';
+  }
+  const lines = text.trim().split('\n').filter(Boolean);
+  if (lines.length === 0) return ' The extension logged nothing.';
+  return ` Last ${Math.min(limit, lines.length)} log lines:\n${lines.slice(-limit).join('\n')}`;
+}
+
 /**
  * One canonical spelling of a directory path — `\` folded to `/`, repeated
  * separators collapsed, a trailing separator dropped, a leading UNC `\\` kept.
@@ -120,8 +162,12 @@ async function suite() {
   const ext = vscode.extensions.getExtension(id);
   assert.ok(ext, `${id} is not loaded in the test host`);
 
+  // BOUNDED, and it says what the extension itself was doing. A hang here used
+  // to cost the launcher's whole deadline and report only that nothing came
+  // back; the extension mirrors its log into FLOCK_LOG_FILE, so a timeout can
+  // quote the last thing activation managed before it stopped.
   progress(`activating ${id}`);
-  await ext.activate();
+  await withTimeout(ext.activate(), ACTIVATE_WAIT_MS, 'activate() did not resolve');
   assert.ok(ext.isActive, 'activate() resolved but isActive is false');
   progress('activated; checking the contributed commands');
 

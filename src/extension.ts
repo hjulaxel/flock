@@ -429,7 +429,28 @@ export async function activate(
 
   const channel = vscode.window.createOutputChannel('Flock');
   context.subscriptions.push(channel);
-  setLogSink((line) => channel.appendLine(line));
+  // A SECOND SINK WHEN ASKED, because an OutputChannel cannot be read back.
+  // Everything in this file logs its way through activation, and none of it is
+  // reachable from outside the editor — so when activation stalls (the smoke
+  // test met exactly that on a macOS runner: the host up, the extension
+  // loaded, `activate()` never resolving, and nothing to say how far it got)
+  // the log is both the answer and unavailable. FLOCK_LOG_FILE mirrors the
+  // channel into a file, appended line by line so a hang keeps whatever was
+  // written before it. Diagnostic only: nothing sets it in normal use, a path
+  // that cannot be written is dropped after one complaint, and the file gets
+  // the same lines the channel does — no secrets are logged anywhere.
+  const logFile = process.env['FLOCK_LOG_FILE'];
+  let logFileBroken = false;
+  setLogSink((line) => {
+    channel.appendLine(line);
+    if (logFile === undefined || logFile === '' || logFileBroken) return;
+    try {
+      fsSync.appendFileSync(logFile, line + '\n');
+    } catch (err) {
+      logFileBroken = true;
+      channel.appendLine(`[log] FLOCK_LOG_FILE is not writable: ${String(err)}`);
+    }
+  });
   context.subscriptions.push({ dispose: () => setLogSink(null) });
   // The activation COUNT, not just the fact of one. The Explorer sync splices
   // workspace folders in place on the strength of the API's promise that only

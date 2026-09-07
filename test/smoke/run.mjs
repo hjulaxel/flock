@@ -72,6 +72,9 @@ const resultFile = path.join(scratch, 'result.json');
  *  stopped. Deliberately NOT the verdict file, which the launcher treats as
  *  final the moment it exists. */
 const progressFile = path.join(scratch, 'progress.txt');
+/** The extension mirrors its output channel here (FLOCK_LOG_FILE), which is
+ *  the only way to read back what activation was doing when it stalled. */
+const logFile = path.join(scratch, 'flock.log');
 for (const dir of [home, userData, workspace, extensionsDir]) {
   fs.mkdirSync(dir, { recursive: true });
 }
@@ -86,6 +89,7 @@ const env = {
   FLOCK_SMOKE_HOME: home,
   FLOCK_SMOKE_RESULT: resultFile,
   FLOCK_SMOKE_PROGRESS: progressFile,
+  FLOCK_LOG_FILE: logFile,
   // The folder the editor is opened on, below. The suite makes a PROJECT out
   // of it, which is a write into the store naming a directory — so it checks
   // the folder the workbench reports against this one first, and refuses to
@@ -178,9 +182,18 @@ try {
     } catch {
       // The default says it.
     }
+    // And what the extension itself last managed, which the phase alone does
+    // not say: "activating" covers everything activate() does.
+    let tail = '';
+    try {
+      const lines = fs.readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean);
+      if (lines.length > 0) tail = `\n--- Flock log, last 12 lines ---\n${lines.slice(-12).join('\n')}`;
+    } catch {
+      tail = '\nThe extension logged nothing.';
+    }
     verdict = {
       ok: false,
-      message: `no verdict after ${String(DEADLINE_MS / 1000)}s; last phase: ${reached}`,
+      message: `no verdict after ${String(DEADLINE_MS / 1000)}s; last phase: ${reached}${tail}`,
     };
   }
 
