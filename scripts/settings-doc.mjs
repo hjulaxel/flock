@@ -110,6 +110,14 @@ function splice(doc, block) {
   return `${doc.slice(0, start + START.length)}\n\n${block}\n\n${doc.slice(end)}`;
 }
 
+/** \r\n and \n are the same document. `render()` only ever emits \n, but the
+ *  file on disk can arrive as \r\n — a Windows checkout before .gitattributes
+ *  pinned the repo to LF, or a clone from before that file existed — so a raw
+ *  byte compare would call a byte-identical doc "behind" for a reason nobody
+ *  can fix by rerunning the generator. Line endings are the one difference
+ *  this script does not treat as content. */
+const toLF = (s) => s.replace(/\r\n/g, '\n');
+
 // --------------------------------------------------------------------- main
 
 const pkg = JSON.parse(readFileSync(MANIFEST, 'utf8'));
@@ -131,7 +139,7 @@ if (next === null) {
   );
 }
 
-if (next === current) {
+if (toLF(next) === toLF(current)) {
   console.log(`  ✓ ${docPath} matches package.json`);
 } else if (check) {
   die(
@@ -139,6 +147,8 @@ if (next === current) {
     'Run `npm run docs:settings` and commit the result.',
   );
 } else {
-  writeFileSync(DOC, next);
+  // Always written as LF, never whatever `current`'s endings were — the doc
+  // converges on one line ending regardless of what checked it out.
+  writeFileSync(DOC, toLF(next));
   console.log(`  ✓ wrote ${docPath} from package.json`);
 }

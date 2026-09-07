@@ -531,6 +531,9 @@ export function formatUsageSummary(
   if (snapshot.error === 'no-credentials') {
     return who === '' ? 'not signed in' : `${who} · usage unavailable`;
   }
+  // The one state whose fix is a person's: the row's **Sign In to Account**
+  // action. Same spelling limits.ts uses, so the row does not change its words
+  // depending on which formatter the wiring handed it.
   if (snapshot.error === 'expired') {
     return who === '' ? 'sign-in expired' : `${who} · sign-in expired`;
   }
@@ -563,9 +566,13 @@ export function formatUsageSummary(
   if (opus !== undefined) parts.push(`opus ${String(opus)}%`);
   if (parts.length === 0) {
     // A signed-in account with nothing measured yet — a Codex login that has
-    // not taken a turn — shows its name rather than an empty line; the name is
-    // the fact the row has. Same rule limits.ts's formatter applies.
-    if (who !== '') return snapshot.stale === true ? `${who} · stale` : who;
+    // not taken a turn, which is every Codex row on a fresh machine — shows its
+    // name and says why there is no meter. "no usage yet" is the same wording
+    // limits.ts's formatter uses for the same state, and it is deliberately not
+    // "n/a": nothing has failed, the account has simply not been used.
+    if (who !== '') {
+      return snapshot.stale === true ? `${who} · stale` : `${who} · no usage yet`;
+    }
     return snapshot.stale === true ? 'stale' : '';
   }
   return parts.join(' · ') + (snapshot.stale === true ? ' (stale)' : '');
@@ -783,6 +790,30 @@ export class AccountsViewProvider implements vscode.TreeDataProvider<AccountRow>
         md.appendMarkdown(`${mdEscape(planLabel(profile.provider, plan))}\n\n`);
       }
 
+      // What to DO about it, for the states a person can act on — and, for the
+      // one they cannot, that there is nothing to do. Every account row already
+      // carries **Sign In to Account** (package.json hangs lineage.loginAccount
+      // on `viewItem =~ /;account;/`), but a row that says "sign-in expired"
+      // and stops has named a verdict without naming its fix; the menu entry is
+      // one right-click away and nothing on the row points at it.
+      const state = snapshot?.error;
+      if (state === 'expired') {
+        md.appendMarkdown(
+          'This sign-in has expired — **Sign In to Account** on this row ' +
+            'renews it.\n\n',
+        );
+      } else if (state === 'no-credentials') {
+        md.appendMarkdown(
+          'No credentials found for this account — **Sign In to Account** on ' +
+            'this row signs it in.\n\n',
+        );
+      } else if (state === 'token-stale') {
+        md.appendMarkdown(
+          'Signed in — the cached access token has aged out and the CLI ' +
+            'renews it on its next run. Nothing to fix here.\n\n',
+        );
+      }
+
       const dir =
         typeof profile.configDir === 'string' ? profile.configDir.trim() : '';
       // A directory is only shown when it is actually USED. CONFIG_DIR_ENV is
@@ -827,7 +858,21 @@ export class AccountsViewProvider implements vscode.TreeDataProvider<AccountRow>
       line('Weekly', snapshot?.sevenDay);
       line('Weekly (Opus)', snapshot?.sevenDayOpus);
       if (rows.length > 0) md.appendMarkdown(rows.join('\n\n') + '\n\n');
-      else md.appendMarkdown(`${this.summary(snapshot) || 'No usage data.'}\n\n`);
+      else {
+        md.appendMarkdown(`${this.summary(snapshot) || 'No usage data.'}\n\n`);
+        // The empty Codex meter on a fresh machine, explained where the row
+        // has no room to: Codex writes the server's rate limits into its
+        // transcript at the END of a turn and nowhere Flock may ask, so a
+        // login that has not taken one yet has no numbers to show and nothing
+        // is wrong with it.
+        const fresh = snapshot !== null && snapshot.error === undefined;
+        if (profile.provider === 'codex' && fresh) {
+          md.appendMarkdown(
+            'Codex reports its rate limits at the end of a turn — this meter ' +
+              'fills in after the first session on this account.\n\n',
+          );
+        }
+      }
 
       // Where the numbers came from, when it is not "just now". Codex writes
       // its rate limits into the transcript after every turn and nowhere Flock

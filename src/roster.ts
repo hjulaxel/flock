@@ -762,12 +762,17 @@ export interface DiscoveryWorld {
  *   %APPDATA%\npm                         npm's global bin on Windows — the
  *                                         claude.cmd shim
  *   %LOCALAPPDATA%\Microsoft\WinGet\Links WinGet's portable-package links
+ *
+ * and, POSIX only — a win32 answer ends at the WinGet links:
+ *
  *   ~/.claude/local                       the older `claude migrate-installer`
  *                                         location, still on many machines
  *   /opt/homebrew/bin, /usr/local/bin     Homebrew (arm64, x64), and npm's
  *                                         default global prefix
  *
  * Pure: a Windows without APPDATA set simply contributes fewer candidates.
+ * The separators are the RUNNING platform's, not `platform`'s — injecting
+ * win32 from a mac selects the Windows roots, not Windows path syntax.
  */
 export function claudeFallbackBinDirs(world: DiscoveryWorld = {}): string[] {
   const platform = world.platform ?? process.platform;
@@ -795,9 +800,13 @@ export function claudeFallbackBinDirs(world: DiscoveryWorld = {}): string[] {
  * installers use (`claudeFallbackBinDirs`); first hit wins, else null.
  *
  * On win32 the NATIVE executable is preferred over the batch shim, and the
- * extension-less `claude` — the POSIX shell script npm drops next to the shim
- * — is not a candidate at all: Windows cannot execute it, so returning it
- * would only produce a spawn failure that reads as "the CLI is broken".
+ * other two files an npm install drops beside it — the extension-less
+ * `claude` (a POSIX shell script) and `claude.ps1` (which only PowerShell can
+ * run, and only as an argument to it) — are not candidates at all: neither is
+ * something CreateProcess can start, so returning one would produce a spawn
+ * failure that reads as "the CLI is broken". Within a directory that is the
+ * PATHEXT order every Windows shell applies; ACROSS directories PATH order
+ * wins, so an earlier .cmd beats a later .exe exactly as `where claude` says.
  */
 export function findClaudeBinary(
   configured?: string,

@@ -13,10 +13,12 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-    # Windows is new to the matrix. Until the suite has been triaged on a real
-    # run, a red Windows leg says "not yet looked at" rather than "broken", so
-    # it does not block a merge. Remove this line the day it is green.
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    # No continue-on-error on any leg. Windows carried one from the day it
+    # joined the matrix — "not yet triaged" rather than "broken" — and it
+    # earned three releases' worth of invisible red: 28 failing tests, two of
+    # them real Windows bugs, and a first run on a native machine that showed
+    # them. They are triaged and green as of run 34089952400, so the exemption
+    # is gone and a red Windows leg blocks a merge like any other.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -35,7 +37,10 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    # Green on Windows since it joined, and it is now the only test that
+    # exercises a native Windows path end to end — the workbench hands the
+    # extension a backslashed drive-lettered folder, a project is made from it
+    # and read back out of the store. It blocks a merge.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

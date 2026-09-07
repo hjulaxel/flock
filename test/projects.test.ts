@@ -903,6 +903,123 @@ describe('computeGrouping: the scope fence over PROJECT rows', () => {
 // under `.claude/worktrees/` plus one sibling checkout beside the repository.
 // Both worktree layouts matter, because the nested ones are inside the project
 // root already and only the sibling proves the fence reads worktree reach.
+// The first-run report, as the decision layer sees it: a native Windows
+// window, one project made from the folder dialog, and the sessions the `+`
+// starts in that window's folder.
+//
+// THREE SPELLINGS OF ONE DIRECTORY reach this module on Windows, and grouping
+// only works if all three compare equal:
+//
+//   * the PROJECT's rootDir — `normalizeDir(uri.fsPath)` from the dialog, so
+//     forward slashes with a drive letter (`C:/Users/...`);
+//   * the SCOPE — `workspaceFolders[].uri.fsPath` straight from the workbench,
+//     backslashed, drive letter lower-cased by `Uri.fsPath`;
+//   * the session CWD — whatever the roster read off the process, which is the
+//     CLI's own `process.cwd()`: backslashed with an UPPER-case drive letter.
+//
+// The report was "no project row appeared and the sessions sat under nothing",
+// which is exactly the shape a fence or a matcher comparing these as raw
+// strings produces — so this pins the whole chain rather than one function.
+describe('the Windows first run: one dialog folder, one window, two sessions', () => {
+  /** What the dialog stored (commands.pickDirectory → normalizeDir). */
+  const STORED = 'C:/Users/axel/code/shape_inference_standalone';
+  /** What the workbench publishes as this window's folder: backslashed, and on
+   *  a real Windows machine drive-letter-lower-cased by `Uri.fsPath` too. The
+   *  SEPARATOR difference is platform-free — `normalizeDir` folds `\` on every
+   *  OS — so it is pinned here, on all three runners. The drive-letter CASE
+   *  difference is not: only a case-folding platform (darwin, win32) makes
+   *  `c:` and `C:` one directory, and on Linux they are genuinely two. It gets
+   *  its own `runIf` block below rather than being smuggled into every
+   *  assertion, where it made these tests pass on macOS and fail on Linux for
+   *  a reason that had nothing to do with what they were checking. */
+  const SCOPE = 'C:\\Users\\axel\\code\\shape_inference_standalone';
+  /** The same folder as the workbench spells it, lower-case drive and all. */
+  const SCOPE_LOWER = 'c:\\Users\\axel\\code\\shape_inference_standalone';
+  /** What the roster reads off the running CLI. */
+  const CWD = 'C:\\Users\\axel\\code\\shape_inference_standalone';
+
+  const proj = project('p1', 'shape_inference_standalone', STORED);
+
+  it('claims a backslashed session cwd for the forward-slash project', () => {
+    const match = matchProject([proj], CWD);
+    expect(match?.project.id).toBe('p1');
+    // The claim is reported in the project's OWN spelling — the string every
+    // downstream reader (the row, the launch fence, the workspace) is handed.
+    expect(match?.dir).toBe(STORED);
+  });
+
+  it('keeps the project row inside a backslashed folder-mode scope', () => {
+    const result = grouping({
+      visibleRootIds: ['s1', 's2'],
+      cwdOf: cwdMap({ s1: CWD, s2: CWD }),
+      scopeDirs: [SCOPE],
+      projects: [proj],
+    });
+    // The row exists, and both sessions are under it rather than loose — the
+    // two halves the screenshot showed missing.
+    expect(result.projects.map((p) => p.label)).toEqual([
+      'shape_inference_standalone',
+    ]);
+    expect(result.projects[0].rootIds).toEqual(['s1', 's2']);
+    expect(result.loose).toEqual([]);
+    expect(result.folders).toEqual([]);
+    expect(result.outOfScopeCount).toBe(0);
+    expect(result.hiddenCount).toBe(0);
+  });
+
+  it('claims a session in a subdirectory of the window folder', () => {
+    // The commonest real shape: the CLI was started from `src\` inside the
+    // folder, so the cwd is deeper than both the scope and the project root.
+    const deeper = `${CWD}\\src`;
+    const result = grouping({
+      visibleRootIds: ['s1'],
+      cwdOf: cwdMap({ s1: deeper }),
+      scopeDirs: [SCOPE],
+      projects: [proj],
+    });
+    expect(result.projects[0].rootIds).toEqual(['s1']);
+    expect(matchProject([proj], deeper)?.project.id).toBe('p1');
+  });
+
+  it('does not claim a SIBLING folder whose name starts the same', () => {
+    // Boundary-awareness survives the fold: `...standalone-old` is a different
+    // directory, and a prefix compare would swallow it.
+    expect(matchProject([proj], `${CWD}-old`)).toBeNull();
+  });
+
+  it('folds the drive letter where the platform folds case', () => {
+    // `Uri.fsPath` lower-cases the drive letter and a process cwd does not, so
+    // on Windows the two spellings of one directory differ in exactly that
+    // character. Both shipped platforms fold; Linux does not, and there the
+    // two really are different paths.
+    const lower = matchProject([proj], SCOPE_LOWER);
+    expect(lower === null).toBe(!PATHS_FOLD_CASE);
+  });
+
+  // THE REAL WINDOWS PAIR, where both differences land at once: the workbench
+  // publishes the scope with a lower-case drive and the roster reads an
+  // upper-case one, so the fence only holds because the platform folds case.
+  // Asserted on macOS as well as Windows — the two platforms that fold — and
+  // skipped on Linux, where a drive letter is not a thing a path has.
+  it.runIf(PATHS_FOLD_CASE)(
+    'keeps the row when the scope and the cwd differ in the drive letter too',
+    () => {
+      const result = grouping({
+        visibleRootIds: ['s1', 's2'],
+        cwdOf: cwdMap({ s1: CWD, s2: CWD }),
+        scopeDirs: [SCOPE_LOWER],
+        projects: [proj],
+      });
+      expect(result.projects.map((p) => p.label)).toEqual([
+        'shape_inference_standalone',
+      ]);
+      expect(result.projects[0].rootIds).toEqual(['s1', 's2']);
+      expect(result.loose).toEqual([]);
+      expect(result.outOfScopeCount).toBe(0);
+    },
+  );
+});
+
 describe('computeGrouping: a window opened on part of a project', () => {
   const REPO = '/Users/axelh/Documents/lineage-sessions';
   const NESTED_WT = `${REPO}/.claude/worktrees/donations`;

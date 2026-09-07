@@ -49,7 +49,7 @@ import {
   worktreePathFor,
   worktreeRemoveArgv,
 } from '../src/worktrees';
-import { PATHS_FOLD_CASE } from '../src/projects';
+import { PATHS_FOLD_CASE, normalizeDir } from '../src/projects';
 import type { BranchStatus, GitCommandResult } from '../src/types';
 import { contributedSettings } from './manifest';
 
@@ -136,9 +136,15 @@ describe('slugifyBranch', () => {
 
 describe('worktreePathFor', () => {
   it('puts a new checkout beside the main one, by default', () => {
+    // The fixture is a driveless POSIX-shaped path on purpose, so this test
+    // runs the same on every host — but that means path.resolve prefixes it
+    // with THIS host's current drive on win32 (a real Windows repoDir would
+    // already carry one). The expectation is built through the identical
+    // path.resolve + normalizeDir the function itself runs, so it lands on
+    // whatever drive this host resolves to rather than pinning one.
     expect(
       worktreePathFor({ repoDir: '/Users/x/code/app', branch: 'feat/x' }),
-    ).toBe('/Users/x/code/app-feat-x');
+    ).toBe(normalizeDir(path.resolve('/Users/x/code/app', '../app-feat-x')));
   });
 
   it('ships the same default the manifest does', () => {
@@ -153,13 +159,15 @@ describe('worktreePathFor', () => {
   it('resolves a relative pattern against the repository, not the process', () => {
     // A VS Code window's cwd is whatever folder it happened to open, so the same
     // pattern would land somewhere different in every window.
+    // Same driveless-fixture note as the test above — the expectation is
+    // derived through path.resolve + normalizeDir rather than pinned literally.
     expect(
       worktreePathFor({
         pattern: '../trees/${repo}/${branch}',
         repoDir: '/Users/x/code/app',
         branch: 'feat/x',
       }),
-    ).toBe('/Users/x/code/trees/app/feat-x');
+    ).toBe(normalizeDir(path.resolve('/Users/x/code/app', '../trees/app/feat-x')));
   });
 
   it('uses an absolute pattern as written', () => {
@@ -176,19 +184,26 @@ describe('worktreePathFor', () => {
     // Without this, an obviously-path-shaped setting would silently create a
     // directory literally named `~`, which is the kind of thing you find months
     // later.
+    // worktreePathFor's result always runs through normalizeDir, which folds
+    // `\` to `/` (the codebase's canonical spelling, per projects.ts). A bare
+    // path.join(...) does not fold that — on win32 it stays backslash-joined —
+    // so the expectation is wrapped in the same normalizeDir the function ends
+    // on, rather than pinning the native separator.
     expect(
       worktreePathFor({
         pattern: '~/worktrees/${branch}',
         repoDir: '/Users/x/code/app',
         branch: 'feat/x',
       }),
-    ).toBe(path.join(os.homedir(), 'worktrees', 'feat-x'));
+    ).toBe(normalizeDir(path.join(os.homedir(), 'worktrees', 'feat-x')));
   });
 
   it('falls back to the default for a blank pattern', () => {
+    // Same driveless-fixture note as 'puts a new checkout beside the main
+    // one': derived through path.resolve + normalizeDir, not pinned literally.
     for (const pattern of ['', '   ', undefined]) {
       expect(worktreePathFor({ pattern, repoDir: '/c/app', branch: 'x' })).toBe(
-        '/c/app-x',
+        normalizeDir(path.resolve('/c/app', '../app-x')),
       );
     }
   });

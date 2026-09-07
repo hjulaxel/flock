@@ -8,7 +8,10 @@
 // against the mock's empty `window` they are silent no-ops. The one genuinely
 // end-to-end block runs the RENDERED CLI under `process.execPath` against a
 // temp home — the script is a generated artifact, and the only test that can
-// catch it drifting from the watcher's protocol is one that executes it.
+// catch it drifting from the watcher's protocol is one that executes it. Under
+// `process.execPath` and not the shebang: a `#!` line is a POSIX kernel
+// feature, and Windows would refuse the file. The temp home is spelled to the
+// child as both HOME and USERPROFILE, for the reason `cliEnv` gives.
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFile } from 'node:child_process';
@@ -24,6 +27,7 @@ import {
   MAX_AGENT_TITLE_CHARS,
   VERBS_VERSION,
   clampForkCount,
+  fallbackHome,
   parseRequestText,
   renderSkillMd,
   renderVerbScript,
@@ -270,6 +274,30 @@ describe('clampForkCount', () => {
     expect(clampForkCount(-2)).toBe(1);
     expect(clampForkCount(NaN)).toBe(1);
     expect(clampForkCount('4')).toBe(1);
+  });
+});
+
+describe('fallbackHome', () => {
+  it('names the variable each platform really keeps a home in', () => {
+    // Reached only when os.homedir() itself fails — but when it is reached it
+    // has to answer with the directory the rest of the extension already
+    // resolved. The platform is a parameter, so the win32 branch runs on macOS
+    // CI and the POSIX branch on Windows CI.
+    expect(
+      fallbackHome({ HOME: '/Users/a', USERPROFILE: 'C:\\Users\\a' }, 'darwin'),
+    ).toBe('/Users/a');
+    // HOME on Windows is Git Bash's invention: a POSIX-shaped path, sometimes
+    // a different directory entirely. os.homedir() there reads USERPROFILE, so
+    // the fallback must too — a CLI and a window that disagree about home
+    // disagree about ~/.lineage/requests, and nothing is ever claimed.
+    expect(
+      fallbackHome({ HOME: '/c/Users/a', USERPROFILE: 'C:\\Users\\a' }, 'win32'),
+    ).toBe('C:\\Users\\a');
+    expect(
+      fallbackHome({ HOMEDRIVE: 'C:', HOMEPATH: '\\Users\\a' }, 'win32'),
+    ).toBe(path.win32.join('C:', '\\Users\\a'));
+    expect(fallbackHome({ HOME: '/c/Users/a' }, 'win32')).toBe('.');
+    expect(fallbackHome({}, 'linux')).toBe('.');
   });
 });
 
@@ -692,6 +720,41 @@ describe('forkForAgent', () => {
 // ------------------------------------------------------- the CLI, executed
 
 describe('the rendered CLI', () => {
+  /** Every test here spawns a real node; a cold Windows runner can spend a
+   *  second or two on the first one, and vitest's 5 s default turns that into
+   *  an opaque timeout instead of the assertion that actually failed. `until`
+   *  still gives up at 8 s, well inside this. */
+  const CLI_TIMEOUT_MS = 20_000;
+
+  /** The env the CLI child runs with. Minimal ON PURPOSE: the test runner may
+   *  itself live inside tmux or a Flock terminal, and inheriting that env
+   *  would hand the script an identity the test did not choose.
+   *
+   *  The home is spelled BOTH ways because os.homedir() — what the CLI builds
+   *  ~/.lineage/requests from — reads HOME on POSIX and USERPROFILE on
+   *  Windows, where it ignores HOME entirely and falls back to the account's
+   *  real profile directory rather than to it. Setting only HOME therefore
+   *  leaves a Windows CLI writing its request under C:\\Users\\<you> while the
+   *  test watches the temp home: nothing arrives, and the test dies waiting
+   *  out the CLI's 30-second poll. SystemRoot and SystemDrive ride along for
+   *  the same reason in reverse — they describe the OS, not the session, and
+   *  "minimal" here means no identity, not no Windows. */
+  function cliEnv(
+    home: string,
+    extra: Record<string, string> = {},
+  ): Record<string, string> {
+    const env: Record<string, string> = {
+      PATH: process.env.PATH ?? '',
+      HOME: home,
+      USERPROFILE: home,
+    };
+    for (const key of ['SystemRoot', 'SystemDrive'] as const) {
+      const value = process.env[key];
+      if (value !== undefined) env[key] = value;
+    }
+    return { ...env, ...extra };
+  }
+
   function runCli(
     home: string,
     args: string[],
@@ -702,10 +765,7 @@ describe('the rendered CLI', () => {
       execFile(
         process.execPath,
         [script, ...args],
-        // A minimal env ON PURPOSE: the test runner may itself live inside
-        // tmux or a Flock terminal, and inheriting that env would hand the
-        // script an identity the test did not choose.
-        { env: { PATH: process.env.PATH ?? '', HOME: home, ...env } },
+        { env: cliEnv(home, env) },
         (err, stdout, stderr) => {
           const code =
             err && typeof (err as { code?: unknown }).code === 'number'
@@ -718,6 +778,32 @@ describe('the rendered CLI', () => {
       );
     });
   }
+
+  it('gives the child the temp home THIS platform resolves to', async () => {
+    // The one fact every test below stands on: the home the harness hands the
+    // CLI is the home os.homedir() gives it back. HOME alone is not that fact
+    // on Windows — libuv reads USERPROFILE there — so the env spells both, and
+    // a real child says which directory that lands in.
+    const home = tempHome();
+    expect(cliEnv(home)).toMatchObject({ HOME: home, USERPROFILE: home });
+
+    // A probe script rather than `node -p`: an argument is quoted by the OS on
+    // its way into the child, and a file path is the one form both agree on.
+    const probe = path.join(home, 'homedir-probe.mjs');
+    fs.writeFileSync(
+      probe,
+      "import * as os from 'node:os';\nprocess.stdout.write(os.homedir());\n",
+    );
+    const resolved = await new Promise<string>((resolve, reject) => {
+      execFile(
+        process.execPath,
+        [probe],
+        { env: cliEnv(home) },
+        (err, stdout) => (err ? reject(err) : resolve(stdout)),
+      );
+    });
+    expect(resolved).toBe(home);
+  }, CLI_TIMEOUT_MS);
 
   it('writes the request, waits for the reply, and reports the branches', async () => {
     const home = tempHome();
@@ -761,7 +847,7 @@ describe('the rendered CLI', () => {
     expect(result.code).toBe(0);
     expect(result.stdout).toContain('Forked 2 new sessions');
     expect(result.stdout).toContain('auth 2, auth 3');
-  });
+  }, CLI_TIMEOUT_MS);
 
   onPosix('v4: leaves the request readable by this user alone', async () => {
     const home = tempHome();
@@ -794,7 +880,7 @@ describe('the rendered CLI', () => {
       JSON.stringify({ ok: true, forked: [SID], titles: ['fork 2'] }),
     );
     expect((await done).code).toBe(0);
-  });
+  }, CLI_TIMEOUT_MS);
 
   it('relays a refusal and exits nonzero', async () => {
     const home = tempHome();
@@ -820,7 +906,7 @@ describe('the rendered CLI', () => {
     const result = await done;
     expect(result.code).toBe(1);
     expect(result.stderr).toContain('no transcript');
-  });
+  }, CLI_TIMEOUT_MS);
 
   it('says so when it cannot tell which session it is in', async () => {
     const home = tempHome();
@@ -835,7 +921,7 @@ describe('the rendered CLI', () => {
       fs.existsSync(requestsDir(home)) &&
         fs.readdirSync(requestsDir(home)).length > 0,
     ).toBe(false);
-  });
+  }, CLI_TIMEOUT_MS);
 
   it('names imply the count, and land in the request as titles', async () => {
     const home = tempHome();
@@ -875,7 +961,7 @@ describe('the rendered CLI', () => {
     const result = await done;
     expect(result.code).toBe(0);
     expect(result.stdout).toContain('redis cache, SQL approach');
-  });
+  }, CLI_TIMEOUT_MS);
 
   it('refuses a name/count mismatch before writing anything', async () => {
     const home = tempHome();
@@ -893,7 +979,7 @@ describe('the rendered CLI', () => {
       fs.existsSync(requestsDir(home)) &&
         fs.readdirSync(requestsDir(home)).length > 0,
     ).toBe(false);
-  });
+  }, CLI_TIMEOUT_MS);
 
   it('refuses a count outside 1..8 before writing anything', async () => {
     const home = tempHome();
@@ -905,5 +991,5 @@ describe('the rendered CLI', () => {
     });
     expect(result.code).toBe(1);
     expect(result.stderr).toContain('--count');
-  });
+  }, CLI_TIMEOUT_MS);
 });

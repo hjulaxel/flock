@@ -2,7 +2,7 @@
 // cascade, the argv primitives it reads, and the forest builder that turns the
 // resolved edges into the tree the sidebar draws.
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as process from 'node:process';
 
 import {
@@ -78,23 +78,38 @@ describe('resumeTarget', () => {
 // ------------------------------------------------------------- ps primitives
 
 describe('psPpidCommand', () => {
-  it('fails silently for an impossible pid', async () => {
-    expect(await psPpidCommand(0)).toEqual({ ppid: null, command: '' });
-    expect(await psPpidCommand(-1)).toEqual({ ppid: null, command: '' });
-    expect(await psPpidCommand(2_147_400_000)).toEqual({
-      ppid: null,
-      command: '',
-    });
-  });
+  // The two tests below ask the real machine. On POSIX that is one `ps`,
+  // bounded by PS_TIMEOUT_MS and back in milliseconds; on Windows it is a
+  // whole CIM sweep whose PowerShell cold start alone is seconds on a runner,
+  // bounded by WINDOWS_SWEEP_TIMEOUT_MS (8 s). Vitest's 5 s default is not
+  // enough room for that — this is; neither assertion is relaxed.
+  const REAL_SWEEP_TIMEOUT_MS = 20_000;
 
-  it('reads a real ppid and command line for this process', async () => {
-    // On POSIX this runs the real `ps`; on Windows the real PowerShell sweep.
-    // Either way the answer has to be about THIS process.
-    const { ppid, command } = await psPpidCommand(process.pid);
-    expect(typeof ppid).toBe('number');
-    expect(ppid).toBeGreaterThan(0);
-    expect(command.length).toBeGreaterThan(0);
-  });
+  it(
+    'fails silently for an impossible pid',
+    async () => {
+      expect(await psPpidCommand(0)).toEqual({ ppid: null, command: '' });
+      expect(await psPpidCommand(-1)).toEqual({ ppid: null, command: '' });
+      expect(await psPpidCommand(2_147_400_000)).toEqual({
+        ppid: null,
+        command: '',
+      });
+    },
+    REAL_SWEEP_TIMEOUT_MS,
+  );
+
+  it(
+    'reads a real ppid and command line for this process',
+    async () => {
+      // On POSIX this runs the real `ps`; on Windows the real PowerShell
+      // sweep. Either way the answer has to be about THIS process.
+      const { ppid, command } = await psPpidCommand(process.pid);
+      expect(typeof ppid).toBe('number');
+      expect(ppid).toBeGreaterThan(0);
+      expect(command.length).toBeGreaterThan(0);
+    },
+    REAL_SWEEP_TIMEOUT_MS,
+  );
 
   it('on Windows, reads the shared process table instead of spawning ps', async () => {
     const table = new Map([
@@ -133,6 +148,29 @@ describe('parentFromForkArgv', () => {
     const r = await parentFromForkArgv(CHILD, process.pid, 2);
     expect(r.parentId).toBeNull();
     expect(r.forkGateSeen).toBe(false);
+  });
+
+  it('on Windows the hops read the CIM table: a fork two levels up is found', async () => {
+    // The command line the walk needs lives in the table, not in `ps` output.
+    // This is the fact the cascade's argv branch rests on where there is no
+    // `ps` at all — the platform is injected, so it is checked on every OS.
+    const table = new Map([
+      [800, { pid: 800, ppid: 4, start: 's', command: 'cmd.exe' }],
+      [
+        1200,
+        {
+          pid: 1200,
+          ppid: 800,
+          start: 's',
+          command: `claude.exe --fork-session --resume ${ARGV_PARENT}`,
+        },
+      ],
+      [1400, { pid: 1400, ppid: 1200, start: 's', command: 'node.exe cli.js' }],
+    ]);
+    const windows = async (): Promise<ProcessSnapshot> => table;
+    await expect(
+      parentFromForkArgv(CHILD, 1400, 5, { platform: 'win32', windows }),
+    ).resolves.toEqual({ parentId: ARGV_PARENT, forkGateSeen: true });
   });
 });
 
@@ -338,6 +376,85 @@ describe('LineageResolver cascade', () => {
     await expect(r.resolve({ sessionId: CHILD, pid: 42 })).resolves.toEqual({
       parentId: null,
       source: 'none',
+    });
+  });
+});
+
+// ------------------------------------------------- the cascade on Windows
+//
+// The argv walk and the deep scan used to sit behind a
+// `process.platform !== 'win32'` in the resolver — a leftover from the days
+// when the walk could not read a Windows command line — so a fork typed at
+// the CLI drew as a root there forever. `process.platform` reaches lineage.ts
+// through a namespace import, whose bindings cannot be redefined, so the only
+// way to exercise the cascade's Windows shape from a POSIX runner is to load
+// the module under a win32 `node:process`. Everything else in this file
+// injects its platform as a parameter, which is cheaper; this is the one
+// question that needs the module's own view of the host.
+
+async function lineageOnWin32(): Promise<typeof import('../src/lineage')> {
+  vi.resetModules();
+  const actual = await vi.importActual<typeof import('node:process')>('node:process');
+  vi.doMock('node:process', () => ({ ...actual, platform: 'win32', default: actual }));
+  return import('../src/lineage.js');
+}
+
+describe('LineageResolver cascade on Windows', () => {
+  afterEach(() => {
+    vi.doUnmock('node:process');
+    vi.resetModules();
+  });
+
+  it('branches 3 and 4 are not gated by the platform', async () => {
+    const win = await lineageOnWin32();
+
+    const argvHit = spyIO({
+      head: null,
+      deep: OTHER,
+      argv: { parentId: PARENT, forkGateSeen: true },
+    });
+    await expect(
+      new win.LineageResolver(argvHit.io).resolve({ sessionId: CHILD, pid: 42 }),
+    ).resolves.toEqual({ parentId: PARENT, source: 'argv' });
+    expect(argvHit.deepScans).toBe(0);
+
+    const gateOnly = spyIO({
+      head: null,
+      deep: PARENT,
+      argv: { parentId: null, forkGateSeen: true },
+    });
+    await expect(
+      new win.LineageResolver(gateOnly.io).resolve({ sessionId: CHILD, pid: 42 }),
+    ).resolves.toEqual({ parentId: PARENT, source: 'cli-fork' });
+    expect(gateOnly.deepScans).toBe(1);
+  });
+
+  it('end to end: a CLI fork on Windows resolves from the table, not as a root', async () => {
+    const win = await lineageOnWin32();
+    const table = new Map([
+      [
+        1400,
+        {
+          pid: 1400,
+          ppid: 800,
+          start: 's',
+          command: `claude.exe --fork-session --resume ${PARENT}`,
+        },
+      ],
+      [800, { pid: 800, ppid: 4, start: 's', command: 'cmd.exe' }],
+    ]);
+    const r = new win.LineageResolver({
+      scanTranscript: () => null,
+      argvScan: (id, pid) =>
+        win.parentFromForkArgv(id, pid, 5, {
+          platform: 'win32',
+          windows: async () => table,
+        }),
+      now: () => 1_000_000,
+    });
+    await expect(r.resolve({ sessionId: CHILD, pid: 1400 })).resolves.toEqual({
+      parentId: PARENT,
+      source: 'argv',
     });
   });
 });

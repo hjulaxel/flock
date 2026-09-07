@@ -15,6 +15,7 @@ import {
   orphanRescueDecision,
   parsePsPidFacts,
   parsePsPpids,
+  readsProcessTable,
   reapSurvivors,
 } from '../src/procs';
 import type { ProcessSnapshot } from '../src/processTable';
@@ -66,11 +67,16 @@ describe('descendantsOf', () => {
 });
 
 describe('listDescendants', () => {
+  // The POSIX route, named rather than inherited from the host, so it is the
+  // route under test on a Windows runner too.
   it('walks via the injected exec', async () => {
     const asked: string[][] = [];
-    const found = await listDescendants(100, async (cmd, args) => {
-      asked.push([cmd, ...args]);
-      return '100 1\n101 100\n201 101\n';
+    const found = await listDescendants(100, {
+      platform: 'linux',
+      exec: async (cmd, args) => {
+        asked.push([cmd, ...args]);
+        return '100 1\n101 100\n201 101\n';
+      },
     });
     expect(asked).toEqual([['ps', '-axo', 'pid=,ppid=']]);
     expect(found.sort()).toEqual([101, 201]);
@@ -78,8 +84,11 @@ describe('listDescendants', () => {
 
   it('a broken ps yields nothing — the reap degrades, never throws', async () => {
     await expect(
-      listDescendants(100, async () => {
-        throw new Error('no ps here');
+      listDescendants(100, {
+        platform: 'linux',
+        exec: async () => {
+          throw new Error('no ps here');
+        },
       }),
     ).resolves.toEqual([]);
   });
@@ -195,9 +204,12 @@ describe('parsePsPidFacts', () => {
 describe('listPidFacts', () => {
   it('sweeps the whole table (never `-p`, which fails when any pid is gone) and filters', async () => {
     const asked: string[][] = [];
-    const facts = await listPidFacts([101, 999], async (cmd, args) => {
-      asked.push([cmd, ...args]);
-      return '101 1 Sat Aug 23 07:00:00 2026\n102 101 Sat Aug 23 07:00:01 2026\n';
+    const facts = await listPidFacts([101, 999], {
+      platform: 'linux',
+      exec: async (cmd, args) => {
+        asked.push([cmd, ...args]);
+        return '101 1 Sat Aug 23 07:00:00 2026\n102 101 Sat Aug 23 07:00:01 2026\n';
+      },
     });
     expect(asked).toEqual([['ps', '-axo', 'pid=,ppid=,lstart=']]);
     expect(facts.get(101)?.ppid).toBe(1);
@@ -207,8 +219,11 @@ describe('listPidFacts', () => {
 
   it('a broken ps yields no facts — and no facts means no signal', async () => {
     await expect(
-      listPidFacts([101], async () => {
-        throw new Error('no ps here');
+      listPidFacts([101], {
+        platform: 'linux',
+        exec: async () => {
+          throw new Error('no ps here');
+        },
       }),
     ).resolves.toEqual(new Map());
   });
@@ -339,8 +354,34 @@ describe('the sweeps on Windows read the process table, not ps', () => {
   });
 
   it('still takes the bare exec argument POSIX callers have always passed', async () => {
-    const kids = await listDescendants(100, async () => '100 1\n101 100\n');
+    // And it takes it AS a POSIX call — on a Windows runner too. A caller
+    // that hands over an exec seam and nothing else is asking for the `ps`
+    // route by construction (see readsProcessTable): the alternative is that
+    // the seam is quietly dropped and the live machine swept instead, which
+    // on a Windows runner is exactly what happened.
+    const asked: string[][] = [];
+    const kids = await listDescendants(100, async (cmd, args) => {
+      asked.push([cmd, ...args]);
+      return '100 1\n101 100\n';
+    });
+    expect(asked).toEqual([['ps', '-axo', 'pid=,ppid=']]);
     expect(kids).toEqual([101]);
+  });
+});
+
+describe('readsProcessTable: which sweep a call takes', () => {
+  const exec = async (): Promise<string> => '';
+
+  it('the deps object decides, and defaults to the host', () => {
+    expect(readsProcessTable({}, 'win32')).toBe(true);
+    expect(readsProcessTable({}, 'darwin')).toBe(false);
+    expect(readsProcessTable({ exec, platform: 'win32' }, 'darwin')).toBe(true);
+    expect(readsProcessTable({ exec, platform: 'linux' }, 'win32')).toBe(false);
+  });
+
+  it('a bare exec is a POSIX caller: `ps`, whatever the host is', () => {
+    expect(readsProcessTable(exec, 'win32')).toBe(false);
+    expect(readsProcessTable(exec, 'darwin')).toBe(false);
   });
 });
 

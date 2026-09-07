@@ -383,7 +383,14 @@ describe('ensureTmuxConf', () => {
   });
 
   it('degrades to undefined when the dir cannot exist', () => {
-    expect(ensureTmuxConf('/dev/null/nope')).toBeUndefined();
+    // '/dev/null/nope' is POSIX-only as "cannot exist" — on Windows it is just
+    // an ordinary path under the drive root and CAN be created. What cannot
+    // exist on any OS is a directory underneath an existing regular FILE:
+    // mkdirSync there is ENOTDIR on POSIX and ENOENT/ENOTDIR on Windows.
+    const dir = tempDir();
+    const blocker = path.join(dir, 'blocker');
+    fs.writeFileSync(blocker, 'not a directory');
+    expect(ensureTmuxConf(path.join(blocker, 'nope'))).toBeUndefined();
   });
 
   it('writes the exit-to-shell block when one is asked for', () => {

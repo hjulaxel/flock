@@ -12,12 +12,21 @@
 // `showInfo` resolves undefined and install() reads that as declined. The
 // no-consent paths — already installed, remove, self-heal — are the ones
 // tested end to end; the write itself is the tested pure merge behind an
-// atomic write hooks.ts already tests.
+// atomic write hooks.ts already tests. The one message a test does read is
+// the Windows refusal, through a warning stub hung off that same empty
+// `window` (test/hooks.test.ts explains the pattern) — a refusal whose whole
+// point is that it is said out loud has to be checked out loud.
+//
+// EVERY manager test states the platform it is about, because the manager
+// behaves differently on win32 and `process.platform` is not the subject: the
+// POSIX expectations below hold on Windows CI too, and the win32 refusal is
+// exercised on macOS and Linux.
 
 import { afterEach, describe, expect, it } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as vscodeMock from 'vscode';
 
 import {
   CODEX_HOOK_EVENTS,
@@ -265,7 +274,16 @@ describe('CODEX_HOOK_COMMAND', () => {
 
 // ---------------------------------------------------------------- manager
 
-function makeManager(home: string, homes: string[] = [], initial: HookInstallState = { installed: false }) {
+/** `platform` defaults to a POSIX one rather than to this machine's: what
+ *  these tests pin is the POSIX behaviour, and it must be pinned identically
+ *  on the Windows runner — where every one of them used to pass vacuously
+ *  through the win32 short-circuit. */
+function makeManager(
+  home: string,
+  homes: string[] = [],
+  initial: HookInstallState = { installed: false },
+  platform = 'linux',
+) {
   let stored = initial;
   const manager = new CodexHooksManager(
     {
@@ -274,10 +292,31 @@ function makeManager(home: string, homes: string[] = [], initial: HookInstallSta
         stored = s;
       },
     },
-    { home, homes: () => homes },
+    { home, homes: () => homes, platform },
   );
   return { manager, stored: () => stored };
 }
+
+// The vscode mock's `window` is empty, so hooks.ts's message shims are silent
+// no-ops; a stub hung off it for one test makes the refusal readable. Removed
+// after every test so nothing else in the suite runs against a stub.
+interface WarningStub {
+  showWarningMessage?: (message: string, options: unknown, ...items: string[]) => Promise<string | undefined>;
+}
+const messageApi = vscodeMock.window as unknown as WarningStub;
+
+function stubWarnings(): string[] {
+  const shown: string[] = [];
+  messageApi.showWarningMessage = async (message: string) => {
+    shown.push(message);
+    return undefined;
+  };
+  return shown;
+}
+
+afterEach(() => {
+  delete messageApi.showWarningMessage;
+});
 
 describe('CodexHooksManager', () => {
   it('lists ~/.codex/hooks.json first and each account home once', () => {
@@ -434,5 +473,73 @@ describe('CodexHooksManager', () => {
     const { manager } = makeManager(home);
     expect((await manager.selfHeal()).installed).toBe(false);
     expect(fs.existsSync(path.join(home, '.codex'))).toBe(false);
+  });
+
+  // ------------------------------------------------------------- on Windows
+  //
+  // There is no Codex hook command for Windows to write. The Claude side has
+  // one (hooks.HOOK_COMMAND_WINDOWS) only because a Claude hook entry carries
+  // a `shell` field to run it through PowerShell; a Codex entry is a command
+  // and nothing else, so the sole candidate is the /bin/sh line — which a
+  // Windows Codex cannot run. The product is therefore a refusal that is
+  // SPOKEN, and these pin what it does and does not touch.
+
+  it('win32: install refuses in words, writes nothing and records nothing — even where our entries already exist', async () => {
+    const home = tempHome();
+    const file = path.join(home, '.codex', 'hooks.json');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const before = mergeCodexHooks(JSON.stringify(FOREIGN))!.text;
+    fs.writeFileSync(file, before);
+    const shown = stubWarnings();
+    const { manager, stored } = makeManager(home, [], { installed: false }, 'win32');
+
+    const state = await manager.install();
+    // On a POSIX machine this same file is the "already present" install and
+    // records itself (above); here nothing is claimed.
+    expect(state.installed).toBe(false);
+    expect(stored().installed).toBe(false);
+    expect(fs.readFileSync(file, 'utf8')).toBe(before);
+    expect(shown).toHaveLength(1);
+    expect(shown[0]).toContain('Windows');
+    expect(shown[0]).toContain('Codex');
+    expect(shown[0]).toContain('/bin/sh');
+  });
+
+  it('win32: self-heal leaves the file alone and KEEPS the stored flag — the install record can come from another machine', async () => {
+    const home = tempHome();
+    const file = path.join(home, '.codex', 'hooks.json');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const partial = mergeCodexHooks(JSON.stringify(FOREIGN), CODEX_HOOK_COMMAND, ['Stop'])!.text;
+    fs.writeFileSync(file, partial);
+    const { manager, stored } = makeManager(
+      home,
+      [],
+      { installed: true, pluginDir: file, pluginVersion: 1 },
+      'win32',
+    );
+
+    const state = await manager.selfHeal();
+    // The POSIX run of this input fills the missing events in and bumps the
+    // version; this one rewrites nothing and un-installs nothing.
+    expect(state.installed).toBe(true);
+    expect(state.pluginVersion).toBe(1);
+    expect(stored().installed).toBe(true);
+    expect(fs.readFileSync(file, 'utf8')).toBe(partial);
+  });
+
+  it('win32: remove still strips our entries and clears the events — the undo is not platform-gated', async () => {
+    const home = tempHome();
+    const file = path.join(home, '.codex', 'hooks.json');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, mergeCodexHooks(JSON.stringify(FOREIGN))!.text);
+    const events = eventsFile(home);
+    fs.mkdirSync(path.dirname(events), { recursive: true });
+    fs.writeFileSync(events, '{"cli":"codex","payload":{"prompt":"my secret plan"}}\n');
+    const { manager, stored } = makeManager(home, [], { installed: true, pluginDir: file }, 'win32');
+
+    await manager.remove();
+    expect(stored().installed).toBe(false);
+    expect(parse(fs.readFileSync(file, 'utf8'))).toEqual(FOREIGN);
+    expect(fs.statSync(events).size).toBe(0);
   });
 });

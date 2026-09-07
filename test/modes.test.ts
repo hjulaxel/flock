@@ -401,4 +401,49 @@ describe('launchableProjects', () => {
       launchableProjects(['/code/app'], [other, vague], dirsOf).map((p) => p.id),
     ).toEqual(['vague']);
   });
+
+  it('places a forward-slash project inside a backslashed Windows scope', () => {
+    // The two strings this rule is handed on Windows are never the same
+    // spelling: the scope is `workspaceFolders[].uri.fsPath` (backslashed) and
+    // a project's directories are `normalizeDir`'d (forward slashes, drive
+    // letter kept). A raw prefix compare places neither, which would drop the
+    // window's own project out of every picker that ends in a launch.
+    const winApp: P = { id: 'win', dirs: ['C:/Users/axel/code/proj'] };
+    const winOther: P = { id: 'winOther', dirs: ['D:/work/other'] };
+    expect(
+      launchableProjects(
+        ['C:\\Users\\axel\\code\\proj'],
+        [winApp, winOther],
+        dirsOf,
+      ).map((p) => p.id),
+    ).toEqual(['win']);
+  });
+});
+
+// The same three Windows spellings of one directory that test/projects.ts
+// pins for the grouping pass, asked of the window rules: a window "covers" the
+// folder it opened, and routes a foreign directory to itself rather than
+// opening a second window on the same path.
+describe('the window rules on Windows-shaped paths', () => {
+  const STORED = 'C:/Users/axel/code/proj';
+  const FOLDER = 'C:\\Users\\axel\\code\\proj';
+
+  it('does not fence out a session running in the folder this window opened', () => {
+    expect(outsideScope([FOLDER], `${STORED}/src`)).toBe(false);
+    expect(outsideScope([STORED], `${FOLDER}\\src`)).toBe(false);
+    // A genuinely different directory still reads as elsewhere.
+    expect(outsideScope([FOLDER], 'D:\\work\\other')).toBe(true);
+  });
+
+  it('knows the window already has the directory, whichever way it is spelled', () => {
+    expect(windowCovers([FOLDER], STORED)).toBe(true);
+    expect(windowCovers([STORED], `${FOLDER}\\pkg`)).toBe(true);
+    expect(windowCovers([FOLDER], `${FOLDER}-old`)).toBe(false);
+  });
+
+  it('routes to the window whose published folder holds the directory', () => {
+    const here = win({ windowId: 'w1', folders: [FOLDER] });
+    const far = win({ windowId: 'w2', folders: ['D:\\work\\other'] });
+    expect(windowForDir([far, here], `${STORED}/src`)?.windowId).toBe('w1');
+  });
 });

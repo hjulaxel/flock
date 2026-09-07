@@ -285,8 +285,11 @@ describe('formatUsageSummary', () => {
     expect(formatUsageSummary(undefined)).toBe('');
   });
 
-  it('a fresh empty snapshot (no windows, no error, not stale) -> "usage n/a"', () => {
-    expect(formatUsageSummary(snap())).toBe('usage n/a');
+  it('a fresh empty snapshot (no windows, no error, not stale) -> "no usage yet"', () => {
+    // Not "n/a": nothing failed. This is the state every Codex row is in on a
+    // machine where no Codex session has run yet, and "n/a" under a brand-new
+    // account reads as a fault the user is meant to go and fix.
+    expect(formatUsageSummary(snap())).toBe('no usage yet');
   });
 
   it('no windows but stale -> "usage stale"', () => {
@@ -297,8 +300,11 @@ describe('formatUsageSummary', () => {
     expect(formatUsageSummary(snap({ error: 'no-credentials' }))).toBe('not logged in');
   });
 
-  it("error 'expired' -> \"login expired\"", () => {
-    expect(formatUsageSummary(snap({ error: 'expired' }))).toBe('login expired');
+  it("error 'expired' -> \"sign-in expired\", the words the row's action is spelled with", () => {
+    expect(formatUsageSummary(snap({ error: 'expired' }))).toBe('sign-in expired');
+    expect(formatUsageSummary(snap({ error: 'expired', signedInAs: 'a@b.c' }))).toBe(
+      'a@b.c · sign-in expired',
+    );
   });
 
   it("error 'http' and 'parse' both -> \"usage unavailable\"", () => {
@@ -766,7 +772,7 @@ describe('LimitsService — a lapsed token on a live login is NOT an expired sig
     expect(out?.fiveHour?.utilization).toBe(7);
   });
 
-  it('still says "login expired" when there is no refresh token to renew from', async () => {
+  it('still says the sign-in expired when there is no refresh token to renew from', async () => {
     // The genuine case, and the only one the user can do anything about.
     const clock = BASE;
     const filePath = credentialsPathFor(profile('p'), HOME);
@@ -783,7 +789,205 @@ describe('LimitsService — a lapsed token on a live login is NOT an expired sig
 
     const out = await service.readUsage(profile('p'));
     expect(out?.error).toBe('expired');
-    expect(formatUsageSummary(out)).toBe('login expired');
+    expect(formatUsageSummary(out)).toBe('sign-in expired');
+  });
+});
+
+// ------------------------------------------------- the credential kinds, on Windows
+//
+// WHY THIS BLOCK EXISTS. On native Windows the Accounts section showed
+// "Claude — default  axel.hagerud@gmail.com · login expired" on a machine
+// whose login was fine. Windows has no keychain, so `.credentials.json` under
+// `%USERPROFILE%\.claude` is the ONLY tier there — `platform: 'win32'` below is
+// what pins that, exec never being called — and every wrong verdict this file
+// can reach is reached from that one file. So each shape the file can plausibly
+// have gets a test, and the invariant they share is: nothing but a lapsed token
+// with NO refresh token anywhere may render as an expired sign-in.
+
+describe('LimitsService — what a credentials file on Windows is allowed to prove', () => {
+  /** One read of the default profile's credentials file, with the file's
+   *  contents as the only variable. `win32` on purpose: the keychain tier is
+   *  darwin-only, so this exercises the branch a Windows user is actually on
+   *  from a Mac (and asserts the keychain is never consulted there). */
+  async function readWith(
+    text: string | null,
+    over: { platform?: string; now?: number } = {},
+  ): Promise<{
+    out: UsageSnapshot | null;
+    fetchFn: ReturnType<typeof vi.fn>;
+    exec: ReturnType<typeof vi.fn>;
+  }> {
+    const filePath = credentialsPathFor(profile('p'), HOME);
+    const readFile = vi.fn(async (file: string): Promise<string | null> =>
+      file === filePath ? text : null,
+    );
+    const exec = vi.fn(async (): Promise<string | null> => null);
+    const fetchFn = vi.fn(async (): Promise<HttpResponseLike> => okResponse(bodyWithFiveHour(5)));
+    const service = new LimitsService({
+      readFile,
+      exec,
+      fetch: fetchFn,
+      now: () => over.now ?? BASE,
+      homeDir: HOME,
+      platform: over.platform ?? 'win32',
+    });
+    const out = await service.readUsage(profile('p'));
+    return { out, fetchFn, exec };
+  }
+
+  it('the shape the CLI writes — expiresAt in epoch MILLISECONDS, lapsed, refresh token beside it — is token-stale', async () => {
+    const { out, fetchFn, exec } = await readWith(
+      JSON.stringify({
+        claudeAiOauth: {
+          accessToken: 'TOKEN',
+          refreshToken: 'REFRESH',
+          expiresAt: BASE - 60 * 60 * 1000, // ms, an hour ago
+          scopes: ['user:inference'],
+          subscriptionType: 'max',
+        },
+      }),
+    );
+    expect(out?.error).toBe('token-stale');
+    expect(formatUsageSummary(out)).toBe('usage n/a');
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(exec).not.toHaveBeenCalled(); // no keychain off darwin
+  });
+
+  it('the same expiry written in epoch SECONDS reads the same — the unit is not what decides', async () => {
+    const lapsed = await readWith(
+      JSON.stringify({
+        claudeAiOauth: {
+          accessToken: 'TOKEN',
+          refreshToken: 'REFRESH',
+          expiresAt: Math.floor((BASE - 60 * 60 * 1000) / 1000),
+        },
+      }),
+    );
+    expect(lapsed.out?.error).toBe('token-stale');
+
+    // And the mirror: a future expiry in seconds must NOT read as a 1970
+    // timestamp and kill a live token.
+    const live = await readWith(
+      JSON.stringify({
+        claudeAiOauth: {
+          accessToken: 'TOKEN',
+          refreshToken: 'REFRESH',
+          expiresAt: Math.floor((BASE + 60 * 60 * 1000) / 1000),
+        },
+      }),
+    );
+    expect(live.out?.error).toBeUndefined();
+    expect(live.out?.fiveHour?.utilization).toBe(5);
+  });
+
+  it('snake_case throughout — claude_ai_oauth / access_token / refresh_token / expires_at — is read, not misread as expired', async () => {
+    const { out } = await readWith(
+      JSON.stringify({
+        claude_ai_oauth: {
+          access_token: 'TOKEN',
+          refresh_token: 'REFRESH',
+          expires_at: BASE - 1000,
+        },
+      }),
+    );
+    expect(out?.error).toBe('token-stale');
+  });
+
+  it('a refresh token that is NOT a sibling of the access token still counts — "expired" needs the whole file to have none', async () => {
+    // The verdict "your sign-in expired" rests on the absence of a refresh
+    // token, and absence under one hardcoded key is not absence from the file.
+    const { out } = await readWith(
+      JSON.stringify({
+        claudeAiOauth: { accessToken: 'TOKEN', expiresAt: BASE - 1000 },
+        refreshToken: 'REFRESH',
+      }),
+    );
+    expect(out?.error).toBe('token-stale');
+    expect(formatUsageSummary(out)).not.toContain('expired');
+  });
+
+  it('a token nested one level deeper than the CLI writes it is still found', async () => {
+    const { out, fetchFn } = await readWith(
+      JSON.stringify({
+        credentials: {
+          claudeAiOauth: {
+            accessToken: 'TOKEN',
+            refreshToken: 'REFRESH',
+            expiresAt: BASE + 60 * 60 * 1000,
+          },
+        },
+      }),
+    );
+    expect(out?.error).toBeUndefined();
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('a refresh token with no access token beside it is a LIVE login, not a missing one', async () => {
+    // The CLI mints the next access token from this file itself. "not signed
+    // in" would send the user to sign in over an account that is signed in.
+    const { out } = await readWith(JSON.stringify({ claudeAiOauth: { refreshToken: 'REFRESH' } }));
+    expect(out?.error).toBe('token-stale');
+    expect(formatUsageSummary(out)).toBe('usage n/a');
+  });
+
+  it('a UTF-8 BOM in front of the JSON does not sign the account out', async () => {
+    // A Windows editor (Notepad, PowerShell's Set-Content/Out-File) writes one,
+    // and JSON.parse throws on it. Before the strip, one invisible character
+    // rendered a working login as "not logged in".
+    const { out, fetchFn } = await readWith(
+      '﻿' +
+        JSON.stringify({
+          claudeAiOauth: {
+            accessToken: 'TOKEN',
+            refreshToken: 'REFRESH',
+            expiresAt: BASE + 60 * 60 * 1000,
+          },
+        }),
+    );
+    expect(out?.error).toBeUndefined();
+    expect(out?.fiveHour?.utilization).toBe(5);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['a file that is not there', null],
+    ['a truncated write', '{"claudeAiOauth": {"accessToken"'],
+    ['a locked/unreadable file read as an empty string', ''],
+    ['a JSON document that is not an object', '"hello"'],
+    ['an object with nothing we recognise', '{"note":"moved to the keychain"}'],
+  ])('%s is "no credentials", never an expired sign-in', async (_label, text) => {
+    const { out } = await readWith(text);
+    expect(out?.error).toBe('no-credentials');
+    expect(formatUsageSummary(out)).not.toContain('expired');
+  });
+
+  it('the genuinely expired file — lapsed, no refresh token anywhere — is the ONLY one that says so', async () => {
+    const { out, fetchFn } = await readWith(
+      JSON.stringify({ claudeAiOauth: { accessToken: 'TOKEN', expiresAt: BASE - 1000 } }),
+    );
+    expect(out?.error).toBe('expired');
+    expect(formatUsageSummary(out)).toBe('sign-in expired');
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it('a BOM in the identity file does not cost the row its name', async () => {
+    const identity = path.join(HOME, IDENTITY_FILE);
+    const readFile = vi.fn(async (file: string): Promise<string | null> =>
+      file === identity
+        ? '﻿' + JSON.stringify({ oauthAccount: { emailAddress: 'axel.hagerud@gmail.com' } })
+        : null,
+    );
+    const service = new LimitsService({
+      readFile,
+      exec: vi.fn(async (): Promise<string | null> => null),
+      fetch: vi.fn(async (): Promise<HttpResponseLike> => okResponse(bodyWithFiveHour(5))),
+      now: () => BASE,
+      homeDir: HOME,
+      platform: 'win32',
+    });
+    const out = await service.readUsage(profile('p'));
+    expect(out?.signedInAs).toBe('axel.hagerud@gmail.com');
+    expect(formatUsageSummary(out)).toBe('axel.hagerud@gmail.com · usage unavailable');
   });
 });
 

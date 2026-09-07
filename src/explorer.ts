@@ -63,8 +63,6 @@
 // the splice arithmetic — the part that is actually easy to get wrong — is unit
 // tested without a workbench.
 
-import * as path from 'node:path';
-
 import { baseName, normalizeDir, pathKey, projectDirs } from './projects';
 import { log, logError } from './log';
 import type { ProjectRecord } from './types';
@@ -517,9 +515,10 @@ export function planAutoConvert(input: AutoConvertInput): AutoConvertPlan {
  * file before opening it. VS Code rewrites the `folders` array on every
  * splice and writes a path RELATIVE when it can (the anchor sits beside the
  * file, so "anchor" is exactly what it may say), so a relative path is
- * resolved against the file's own directory before it is compared. Anything
- * else — unparseable text, an empty list, a list that starts somewhere else —
- * is not ours to open.
+ * resolved against the file's own directory — by {@link resolveFromDir},
+ * which spells both separators the way `normalizeDir` does — before it is
+ * compared. Anything else — unparseable text, an empty list, a list that
+ * starts somewhere else — is not ours to open.
  */
 export function anchoredWorkspaceFile(
   text: string,
@@ -538,8 +537,63 @@ export function anchoredWorkspaceFile(
   const first = folders[0] as { path?: unknown } | null;
   const raw = typeof first?.path === 'string' ? first.path.trim() : '';
   if (raw === '') return false;
-  const resolved = path.isAbsolute(raw) ? raw : path.resolve(fileDir, raw);
-  return isAnchored([{ path: resolved }], anchorPath);
+  return isAnchored([{ path: resolveFromDir(raw, fileDir) }], anchorPath);
+}
+
+/**
+ * A folders[0].path as an absolute directory: itself when it already is one,
+ * otherwise `fileDir` with it joined on and `.`/`..` walked out.
+ *
+ * NOT `node:path`, and that is the point. `path` answers as the platform it is
+ * running on, and this string comes out of a FILE rather than out of the
+ * running OS: on POSIX `path.posix` reads the `..\code\web` that VS Code
+ * writes on Windows as one long filename, and on Windows `path.win32.resolve`
+ * gives a driveless path like `/Users/x/.lineage` the CURRENT DRIVE, inventing
+ * a `C:` that was never in the file — and either way the compare below says
+ * "not ours" about a file that is, so the empty window refuses to convert
+ * itself and Follow the Session rewrites a workspace file it should have
+ * reopened. `path.resolve` also reaches for `process.cwd()` when `fileDir` is
+ * not absolute, which makes the answer depend on where the extension host was
+ * started. So the resolution is done here in the terms `normalizeDir` already
+ * uses — one separator, no cwd, no platform — the same discipline `baseName`
+ * and `parentDir` keep in src/projects.ts, and for the same reason: a path
+ * compare must not change its mind about a path because of which OS is asking.
+ *
+ * ABSOLUTE means what both families mean by it: a leading `/` (a POSIX root, a
+ * Windows root without a drive, or the `//` of a UNC share) or a drive letter
+ * with a separator after it. `C:` alone is drive-RELATIVE and node does not
+ * call it absolute either.
+ */
+function resolveFromDir(raw: string, fileDir: string): string {
+  const p = normalizeDir(raw);
+  if (p === '' || ABSOLUTE.test(p)) return p;
+  const base = normalizeDir(fileDir);
+  return tidy(base === '' ? p : `${base}/${p}`);
+}
+
+/** A leading root, in either family, on a path `normalizeDir` has already
+ *  spelled with `/`: `/x`, `//server/share`, `C:/x`. */
+const ABSOLUTE = /^(?:\/|[A-Za-z]:\/)/;
+/** That same root, captured, so `tidy` can keep it while it walks segments. */
+const ROOT = /^(?:\/\/|\/|[A-Za-z]:\/)/;
+
+/** `.` and `..` walked out of an already-`normalizeDir`ed path, keeping its
+ *  root. A `..` at the root stays at the root — `/..` is `/`, as every
+ *  filesystem agrees — and one a RELATIVE path cannot cancel is kept, because
+ *  dropping it would silently turn `../x` into `x`. */
+function tidy(p: string): string {
+  const root = ROOT.exec(p)?.[0] ?? '';
+  const out: string[] = [];
+  for (const seg of p.slice(root.length).split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') {
+      if (out.length > 0 && out[out.length - 1] !== '..') out.pop();
+      else if (root === '') out.push('..');
+      continue;
+    }
+    out.push(seg);
+  }
+  return normalizeDir(`${root}${out.join('/')}`);
 }
 
 // ------------------------------------------------------------------ driver

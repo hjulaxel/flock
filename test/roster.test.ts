@@ -15,6 +15,7 @@ import {
   fetchRosterMulti,
   findClaudeBinary,
   claudeFallbackBinDirs,
+  type DiscoveryWorld,
   isProcessAlive,
   isSpareCommand,
   psCommands,
@@ -161,8 +162,23 @@ describe('isProcessAlive', () => {
     expect(isProcessAlive(NaN)).toBe(false);
   });
 
-  it('is true for pid 1, which exists but we may not signal (EPERM)', () => {
+  // pid 1 is a POSIX fact: there init/launchd always is, and it is always
+  // owned by root, which is what makes it the one cheap EPERM case. Windows
+  // has no pid 1 at all — pids there are handle values the kernel hands out
+  // in multiples of 4 — so the probe is skipped rather than reinterpreted.
+  const posix = process.platform === 'win32' ? it.skip : it;
+
+  posix('is true for pid 1, which exists but we may not signal (EPERM)', () => {
     expect(isProcessAlive(1)).toBe(true);
+  });
+
+  it('separates a live pid from one no OS could have issued', () => {
+    // The half of the pid-1 case every platform can answer: alive is this
+    // process, dead is a pid past the top of every range (Linux caps at 2^22;
+    // Windows pids are multiples of 4, so an odd 2^31-1 can never be one).
+    // No reaping, so no race — the answer is the same on every runner.
+    expect(isProcessAlive(process.pid)).toBe(true);
+    expect(isProcessAlive(2_147_483_647)).toBe(false);
   });
 });
 
@@ -553,6 +569,28 @@ describe('findClaudeBinary', () => {
     process.env['PATH'] = savedPath;
   });
 
+  /**
+   * A temp dir holding one file per name. Real directories, on whatever OS is
+   * running the suite: only the NAMES the lookup accepts differ by platform,
+   * and `world.platform` selects those, so passing it explicitly exercises the
+   * Windows answer on the macOS lane and the POSIX answer on the Windows one.
+   * Separators and the PATH delimiter still come from the host's `node:path`
+   * (as they do in `findClaudeBinary` itself), which is why these fixtures are
+   * mkdtemp paths and never `C:\` literals.
+   */
+  const binDir = (...names: readonly string[]): string => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lineage-bin-'));
+    for (const name of names) {
+      fs.writeFileSync(path.join(dir, name), '#!/bin/sh\nexit 0\n', {
+        mode: 0o755,
+      });
+    }
+    return dir;
+  };
+  const rm = (...dirs: readonly string[]): void => {
+    for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
+  };
+
   it('returns a configured path verbatim, without touching the filesystem', () => {
     expect(findClaudeBinary('/explicit/path/to/claude')).toBe(
       '/explicit/path/to/claude',
@@ -560,14 +598,69 @@ describe('findClaudeBinary', () => {
     expect(findClaudeBinary('  ')).not.toBe('  '); // blank falls back to PATH
   });
 
-  it('finds an executable claude on PATH', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lineage-bin-'));
-    const bin = path.join(dir, 'claude');
-    fs.writeFileSync(bin, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  it('finds the CLI on the PATH this process really has', () => {
+    // No world: the host's own process.env and process.platform, which is the
+    // production call. The fixture is therefore named the way THIS platform's
+    // installers name it — an extension-less `claude` is not a thing Windows
+    // can run, and findClaudeBinary deliberately does not offer one (below).
+    const name = process.platform === 'win32' ? 'claude.exe' : 'claude';
+    const dir = binDir(name);
     process.env['PATH'] = dir;
-    expect(findClaudeBinary()).toBe(bin);
-    expect(findClaudeBinary('')).toBe(bin);
-    fs.rmSync(dir, { recursive: true, force: true });
+    expect(findClaudeBinary()).toBe(path.resolve(dir, name));
+    expect(findClaudeBinary('')).toBe(path.resolve(dir, name));
+    rm(dir);
+  });
+
+  it('prefers the native claude.exe over the npm .cmd shim on Windows', () => {
+    // What the README promises: the native installer's executable wins over
+    // the batch shim npm leaves beside it, and the extension-less POSIX shell
+    // script npm drops in the same directory is not a candidate at all —
+    // Windows cannot execute it, so returning it would only spawn-fail.
+    const both = binDir('claude', 'claude.cmd', 'claude.exe');
+    const win = (dir: string): DiscoveryWorld => ({
+      platform: 'win32',
+      env: { PATH: dir },
+      home: dir, // no fallback root exists under it, so PATH is the whole answer
+    });
+    expect(findClaudeBinary(undefined, win(both))).toBe(
+      path.resolve(both, 'claude.exe'),
+    );
+
+    // An npm-only install: the shim IS the CLI there, so it must be found.
+    const npmOnly = binDir('claude', 'claude.cmd');
+    expect(findClaudeBinary(undefined, win(npmOnly))).toBe(
+      path.resolve(npmOnly, 'claude.cmd'),
+    );
+
+    // And the shell script alone is nothing Windows can launch.
+    const scriptOnly = binDir('claude');
+    expect(findClaudeBinary(undefined, win(scriptOnly))).toBeNull();
+    // The same directory is the answer on POSIX, where that file is the CLI.
+    expect(
+      findClaudeBinary(undefined, {
+        platform: 'linux',
+        env: { PATH: scriptOnly },
+        home: scriptOnly,
+      }),
+    ).toBe(path.resolve(scriptOnly, 'claude'));
+
+    rm(both, npmOnly, scriptOnly);
+  });
+
+  it('lets PATH order beat the extension preference, as the shell does', () => {
+    // cmd.exe resolves a bare name by walking PATH and trying PATHEXT WITHIN
+    // each directory, so an earlier .cmd wins over a later .exe. Matching that
+    // is the point: Flock must run the claude the user's own shell runs.
+    const shim = binDir('claude.cmd');
+    const native = binDir('claude.exe');
+    expect(
+      findClaudeBinary(undefined, {
+        platform: 'win32',
+        env: { PATH: [shim, native].join(path.delimiter) },
+        home: shim,
+      }),
+    ).toBe(path.resolve(shim, 'claude.cmd'));
+    rm(shim, native);
   });
 
   it('returns null when PATH holds nothing named claude', () => {
@@ -579,11 +672,19 @@ describe('findClaudeBinary', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it('ignores a PATH entry that is a directory named claude', () => {
+  it('ignores a PATH entry that is a directory, not a file', () => {
+    // Both branches: `claude/` is the trap on POSIX, `claude.exe/` on Windows
+    // — a directory can be named anything, and `isFile()` is what rejects it.
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lineage-bin-'));
     fs.mkdirSync(path.join(dir, 'claude'));
+    fs.mkdirSync(path.join(dir, 'claude.exe'));
     process.env['PATH'] = dir;
     expect(findClaudeBinary(undefined, { home: dir })).toBeNull();
+    for (const platform of ['win32', 'darwin']) {
+      expect(
+        findClaudeBinary(undefined, { platform, env: { PATH: dir }, home: dir }),
+      ).toBeNull();
+    }
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
@@ -604,8 +705,11 @@ describe('findClaudeBinary', () => {
   });
 
   it('knows where each platform’s installers put the CLI', () => {
-    // Pure, so the Windows answer is testable from anywhere. Every entry is a
-    // directory a real installer writes to — see claudeFallbackBinDirs.
+    // Pure, so the Windows answer is testable from anywhere — but the
+    // SEPARATORS are the host's: the function joins with the running
+    // platform's node:path, so every expectation below is built with the same
+    // path.join call rather than written as a literal. What is being pinned is
+    // the set of roots and their order, not which slash this runner uses.
     expect(
       claudeFallbackBinDirs({
         platform: 'win32',
@@ -622,8 +726,10 @@ describe('findClaudeBinary', () => {
       path.join('C:\\Users\\a', '.local', 'bin'),
     ]);
     expect(claudeFallbackBinDirs({ platform: 'darwin', env: {}, home: '/Users/a' })).toEqual([
-      '/Users/a/.local/bin',
-      '/Users/a/.claude/local',
+      path.join('/Users/a', '.local', 'bin'),
+      path.join('/Users/a', '.claude', 'local'),
+      // Absolute POSIX roots the function returns verbatim, so they are
+      // literals on every platform.
       '/opt/homebrew/bin',
       '/usr/local/bin',
     ]);

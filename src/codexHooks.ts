@@ -48,6 +48,29 @@
 // exactly as it did before. HooksManager.codexHooksActive() is the honest
 // report of which state we are in, and every message below says the step out
 // loud rather than letting the user wonder why nothing changed.
+//
+// WINDOWS: NOT INSTALLED, AND SAID SO IN WORDS. The Claude side ships a
+// SECOND command for Windows (hooks.HOOK_COMMAND_WINDOWS) and asks the CLI to
+// run it through PowerShell, because a Claude hook entry carries a `shell`
+// field and renderHooksJson fills it in. A Codex hook entry has no such
+// field — it is `{type:'command', command}` under a matcher, and the command
+// text is the whole of it — so the only thing Flock could write into a Codex
+// hooks.json is the `/bin/sh` line below, which is not a line a Windows Codex
+// can run. Writing it anyway would install a hook that fails on every event
+// and an install record that claims otherwise. So install() REFUSES on win32
+// and names the reason; the roster poll keeps Codex rows moving exactly as it
+// did before hooks existed, and the Claude hooks are unaffected.
+//
+// selfHeal() is a no-op there for the same reason — and it deliberately does
+// NOT clear the stored flag: this record is one of the store's singletons and
+// can have been written on another machine, so a Windows window must not
+// uninstall a Mac's install by reading Windows' own disk. remove() is not
+// gated at all: stripping whatever entries are there and clearing the events
+// file is a promise that has to hold on every platform.
+//
+// The platform is a constructor option defaulting to process.platform, so
+// both branches are exercised wherever the tests run: the POSIX behaviour on
+// Windows CI, the refusal on macOS and Linux.
 
 import * as path from 'node:path';
 import * as process from 'node:process';
@@ -305,6 +328,12 @@ export interface CodexHooksManagerOptions {
   homes?: () => readonly string[];
   /** `$HOME`, for the default Codex home. Tests inject a temp directory. */
   home?: string;
+  /** The platform being installed FOR, `process.platform` by default. Explicit
+   *  so the two branches are separable from the machine the code runs on: the
+   *  Windows refusal is exercised on macOS and Linux, and the POSIX path is
+   *  exercised on Windows CI, which is where it used to go untested because
+   *  every call short-circuited. */
+  platform?: string;
 }
 
 interface Verdict {
@@ -322,11 +351,13 @@ export class CodexHooksManager implements DisposableLike {
   private readonly deps: HookDeps;
   private readonly homesFn: (() => readonly string[]) | undefined;
   private readonly home: string;
+  private readonly platform: string;
 
   constructor(deps: HookDeps, opts?: CodexHooksManagerOptions) {
     this.deps = deps;
     this.homesFn = opts?.homes;
     this.home = homeDir(opts?.home);
+    this.platform = opts?.platform ?? process.platform;
   }
 
   // ------------------------------------------------------------- accessors
@@ -386,12 +417,17 @@ export class CodexHooksManager implements DisposableLike {
    */
   async install(): Promise<HookInstallState> {
     const stored = this.getState();
-    if (process.platform === 'win32') {
+    if (this.platform === 'win32') {
+      // Nothing is written and nothing is recorded — see the header: a Codex
+      // hook entry cannot name a shell, so there is no Windows command to put
+      // in one, and a refusal the user can read beats a hook that fails on
+      // every event.
       void showWarning(
-        'Flock hooks need a POSIX shell (/bin/sh) and are not supported on ' +
-          'Windows. Flock keeps updating Codex rows by polling.',
+        "Flock does not install its Codex hooks on Windows: a Codex hook entry " +
+          "cannot name a shell, and Flock's entry needs /bin/sh. Codex rows keep " +
+          'updating by polling; the Claude hooks are unaffected.',
       );
-      log('codex hooks: install skipped (win32)');
+      log('codex hooks: install refused — win32 has no Codex hook command');
       return stored;
     }
 
@@ -531,7 +567,10 @@ export class CodexHooksManager implements DisposableLike {
   async selfHeal(): Promise<HookInstallState> {
     const stored = this.getState();
     if (!stored.installed) return stored;
-    if (process.platform === 'win32') return stored;
+    // Windows never installed these entries and cannot, so there is nothing
+    // here to reconcile — and the flag is left ALONE rather than cleared: the
+    // record is shared with the machine that did the install.
+    if (this.platform === 'win32') return stored;
 
     const files = this.files();
     const texts = files.map((f) => readTextSync(f));

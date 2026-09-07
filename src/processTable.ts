@@ -55,9 +55,20 @@ export type ExecFn = (
  *  or two of JSON; sixteen leaves room for the machine that runs everything. */
 const MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 
-/** PowerShell's cold start dominates; the query itself is tens of
- *  milliseconds. A machine that cannot answer in this long is not going to. */
-export const WINDOWS_SWEEP_TIMEOUT_MS = 8_000;
+/**
+ * PowerShell's cold start dominates; the query itself is tens of milliseconds
+ * once CIM is only asked for four properties.
+ *
+ * WAS 8 SECONDS, on the reasoning that a machine which cannot answer in that
+ * long is not going to. A GitHub windows-latest runner disproved it: two real
+ * sweeps in `test/lineage.test.ts` took the file to 18.7 s and both came back
+ * empty, so `psPpidCommand(process.pid)` reported no parent for the process
+ * asking — and the whole point of this module is that Windows stops being the
+ * platform where a CLI fork draws as a root. A timeout here is SILENT by
+ * design (an empty table means "nothing verifiable"), which is exactly why it
+ * must not be tight enough to hit on a busy machine.
+ */
+export const WINDOWS_SWEEP_TIMEOUT_MS = 15_000;
 
 /** How long one sweep answers for. The callers that share a tick — the argv
  *  walk's hops, the spare check, a kill's descendant walk — arrive within
@@ -97,9 +108,20 @@ const defaultExec: ExecFn = (cmd, args, timeoutMs) =>
  */
 export function windowsProcessQuery(): [string, ...string[]] {
   const script = [
-    '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;',
+    // UTF8Encoding($false) — WITHOUT the preamble. `[Text.Encoding]::UTF8`
+    // carries one, and .NET writes it on the first redirected write, so stdout
+    // began with a BOM that `JSON.parse` rejects; the parser below caught the
+    // throw and returned an EMPTY table, which reads to every caller as "no
+    // such process". Belt and braces: the parser now strips it too, because
+    // this line cannot be tested from macOS and a silent empty table is the
+    // most expensive way for this module to fail.
+    '[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false;',
     'ConvertTo-Json -Compress -Depth 2 -InputObject @(',
-    'Get-CimInstance Win32_Process |',
+    // `-Property` limits what CIM MATERIALISES per process, which is where the
+    // sweep's time goes — Win32_Process fetches every column otherwise, and a
+    // `Select-Object` after the fact has already paid for them.
+    'Get-CimInstance -ClassName Win32_Process',
+    '-Property ProcessId, ParentProcessId, CommandLine, CreationDate |',
     'Select-Object ProcessId, ParentProcessId, CommandLine,',
     "@{ n = 'Start'; e = { if ($_.CreationDate) { $_.CreationDate.ToString('o') } else { '' } } }",
     ')',
@@ -126,7 +148,13 @@ export function parseWindowsProcessJson(stdout: string): Map<number, ProcessFact
   const out = new Map<number, ProcessFact>();
   let parsed: unknown;
   try {
-    parsed = JSON.parse(stdout);
+    // A LEADING BOM IS NOT A PARSE ERROR HERE. PowerShell's console encoding
+    // can put one in front of the JSON (see `windowsProcessQuery`), and
+    // `JSON.parse` refuses it — which used to mean an empty table, i.e. every
+    // Windows caller silently told "no such process". Stripped rather than
+    // trusted away, since the shape of stdout is the one thing this module
+    // does not control.
+    parsed = JSON.parse(stdout.replace(/^﻿/, ''));
   } catch {
     return out;
   }
