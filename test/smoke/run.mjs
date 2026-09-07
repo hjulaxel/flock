@@ -42,16 +42,16 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-/** How long the whole run may take once the editor is spawned. A cold start
- *  on a CI runner is ten to twenty seconds; the suite itself is under one. */
 /**
- * WAS 180 s, on the measurement that a cold CI start is ten to twenty seconds.
- * A macos-latest runner blew through it while the same commit passed on the
- * other two, and the suite's own waits are all bounded (15 s for the store,
- * 15 s for the project), so what ran out was the EDITOR's cold start, not
- * anything under test. A generous ceiling costs nothing on a green run — the
- * launcher stops the moment the verdict file appears — and a tight one turns a
- * slow runner into a red build about nothing.
+ * How long the whole run may take once the editor is spawned.
+ *
+ * WAS 180 s, on the measurement that a cold CI start is ten to twenty seconds,
+ * and raised when a macos-latest runner blew through it on a commit its two
+ * siblings passed. That was not the cause either — see the macOS note in
+ * test/smoke/index.js — but the ceiling is right where it is: every wait the
+ * suite performs is separately bounded and reports its own reason, so this is
+ * only the backstop, and a generous backstop costs nothing on a green run
+ * while a tight one turns a slow runner into a red build about nothing.
  */
 const DEADLINE_MS = 300_000;
 /** How long the editor gets to quit on its own after the verdict, before the
@@ -136,15 +136,15 @@ try {
     '--disable-workspace-trust',
     '--disable-extensions',
     '--disable-gpu',
-    // THE THROWAWAY, not `cache`. CI caches the whole of `.vscode-test` —
-    // that is the point, the editor download is ~150 MB per OS — and this
-    // directory is the one thing under it the editor WRITES. A run left an
-    // `extensions/extensions.json` in the cache, the next run restored it, and
-    // a newer build refused it: "Unable to create file 'extensions.json' that
-    // already exists when overwrite flag is not set". The host then came up
-    // with the extension loaded and `activate()` never resolving — a 300-second
-    // timeout on macOS whose cause was invisible until the suite started
-    // stamping its phase. Runtime state does not belong in a cached directory.
+    // THE THROWAWAY, not `.vscode-test`. CI caches the whole of that directory
+    // — the editor download is ~150 MB per OS — and this is the one thing
+    // under it the editor WRITES, so runtime state was surviving between runs.
+    // Hygiene, and nothing more than hygiene: it was moved here on the theory
+    // that a restored `extensions.json` was behind the macOS activation stall,
+    // and that theory is dead — the editor logs "Unable to create file
+    // 'extensions.json' that already exists when overwrite flag is not set"
+    // just the same in this brand-new directory, on runs that pass. The
+    // message is noise from the editor's own profile setup.
     `--extensions-dir=${extensionsDir}`,
     `--user-data-dir=${userData}`,
     `--extensionDevelopmentPath=${root}`,
