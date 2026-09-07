@@ -42,7 +42,8 @@ All notable changes to Flock are recorded here. The format follows
   for years; for a spawned thread they do not, and since a thread shares its
   parent's directory it satisfied every clause of the adoption test. On one
   machine two named rows ended up pointing inside a `codex exec` harness run
-  the user had never opened. A rollout whose header disagrees with its name is
+  the user had never opened — and in the store that produced them, 77 of the 92
+  rollout files were threads rather than sessions. A rollout whose header disagrees with its name is
   now not a session at all — not a match, not an archived row — and a launch
   will not adopt a rollout opened by a front end Flock cannot have started.
   Rows already mis-adopted are not repaired retroactively; the next resume of
