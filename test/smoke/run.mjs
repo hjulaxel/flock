@@ -11,7 +11,10 @@
 // writes the home directory (~/.lineage, ~/.claude), polls `claude agents
 // --json`, and reconciles the private tmux server — whose socket lives under
 // /tmp, not under HOME, so an isolated home alone would not keep it away from
-// a developer's live sessions. Three walls, each sufficient on its own:
+// a developer's live sessions. The suite also WRITES: it makes a project out
+// of the folder the editor is open on, which is why that folder is a scratch
+// one this launcher made and the suite re-checks before claiming it. Three
+// walls, each sufficient on its own:
 //
 //   1. an EMPTY, throwaway home, so the store, the transcripts and the
 //      account profiles it sees are nobody's;
@@ -64,6 +67,11 @@ const env = {
   // took, before anything else is asserted; and where the verdict goes.
   FLOCK_SMOKE_HOME: home,
   FLOCK_SMOKE_RESULT: resultFile,
+  // The folder the editor is opened on, below. The suite makes a PROJECT out
+  // of it, which is a write into the store naming a directory — so it checks
+  // the folder the workbench reports against this one first, and refuses to
+  // claim anything that is not the scratch directory.
+  FLOCK_SMOKE_WORKSPACE: workspace,
 };
 if (process.platform !== 'win32') env.PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
 

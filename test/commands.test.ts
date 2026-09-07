@@ -19,6 +19,7 @@ import {
   configureProjectFlow,
   defaultForkTitle,
   defaultSessionTitle,
+  firstProjectOffer,
   forkForAgent,
   forkStemFor,
   detachedTmuxName,
@@ -45,6 +46,7 @@ import type { AccountCommandDeps, ProfileConfigOps } from '../src/commands';
 import type { AccountDeps, SwitchAccountResult } from '../src/accountsView';
 import type { ReseedPlan } from '../src/profileConfig';
 import { PATHS_FOLD_CASE, isWithin, validateProjectName } from '../src/projects';
+import { worktreePathFor } from '../src/worktrees';
 import {
   COMMANDS,
   MAX_PROJECT_NAME_LEN,
@@ -7090,6 +7092,38 @@ describe('the add / import flows', () => {
       expect(saidInfo.join(' ')).toContain(HOOKS);
     });
 
+    it('names a ticked step that landed nothing, next to the ones that did', async () => {
+      // THE FIRST-RUN REPORT'S "no error either". A step that answers false is
+      // ordinary — here the folder dialog was closed — and when nothing at all
+      // lands the receipt says so. But with another step applied it listed only
+      // that one, so a ticked step that quietly did nothing left no trace on
+      // screen: "I picked a folder and no project appeared, and there was no
+      // error." The receipt now names both halves.
+      const { deps } = poolDeps({
+        world: { ...settledWorld, hasProjects: false, hooksInstalled: false },
+      });
+      (mockWindow as { showOpenDialog?: unknown }).showOpenDialog =
+        async () => undefined;
+      scriptPicks([PROJECT, HOOKS]);
+      await recommendedSetupFlow(deps);
+      const said = saidInfo.join(' ');
+      expect(said).toContain(`set up ${HOOKS}`);
+      expect(said).toContain('Not set up:');
+      expect(said).toContain(PROJECT);
+      // Not an error: a closed dialog is an answer, and the failure line is
+      // reserved for a step that could not be carried out.
+      expect(said).not.toContain('Could not set up');
+    });
+
+    it('says nothing extra when every ticked step landed', async () => {
+      const { deps } = poolDeps({
+        world: { ...settledWorld, hooksInstalled: false },
+      });
+      scriptPicks([HOOKS]);
+      await recommendedSetupFlow(deps);
+      expect(saidInfo.join(' ')).not.toContain('Not set up');
+    });
+
     it('makes the project when the dialog answers', async () => {
       const { deps, calls } = poolDeps({
         world: { ...settledWorld, hasProjects: false },
@@ -7101,6 +7135,31 @@ describe('the add / import flows', () => {
       await recommendedSetupFlow(deps);
       expect(calls.projectDirs).toEqual(['/w/api']);
       expect(calls.refreshes).toBeGreaterThan(0);
+    });
+
+    it('takes a Windows folder from the dialog and stores it normalized', async () => {
+      // The first-run report, step by step: Recommended Setup → "Make your
+      // first project" → the folder dialog, on a native Windows machine. What
+      // `showOpenDialog` hands back there is a backslashed `fsPath` with a
+      // drive letter, and the project only ever appears if that survives the
+      // trip into the store as the one spelling everything else compares
+      // against (`normalizeDir`) — a rootDir the sanitizer dropped, or one
+      // still carrying backslashes, is a project with no row.
+      const { deps, calls } = poolDeps({
+        world: { ...settledWorld, hasProjects: false },
+      });
+      (mockWindow as { showOpenDialog?: unknown }).showOpenDialog = async () => [
+        { fsPath: 'C:\\Users\\axel\\code\\shape_inference_standalone' },
+      ];
+      scriptPicks([PROJECT]);
+      await recommendedSetupFlow(deps);
+      expect(calls.projectDirs).toEqual([
+        'C:/Users/axel/code/shape_inference_standalone',
+      ]);
+      expect(calls.refreshes).toBeGreaterThan(0);
+      // The step landed, so the receipt says so rather than "nothing was
+      // changed" — the sentence Axel would have had to see to know it worked.
+      expect(saidInfo.join(' ')).toContain(PROJECT);
     });
 
     it('writes nothing when the checklist is cancelled or emptied', async () => {
@@ -8592,6 +8651,18 @@ describe('the + cuts a worktree per root session', () => {
 
   const REPO = '/Users/a/code/magma';
   const PROJECT_ARG = { type: 'project', projectId: 'p1' };
+  const PATTERN = '../${repo}-${branch}';
+  const BRANCH = 'axel/magma-os';
+  /** Where the checkout LANDS, derived with the same function the flow uses
+   *  rather than written out. `worktreePathFor` resolves a relative pattern
+   *  through `path.resolve`, which on Windows prefixes the current drive — so a
+   *  POSIX literal here fails on a Windows runner while the product is
+   *  behaving. */
+  const WORKTREE = worktreePathFor({
+    pattern: PATTERN,
+    repoDir: REPO,
+    branch: BRANCH,
+  });
 
   interface AutoCalls {
     added: Array<{ repoDir: string; path: string; branch: string; create: boolean }>;
@@ -8641,7 +8712,7 @@ describe('the + cuts a worktree per root session', () => {
         },
       ],
       localBranches: async () => ['main'],
-      worktreePathPattern: () => '../${repo}-${branch}',
+      worktreePathPattern: () => PATTERN,
       branchPrefix: () => 'axel/',
       addWorktree: async (opts) => {
         calls.added.push(opts);
@@ -8674,21 +8745,17 @@ describe('the + cuts a worktree per root session', () => {
     // asserted exactly — this is the one write in Flock behind no modal.
     expect(h.calls.warnings).toEqual([]);
     expect(h.calls.added).toEqual([
-      {
-        repoDir: REPO,
-        path: '/Users/a/code/magma-axel-magma-os',
-        branch: 'axel/magma-os',
-        create: true,
-      },
+      { repoDir: REPO, path: WORKTREE, branch: BRANCH, create: true },
     ]);
     // The ledger entry that later earns the ref its delete offer.
-    expect(h.calls.minted).toEqual([{ repoDir: REPO, branch: 'axel/magma-os' }]);
+    expect(h.calls.minted).toEqual([{ repoDir: REPO, branch: BRANCH }]);
     // The read the flow needed anyway swept the ledger against live refs.
     expect(h.calls.pruned).toEqual([{ repoDir: REPO, existing: ['main'] }]);
     // The session runs on the new floor, named the way every `+` names.
-    expect(h.calls.launches).toEqual([
-      { cwd: '/Users/a/code/magma-axel-magma-os', title: 'magma-os' },
-    ]);
+    expect(h.calls.launches).toEqual([{ cwd: WORKTREE, title: 'magma-os' }]);
+    // The pattern is relative, so the checkout is a SIBLING of the repository —
+    // the part of the answer that is platform-independent and worth pinning.
+    expect(WORKTREE.endsWith('/magma-axel-magma-os')).toBe(true);
   });
 
   it('falls back to a plain session when the project has no repository', async () => {
@@ -8928,6 +8995,182 @@ describe('archiving the last session in a minted worktree offers the cleanup', (
     const h = offerHarness({ minted: false });
     await h.run(COMMANDS.deleteSession, S1);
     expect(h.infos).toHaveLength(1);
+  });
+});
+
+// ------------------------------------------ the + on a window with no project
+//
+// The second half of the first-run report: on a machine with no projects the
+// `+` produced bare root rows named after the window's folder, with nothing on
+// screen saying a project was a thing that could exist. The `+` still asks
+// nothing and still launches — the offer arrives after the session, as a
+// notification — and it is gated so it cannot become nagging.
+//
+// Windows-shaped throughout on purpose. `workspaceFolders[].uri.fsPath` is
+// backslashed on Windows and the store's spelling is not, so the folder that
+// reaches the launch and the `rootDir` that reaches the store are two different
+// strings for one directory, and the assertions pin both.
+describe('the + offers a first project on a projectless window', () => {
+  const WIN_FOLDER = 'C:\\Users\\axel\\code\\shape_inference_standalone';
+  const STORED = 'C:/Users/axel/code/shape_inference_standalone';
+  const MAKE = 'Make it a Project';
+
+  beforeEach(() => {
+    (vscodeMock as unknown as { workspace: unknown }).workspace = {
+      workspaceFolders: [
+        { uri: { fsPath: WIN_FOLDER }, name: 'shape_inference_standalone' },
+      ],
+    };
+    // newProjectFlow names what it just made, and falls back to this command
+    // when there is no inline rename to run.
+    (mockCommands as { executeCommand?: unknown }).executeCommand = async () =>
+      undefined;
+  });
+
+  afterEach(() => {
+    delete (vscodeMock as unknown as { workspace?: unknown }).workspace;
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockCommands as { executeCommand?: unknown }).executeCommand;
+    delete (mockWindow as { showInformationMessage?: unknown })
+      .showInformationMessage;
+  });
+
+  function plusHarness(
+    over: {
+      projects?: ProjectRecord[];
+      forest?: SessionForest;
+      /** What the notification is answered with. */
+      answer?: string | undefined;
+    } = {},
+  ): {
+    calls: ChatCalls;
+    infos: string[];
+    run: (command: string, arg?: unknown) => Promise<void>;
+  } {
+    const infos: string[] = [];
+    (
+      mockWindow as {
+        showInformationMessage?: (
+          message: string,
+          ...items: string[]
+        ) => Promise<string | undefined>;
+      }
+    ).showInformationMessage = async (message) => {
+      infos.push(message);
+      return over.answer;
+    };
+    const { deps, calls } = chatDeps(undefined, {
+      projects: over.projects ?? [],
+      beginInlineRename: () => true,
+      beginInlineRenameProject: () => true,
+    });
+    const h = withRegisteredCommands({
+      ...deps,
+      getForest: () => over.forest ?? forestOf([]),
+      launchSession: async (opts) => {
+        calls.order.push('launchSession');
+        calls.launches.push(opts);
+        return {
+          nodeId: opts.sessionId,
+          sessionId: opts.sessionId,
+          terminalName: 'claude',
+          createdAt: 0,
+        };
+      },
+    });
+    return { calls, infos, run: (command, arg) => h.run(command, arg) };
+  }
+
+  it('launches in the window folder first, then offers the project', async () => {
+    const h = plusHarness({ answer: MAKE });
+    await h.run(COMMANDS.newSession);
+
+    // The `+` did what it promised, with nothing asked in front of it: the
+    // session runs in the folder this window is open on, named after it.
+    expect(h.calls.launches).toHaveLength(1);
+    expect(h.calls.launches[0].cwd).toBe(WIN_FOLDER);
+    expect(h.calls.records[0].patch.title).toBe('shape_inference_standalone');
+
+    // And only then the offer — accepted here, so the project is made from the
+    // same folder, under the store's spelling of it.
+    expect(h.infos.join(' ')).toContain('shape_inference_standalone');
+    expect(h.infos.join(' ')).toContain('not a project yet');
+    expect(h.calls.projectPatches).toHaveLength(1);
+    expect(h.calls.projectPatches[0].patch).toMatchObject({
+      name: 'shape_inference_standalone',
+      rootDir: STORED,
+      dirs: [],
+    });
+    // The launch happened BEFORE the notification: a `+` that has to be
+    // answered before the session appears is a dialog, which is the thing
+    // newSessionTarget exists to have got rid of.
+    expect(h.calls.order.indexOf('launchSession')).toBeLessThan(
+      h.calls.order.indexOf('upsertProject'),
+    );
+  });
+
+  it('makes nothing when the offer is dismissed, and still launched', async () => {
+    const h = plusHarness({ answer: undefined });
+    await h.run(COMMANDS.newSession);
+    expect(h.calls.launches).toHaveLength(1);
+    expect(h.infos).toHaveLength(1);
+    expect(h.calls.projectPatches).toEqual([]);
+  });
+
+  it('says nothing on a machine that already has a project', async () => {
+    // A project somewhere else on the machine still counts: the person has met
+    // the concept and declined to apply it here.
+    const h = plusHarness({
+      projects: [projectOf({ id: 'p9', rootDir: 'D:/work/other' })],
+      answer: MAKE,
+    });
+    await h.run(COMMANDS.newSession);
+    expect(h.calls.launches).toHaveLength(1);
+    expect(h.infos).toEqual([]);
+    expect(h.calls.projectPatches).toEqual([]);
+  });
+
+  it('says nothing for the second session in the same folder', async () => {
+    // The offer belongs to the gesture that creates a folder's work, not to
+    // every launch under it afterwards.
+    const h = plusHarness({
+      forest: forestOf([
+        node(uuid(9), { cwd: WIN_FOLDER, label: 'shape_inference_standalone' }),
+      ]),
+      answer: MAKE,
+    });
+    await h.run(COMMANDS.newSession);
+    expect(h.calls.launches).toHaveLength(1);
+    expect(h.infos).toEqual([]);
+  });
+});
+
+describe('firstProjectOffer gates the offer on two things and normalizes', () => {
+  const WIN = 'C:\\Users\\axel\\code\\proj';
+
+  it('answers the normalized folder for the first session on a bare machine', () => {
+    expect(firstProjectOffer({ projects: [], cwd: WIN, siblings: 0 })).toBe(
+      'C:/Users/axel/code/proj',
+    );
+  });
+
+  it('is silent once any project exists, closed ones included', () => {
+    const closed = projectOf({ id: 'p2', hidden: true });
+    expect(
+      firstProjectOffer({ projects: [closed], cwd: WIN, siblings: 0 }),
+    ).toBeUndefined();
+  });
+
+  it('is silent for a folder that already has sessions, and for no folder', () => {
+    expect(
+      firstProjectOffer({ projects: [], cwd: WIN, siblings: 1 }),
+    ).toBeUndefined();
+    expect(
+      firstProjectOffer({ projects: [], cwd: undefined, siblings: 0 }),
+    ).toBeUndefined();
+    expect(
+      firstProjectOffer({ projects: [], cwd: '   ', siblings: 0 }),
+    ).toBeUndefined();
   });
 });
 

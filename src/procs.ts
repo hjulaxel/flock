@@ -47,6 +47,7 @@ export type ExecFn = (
  *  route is testable from anywhere; production passes nothing. */
 export interface ProcessTableDeps {
   exec?: ExecFn;
+  /** Which route to take. Absent = the host's platform. */
   platform?: string;
   /** The Windows table to read. Absent = the shared, cached one. */
   windows?: () => Promise<ProcessSnapshot>;
@@ -128,7 +129,7 @@ export async function listDescendants(
   if (!Number.isInteger(rootPid) || rootPid <= 0) return [];
   const d = normalizeDeps(deps);
   try {
-    if (d.platform === 'win32') {
+    if (d.readsTable) {
       // One CIM sweep (src/processTable.ts) stands in for `ps`: the same
       // pid → ppid map, walked the same way.
       const table = await d.windows();
@@ -144,14 +145,39 @@ export async function listDescendants(
   }
 }
 
+/**
+ * Pure. Which table a sweep reads: the CIM snapshot (Windows) or `ps`.
+ *
+ * The deps OBJECT lets the caller say so — `platform` decides, and defaults to
+ * the host. The legacy POSITIONAL `exec` argument pins the `ps` route whatever
+ * the host is: the only thing this module ever puts through that seam is `ps`,
+ * a command Windows does not have, so a bare exec is a POSIX caller by
+ * construction. The alternative — silently ignoring the seam it handed us and
+ * sweeping the real machine with PowerShell instead — is what made a
+ * `ps`-injecting caller read the live process table on a Windows runner.
+ * Production passes neither shape (tmux.ts, terminals.ts and extension.ts all
+ * call bare) and rides the host default.
+ */
+export function readsProcessTable(
+  deps: ExecFn | ProcessTableDeps,
+  hostPlatform: string = process.platform,
+): boolean {
+  if (typeof deps === 'function') return false;
+  return (deps.platform ?? hostPlatform) === 'win32';
+}
+
 /** The old positional `exec` argument and the new deps object, folded into
- *  one shape with the platform's defaults filled in. */
-function normalizeDeps(deps: ExecFn | ProcessTableDeps): Required<ProcessTableDeps> {
+ *  one shape with the defaults filled in and the route already chosen. */
+function normalizeDeps(deps: ExecFn | ProcessTableDeps): {
+  exec: ExecFn;
+  windows: () => Promise<ProcessSnapshot>;
+  readsTable: boolean;
+} {
   const d: ProcessTableDeps = typeof deps === 'function' ? { exec: deps } : deps;
   return {
     exec: d.exec ?? defaultExec,
-    platform: d.platform ?? process.platform,
     windows: d.windows ?? (() => sharedWindowsProcessTable().snapshot()),
+    readsTable: readsProcessTable(deps),
   };
 }
 
@@ -311,10 +337,9 @@ export async function listPidFacts(
   if (wanted.size === 0) return new Map();
   const d = normalizeDeps(deps);
   try {
-    const all =
-      d.platform === 'win32'
-        ? await d.windows()
-        : parsePsPidFacts(await d.exec('ps', ['-axo', 'pid=,ppid=,lstart='], 5_000));
+    const all = d.readsTable
+      ? await d.windows()
+      : parsePsPidFacts(await d.exec('ps', ['-axo', 'pid=,ppid=,lstart='], 5_000));
     const out = new Map<number, { ppid: number; start: string }>();
     for (const pid of wanted) {
       const fact = all.get(pid);

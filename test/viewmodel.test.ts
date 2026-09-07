@@ -28,10 +28,11 @@ import type {
   PullRequest,
   PullRequestChecks,
   PullRequestState,
+  ProjectRecord,
   SessionForest,
   SessionNode,
 } from '../src/types';
-import { HIDDEN_RUNNING_GROUP_KEY } from '../src/projects';
+import { HIDDEN_RUNNING_GROUP_KEY, computeGrouping } from '../src/projects';
 import type { GroupingResult } from '../src/projects';
 
 const A = '0f00000a-0000-4000-8000-00000000000a';
@@ -101,6 +102,46 @@ function input(
 }
 
 const keys = (rows: { key: string }[]): string[] => rows.map((r) => r.key);
+
+// The one place the two halves of the reported bug meet: grouping decides the
+// project survives its window's scope fence, and this decides it becomes a row.
+// Run together, with the Windows spellings the workbench and the roster really
+// hand over, because "no project row appeared" is a claim about the pair.
+describe('buildViewModel: a Windows project row reaches the tree', () => {
+  const STORED = 'C:/Users/axel/code/shape_inference_standalone';
+  const SCOPE = 'c:\\Users\\axel\\code\\shape_inference_standalone';
+  const CWD = 'C:\\Users\\axel\\code\\shape_inference_standalone';
+
+  it('draws the project, with the sessions under it and nothing loose', () => {
+    const project: ProjectRecord = {
+      id: 'p1',
+      name: 'shape_inference_standalone',
+      rootDir: STORED,
+      dirs: [],
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    };
+    const forest = forestOf([node(A, { cwd: CWD }), node(B, { cwd: CWD })]);
+    const grouping = computeGrouping({
+      visibleRootIds: forest.visibleRoots,
+      cwdOf: (id) => forest.nodes.get(id)?.cwd,
+      projects: [project],
+      hiddenFolders: [],
+      groupByFolder: true,
+      onlyProjectSessions: false,
+      scopeDirs: [SCOPE],
+    });
+    const rows = buildViewModel(input(forest, grouping));
+    expect(keys(rows)).toEqual([
+      projectRowKey('p1'),
+      sessionRowKey(A),
+      sessionRowKey(B),
+    ]);
+    expect(rows[0].label).toBe('shape_inference_standalone');
+    // Depth is what says "under it": bare roots would sit at 0 beside the row.
+    expect(rows.map((r) => r.depth)).toEqual([0, 1, 1]);
+  });
+});
 
 describe('buildViewModel: flattening', () => {
   it('emits loose roots in order, at depth 0', () => {

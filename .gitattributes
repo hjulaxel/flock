@@ -1,0 +1,11 @@
+# Force LF regardless of the checking-out machine's core.autocrlf. Without
+# this, a Windows runner (git's autocrlf default) checks text files out as
+# CRLF, and this repo has byte-comparison checks that would call a
+# byte-identical file "behind" for a reason nobody can fix by regenerating it:
+# scripts/settings-doc.mjs's --check (docs/settings.md against package.json,
+# gated in test/manifest.test.ts) and the settings-editor manifest tests that
+# diff generated markdown against the committed doc. This line is what keeps
+# every checkout, on every platform, the same bytes those checks compare.
+* text=auto eol=lf
+*.png binary
+*.vsix binary

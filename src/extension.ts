@@ -3149,8 +3149,15 @@ export async function activate(
 
   /** Is there a Codex to hook at all — an account on the roster, or the CLI
    *  on the machine? Gates the Codex hook entries in the gear menu and the
-   *  recommended-setup step, so neither is offered where it can only refuse. */
+   *  recommended-setup step, so neither is offered where it can only refuse.
+   *
+   *  win32 is the other way it can only refuse, and it is not about whether a
+   *  Codex is present: a Codex hook entry is `{type:'command', command}` with
+   *  no field naming a shell, and Flock's entry needs `/bin/sh` — so
+   *  `CodexHooksManager.install` refuses there by design (see its header). The
+   *  Claude hooks have a PowerShell spelling and stay on offer. */
   const codexHooksAvailable = (): boolean => {
+    if (process.platform === 'win32') return false;
     try {
       if (store.getAccounts().some((p) => p.provider === 'codex')) return true;
     } catch (err) {

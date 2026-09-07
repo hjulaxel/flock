@@ -254,6 +254,15 @@ describe('formatUsageSummary', () => {
     expect(formatUsageSummary(snapshot({ stale: true }), NOW)).toBe('stale');
   });
 
+  it('a named account with nothing measured yet says so — "no usage yet", not a bare name', () => {
+    // The first-run Codex row: signed in, no turn taken, no rate-limit line
+    // written yet. Same wording limits.ts uses for the same state, and
+    // deliberately not "n/a" — nothing here has failed.
+    expect(formatUsageSummary(snapshot({ signedInAs: 'a@b.c' }), NOW)).toBe(
+      'a@b.c · no usage yet',
+    );
+  });
+
   it('is empty for a fresh snapshot with no windows and no error', () => {
     expect(formatUsageSummary(snapshot(), NOW)).toBe('');
   });
@@ -694,6 +703,71 @@ describe('AccountsViewProvider tooltip — never a credential VALUE, only names'
     const p = new AccountsViewProvider(fakeDeps({ accounts: () => [profile('a')] }));
     const tooltip = p.getTreeItem(p.getChildren()[0]).tooltip as { value: string };
     expect(tooltip.value).not.toContain('New sessions cannot start');
+  });
+
+  it('an expired sign-in names the action that fixes it', () => {
+    // The row's description says "sign-in expired" and stops; the Sign In
+    // action is one right-click away and nothing else points at it. This line
+    // is what turns the verdict into an instruction.
+    const p = new AccountsViewProvider(
+      fakeDeps({
+        accounts: () => [profile('a')],
+        usage: () => snapshot({ error: 'expired', signedInAs: 'a@b.c' }),
+      }),
+    );
+    const tooltip = p.getTreeItem(p.getChildren()[0]).tooltip as { value: string };
+    expect(tooltip.value).toContain('This sign-in has expired');
+    expect(tooltip.value).toContain('Sign In to Account');
+  });
+
+  it('an account with no credentials points at Sign In too', () => {
+    const p = new AccountsViewProvider(
+      fakeDeps({
+        accounts: () => [profile('a')],
+        usage: () => snapshot({ error: 'no-credentials' }),
+      }),
+    );
+    const tooltip = p.getTreeItem(p.getChildren()[0]).tooltip as { value: string };
+    expect(tooltip.value).toContain('Sign In to Account');
+  });
+
+  it('an aged-out access token says there is nothing to fix — and never offers a sign-in', () => {
+    // The account is signed in; the CLI renews the token on its next run.
+    // Pointing this row at Sign In is exactly the wrong-repair the wording
+    // fix exists to stop.
+    const p = new AccountsViewProvider(
+      fakeDeps({
+        accounts: () => [profile('a')],
+        usage: () => snapshot({ error: 'token-stale', signedInAs: 'a@b.c' }),
+      }),
+    );
+    const tooltip = p.getTreeItem(p.getChildren()[0]).tooltip as { value: string };
+    expect(tooltip.value).toContain('Nothing to fix here');
+    expect(tooltip.value).not.toContain('Sign In to Account');
+    expect(tooltip.value).not.toContain('expired');
+  });
+
+  it('an empty Codex meter explains itself: the numbers arrive after the first turn', () => {
+    const p = new AccountsViewProvider(
+      fakeDeps({
+        accounts: () => [profile('cx', { provider: 'codex' })],
+        usage: () => snapshot({ signedInAs: 'a@b.c', plan: 'pro' }),
+      }),
+    );
+    const tooltip = p.getTreeItem(p.getChildren()[0]).tooltip as { value: string };
+    expect(tooltip.value).toContain('a@b.c · no usage yet');
+    expect(tooltip.value).toContain('fills in after the first session');
+  });
+
+  it('a Claude row with an empty meter gets no Codex explanation', () => {
+    const p = new AccountsViewProvider(
+      fakeDeps({
+        accounts: () => [profile('a')],
+        usage: () => snapshot({ signedInAs: 'a@b.c' }),
+      }),
+    );
+    const tooltip = p.getTreeItem(p.getChildren()[0]).tooltip as { value: string };
+    expect(tooltip.value).not.toContain('fills in after the first session');
   });
 
   it('lists every window that has a number', () => {

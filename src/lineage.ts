@@ -1,12 +1,13 @@
 // src/lineage.ts — the parent-resolution cascade, the argv walk, and the
 // forest builder.
 //
-// This module imports ./types, ./log, ./transcript, ./archive and node
-// builtins only — never vscode, roster.ts or state.ts. That keeps it runnable
-// (and unit testable) outside the extension host, and keeps the ancestry model
-// independent of the roster-polling layer that feeds it. It spawns nothing but
-// `ps`, and never infers an edge from message-uuid overlap between transcripts
-// (see below).
+// This module imports ./types, ./log, ./transcript, ./archive, ./processTable
+// and node builtins only — never vscode, roster.ts or state.ts. That keeps it
+// runnable (and unit testable) outside the extension host, and keeps the
+// ancestry model independent of the roster-polling layer that feeds it. It
+// spawns nothing but `ps` — and on Windows, which has none, the one shared
+// PowerShell sweep ./processTable owns — and never infers an edge from
+// message-uuid overlap between transcripts (see below).
 //
 // ./archive is the newest of those and the only one that is not obviously a
 // dependency: it owns the reading of a transcript HEAD, and the name a closed
@@ -174,11 +175,16 @@ export function psPpidCommand(
  * `forkGateSeen` reports whether ANY inspected command line carried
  * `--fork-session`; that is the independent evidence which authorizes the deep
  * transcript scan.
+ *
+ * `deps` is handed to every hop, so the Windows route — the walk reading the
+ * shared CIM table instead of `ps` — is testable from any OS. Production
+ * passes nothing and each hop asks the host.
  */
 export async function parentFromForkArgv(
   sessionId: string,
   pid: number,
   maxdepth: number = FORK_ARGV_MAXDEPTH,
+  deps: PpidDeps = {},
 ): Promise<ArgvScanResult> {
   let forkGateSeen = false;
   if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) {
@@ -193,7 +199,7 @@ export async function parentFromForkArgv(
     let current = pid;
     for (let i = 0; i < depth; i++) {
       if (!current || current <= 1) break;
-      const { ppid, command } = await psPpidCommand(current);
+      const { ppid, command } = await psPpidCommand(current, deps);
       if (command.includes('--fork-session')) {
         forkGateSeen = true;
         const parent = resumeTarget(command);
@@ -349,7 +355,16 @@ export class LineageResolver {
     const pid = entry.pid;
     const pidUsable =
       typeof pid === 'number' && Number.isInteger(pid) && pid > 0;
-    if (pidUsable && process.platform !== 'win32') {
+    // A live pid is the whole condition. There used to be a
+    // `process.platform !== 'win32'` beside it, from the days when
+    // psPpidCommand could not read a Windows command line: it outlived that
+    // limitation (the walk reads the shared CIM table there — see
+    // ./processTable) and while it stood, a fork typed at the CLI
+    // (`claude --fork-session --resume <id>`) drew as a root on Windows
+    // forever, because branch 4 was behind the same gate and never got its
+    // evidence either. On Windows the hops cost one PowerShell sweep between
+    // them, cached across the tick; on POSIX, the same `ps` calls as always.
+    if (pidUsable) {
       // Branch 3 — argv walk. Exact: the resume target is literally the parent
       // the user typed at the still-running process.
       let scan: ArgvScanResult;

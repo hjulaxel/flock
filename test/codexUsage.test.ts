@@ -500,7 +500,10 @@ describe('LimitsService — a codex profile', () => {
     expect(snap?.fiveHour).toBeUndefined();
     expect(snap?.signedInAs).toBe('a@b.c');
     expect(snap?.plan).toBe('pro');
-    expect(formatUsageSummary(snap, NOW)).toBe('a@b.c · usage n/a');
+    // "no usage yet", not "usage n/a": this is the FIRST-RUN state of every
+    // Codex row — signed in, no turn taken, so no rate-limit line has been
+    // written yet — and it is not a fault.
+    expect(formatUsageSummary(snap, NOW)).toBe('a@b.c · no usage yet');
   });
 
   it('a Codex API-key profile answers null without reading anything', async () => {

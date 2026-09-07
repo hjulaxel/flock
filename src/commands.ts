@@ -2004,7 +2004,7 @@ export async function recommendedSetupFlow(deps: CommandDeps): Promise<void> {
 
   const wanted = new Set(chosen.map((c) => c.stepId));
   const applied: RecommendedStep[] = [];
-  let skipped = 0;
+  const skipped: RecommendedStep[] = [];
   const failed: string[] = [];
 
   for (const step of plan.steps) {
@@ -2021,11 +2021,11 @@ export async function recommendedSetupFlow(deps: CommandDeps): Promise<void> {
       continue;
     }
     if (done) applied.push(step);
-    else skipped += 1;
+    else skipped.push(step);
   }
 
   deps.refresh();
-  log('recommended:', applied.length, 'applied,', skipped, 'skipped');
+  log('recommended:', applied.length, 'applied,', skipped.length, 'skipped');
 
   // The receipt, carrying the `undo` of each step that actually landed: a setup
   // command that cannot be walked back is one people are right not to run.
@@ -2035,6 +2035,19 @@ export async function recommendedSetupFlow(deps: CommandDeps): Promise<void> {
     parts.push(`Undo: ${applied.map((s) => s.undo).join('; ')}.`);
   } else {
     parts.push('Flock: nothing was changed.');
+  }
+  // A TICKED STEP THAT LANDED NOTHING IS NAMED. Every step here answers "did
+  // it land", and a false is ordinary — a consent declined, a folder dialog
+  // closed. But saying nothing about it only reads correctly when nothing
+  // landed at all: with two other steps applied, the receipt listed those and
+  // a ticked step that quietly did nothing was invisible, which is how "I
+  // picked a folder and no project appeared, and there was no error" happens.
+  // The wording is deliberately not an error — the usual cause is a dialog the
+  // person closed, and the second sentence is what makes a step that closed
+  // ITSELF (a Windows dialog that answered nothing) reportable rather than a
+  // mystery.
+  if (applied.length > 0 && skipped.length > 0) {
+    parts.push(`Not set up: ${skipped.map((s) => s.title).join(', ')}.`);
   }
   if (failed.length > 0) parts.push(`Could not set up: ${failed.join(', ')}.`);
   parts.push(...plan.notes);
@@ -2356,10 +2369,16 @@ async function newSessionFlow(
   cwd: string | undefined,
   account?: AccountProfile,
 ): Promise<void> {
-  const title = defaultSessionTitle(
+  const siblings = cwd === undefined ? [] : namesUnder(deps, [cwd]);
+  const title = defaultSessionTitle(cwd, siblings);
+
+  // Read BEFORE the launch, because the launch is what makes the answer stale:
+  // this session is about to become a sibling of itself.
+  const offerProject = firstProjectOffer({
+    projects: safeCall('allProjects', () => deps.allProjects()) ?? [],
     cwd,
-    cwd === undefined ? [] : namesUnder(deps, [cwd]),
-  );
+    siblings: siblings.length,
+  });
 
   // Routed by the project this directory belongs to, if any — a folder
   // that is part of a project inherits that project's account even when the
@@ -2405,6 +2424,81 @@ async function newSessionFlow(
   // inline view's model, which already has the row.
   void deps.revealSession(sessionId);
   await nameJustCreatedSession(deps, sessionId);
+  // LAST. Everything the `+` promised has already happened — the session is
+  // running, named and revealed — so nothing the person is waiting for sits
+  // behind this notification, and it is never the dialog in front of a launch
+  // that `newSessionTarget` argues a `+` must not open.
+  //
+  // AWAITED all the same, rather than fired and forgotten. The offer creates a
+  // project when accepted, and a store write that outlives the verb that
+  // started it is one no caller can wait for: the tests would be racing the
+  // microtask queue, and a window closing on an unanswered notice would drop a
+  // half-finished write. An unanswered toast simply leaves the verb pending,
+  // which costs nothing and is invisible.
+  if (offerProject !== undefined) await offerFirstProject(deps, offerProject);
+}
+
+/**
+ * The folder the `+` should offer to make a project, or undefined — the answer
+ * to the half of the first-run report that was not a bug.
+ *
+ * A window with no project is a window whose `+` produces a bare root row named
+ * after a directory, with nothing on screen saying that projects exist or that
+ * this folder could be one. That is correct behaviour and a dead end: the
+ * person who has just started their first session is exactly the person for
+ * whom "a project is a name and a directory" is finally a concrete sentence.
+ *
+ * TWO GATES, and both are what keep this from being nagging.
+ *
+ *   * NO PROJECTS AT ALL — not "no project claims this folder". Somebody who
+ *     has made one project has met the concept and declined to apply it here,
+ *     and a machine with projects on it does not need to be told they exist.
+ *     Closed (`hidden`) projects count: closing one is not unlearning it.
+ *   * THE FIRST SESSION IN THIS DIRECTORY. The offer belongs to the gesture
+ *     that creates a folder's work, not to every launch under it afterwards —
+ *     otherwise a person who says no keeps being asked on the same folder all
+ *     day. Saying no still asks again on the NEXT folder, which is the rule
+ *     every dismissible notice in this extension follows.
+ *
+ * Normalized on the way out because the answer is a `rootDir`: a Windows
+ * dialog and a Windows workspace folder both hand this module a backslashed
+ * path (`C:\Users\axel\code\proj`), and the store's spelling is the one
+ * `normalizeDir` produces.
+ *
+ * Pure and exported so the rule can be asked questions without a workbench.
+ */
+export function firstProjectOffer(opts: {
+  projects: readonly ProjectRecord[];
+  cwd: string | undefined;
+  /** Sessions already living under `cwd` — `namesUnder`'s count. */
+  siblings: number;
+}): string | undefined {
+  if ((opts.projects ?? []).length > 0) return undefined;
+  if (opts.siblings > 0) return undefined;
+  const dir = normalizeDir(opts.cwd);
+  return dir === '' ? undefined : dir;
+}
+
+/** The offer itself. TOTAL — the notification API is absent from the unit
+ *  double and this is not awaited by anything that could report a throw, so a
+ *  host without it must leave the session that was just launched alone. */
+async function offerFirstProject(
+  deps: AccountCommandDeps,
+  dir: string,
+): Promise<void> {
+  try {
+    const make = 'Make it a Project';
+    const answer = await vscode.window.showInformationMessage(
+      `Flock: ${baseName(dir)} is not a project yet — sessions started here ` +
+        'sit on a plain folder row. A project groups them under one name, ' +
+        'with a + of its own to start more.',
+      make,
+    );
+    if (answer !== make) return;
+    await newProjectFlow(deps, { rootDir: dir, name: baseName(dir) });
+  } catch (err) {
+    logError('commands.offerFirstProject', err);
+  }
 }
 
 /**

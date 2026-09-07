@@ -384,12 +384,17 @@ describe('findCodexBinary', () => {
       path.join('C:\\Users\\a\\AppData\\Roaming', 'npm'),
       path.join('C:\\Users\\a\\AppData\\Local', 'Microsoft', 'WinGet', 'Links'),
     ]);
-    expect(codexFallbackBinDirs({ platform: 'linux', env: {}, home: '/home/a' })).toEqual([
-      '/home/a/.codex/bin',
-      '/home/a/.local/bin',
-      '/opt/homebrew/bin',
-      '/usr/local/bin',
-    ]);
+    // codexFallbackBinDirs joins with the AMBIENT node:path (not one picked by
+    // `platform`), so on a real Windows host `path.join('/home/a', '.codex',
+    // 'bin')` comes back backslash-separated even while asked for the 'linux'
+    // table. Folded to '/' on both sides — same fix as stateHome.test.ts and
+    // hooks.test.ts use for the identical reason — since separator style here
+    // is a byproduct of the host, not part of what this list is pinning down.
+    expect(
+      codexFallbackBinDirs({ platform: 'linux', env: {}, home: '/home/a' }).map((d) =>
+        d.replace(/\\/g, '/'),
+      ),
+    ).toEqual(['/home/a/.codex/bin', '/home/a/.local/bin', '/opt/homebrew/bin', '/usr/local/bin']);
   });
 });
 

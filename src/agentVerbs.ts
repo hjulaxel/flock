@@ -1028,7 +1028,32 @@ function homeDir(home?: string): string {
   } catch (err) {
     logError('verbs: homedir', err);
   }
-  return process.env['HOME'] ?? '.';
+  return fallbackHome(process.env, process.platform);
+}
+
+/** The env fallback for a home directory, reached only when os.homedir()
+ *  itself fails. Platform-explicit because HOME is a POSIX idea: os.homedir()
+ *  on Windows reads USERPROFILE and never HOME, so USERPROFILE is the variable
+ *  that names the SAME directory a window resolved — while HOME on Windows is
+ *  Git Bash's own invention, a POSIX-shaped path that can point somewhere else
+ *  entirely. A CLI and a window that disagree about home disagree about the
+ *  requests directory, and then nothing is ever claimed. HOMEDRIVE + HOMEPATH
+ *  is the older pair Windows still sets when USERPROFILE is missing. The
+ *  platform is a parameter, not `process.platform`, so both branches run on
+ *  every machine in the CI matrix. */
+export function fallbackHome(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+): string {
+  if (platform === 'win32') {
+    const profile = env['USERPROFILE'];
+    if (profile) return profile;
+    const drive = env['HOMEDRIVE'];
+    const rest = env['HOMEPATH'];
+    if (drive && rest) return path.win32.join(drive, rest);
+    return '.';
+  }
+  return env['HOME'] || '.';
 }
 
 function readTextSync(file: string): string | null {

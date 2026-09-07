@@ -290,8 +290,16 @@ describe('daemon: background-job forks', () => {
   }
 
   it('jobsDirForRosterPath finds the jobs dir beside the daemon dir', () => {
-    expect(jobsDirForRosterPath('/cfg/daemon/roster.json')).toBe('/cfg/jobs');
-    expect(jobsDirForRosterPath(daemonRosterPathFor('/cfg'))).toBe('/cfg/jobs');
+    // jobsDirForRosterPath joins with the ambient node:path, so on win32 this
+    // comes back backslash-separated even from a forward-slash fixture —
+    // folded to '/' on both sides, same as stateHome.test.ts does for the
+    // identical reason, since separator style is not what this is pinning.
+    expect(jobsDirForRosterPath('/cfg/daemon/roster.json').replace(/\\/g, '/')).toBe(
+      '/cfg/jobs',
+    );
+    expect(jobsDirForRosterPath(daemonRosterPathFor('/cfg')).replace(/\\/g, '/')).toBe(
+      '/cfg/jobs',
+    );
   });
 
   it('parseDaemonRoster falls back to the dispatch env when the path has no uuid', () => {

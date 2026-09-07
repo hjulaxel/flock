@@ -39,6 +39,14 @@
 //      hashed service name resolves: the item IS per-config-dir, so the
 //      fallback can never cross accounts.
 //
+// On Windows and Linux there is no second tier: the CLI keeps the OAuth blob in
+// `<configDir>/.credentials.json` and nowhere else (`%USERPROFILE%\.claude\`
+// for the default account, via os.homedir()). That one file therefore carries
+// the whole verdict a Windows row shows, which is why `readCredentialBlob`
+// below refuses to read anything into it that is not there: a file it cannot
+// parse is "no credentials", and only a lapsed token with NO refresh token
+// anywhere in the document is an expired sign-in.
+//
 // WHO IS SIGNED IN. Separately from the token, `<configDir>/.claude.json`
 // (for the default account: `~/.claude.json`, at the home root) records the
 // logged-in identity under `oauthAccount.emailAddress`. Every snapshot carries
@@ -685,18 +693,26 @@ export function resetInLabel(
  *                             credential could not be read — the state that
  *                             used to render, wrongly, as "not logged in"
  *   "not logged in"           never signed in on this account (no identity)
- *   "a@b.c · login expired" / "login expired"  the token needs renewing
+ *   "a@b.c · sign-in expired" / "sign-in expired"  the sign-in is over and
+ *                             only the user can fix it — the row's **Sign In
+ *                             to Account** action is the fix, and the hover
+ *                             says so
+ *   "a@b.c · usage n/a"       signed in, the cached token has aged out and the
+ *                             CLI renews it on its next run: the METER is
+ *                             missing, the login is not
  *   "usage unavailable"       the endpoint said something we could not use
  *   "usage stale"             nothing but an old failure to report
- *   "usage n/a"               answered, with nothing in it
- *   ""                        NO answer at all — Codex, an API-key account
+ *   "no usage yet"            answered, with nothing in it — a login that has
+ *                             not taken a turn, not a fault
+ *   ""                        NO answer at all — a Gemini, generic or API-key
+ *                             account (Codex IS served: it reads off its own
+ *                             rollouts)
  *
  * The empty string is the interesting one. `null` is not a failure: it is what
- * `readUsage` returns for every account this file knowingly does not serve, and
- * that is most rows on a machine with a Codex login. Those rows are not broken
- * and have nothing to report, so they say nothing — a permanent "usage n/a"
- * under half the accounts in the view is noise that trains the eye to skip the
- * line that matters. A snapshot that EXISTS and carries nothing is different:
+ * `readUsage` returns for every account this file knowingly does not serve.
+ * Those rows are not broken and have nothing to report, so they say nothing —
+ * a permanent "no usage yet" under accounts that will never have a meter is
+ * noise that trains the eye to skip the line that matters. A snapshot that EXISTS and carries nothing is different:
  * something answered and we could not use it, which is worth a word.
  *
  * Pure string building. The clock arrives as an argument — defaulted to the
@@ -735,7 +751,10 @@ export function formatUsageSummary(
         // login exists; it is the CREDENTIAL READ that came up empty.
         return who === '' ? 'not logged in' : `${who} · usage unavailable`;
       case 'expired':
-        return who === '' ? 'login expired' : `${who} · login expired`;
+        // "sign-in expired", the same words the row's own action is spelled
+        // with (**Sign In to Account**) — a row that names a state the user
+        // can act on should name the action too, and the hover says which.
+        return who === '' ? 'sign-in expired' : `${who} · sign-in expired`;
       case 'token-stale':
         // NOT "login expired". The account is signed in; its access token has
         // simply aged out between CLI runs, and the next `claude` on this
@@ -747,9 +766,12 @@ export function formatUsageSummary(
         return 'usage unavailable';
       default: {
         // A signed-in account with no windows to show — a Codex login that has
-        // not taken a turn yet — still names itself: the name is the fact the
-        // row has, and "usage n/a" alone under it reads as a fault.
-        const word = snapshot.stale === true ? 'usage stale' : 'usage n/a';
+        // not taken a turn yet, which is EVERY Codex row on a fresh machine —
+        // still names itself: the name is the fact the row has. "no usage yet"
+        // rather than "usage n/a" because nothing has failed here; Codex
+        // publishes its rate limits only after a turn, and "n/a" under a
+        // brand-new account reads as a fault the user is meant to fix.
+        const word = snapshot.stale === true ? 'usage stale' : 'no usage yet';
         return who === '' ? word : `${who} · ${word}`;
       }
     }
@@ -778,42 +800,128 @@ export function formatUsageSummary(
 type CredentialResult =
   | { kind: 'ok'; token: string; refreshable: boolean }
   | { kind: 'missing' }
-  /** Lapsed access token, no refresh token: the sign-in really is over. */
+  /** Lapsed access token and NO refresh token anywhere in the document: the
+   *  sign-in really is over, and only the user can fix it. */
   | { kind: 'expired' }
-  /** Lapsed access token WITH a refresh token: signed in, nothing to fix, and
-   *  no point spending a round trip on a header that will 401. */
+  /** Lapsed (or absent) access token WITH a refresh token: signed in, nothing
+   *  to fix, and no point spending a round trip on a header that will 401. */
   | { kind: 'stale' };
+
+/** Squashed key spellings (`normKey` folds `refresh_token` onto
+ *  `refreshtoken`), so one entry covers every casing and separator a CLI has
+ *  been seen to write. */
+const ACCESS_TOKEN_KEYS: readonly string[] = ['accesstoken'];
+const REFRESH_TOKEN_KEYS: readonly string[] = ['refreshtoken'];
+const EXPIRES_AT_KEYS: readonly string[] = ['expiresat'];
+
+/** The first raw value under any of `keys`, matched on the squashed key. */
+function rawUnder(obj: Record<string, unknown>, keys: readonly string[]): unknown {
+  for (const [key, value] of Object.entries(obj)) {
+    if (keys.includes(normKey(key))) return value;
+  }
+  return undefined;
+}
+
+/**
+ * JSON.parse for a file some other program wrote, as an object or undefined.
+ *
+ * The BOM is the Windows part: `%USERPROFILE%\.claude\.credentials.json` is
+ * written by the CLI without one, but anything that has passed through
+ * PowerShell's `Set-Content`/`Out-File` or Notepad comes back with a leading
+ * U+FEFF, and `JSON.parse` throws on it. A credentials file we throw on reads
+ * as "no credentials", which is a whole account rendered signed-out over one
+ * invisible character.
+ */
+function parseJsonObject(text: string | null | undefined): Record<string, unknown> | undefined {
+  if (typeof text !== 'string') return undefined;
+  const body = text.replace(/^\uFEFF/, '').trim();
+  if (body === '') return undefined;
+  try {
+    const root: unknown = JSON.parse(body);
+    return isPlainObject(root) ? root : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+interface CredentialFields {
+  /** '' when the document holds no access token at all. */
+  token: string;
+  /** The expiry sitting BESIDE the access token, in epoch ms. */
+  expiresAt?: number;
+  /** A refresh token exists SOMEWHERE in the document. Presence only — never
+   *  the value, which is a credential this file has no reason to hold. */
+  refreshable: boolean;
+}
+
+/**
+ * The fields a credentials document carries, found by a bounded walk rather
+ * than at one hardcoded path.
+ *
+ * `claudeAiOauth.accessToken` is where Claude Code puts them and the walk finds
+ * that first, because it is first in the file. The walk exists for the other
+ * spellings: a token nested one level deeper, or — the one that matters — a
+ * refresh token that is NOT a sibling of the access token. "No refreshToken
+ * under this exact key" is the whole evidence behind telling a user their
+ * sign-in expired, and that verdict must not rest on the shape of a file
+ * another program owns. Bounded by the same depth and node budget the usage
+ * scan uses: a credentials file is a few hundred bytes, and a strange one must
+ * not turn a repaint into a tree traversal.
+ */
+function scanCredential(root: unknown): CredentialFields {
+  let token = '';
+  let expiresAt: number | undefined;
+  let refreshable = false;
+  let budget = SCAN_NODE_BUDGET;
+
+  const visit = (value: unknown, depth: number): void => {
+    if (budget <= 0 || depth > SCAN_MAX_DEPTH) return;
+    budget -= 1;
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, depth + 1);
+      return;
+    }
+    if (!isPlainObject(value)) return;
+    for (const [key, child] of Object.entries(value)) {
+      const squashed = normKey(key);
+      const text = typeof child === 'string' ? child.trim() : '';
+      if (text !== '' && ACCESS_TOKEN_KEYS.includes(squashed) && token === '') {
+        token = text;
+        // The expiry that belongs to THIS token, not the first one in the file.
+        expiresAt = parseResetAt(rawUnder(value, EXPIRES_AT_KEYS));
+      }
+      if (text !== '' && REFRESH_TOKEN_KEYS.includes(squashed)) refreshable = true;
+      visit(child, depth + 1);
+    }
+  };
+
+  visit(root, 0);
+  return expiresAt === undefined ? { token, refreshable } : { token, expiresAt, refreshable };
+}
 
 /** Pull the access token out of the OAuth blob, honouring its expiry. Kept
  *  private: nothing outside this file has a reason to hold a token. */
 function readCredentialBlob(text: string | null, now: number): CredentialResult {
-  if (typeof text !== 'string' || text.trim() === '') return { kind: 'missing' };
-  let root: unknown;
-  try {
-    root = JSON.parse(text) as unknown;
-  } catch {
-    return { kind: 'missing' };
+  const root = parseJsonObject(text);
+  // Unreadable is 'missing', never 'expired': a file we could not parse is a
+  // file that said nothing, and "your sign-in expired" is a claim that needs
+  // evidence.
+  if (root === undefined) return { kind: 'missing' };
+
+  const { token, expiresAt, refreshable } = scanCredential(root);
+  if (token === '') {
+    // A refresh token with no access token beside it is a LIVE login whose
+    // cached token has been spent or cleared — the CLI mints a new one on its
+    // next run. Calling that "not signed in" is the same lie in a different
+    // place.
+    return refreshable ? { kind: 'stale' } : { kind: 'missing' };
   }
-  if (!isPlainObject(root)) return { kind: 'missing' };
-
-  const nested = root['claudeAiOauth'] ?? root['claude_ai_oauth'];
-  const blob = isPlainObject(nested) ? nested : root;
-
-  const raw = blob['accessToken'] ?? blob['access_token'];
-  const token = typeof raw === 'string' ? raw.trim() : '';
-  if (token === '') return { kind: 'missing' };
-
-  // Presence only — never the value, which is a credential this file has no
-  // reason to hold beyond the one it is about to spend.
-  const refresh = blob['refreshToken'] ?? blob['refresh_token'];
-  const refreshable = typeof refresh === 'string' && refresh.trim() !== '';
 
   // An expiry in the past means the CLI has not refreshed yet. Sending it would
   // buy a 401 and a wasted round trip; say so from here instead. WHICH thing it
   // says depends on the refresh token: with one, this is an ordinary lapsed
   // token on a live login and the CLI renews it unprompted; without one, the
   // sign-in is genuinely over and only the user can fix it.
-  const expiresAt = parseResetAt(blob['expiresAt'] ?? blob['expires_at']);
   if (expiresAt !== undefined && expiresAt <= now) {
     return refreshable ? { kind: 'stale' } : { kind: 'expired' };
   }
@@ -1333,17 +1441,16 @@ export class LimitsService implements LimitsReader, DisposableLike {
     const file = this.identityPathFor(profile);
     if (file === '') return undefined;
     const text = await this.readFile(file);
-    if (typeof text !== 'string' || text.trim() === '') return undefined;
-    try {
-      const root: unknown = JSON.parse(text);
-      if (!isPlainObject(root)) return undefined;
-      const account = root['oauthAccount'];
-      if (!isPlainObject(account)) return undefined;
-      const email = account['emailAddress'] ?? account['email_address'];
-      return typeof email === 'string' && email.trim() !== '' ? email.trim() : undefined;
-    } catch {
-      return undefined;
-    }
+    // Through the same BOM-tolerant parse the credentials file gets: a
+    // `.claude.json` that has been through a Windows editor still names its
+    // account, and a row that loses its name is a row that says "not logged
+    // in" about a login that exists.
+    const root = parseJsonObject(text);
+    if (root === undefined) return undefined;
+    const account = root['oauthAccount'];
+    if (!isPlainObject(account)) return undefined;
+    const email = account['emailAddress'] ?? account['email_address'];
+    return typeof email === 'string' && email.trim() !== '' ? email.trim() : undefined;
   }
 
   /** The GET. Distinguishes only the two things the caller can act on: a dead

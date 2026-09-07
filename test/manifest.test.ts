@@ -17,6 +17,7 @@
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { CONFIG_KEYS, LEGACY_KEYS } from '../src/types';
@@ -213,5 +214,33 @@ describe('docs/settings.md is generated from the manifest', () => {
       encoding: 'utf8',
     });
     expect(result.status, `${result.stderr}${result.stdout}`).toBe(0);
+  });
+
+  // The check above runs on this checkout's own bytes, which are already LF —
+  // it would pass on this machine whether or not the generator normalises
+  // line endings. A Windows checkout hands the generator \r\n (git's
+  // autocrlf, or a clone from before .gitattributes pinned the repo to LF),
+  // so prove the normalisation directly: copy the generator and the manifest
+  // into a throwaway root next to a CRLF copy of the (already up to date)
+  // doc, and `--check` it there.
+  it('--check ignores line endings: a CRLF copy of the up-to-date doc still passes', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'flock-settings-doc-'));
+    try {
+      fs.mkdirSync(path.join(tmp, 'docs'));
+      fs.mkdirSync(path.join(tmp, 'scripts'));
+      fs.copyFileSync(path.join(ROOT, 'package.json'), path.join(tmp, 'package.json'));
+      fs.copyFileSync(GENERATOR, path.join(tmp, 'scripts', 'settings-doc.mjs'));
+      const crlf = fs.readFileSync(DOC, 'utf8').replace(/\n/g, '\r\n');
+      fs.writeFileSync(path.join(tmp, 'docs', 'settings.md'), crlf);
+
+      const result = spawnSync(
+        process.execPath,
+        [path.join(tmp, 'scripts', 'settings-doc.mjs'), '--check'],
+        { cwd: tmp, encoding: 'utf8' },
+      );
+      expect(result.status, `${result.stderr}${result.stdout}`).toBe(0);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });

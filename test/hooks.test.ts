@@ -282,8 +282,11 @@ describe('hooks: generated plugin files', () => {
 
 describe('hooks: path shapes', () => {
   it('places the plugin under ~/.claude/skills and events under ~/.lineage', () => {
-    expect(pluginDir('/tmp/h')).toBe('/tmp/h/.claude/skills/lineage-events');
-    expect(eventsFile('/tmp/h')).toBe('/tmp/h/.lineage/events.ndjson');
+    // Both join with the ambient node:path, so a forward-slash fixture comes
+    // back backslash-separated on win32 — folded to '/' the same way
+    // stateHome.test.ts does for the identical reason.
+    expect(pluginDir('/tmp/h').replace(/\\/g, '/')).toBe('/tmp/h/.claude/skills/lineage-events');
+    expect(eventsFile('/tmp/h').replace(/\\/g, '/')).toBe('/tmp/h/.lineage/events.ndjson');
   });
 });
 

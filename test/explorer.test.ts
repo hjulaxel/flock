@@ -809,6 +809,30 @@ describe('planAutoConvert', () => {
     });
   });
 
+  it('accepts a Windows-shaped file, drive letter and all', () => {
+    // The empty window has to convert itself on Windows too, and there the
+    // anchor lives behind a drive letter while VS Code still writes folder[0]
+    // relative. Spelled out here rather than left to the Windows runner: the
+    // resolution `anchoredWorkspaceFile` does is platform-FREE, so this shape
+    // must answer the same on whichever OS the suite happens to run.
+    const existingFile = JSON.stringify({
+      folders: [
+        { path: 'anchor', name: 'Magma Web' },
+        { path: '..\\code\\web' },
+      ],
+      settings: {},
+    });
+    expect(
+      planAutoConvert(
+        emptyWindow({
+          existingFile,
+          anchorPath: 'C:\\Users\\x\\.lineage\\anchor',
+          fileDir: 'C:\\Users\\x\\.lineage',
+        }),
+      ),
+    ).toEqual({ kind: 'open' });
+  });
+
   it('refuses a file it cannot read or that is not ours, before any reload', () => {
     for (const existingFile of [
       '',
@@ -895,6 +919,54 @@ describe('anchoredWorkspaceFile', () => {
     const rel = JSON.stringify({ folders: [{ path: 'anchor' }] });
     expect(anchoredWorkspaceFile(rel, ANCHOR, FILE_DIR)).toBe(true);
     expect(anchoredWorkspaceFile(rel, ANCHOR, '/somewhere/else')).toBe(false);
+  });
+
+  // WINDOWS SHAPES, ON EVERY OS. What this check meets on a Windows machine is
+  // a drive-lettered anchor and a folders[0] whose separators came out of the
+  // FILE rather than out of the running platform. Both are written literally
+  // below instead of being derived from `process.platform`, so the Windows
+  // answer is asserted on the macOS and Linux runners too — the resolution is
+  // platform-free precisely so it can be.
+  const WIN_ANCHOR = 'C:\\Users\\x\\proj\\anchor';
+  const WIN_FILE_DIR = 'C:\\Users\\x\\proj';
+
+  it('resolves a Windows relative folder[0] against the file directory', () => {
+    const rel = JSON.stringify({ folders: [{ path: 'anchor' }] });
+    expect(anchoredWorkspaceFile(rel, WIN_ANCHOR, WIN_FILE_DIR)).toBe(true);
+    expect(anchoredWorkspaceFile(rel, WIN_ANCHOR, 'C:\\Users\\x\\other')).toBe(
+      false,
+    );
+    // A relative path spelled with backslashes, which is how Windows writes
+    // one: `..` walks the same way `/` does.
+    const up = JSON.stringify({ folders: [{ path: '..\\proj\\anchor' }] });
+    expect(anchoredWorkspaceFile(up, WIN_ANCHOR, WIN_FILE_DIR)).toBe(true);
+  });
+
+  it('reads a Windows absolute folder[0] whichever separator it uses', () => {
+    const slashed = WIN_ANCHOR.replace(/\\/g, '/'); // C:/Users/x/proj/anchor
+    expect(
+      anchoredWorkspaceFile(
+        JSON.stringify({ folders: [{ path: WIN_ANCHOR }] }),
+        WIN_ANCHOR,
+        WIN_FILE_DIR,
+      ),
+    ).toBe(true);
+    expect(
+      anchoredWorkspaceFile(
+        JSON.stringify({ folders: [{ path: slashed }] }),
+        WIN_ANCHOR,
+        WIN_FILE_DIR,
+      ),
+    ).toBe(true);
+    // The drive letter folds like any other segment where the platform folds
+    // — VS Code is not consistent about its case — and not where it does not.
+    expect(
+      anchoredWorkspaceFile(
+        JSON.stringify({ folders: [{ path: slashed.toLowerCase() }] }),
+        WIN_ANCHOR,
+        WIN_FILE_DIR,
+      ),
+    ).toBe(PATHS_FOLD_CASE);
   });
 
   it('compares the way the platform compares paths', () => {

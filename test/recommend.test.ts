@@ -91,6 +91,23 @@ describe('recommendedPlan: what is offered', () => {
     expect(ids(fresh)).toEqual(['project', 'import', 'hooks', 'verbs']);
   });
 
+  it('still leads with the project step on a fresh Windows machine', () => {
+    // Windows drops out of the tmux branch entirely (no detach tier to offer),
+    // and the first-run report starts with somebody taking this exact line on
+    // a native Windows install — so "the plan is not empty and `project` is at
+    // the head of it" is the claim worth pinning, not an incidental.
+    const plan = recommendedPlan({ ...fresh, platform: 'win32' });
+    expect(plan.steps.map((s) => s.id)).toEqual([
+      'project',
+      'import',
+      'hooks',
+      'verbs',
+    ]);
+    expect(plan.steps[0].title).toBe('Make your first project');
+    expect(plan.notes).toEqual([]);
+    expect(plan.done).not.toContain('tmux');
+  });
+
   it('keeps every step in the declared order', () => {
     const order = ids(
       world({
