@@ -2,7 +2,7 @@
   "name": "flock",
   "displayName": "Flock",
   "description": "See every Claude Code session you're running as one live tree — who forked from whom, who's working, and who's waiting on you.",
-  "version": "0.6.0",
+  "version": "0.8.0",
   "publisher": "hjulaxel",
   "license": "MIT",
   "repository": {
