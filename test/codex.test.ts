@@ -324,25 +324,32 @@ describe('the rollout store on disk', () => {
   // `codex resume` can reopen — and, because they share the parent's cwd,
   // into adoption candidates for an unrelated launch.
 
-  it('readRolloutMeta refuses a thread file, whose head names another conversation', () => {
+  it('readRolloutMeta MARKS a thread file rather than refusing it', () => {
+    // The reader reports and the scan decides: one caller (the meter) wants
+    // these files, and it does not care what id they carry.
     const file = writeRollout('2026-08-12', ID_A, {
       sessionId: ID_B,
       parentThreadId: ID_B,
       originator: 'codex_exec',
     });
-    expect(readRolloutMeta(file)).toBeNull();
+    expect(readRolloutMeta(file)?.threadOf).toBe(ID_B);
   });
 
-  it('readRolloutMeta refuses on session_id alone, with no parent_thread_id', () => {
+  it('readRolloutMeta marks on session_id alone, with no parent_thread_id', () => {
     const file = writeRollout('2026-08-12', ID_A, { sessionId: ID_B });
-    expect(readRolloutMeta(file)).toBeNull();
+    expect(readRolloutMeta(file)?.threadOf).toBe(ID_B);
   });
 
-  it('readRolloutMeta refuses on parent_thread_id alone', () => {
+  it('readRolloutMeta marks on parent_thread_id alone', () => {
     // A future shape that drops `session_id` but keeps the parent link is
     // still a thread, and each witness has to be enough on its own.
     const file = writeRollout('2026-08-12', ID_A, { parentThreadId: ID_B });
-    expect(readRolloutMeta(file)).toBeNull();
+    expect(readRolloutMeta(file)?.threadOf).toBe(ID_B);
+  });
+
+  it('leaves threadOf unset on a session of its own', () => {
+    const file = writeRollout('2026-08-12', ID_A, { sessionId: ID_A });
+    expect(readRolloutMeta(file)?.threadOf).toBeUndefined();
   });
 
   it('readRolloutMeta keeps a file whose head AGREES with its name', () => {
@@ -368,7 +375,7 @@ describe('the rollout store on disk', () => {
     expect(readRolloutMeta(file)?.sessionId).toBe(ID_A);
   });
 
-  it('scanRollouts leaves thread files out of the store entirely', () => {
+  it('scanRollouts leaves thread files out of the store by default', () => {
     writeRollout('2026-08-12', ID_A, { originator: 'codex-tui' });
     writeRollout('2026-08-12', ID_B, {
       sessionId: ID_A,
@@ -377,6 +384,22 @@ describe('the rollout store on disk', () => {
     });
     const found = scanRollouts({ sessionsDirs: [path.join(root, 'sessions')] });
     expect(found.map((r) => r.sessionId)).toEqual([ID_A]);
+  });
+
+  it('scanRollouts hands threads back when a caller asks for them', () => {
+    // The meter's case: it reads the newest `token_count` record on a login
+    // and never touches an id, so hiding threads from it would only make the
+    // reading staler than it has to be.
+    writeRollout('2026-08-12', ID_A, { originator: 'codex-tui' });
+    writeRollout('2026-08-12', ID_B, {
+      sessionId: ID_A,
+      parentThreadId: ID_A,
+    });
+    const found = scanRollouts({
+      sessionsDirs: [path.join(root, 'sessions')],
+      includeThreads: true,
+    });
+    expect(found.map((r) => r.sessionId).sort()).toEqual([ID_A, ID_B].sort());
   });
 
   it('scanRollouts walks the YYYY/MM/DD tree', () => {
@@ -528,6 +551,16 @@ describe('matchRollout: which rollout did this launch produce', () => {
   });
 
   // ---- whose front end opened it ------------------------------------
+
+  it('refuses a thread even when one is handed to it directly', () => {
+    // scanRollouts already drops these, so this clause is the second lock:
+    // the guarantee has to hold for any caller, not only the one that filters.
+    const hit = matchRollout([meta({ sessionId: ID_A, threadOf: ID_B })], {
+      spawnedAt: T,
+      cwd: '/code/api',
+    });
+    expect(hit).toBeNull();
+  });
 
   it('refuses a headless exec run that fits the window and the directory', () => {
     // The shape that cost two rows on a real machine: a `codex exec` harness

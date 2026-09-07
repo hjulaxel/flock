@@ -364,6 +364,13 @@ export interface RolloutMeta {
   /** File mtime — last activity, the same role `ArchivedSession.endedAt` has. */
   endedAt: number;
   bytes: number;
+  /** The conversation this file is a THREAD of, when it is one: the value of
+   *  `session_meta.payload.session_id` (or `parent_thread_id`) where it
+   *  disagrees with the id in the filename. Set means "this file is not a
+   *  session", which is why scanRollouts drops it by default and matchRollout
+   *  refuses it outright. Kept as the parent's id rather than as a boolean
+   *  because it is the only place that link is recoverable. */
+  threadOf?: string;
   /** `session_meta.payload.originator` — which front end opened this rollout.
    *  Measured spellings on codex-cli 0.153.4: `codex-tui` for an interactive
    *  session, `codex_exec` for a headless `codex exec` run. Absent on older
@@ -436,10 +443,11 @@ export function extractJsonString(text: string, key: string): string | undefined
 }
 
 /**
- * Read one rollout's facts. Bounded, never throws. Returns null when the file
- * is not a rollout at all, cannot be stat'ed, or is a SUBAGENT THREAD rather
- * than a session — see below, because that last case is a correctness fix and
- * not a tidy-up.
+ * Read one rollout's facts. Bounded, never throws. Returns null only when the
+ * file is not a rollout at all or cannot be stat'ed. A file that turns out to
+ * be a SUBAGENT THREAD rather than a session comes back MARKED (`threadOf`)
+ * rather than refused — the reader reports, the scan decides — because one
+ * caller genuinely wants those files (see RolloutScanOptions.includeThreads).
  *
  * THE FILENAME IS NOT THE SESSION ID, and this module believed it was.
  * Measured on codex-cli 0.153.4 with `features.multi_agent` on: every thread
@@ -458,10 +466,11 @@ export function extractJsonString(text: string, key: string): string | undefined
  * conversation the user never opened. A wrong edge is worse than no edge, so a
  * thread file is now not a candidate for anything: not a match, not a row.
  *
- * The id therefore comes from the HEADER when the header speaks, and from the
- * filename only when it does not. That keeps the old robustness argument
- * (a rollout truncated before `session_id` is written still gets an id) while
- * making the two disagreeing a rejection rather than a silent mis-identity.
+ * The id therefore still comes from the filename — which is right whenever the
+ * two agree, and keeps the old robustness argument that a rollout truncated
+ * before `session_id` is written still gets an id — but the two DISAGREEING is
+ * now recorded instead of ignored, and that mark is what disqualifies the file
+ * from being anything's session.
  */
 export function readRolloutMeta(file: string): RolloutMeta | null {
   const sessionId = sessionIdOfRollout(path.basename(file));
@@ -506,12 +515,13 @@ export function readRolloutMeta(file: string): RolloutMeta | null {
     // an independent witness for the same verdict.
     const headerId = extractJsonString(head, 'session_id');
     const parentThread = extractJsonString(head, 'parent_thread_id');
-    if (
-      (headerId !== undefined && headerId !== sessionId) ||
-      (parentThread !== undefined && parentThread !== sessionId)
-    ) {
-      return null; // a thread of another conversation, not a session
-    }
+    const threadOf =
+      headerId !== undefined && headerId !== sessionId
+        ? headerId
+        : parentThread !== undefined && parentThread !== sessionId
+          ? parentThread
+          : undefined;
+    if (threadOf !== undefined) out.threadOf = threadOf;
     const originator = extractJsonString(head, 'originator');
     if (originator !== undefined) out.originator = originator;
     const cwd = extractJsonString(head, 'cwd');
@@ -540,6 +550,16 @@ export interface RolloutScanOptions {
   maxAgeDays?: number;
   /** Hard cap on files returned, newest day first. */
   limit?: number;
+  /** Include files that are THREADS of another conversation rather than
+   *  sessions of their own (RolloutMeta.threadOf). Off by default, because
+   *  every identity-bearing caller — the archived rows, the id adoption —
+   *  would otherwise treat a thread as a session it can open.
+   *
+   *  readCodexUsage turns it ON, and the asymmetry is the point: the meter
+   *  wants the newest `token_count` record on a login and never looks at the
+   *  id, so excluding threads there would only make the reading staler than
+   *  it needs to be for no safety gained. */
+  includeThreads?: boolean;
 }
 
 const DEFAULT_MAX_AGE_DAYS = 90;
@@ -582,6 +602,7 @@ export function scanRollouts(opts?: RolloutScanOptions): RolloutMeta[] {
   // Compared as a STRING against the `YYYY/MM/DD` the tree is named with, so
   // the cutoff needs no date parsing per directory — lexical order on a
   // zero-padded date is chronological order.
+  const includeThreads = opts?.includeThreads === true;
   const cutoff = dayKeyOf(Date.now() - maxAgeDays * 86_400_000);
 
   const days: Array<{ key: string; dir: string }> = [];
@@ -609,6 +630,11 @@ export function scanRollouts(opts?: RolloutScanOptions): RolloutMeta[] {
       if (out.length >= limit) break;
       if (sessionIdOfRollout(file) === null) continue;
       const meta = readRolloutMeta(path.join(dir, file));
+      // A thread is not a session — dropped HERE, at the boundary, so the
+      // reader stays a reader and every caller gets the same default.
+      if (meta !== null && meta.threadOf !== undefined && !includeThreads) {
+        continue;
+      }
       // One id, one row: the same session copied into two stores (a profile
       // that inherited a directory, say) must not produce two rows.
       if (meta === null || claimed.has(meta.sessionId)) continue;
@@ -720,6 +746,7 @@ export function matchRollout(
   for (const meta of candidates ?? []) {
     if (!meta || !isSessionId(meta.sessionId)) continue;
     if (taken.has(meta.sessionId)) continue;
+    if (meta.threadOf !== undefined) continue;
     if (!isAdoptableOriginator(meta.originator)) continue;
     const startedAt = meta.startedAt;
     if (typeof startedAt !== 'number' || !Number.isFinite(startedAt)) continue;
@@ -1020,6 +1047,9 @@ export function readCodexUsage(opts: ReadCodexUsageOptions): CodexUsageReading |
   try {
     rollouts = scanRollouts({
       sessionsDirs: opts?.sessionsDirs ?? [],
+      // A thread's rollout carries the same `token_count` records as any
+      // other, and this reader never touches an id — see includeThreads.
+      includeThreads: true,
       ...(opts?.maxAgeDays !== undefined ? { maxAgeDays: opts.maxAgeDays } : {}),
     });
   } catch {
