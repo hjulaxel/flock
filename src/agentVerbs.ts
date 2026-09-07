@@ -33,6 +33,53 @@
 // branched from, exactly where the sidebar button would have put it, and the
 // delay only ever matters for sessions no window is bound to.
 //
+// PROVENANCE: a request must carry a secret from the session it names. The
+// requests directory is writable by anything running as this user, and the
+// names it could put in a request are public — `claude agents --json` lists
+// them. So until v5 a sub-agent, an MCP server or one talked-into Bash step
+// could name ANOTHER conversation, ask for eight forks and write the opening
+// prompt those forks would execute, quietly (the verb forks with quiet:true).
+// A count cap is not a defence against that; the count was never the problem.
+//
+// The proof is a per-launch secret, minted and stamped by terminals.ts and
+// remembered here — see the LAUNCH TOKEN section below for why it lives in
+// memory only, why that means only the window that LAUNCHED a session can
+// honour its verb, and why it is keyed on the launch id rather than the row's.
+//
+// WHAT THE TOKEN DOES NOT DO, stated here because the temptation is to read it
+// as more. It stops any process that cannot READ THE NAMED SESSION'S
+// ENVIRONMENT — which is the whole "name any uuid you can list" attack, and
+// worth having. It is NOT a defence against a process running AS YOU that can
+// read it, and on a normal machine several routes can:
+//
+//   * `ps eww -p <pid>` prints a same-user process's full environment on macOS
+//     and Linux, so `ps eww -A | grep LINEAGE_VERB_TOKEN` yields every live
+//     session's node id and its token together, with no race.
+//   * a WRAPPED launch renders `-e LINEAGE_VERB_TOKEN=<hex>` into the tmux
+//     CLIENT's argv (terminals.ts → tmux.buildSpawnArgs), which `ps` shows and
+//     /proc/<pid>/cmdline exposes world-readably on Linux. Unavoidable while
+//     the secret has to be in the CLI's environment BEFORE tmux spawns it:
+//     `-e` is what does that, a later `set-environment` is too late for a
+//     process already running, and every other route puts the secret in
+//     another argv or in a file — and a file is the one thing the memory-only
+//     rule below exists to forbid.
+//   * it is in the tmux SESSION environment, so
+//     `tmux -L <socket> show-environment -t =lineage-<uuid>` reads it back over
+//     a same-user socket.
+//   * the request file itself sits in a 0700 directory for the milliseconds
+//     before a window claims it — private to this user, and this user is the
+//     attacker in question.
+//
+// So a sub-agent, an MCP server or a talked-into Bash step running inside ANY
+// Flock session can still forge a request naming any OTHER Flock session. What
+// v5 removed is the ability to do it without reading another process's
+// environment first, which is a real narrowing and not a closure. Closing it
+// would take provenance the OS attests — a unix socket with peer credentials
+// plus a pid → launched-session ancestry check — or human confirmation of a
+// model-initiated fork that carries a prompt, the doctrine this codebase
+// applies everywhere else. Neither is built, and nothing in the UI, the
+// consent modal or the CLI's own text may claim otherwise.
+//
 // Nothing here is required for anything: with the verbs never installed (the
 // default), no file exists, no watcher runs, and the extension is exactly what
 // it was. Version-proofing follows hooks.ts to the letter — what persists into
@@ -40,13 +87,14 @@
 // an extension install path.
 
 import * as vscode from 'vscode';
+import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as process from 'node:process';
 
-import { isSessionId, shortId } from './types';
+import { ENV_NODE_ID, isSessionId, shortId } from './types';
 import type { DisposableLike, HookInstallState } from './types';
 import { log, logError } from './log';
 
@@ -65,8 +113,19 @@ export const VERBS_SKILL_NAME = 'flock';
  *  v4: the CLI creates `~/.lineage/requests` 0700 and each request file
  *  0600. A request carries the `--prompt` — the opening message for every
  *  fork, i.e. the user's own words — and v3 left it world-readable for the
- *  seconds it sat on disk. Same reason hooks.PLUGIN_VERSION went to v5. */
-export const VERBS_VERSION = 4;
+ *  seconds it sat on disk. Same reason hooks.PLUGIN_VERSION went to v5.
+ *  v5: the CLI reads ENV_VERB_TOKEN out of its own environment and puts it in
+ *  the request, which is now `v: 2` — the wire version moves with it, so a
+ *  request from a pre-v5 CLI is refused as the OLD protocol instead of as a
+ *  forgery. See the LAUNCH TOKEN section: without this a request could name
+ *  any session on the machine.
+ *  v6: TEXT ONLY — the no-stamp refusal said "Flock did not launch this
+ *  session", which is false for the three commonest ways a session loses its
+ *  stamp (it was running when the extension updated, it was revived after an
+ *  app restart, or another window re-attached it) and buried the remedy
+ *  mid-sentence. The model relays that sentence to the user as fact, so it
+ *  has to be one. */
+export const VERBS_VERSION = 6;
 
 const SCRIPT_BASENAME = 'flock-verbs.mjs';
 const REQUESTS_DIR_BASENAME = 'requests';
@@ -74,7 +133,9 @@ const REQUESTS_DIR_BASENAME = 'requests';
 /** The most forks one request may ask for. "Do three forks here" is the use
  *  case; eight is already a wall of terminal tabs, and a runaway loop in a
  *  model should hit a wall, not a fleet. Enforced in the CLI AND here — the
- *  request file is writable by anything on the machine. */
+ *  request file is writable by anything on the machine, which is also why the
+ *  request has to carry the launch token below: a cap only bounds the damage
+ *  a forged request can do, it does not stop one. */
 export const MAX_AGENT_FORKS = 8;
 /** An opening prompt longer than this is refused rather than truncated —
  *  silently cutting a prompt changes what the fork does. */
@@ -95,6 +156,20 @@ const REQUEST_TTL_MS = 120_000;
 /** How long a window that does NOT host the session waits before claiming, so
  *  the window that does host it wins the rename. */
 const CLAIM_DELAY_MS = 600;
+/** How long a window waits before refusing a request on TOKEN MISMATCH.
+ *
+ *  Strictly longer than any claim delay, and that is the whole point. Every
+ *  other error verdict (too large, expired, malformed) is one every window
+ *  reaches identically, so arming it at the claim delay is harmless. A
+ *  mismatch is window-DEPENDENT: after a park and restore by a second window,
+ *  that window minted its own token for the session while the running process
+ *  still holds the launching window's — so it holds the WRONG token and would
+ *  arm a refusal at exactly the delay the window with the RIGHT token uses.
+ *  The refusal renames and deletes the file, so winning that race turns a
+ *  genuine self-fork into an intermittent accusation. Three claim delays is
+ *  far longer than the rename any real claimant needs and far inside the CLI's
+ *  own 30 s wait, so a mismatch still gets an answer rather than a timeout. */
+const REFUSAL_DELAY_MS = CLAIM_DELAY_MS * 3;
 /** fs.watch is lossy (see hooks.ts on macOS FSEvents); a cheap readdir at
  *  this cadence is the floor. */
 const WATCH_FALLBACK_MS = 2_000;
@@ -118,6 +193,145 @@ export function verbsScriptPath(home?: string): string {
 /** <home>/.lineage/requests */
 export function requestsDir(home?: string): string {
   return path.join(homeDir(home), '.lineage', REQUESTS_DIR_BASENAME);
+}
+
+// -------------------------------------------------------------- launch token
+//
+// The one thing that makes a request more than a wish: a secret only the
+// named session's own processes can read.
+//
+// terminals.ts mints one per launch and stamps it into that session's
+// environment beside ENV_NODE_ID — so the CLI (and a sub-agent, and any Bash
+// step, all of which inherit it) can read it. The extension then accepts a
+// request only if the token in it is the one stamped for the session the
+// request names.
+//
+// That makes a request unforgeable by anything that cannot read the named
+// session's environment. It does NOT make it unforgeable by a process running
+// as you that can — `ps eww` prints another process's environment to its own
+// user — and the PROVENANCE note in the header lists every copy of the secret
+// and what it would take to close that. The rules below are what keep the
+// narrowing worth having; they are not what would make the claim bigger.
+//
+// IN MEMORY, AND ONLY IN MEMORY. This table must never be written to disk,
+// the store, or a log line. A session's Bash tool runs as the user with the
+// user's read permissions: any file the extension can read to verify a token,
+// that session can read to forge every other session's token — which would
+// hand back exactly the hole this closes. The window's heap is the one place
+// a session cannot reach. Two consequences, both deliberate:
+//
+//   * Only the window that LAUNCHED a session holds its token, so only that
+//     window can honour the verb for it. A window that holds no token for the
+//     named session does not claim the request at all (scan()) — it may well
+//     belong to another window, and the sibling that launched it claims it
+//     first anyway (it hosts the terminal, so its delay is zero).
+//   * A session Flock did NOT launch has no token and therefore no verb.
+//     That is a removal: v4 accepted a request from any session that could
+//     name itself, including through CLAUDE_SESSION_ID or the tmux session
+//     name. Those two say which session is asking; neither says that the
+//     ASKER is that session, and forking somebody else's conversation with a
+//     prompt of your choosing is not a mistake worth leaving open for the
+//     convenience of a terminal Flock did not start. The CLI says so plainly
+//     rather than timing out (renderVerbScript), and the fix is to relaunch
+//     the session from the sidebar.
+//
+// KEYED ON THE LAUNCH ID, which is what makes it survive the generation
+// chain. The row's id changes — a plain resume, `/clear` or a compaction
+// re-mints it and terminals.rebind() moves the binding onto the new
+// generation id — but the environment stamp inside the running process never
+// does, and the CLI reports what it reads there. So the key is the stamped
+// launch id on both sides, and a re-keyed session keeps its verb. (The
+// window-reload path keeps it too: creationOptions.env comes back with the
+// terminal, so terminals.bind() re-learns the token from the same place it
+// re-learns the node id, and nothing has to be persisted.)
+
+/** The environment variable the stamp lands in. Lives here, next to the two
+ *  functions that mint and check it and the CLI text that reads it, rather
+ *  than in types.ts beside ENV_NODE_ID: the node id is what the whole
+ *  extension keys on, this is one channel's private proof, and the fewer
+ *  modules that can name it the better. */
+export const ENV_VERB_TOKEN = 'LINEAGE_VERB_TOKEN';
+
+/** 32 bytes, hex. Long enough that guessing is not a strategy, and hex so it
+ *  survives an `-e KEY=VALUE` tmux flag, a JSON string and a Windows
+ *  environment block without any quoting question. Lower case only, and no
+ *  `i` flag: the token is compared byte for byte, so there is no case to
+ *  fold — and the CLI's own copy of this pattern is RENDERED from this
+ *  constant, so the two ends cannot drift apart. */
+const VERB_TOKEN_BYTES = 32;
+const VERB_TOKEN_RE = /^[0-9a-f]{64}$/;
+
+/** launch id (the ENV_NODE_ID stamp) → the secret stamped beside it.
+ *
+ *  Module scope, not a field on the registry or the manager, for two reasons:
+ *  one extension host is one window, so a module-level table already has
+ *  exactly the lifetime and the privacy of "this window"; and the two sides
+ *  (terminals.ts stamps, the watcher below checks) must be looking at ONE
+ *  table — an injected lookup would be a seam a wiring could forget to
+ *  connect, and a guard that a missing wire turns off is not a guard. */
+const launchTokens = new Map<string, string>();
+
+/** The token for `sessionId`, minted on first ask.
+ *
+ *  Idempotent, because the launch verb is not: the workspace restore path
+ *  re-runs it to RE-ATTACH a session that is still alive in tmux, and that
+ *  process already holds the token it was created with (tmux's `-e` sets the
+ *  environment of a session it creates; there is nothing to set when `-A`
+ *  attaches to one that exists). Handing back the same token keeps the verb
+ *  working across a park and restore in this window. */
+export function ensureVerbToken(sessionId: string): string {
+  const held = launchTokens.get(sessionId);
+  if (held !== undefined) return held;
+  const token = randomBytes(VERB_TOKEN_BYTES).toString('hex');
+  launchTokens.set(sessionId, token);
+  return token;
+}
+
+/** Re-learn a token a window ALREADY stamped, from the place a revived
+ *  terminal keeps it (creationOptions.env). Ignores anything that is not a
+ *  token and never overwrites one we hold: the live process's secret is the
+ *  fact, and a second source of truth for it is how a session would lose its
+ *  verb halfway through a reload. */
+export function adoptVerbToken(
+  sessionId: string | null | undefined,
+  token: unknown,
+): void {
+  if (typeof sessionId !== 'string' || !isSessionId(sessionId)) return;
+  if (!isVerbToken(token)) return;
+  if (launchTokens.has(sessionId)) return;
+  launchTokens.set(sessionId, token);
+}
+
+/** Shape only — says nothing about whether it is the RIGHT token. */
+function isVerbToken(raw: unknown): raw is string {
+  return typeof raw === 'string' && VERB_TOKEN_RE.test(raw);
+}
+
+/**
+ * What this window can say about a request's token.
+ *
+ *   'ok'       — it is the token stamped for that session here: run the verb.
+ *   'mismatch' — this window stamped a DIFFERENT token for that session, so
+ *                the request did not come from it. Refuse, with a reply, so
+ *                the asker gets an answer instead of a timeout.
+ *   'unknown'  — this window never launched that session. Say nothing and
+ *                claim nothing: another window may hold the token.
+ *
+ * A plain `===`. The comparison leaks one bit per request — "was that the
+ * token" — which is the same bit the reply carries anyway, and there is no
+ * per-byte feedback to walk towards a 256-bit secret. `timingSafeEqual`
+ * would also throw on the unequal lengths a forged request can hand us,
+ * turning a refusal into a logged exception.
+ */
+export type TokenVerdict = 'ok' | 'mismatch' | 'unknown';
+
+export function verbTokenVerdict(
+  sessionId: string,
+  token: unknown,
+): TokenVerdict {
+  const held = launchTokens.get(sessionId);
+  if (held === undefined) return 'unknown';
+  return isVerbToken(token) && token === held ? 'ok' : 'mismatch';
 }
 
 // ------------------------------------------------------------ file contents
@@ -181,8 +395,10 @@ export function renderSkillMd(scriptPath: string): string {
     '  mean this verb. Parse the count from the request; default to 1.',
     '- Each fork opens as a terminal tab in VS Code holding a full copy of',
     '  this conversation. This session itself is never modified.',
-    '- If the script cannot tell which session it is running in, say so —',
-    '  that happens in terminals Flock did not launch.',
+    '- The verb only works in a session Flock itself launched: the command',
+    '  proves which session it is with a secret Flock put in the environment',
+    "  of that session. Anywhere else it exits saying so — report that, don't",
+    '  work around it.',
     '',
     '<!-- Written by the Flock VS Code extension (in-session verbs v' +
       String(VERBS_VERSION) +
@@ -192,10 +408,15 @@ export function renderSkillMd(scriptPath: string): string {
 }
 
 /** The CLI the skill invokes. Plain node, no dependencies, top-level await.
- *  Identity resolution mirrors what the extension itself relies on: the
- *  LINEAGE_NODE_ID stamp our terminals launch with (types.ENV_NODE_ID),
- *  CLAUDE_SESSION_ID where the CLI provides it, and the `lineage-<uuid>` tmux
- *  session name (tmux.ts) as the fallback that survives env stripping. */
+ *
+ *  Identity and PROOF come from the same place, and there is only one place:
+ *  the LINEAGE_NODE_ID stamp our terminals launch with (types.ENV_NODE_ID)
+ *  and the ENV_VERB_TOKEN stamped beside it. v4 also accepted
+ *  CLAUDE_SESSION_ID and the `lineage-<uuid>` tmux session name (tmux.ts) —
+ *  both say which session is asking, neither says the asker IS that session,
+ *  and a request with no token is refused by every window now. So they are
+ *  gone: dying here with the reason beats writing a request that cannot be
+ *  honoured and waiting 30 seconds to be told so. */
 export function renderVerbScript(): string {
   return [
     '#!/usr/bin/env node',
@@ -207,7 +428,10 @@ export function renderVerbScript(): string {
     '//',
     '// The request lands in ~/.lineage/requests/, one Flock window claims it,',
     '// runs the same fork the sidebar button runs, and replies here.',
-    "import { execFileSync } from 'node:child_process';",
+    '//',
+    '// The request carries the launch token this session was started with, and',
+    '// only the window that started the session knows it — so a request can',
+    '// only ever fork the session it was written from.',
     "import { randomUUID } from 'node:crypto';",
     "import * as fs from 'node:fs';",
     "import * as os from 'node:os';",
@@ -215,27 +439,20 @@ export function renderVerbScript(): string {
     '',
     "const DIR = path.join(os.homedir(), '.lineage', 'requests');",
     'const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;',
+    'const TOKEN = ' + String(VERB_TOKEN_RE) + ';',
     'const WAIT_MS = 30000;',
     'const POLL_MS = 250;',
     '',
     'function die(msg) { console.error(msg); process.exit(1); }',
     '',
-    'function sessionId() {',
+    '// Who this session is, and the proof — one environment stamp, both halves',
+    '// or neither. The token is never printed: not here, not in an error.',
+    'function launchProof() {',
     '  const env = process.env;',
-    "  if (UUID.test(env.LINEAGE_NODE_ID || '')) return env.LINEAGE_NODE_ID;",
-    "  if (UUID.test(env.CLAUDE_SESSION_ID || '')) return env.CLAUDE_SESSION_ID;",
-    '  if (env.TMUX && env.TMUX_PANE) {',
-    '    try {',
-    '      const name = execFileSync(',
-    "        'tmux',",
-    "        ['display-message', '-p', '-t', env.TMUX_PANE, '#S'],",
-    "        { encoding: 'utf8' },",
-    '      ).trim();',
-    '      const m = /^lineage-([0-9a-f-]{36})$/i.exec(name);',
-    '      if (m && UUID.test(m[1])) return m[1];',
-    '    } catch { /* not in tmux, or tmux is gone — a normal answer */ }',
-    '  }',
-    '  return null;',
+    '  const node = env.' + ENV_NODE_ID + " || '';",
+    '  const token = env.' + ENV_VERB_TOKEN + " || '';",
+    '  if (!UUID.test(node) || !TOKEN.test(token)) return null;',
+    '  return { node, token };',
     '}',
     '',
     'const argv = process.argv.slice(2);',
@@ -276,21 +493,31 @@ export function renderVerbScript(): string {
     "if (typeof prompt === 'string' && prompt.length > " + String(MAX_AGENT_PROMPT_CHARS) + ') {',
     "  die('--prompt is longer than " + String(MAX_AGENT_PROMPT_CHARS) + " characters.');",
     '}',
-    'const node = sessionId();',
-    'if (!node) {',
-    "  die('Could not tell which session this is. Forking from inside works ' +",
-    "    'in sessions launched by Flock (or any session that sets ' +",
-    "    'CLAUDE_SESSION_ID).');",
+    'const proof = launchProof();',
+    'if (!proof) {',
+    "  die('This session carries no Flock launch stamp, so Flock cannot ' +",
+    "    'prove the request came from it. Sessions started before Flock was ' +",
+    "    'updated, revived after a restart, or re-attached in another window ' +",
+    "    'need to be relaunched from the Flock sidebar to use this verb. ' +",
+    "    'Tell the user that; there is nothing to work around.');",
     '}',
     '',
-    '// The request carries the prompt, so the directory is 0700 and the file',
-    '// 0600 — readable by this user alone (v4). Modes are creation-only and',
-    '// ignored on Windows, where the profile folder\'s ACL already does this.',
+    '// The request carries the prompt AND the launch token, so the directory',
+    '// is 0700 and the file 0600 — readable by this user alone (v4). Modes are',
+    "// creation-only and ignored on Windows, where the profile folder's ACL",
+    '// already does this. The file is short-lived either way: a window claims',
+    '// it in milliseconds, and an unanswered one is withdrawn below.',
     'fs.mkdirSync(DIR, { recursive: true, mode: 0o700 });',
     'const id = randomUUID();',
     "const reqFile = path.join(DIR, id + '.json');",
     "const replyFile = path.join(DIR, id + '.reply.json');",
-    "const body = { v: 1, verb: 'fork', node, count };",
+    'const body = {',
+    '  v: 2,',
+    "  verb: 'fork',",
+    '  node: proof.node,',
+    '  token: proof.token,',
+    '  count,',
+    '};',
     "if (typeof prompt === 'string' && prompt.length > 0) body.prompt = prompt;",
     'if (names.length > 0) body.titles = names.map((n) => n.trim());',
     "const tmp = path.join(DIR, '.' + id + '.tmp');",
@@ -350,10 +577,19 @@ export interface AgentForkRequest {
 /** `count` is already clamped; anything the validator could not accept is an
  *  `{ error }` instead — the caller still claims the file and REPLIES with
  *  the error, so the CLI never times out on a request the extension actually
- *  saw. */
+ *  saw.
+ *
+ *  `token` rides HERE and not on AgentForkRequest: AgentForkRequest is what
+ *  crosses into the command wiring, and the thing that runs the fork has no
+ *  business holding the secret that authorised it. */
 export type ParsedRequest =
-  | ({ verb: 'fork' } & AgentForkRequest)
+  | ({ verb: 'fork'; token: string } & AgentForkRequest)
   | { error: string };
+
+/** The wire version this build speaks. v1 is a pre-v5 CLI, which cannot have
+ *  carried a token — refused by version, so "no token" means exactly one
+ *  thing: a request somebody wrote by hand. */
+const REQUEST_WIRE_VERSION = 2;
 
 export function parseRequestText(text: string): ParsedRequest {
   let raw: unknown;
@@ -366,15 +602,35 @@ export function parseRequestText(text: string): ParsedRequest {
     return { error: 'the request is not an object' };
   }
   const body = raw as Record<string, unknown>;
-  if (body['v'] !== 1) return { error: 'unknown request version' };
+  if (body['v'] !== REQUEST_WIRE_VERSION) {
+    return { error: 'unknown request version' };
+  }
   if (body['verb'] !== 'fork') {
     return { error: `unknown verb ${JSON.stringify(body['verb'])}` };
   }
   const node = body['node'];
   if (!isSessionId(node)) return { error: 'the request names no session' };
+  // The proof, checked for SHAPE here and for VALUE by the watcher, which is
+  // the only place that knows what this window stamped. Absent is refused
+  // outright rather than passed on as "unknown session": nothing on the
+  // machine can honour a request with no token, so answering it here saves
+  // the asker a 30-second wait.
+  const token = body['token'];
+  if (!isVerbToken(token)) {
+    return {
+      error:
+        'the request carries no launch token — only a session Flock started ' +
+        'can ask Flock to fork it',
+    };
+  }
   const count = clampForkCount(body['count']);
 
-  const out: { verb: 'fork' } & AgentForkRequest = { verb: 'fork', node, count };
+  const out: { verb: 'fork'; token: string } & AgentForkRequest = {
+    verb: 'fork',
+    token,
+    node,
+    count,
+  };
 
   const prompt = body['prompt'];
   if (prompt !== undefined) {
@@ -471,6 +727,10 @@ export class AgentVerbsManager implements DisposableLike {
   private readonly deps: VerbsDeps;
   private readonly home: string;
   private readonly claimDelayMs: number;
+  /** Derived from `claimDelayMs`, never injected separately: the ONE property
+   *  that matters is that it is longer than any window's claim delay, and two
+   *  independent knobs are how a test would silently stop testing that. */
+  private readonly refusalDelayMs: number;
   private readonly fallbackMs: number;
   private readonly requestTtlMs: number;
 
@@ -480,6 +740,13 @@ export class AgentVerbsManager implements DisposableLike {
   /** request id → the pending claim timer, so a second watch event for the
    *  same file cannot arm a second claim. */
   private readonly inFlight = new Map<string, NodeJS.Timeout>();
+  /** Requests this window decided not to claim (no launch token for the
+   *  session they name). They are NOT in flight — another window's to run —
+   *  so they sit in the directory until that window claims them or the CLI
+   *  withdraws them, and every fallback tick would re-log the same line. Held
+   *  as ids and pruned against the directory in `scan`, so the set cannot
+   *  outgrow what is actually on disk. */
+  private readonly leftAlone = new Set<string>();
   private disposed = false;
   private watchErrorLogged = false;
 
@@ -487,6 +754,10 @@ export class AgentVerbsManager implements DisposableLike {
     this.deps = deps;
     this.home = homeDir(home);
     this.claimDelayMs = timing?.claimDelayMs ?? CLAIM_DELAY_MS;
+    this.refusalDelayMs =
+      timing?.claimDelayMs === undefined
+        ? REFUSAL_DELAY_MS
+        : timing.claimDelayMs * 3;
     this.fallbackMs = timing?.fallbackMs ?? WATCH_FALLBACK_MS;
     this.requestTtlMs = timing?.requestTtlMs ?? REQUEST_TTL_MS;
   }
@@ -711,6 +982,7 @@ export class AgentVerbsManager implements DisposableLike {
     this.fallbackTimer = null;
     for (const timer of this.inFlight.values()) clearTimeout(timer);
     this.inFlight.clear();
+    this.leftAlone.clear();
   }
 
   dispose(): void {
@@ -744,6 +1016,11 @@ export class AgentVerbsManager implements DisposableLike {
       'the CLI, which writes a request into',
       `${this.requestsPath()} — and a Flock window runs the same`,
       'fork the sidebar button runs. Nothing leaves your machine.',
+      '',
+      'A request has to carry a secret Flock puts in the named session\'s own',
+      'environment at launch, so nothing that cannot read that environment can',
+      'ask for a fork of a conversation it is not. A program already running as',
+      'you can read it, so this narrows the channel rather than sealing it.',
       '',
       'Existing Claude sessions pick the skill up after /reload-plugins or a',
       'restart. Remove it any time with "Remove In-Session Verbs", or',
@@ -862,10 +1139,12 @@ export class AgentVerbsManager implements DisposableLike {
     } catch {
       return; // directory missing: nothing to claim
     }
+    const present = new Set<string>();
     for (const entry of entries) {
       const m = REQUEST_RE.exec(entry);
       if (!m) continue;
       const id = m[1].toLowerCase();
+      present.add(id);
       if (this.inFlight.has(id)) continue;
       const file = path.join(this.requestsPath(), entry);
 
@@ -897,6 +1176,57 @@ export class AgentVerbsManager implements DisposableLike {
         continue;
       }
 
+      // PROVENANCE, before anything else is decided about the request. The
+      // token is the only thing here that a process outside the named session
+      // cannot produce; the id in the request is a claim, and count, prompt
+      // and titles are all instructions from whoever wrote the file.
+      const verdict = verbTokenVerdict(parsed.node, parsed.token);
+      if (verdict === 'unknown') {
+        // Not a session this window launched, so this window cannot tell a
+        // real request from a forged one. Claim nothing — the window that
+        // launched it holds the token and claims first (it hosts the
+        // terminal, so its delay is zero). If no window does, the CLI
+        // withdraws the request after its 30 s and says nobody answered,
+        // which is the truth.
+        //
+        // Said ONCE per request: the file stays put, so every fallback tick
+        // sees it again, and a line every two seconds for half a minute is
+        // noise in a channel somebody reads to diagnose the opposite problem.
+        if (!this.leftAlone.has(id)) {
+          this.leftAlone.add(id);
+          log(
+            'verbs: no launch token here for',
+            shortId(parsed.node),
+            '— leaving the request to the window that launched it',
+          );
+        }
+        continue;
+      }
+      if (verdict === 'mismatch') {
+        // Positive evidence that the token is not OURS — which is not the same
+        // as positive evidence that it is nobody's. The benign and commonest
+        // cause is a session re-attached by another window: a tmux attach
+        // cannot be re-stamped, so the running process keeps the token of
+        // whoever created it while THIS window minted a second one on the
+        // attach launch. That makes the verdict window-dependent, so the
+        // refusal is armed at REFUSAL_DELAY_MS — long enough that a window
+        // holding the real token always wins the rename — while the log line
+        // stays immediate. The token itself is never written to the log.
+        log(
+          'verbs: a fork request for',
+          shortId(parsed.node),
+          'does not carry the token stamped here — refusing it unless another',
+          'window claims it first',
+        );
+        this.armClaim(id, file, this.refusalDelayMs, {
+          error:
+            "this session's terminal was re-attached by another Flock window " +
+            'since it launched, so this window cannot vouch for it — relaunch ' +
+            'it from the Flock sidebar to use the verb',
+        });
+        continue;
+      }
+
       // Priority: the window whose terminal hosts the conversation claims at
       // once; everybody else gives it CLAIM_DELAY_MS of head start. Bound
       // nowhere, every window races at the delay and rename picks one.
@@ -907,6 +1237,12 @@ export class AgentVerbsManager implements DisposableLike {
         logError('verbs: bound check', err);
       }
       this.armClaim(id, file, delay, parsed);
+    }
+
+    // A request we left alone is gone — claimed elsewhere or withdrawn — so
+    // forget it; the set tracks the directory and nothing more.
+    for (const id of this.leftAlone) {
+      if (!present.has(id)) this.leftAlone.delete(id);
     }
   }
 
@@ -954,7 +1290,10 @@ export class AgentVerbsManager implements DisposableLike {
           parsed.titles !== undefined ? '(named)' : '',
           parsed.prompt !== undefined ? '(with prompt)' : '',
         );
-        const { verb: _verb, ...request } = parsed;
+        // The token stops here: it has done its job (scan() checked it), and
+        // the executor — forkForAgent, i.e. the whole command wiring — has no
+        // reason to hold a secret.
+        const { verb: _verb, token: _token, ...request } = parsed;
         outcome = await executor.runFork(request);
       }
     } catch (err) {

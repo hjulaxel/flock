@@ -17,6 +17,53 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  *  CI runner is slow. */
 const STORE_WAIT_MS = 15_000;
 
+/** How long activation gets. Well inside the launcher's own deadline on
+ *  purpose: a stall reported here can quote the extension's log and name the
+ *  phase, where the launcher timing out can only say that nothing came back. */
+const ACTIVATE_WAIT_MS = 120_000;
+
+/** How long one workbench command gets. Generous for a command that does no
+ *  I/O, and far inside the launcher's deadline so a command that never settles
+ *  is REPORTED by name rather than swallowing the whole run. */
+const COMMAND_WAIT_MS = 30_000;
+
+/** Reject with `what`, plus whatever the extension last logged, if `promise`
+ *  has not settled in time. The log is the only account of activation there is
+ *  (an OutputChannel cannot be read back), which is why the extension mirrors
+ *  it into FLOCK_LOG_FILE for this. */
+function withTimeout(promise, ms, what) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${what} within ${ms / 1000}s.${logTail()}`));
+    }, ms);
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
+/** The last few lines the extension logged, for a failure message. */
+function logTail(limit = 12) {
+  const file = process.env.FLOCK_LOG_FILE;
+  if (!file) return '';
+  let text = '';
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch {
+    return ' The extension logged nothing.';
+  }
+  const lines = text.trim().split('\n').filter(Boolean);
+  if (lines.length === 0) return ' The extension logged nothing.';
+  return ` Last ${Math.min(limit, lines.length)} log lines:\n${lines.slice(-limit).join('\n')}`;
+}
+
 /**
  * One canonical spelling of a directory path — `\` folded to `/`, repeated
  * separators collapsed, a trailing separator dropped, a leading UNC `\\` kept.
@@ -120,8 +167,12 @@ async function suite() {
   const ext = vscode.extensions.getExtension(id);
   assert.ok(ext, `${id} is not loaded in the test host`);
 
+  // BOUNDED, and it says what the extension itself was doing. A hang here used
+  // to cost the launcher's whole deadline and report only that nothing came
+  // back; the extension mirrors its log into FLOCK_LOG_FILE, so a timeout can
+  // quote the last thing activation managed before it stopped.
   progress(`activating ${id}`);
-  await ext.activate();
+  await withTimeout(ext.activate(), ACTIVATE_WAIT_MS, 'activate() did not resolve');
   assert.ok(ext.isActive, 'activate() resolved but isActive is false');
   progress('activated; checking the contributed commands');
 
@@ -256,20 +307,45 @@ async function makeAProject(stateFile) {
     'the project was not named after its directory',
   );
 
-  // Whatever the flow left on screen — the inline input on the new row, or the
-  // rename box behind it — is dismissed, so the editor is not sitting on a
-  // prompt when the launcher goes looking for it. Best effort: the run is
-  // already decided by this point.
+  // BOTH OF THESE ARE BOUNDED, and each has its own phase stamp.
+  //
+  // This is where the run hung: the store poll above had already succeeded (a
+  // failed poll reports in milliseconds), so the 300-second timeout was spent
+  // in one of the two awaited workbench commands below — and `try/catch` does
+  // not bound an await, which is why the "best effort" one could take the whole
+  // run with it. A promise the workbench never settles is not something this
+  // suite can prevent, but it is something it must be able to REPORT: with a
+  // stamp either side, the next occurrence names the command instead of the
+  // step, which is the difference between a harness problem and a Flock one.
+  //
+  // `closeQuickOpen` is the suspect. The flow deliberately leaves an inline
+  // rename open (create first, name after), so this is asked to dismiss an
+  // input box that another, un-awaited command chain is still driving.
+
+  progress('dismissing the inline rename (workbench.action.closeQuickOpen)');
   try {
-    await vscode.commands.executeCommand('workbench.action.closeQuickOpen');
-  } catch {
-    // Nothing depends on it.
+    await withTimeout(
+      Promise.resolve(vscode.commands.executeCommand('workbench.action.closeQuickOpen')),
+      COMMAND_WAIT_MS,
+      'workbench.action.closeQuickOpen did not settle',
+    );
+  } catch (err) {
+    // Nothing depends on it — but say so, because a workbench command that
+    // never settles is worth knowing about even when it costs nothing here.
+    console.log(`smoke: closeQuickOpen did not settle: ${String(err)}`);
   }
 
   // One more refresh, now that there IS something to draw: the tree has no API
   // to read a row back from, so this is the cheap half — rebuilding it over a
-  // real project record whose rootDir is a native path must not throw.
-  await vscode.commands.executeCommand('lineage.refresh');
+  // real project record whose rootDir is a native path must not throw. THIS one
+  // is Flock's own command, so a hang here is a Flock bug and the timeout is
+  // the assertion that says so.
+  progress('rebuilding the tree over the new project (lineage.refresh)');
+  await withTimeout(
+    Promise.resolve(vscode.commands.executeCommand('lineage.refresh')),
+    COMMAND_WAIT_MS,
+    'lineage.refresh did not settle over a real project record',
+  );
 
   return stored;
 }

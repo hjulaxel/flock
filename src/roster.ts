@@ -26,10 +26,12 @@ import {
   isSessionId,
   type DisposableLike,
   type NodeAttention,
+  type ProviderId,
   type RosterEntry,
   type RosterResult,
   type SessionKind,
   type SessionStatus,
+  type TypeRefusal,
 } from './types';
 
 /** The ONLY argument vector we ever hand the claude binary. Returned fresh so
@@ -181,6 +183,134 @@ export function normalizeStatus(e: RosterEntry): {
   }
   if (status === 'idle') return { status: 'idle', attention: 'none' };
   return { status: 'unknown', attention: 'none' };
+}
+
+/**
+ * What the wiring knows about a session it is about to type into.
+ *
+ * One object rather than a bare status, because "is a permission prompt
+ * possible here and would Flock see it" is not answerable from a status
+ * alone — see mayTypeInto. Every field is a fact the wiring already holds;
+ * none of them is derived here.
+ */
+export interface TypeTarget {
+  /** The NORMALIZED status of the row the wiring found (normalizeStatus), or
+   *  `'unknown'` when it found none. */
+  status: SessionStatus;
+  /** Did ANY generation alias of this conversation have a roster row at all?
+   *  Not the same question as the status: a row with unreadable fields is
+   *  present-and-unknown, a session whose CLI has gone is absent. */
+  row: boolean;
+  /** Did the LAST roster fetch succeed? False means the wiring is holding a
+   *  stale snapshot (or has never had one), so an absent row proves nothing. */
+  rosterOk: boolean;
+  /** Which CLI owns the conversation, where the wiring knows
+   *  (extension.sessionProviderFor / the record's `provider`). */
+  provider?: ProviderId | undefined;
+  /** Can this provider's PERMISSION PROMPTS reach Flock at all, in this
+   *  wiring, right now? For Claude that is a property of the roster and always
+   *  true. For Codex it is the Codex hooks being installed AND proven live —
+   *  see the CODEX arm below. */
+  promptsVisible?: boolean;
+}
+
+/**
+ * May the extension TYPE into a session in this state? `'ok'`, or WHY NOT.
+ *
+ * There is exactly ONE extension → live-session channel and it is
+ * KEYSTROKES: `TerminalRegistry.sendText` calls `terminal.sendText(text,
+ * true)`, which types the string into the CLI's input and presses ENTER (see
+ * the src/forkNote.ts header for what that channel is and is not). Four
+ * callers spend it — the fork note to a parent, `/compact` in Close With
+ * Summary, the summary note to a parent, and the wrap prompt — and this
+ * predicate is the one question all four have to pass first.
+ *
+ * WAITING is the status that must never be typed into, and the reason is the
+ * Enter rather than the text. A waiting row is a session sitting on a
+ * permission prompt — `waitingFor: "dialog open"`, the tree's attention badge,
+ * "Run `rm -rf dist`? Yes/No" on screen — so a keystroke there is not a
+ * message, it is an ANSWER. Flock would authorise somebody else's tool call
+ * unattended, and the fork note is reachable from an in-session verb
+ * (`lineage.fork.notifyParent`), which means the MODEL could trigger the
+ * answering. That decision belongs to the human the dialog is addressed to;
+ * the tree already shows them the row.
+ *
+ * NO ROW AT ALL, on a roster that was READ successfully, is refused — and this
+ * is the arm that is about a SHELL rather than a dialog. `lineage.exitToShell`
+ * is on by default: when the CLI exits, tmux respawns the user's LOGIN SHELL
+ * in the same pane, so the tab stays and the terminal stays BOUND while the
+ * session's roster row disappears completely. Typing there is not a message to
+ * a conversation, it is a COMMAND LINE plus Enter — and for the summary note
+ * the text is model-authored prose. So "the CLI is not running under any alias
+ * of this conversation" is its own refusal, distinct from `unknown`. It needs
+ * both facts: an absent row on a FAILED fetch (or before the first one) means
+ * only that nobody looked.
+ *
+ * What this arm COSTS is a session that has not registered yet: for up to one
+ * poll interval after a launch there is no row for it either, and the verb is
+ * refused for those few seconds. The refusal sentence is therefore worded for
+ * the observation ("not in the session roster") rather than for the shell,
+ * because both readings end in the same instruction — do not type into it.
+ *
+ * CODEX is refused unless its prompts can actually reach Flock, which is the
+ * hole the `waiting` arm above does NOT close for it. Codex has two status
+ * sources and only one of them can ever say `waiting`: the `PermissionRequest`
+ * hook, which is OPT-IN (codexHooks.ts, a separate consent, and a Codex-side
+ * trust the install cannot grant itself). Without it the only source is the
+ * rollout tail, whose whole vocabulary is busy|idle — and a Codex approval
+ * prompt happens MID-TASK, so the last rollout event is `task_started` and the
+ * row reads `busy`. Fail-open on `busy` would then type the wrap prompt into
+ * an open "allow this command?" dialog and answer it, with no race and no
+ * hooks involved. Absence of `waiting` is only evidence when something could
+ * have said `waiting`; for hook-less Codex, nothing could. The cost is the
+ * wrap verb and the summary note on hook-less Codex sessions, and the callers
+ * say so in words rather than reporting a missing terminal.
+ *
+ * BUSY is allowed for a provider whose prompts are visible, deliberately. A
+ * line typed mid-turn lands in the CLI's input box and is taken as the next
+ * user turn — the same behaviour docs/reference.md already warns about, that
+ * what Flock types is appended to whatever you had half-written there — and
+ * arriving during work is the POINT of three of the four callers: the wrap
+ * prompt asks a WORKING session to wind up, `/compact` is sent to a session
+ * that then does the compacting, and a fork note that had to wait for its
+ * parent to fall idle would mostly never be delivered at all. Nothing is being
+ * answered: busy means nobody is being asked.
+ *
+ * UNKNOWN ON A PRESENT ROW is ALLOWED, and that is a decision rather than an
+ * oversight. `unknown` is not evidence of a prompt: a prompt is reported as
+ * `status: "waiting"` or `state: "blocked"` by the table above, and a row
+ * frozen at "waiting" by a warm spare is dropped before it gets here (see the
+ * phantom-row note — the wiring resolves this from the filtered, destaled rows
+ * the tree itself is drawn from). What it mostly means is that the CLI omitted
+ * the fields for this row — and refusing that would turn a permission guard
+ * into an outage for Wrap and Close With Summary, verbs a person just clicked.
+ * It is the same call `chatAutoCloseVictims` makes, where only `busy` and
+ * `waiting` protect a tab. What stays open is the residual case of a Claude
+ * session at a prompt whose status field the CLI did not populate, and the
+ * SUB-POLL race: the status is a snapshot up to one poll interval old, so a
+ * session that walked into a dialog in the last few seconds still reads
+ * busy/idle here. This closes the systematic holes, not those two.
+ *
+ * `idle` is allowed and costs nothing.
+ *
+ * Answers a REASON rather than a boolean because the three refusals need three
+ * different sentences from the caller — answer the prompt, install the Codex
+ * hooks, relaunch the session — and one of them ('gone') is not about a prompt
+ * at all. See TypeRefusal and forkNote.sendRefusalSentence.
+ *
+ * Takes the NORMALIZED status, not a raw row, so this shares the decision
+ * table above instead of becoming a third hand-written copy of it — the exact
+ * drift lineage.ts's `deriveStatus` is pinned against by a test.
+ */
+export function mayTypeInto(target: TypeTarget): 'ok' | TypeRefusal {
+  if (target.status === 'waiting') return 'waiting';
+  // Ordered ahead of the provider arm on purpose: a session whose CLI is gone
+  // is refused whichever CLI it was, and for a different reason.
+  if (!target.row && target.rosterOk) return 'gone';
+  if (target.provider === 'codex' && target.promptsVisible !== true) {
+    return 'blind';
+  }
+  return 'ok';
 }
 
 // -------------------------------------------------------- frozen "busy"

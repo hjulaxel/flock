@@ -6,6 +6,42 @@ All notable changes to Flock are recorded here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- **Flock never types into a session that is holding a prompt.** The one channel
+  that can reach a running conversation is keystrokes, ending in Enter, and none
+  of its four users — the fork note, the `/compact` in Close With Summary, the
+  summary note to a parent, and Wrap Up Session — looked at what the session was
+  doing. A note arriving while the CLI asked *"Run `rm -rf dist`? Yes / No"*
+  answered that question, and the fork note is reachable from the in-session
+  verb, so a model could trigger it. One predicate now refuses three states: a
+  session **waiting** for your answer, a **Codex** session without the Codex
+  hooks (whose prompts are invisible from outside, so Flock cannot tell), and a
+  session **no longer on the roster**, where `/exit` may have left your own
+  shell in that pane. Each refusal has its own sentence naming the remedy, and
+  the summarised-branch case raises a line rather than dropping the note in
+  silence. The roster is polled, so a prompt you have just answered can still
+  refuse for one poll; run the verb again.
+- **A fork request must prove it came from the session it names.** The
+  in-session verbs CLI writes a request file that any process could write, and
+  the only check was that the session id was uuid-shaped — so anything on the
+  machine could ask for eight forks *of someone else's conversation* and supply
+  the prompt they would execute, silently. Each session now carries a random
+  token in its environment, the request must match it, and a mismatch is
+  refused. What that buys is stated plainly rather than overclaimed: it stops
+  what cannot read that session's environment, and it is not a defence against
+  something already running as you. A session Flock did not launch has no token
+  and is told so.
+- **One queued dispatch entry is launched by exactly one window.** Every window
+  ran its own dispatcher over the shared store with no claim, and both woke on
+  the same account reset — so two windows could start `claude --session-id` on
+  one transcript, the second-writer hazard the store is built to avoid. A window
+  now writes a claim, confirms the write actually landed and that the claim is
+  its own, and only then launches; a claim left by a window that died is
+  reclaimable. An entry this window's folder cannot host is reported as stranded
+  with the folder named, instead of being retried invisibly every five minutes
+  and starving the entry behind it.
+
 ### Fixed
 
 - **Windows is a platform Flock is tested on now, and the test leg blocks a

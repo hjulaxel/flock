@@ -1405,6 +1405,18 @@ one-line request into `~/.lineage/requests/`, and waits up to 30 seconds for a
 reply, which it prints for Claude to relay: the names of the new branches, or
 exactly why nothing was forked.
 
+**The request has to carry a secret from the session it names.** Flock puts a
+fresh random token in each session's environment when it launches it, the CLI
+reads it from there, and a request whose token is missing or belongs to a
+different session is refused with a line in the output channel and no dialog.
+That is what stops one conversation asking for forks *of another* — a sub-agent
+or an MCP server that can write a file but cannot read that session's
+environment gets nowhere. Be clear about what it is not: any process running as
+you can read the environment of your own processes, so this is a boundary
+between sessions, not a defence against something already running as you. A
+session Flock did not launch has no token, and the CLI says so rather than
+failing obscurely: relaunch it from the sidebar to use the verb.
+
 On the other side, every Flock window watches that directory, and a request
 runs **exactly once**: a window claims it with an atomic rename, and the window
 whose terminal actually hosts the session gets a head start, so the forks open
@@ -1466,6 +1478,21 @@ output channel, and **nothing is queued and nothing is retried.** Those are the
 ordinary cases, not the exotic ones, which is why the fork note is off by
 default. What is typed also **costs that conversation a turn**, and is appended
 to whatever you had half-written in its input box.
+
+**Nor is anything ever typed into a session that is holding a prompt.** What
+this channel sends is keystrokes, ending in Enter, so a message arriving while
+the CLI is asking *"Run `rm -rf dist`? Yes / No"* would answer that question —
+and Flock must never answer a permission prompt on your behalf. Three states are
+refused outright:
+
+| Refused when | Because | What you see |
+| --- | --- | --- |
+| The session is **waiting for your answer** | Enter is the answer | Nothing is typed. A verb you ran says so and tells you to answer the prompt first; a note simply does not arrive, with one line in the output channel. |
+| Flock **cannot tell** whether it is waiting | A Codex session reports only *working* or *idle* until you install the Codex hooks, so an approval prompt there is invisible from outside | Nothing is typed, and the sentence names the hooks as the fix. |
+| The session is **no longer on the roster** | There is nothing to aim at, and `/exit` may have left your own shell in that pane — where a message would be typed at a shell prompt instead | Nothing is typed. |
+
+One consequence worth knowing: the roster is read on a timer, so a prompt you
+answered a second ago can still refuse for up to one poll. Run the verb again.
 
 ## Privacy
 

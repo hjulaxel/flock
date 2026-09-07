@@ -42,16 +42,16 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-/** How long the whole run may take once the editor is spawned. A cold start
- *  on a CI runner is ten to twenty seconds; the suite itself is under one. */
 /**
- * WAS 180 s, on the measurement that a cold CI start is ten to twenty seconds.
- * A macos-latest runner blew through it while the same commit passed on the
- * other two, and the suite's own waits are all bounded (15 s for the store,
- * 15 s for the project), so what ran out was the EDITOR's cold start, not
- * anything under test. A generous ceiling costs nothing on a green run — the
- * launcher stops the moment the verdict file appears — and a tight one turns a
- * slow runner into a red build about nothing.
+ * How long the whole run may take once the editor is spawned.
+ *
+ * WAS 180 s, on the measurement that a cold CI start is ten to twenty seconds,
+ * and raised when a macos-latest runner blew through it on a commit its two
+ * siblings passed. That was not the cause either — see the macOS note in
+ * test/smoke/index.js — but the ceiling is right where it is: every wait the
+ * suite performs is separately bounded and reports its own reason, so this is
+ * only the backstop, and a generous backstop costs nothing on a green run
+ * while a tight one turns a slow runner into a red build about nothing.
  */
 const DEADLINE_MS = 300_000;
 /** How long the editor gets to quit on its own after the verdict, before the
@@ -64,12 +64,20 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'flock-smoke-'));
 const home = path.join(scratch, 'home');
 const userData = path.join(scratch, 'user-data');
 const workspace = path.join(scratch, 'workspace');
+/** Where the editor writes its extensions manifest. Under the throwaway, not
+ *  under the cached `.vscode-test` — see the `--extensions-dir` comment. */
+const extensionsDir = path.join(scratch, 'extensions');
 const resultFile = path.join(scratch, 'result.json');
 /** Overwritten by the suite as it advances, so a deadline can say where it
  *  stopped. Deliberately NOT the verdict file, which the launcher treats as
  *  final the moment it exists. */
 const progressFile = path.join(scratch, 'progress.txt');
-for (const dir of [home, userData, workspace]) fs.mkdirSync(dir, { recursive: true });
+/** The extension mirrors its output channel here (FLOCK_LOG_FILE), which is
+ *  the only way to read back what activation was doing when it stalled. */
+const logFile = path.join(scratch, 'flock.log');
+for (const dir of [home, userData, workspace, extensionsDir]) {
+  fs.mkdirSync(dir, { recursive: true });
+}
 
 /** @type {Record<string, string>} */
 const env = {
@@ -81,6 +89,7 @@ const env = {
   FLOCK_SMOKE_HOME: home,
   FLOCK_SMOKE_RESULT: resultFile,
   FLOCK_SMOKE_PROGRESS: progressFile,
+  FLOCK_LOG_FILE: logFile,
   // The folder the editor is opened on, below. The suite makes a PROJECT out
   // of it, which is a write into the store naming a directory — so it checks
   // the folder the workbench reports against this one first, and refuses to
@@ -114,7 +123,6 @@ try {
   // CLI wrapper, which hands off to the app and exits at once, taking the
   // "did it quit" signal with it.
   const executable = await downloadAndUnzipVSCode();
-  const cache = path.join(root, '.vscode-test');
   const args = [
     workspace,
     // The same flags runTests passes, for the same reasons (see its source):
@@ -128,7 +136,16 @@ try {
     '--disable-workspace-trust',
     '--disable-extensions',
     '--disable-gpu',
-    `--extensions-dir=${path.join(cache, 'extensions')}`,
+    // THE THROWAWAY, not `.vscode-test`. CI caches the whole of that directory
+    // — the editor download is ~150 MB per OS — and this is the one thing
+    // under it the editor WRITES, so runtime state was surviving between runs.
+    // Hygiene, and nothing more than hygiene: it was moved here on the theory
+    // that a restored `extensions.json` was behind the macOS activation stall,
+    // and that theory is dead — the editor logs "Unable to create file
+    // 'extensions.json' that already exists when overwrite flag is not set"
+    // just the same in this brand-new directory, on runs that pass. The
+    // message is noise from the editor's own profile setup.
+    `--extensions-dir=${extensionsDir}`,
     `--user-data-dir=${userData}`,
     `--extensionDevelopmentPath=${root}`,
     `--extensionTestsPath=${path.join(root, 'test', 'smoke', 'index.js')}`,
@@ -165,9 +182,18 @@ try {
     } catch {
       // The default says it.
     }
+    // And what the extension itself last managed, which the phase alone does
+    // not say: "activating" covers everything activate() does.
+    let tail = '';
+    try {
+      const lines = fs.readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean);
+      if (lines.length > 0) tail = `\n--- Flock log, last 12 lines ---\n${lines.slice(-12).join('\n')}`;
+    } catch {
+      tail = '\nThe extension logged nothing.';
+    }
     verdict = {
       ok: false,
-      message: `no verdict after ${String(DEADLINE_MS / 1000)}s; last phase: ${reached}`,
+      message: `no verdict after ${String(DEADLINE_MS / 1000)}s; last phase: ${reached}${tail}`,
     };
   }
 
