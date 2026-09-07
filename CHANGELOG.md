@@ -4,6 +4,59 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Windows is a platform Flock is tested on now, and the test leg blocks a
+  merge.** The Windows half of CI had carried `continue-on-error` since the day
+  it joined, so 28 failing tests had been invisible for three releases. Most
+  were assertions that pinned POSIX separators, but two were real: the process
+  table's sweep took longer than its own eight-second timeout on a loaded
+  machine, and an empty table is a legitimate answer there — so the parent walk
+  silently found nothing and a fork typed at the CLI drew as a root, which is
+  the exact failure that table exists to prevent. The sweep now asks for four
+  properties rather than every column of every process and has fifteen seconds.
+  The same query set the console encoding to a UTF-8 variant that carries a
+  byte-order mark, which would have made its output unparseable and the table
+  empty on **every** Windows machine; the encoding no longer emits one and the
+  parser strips it regardless.
+- **A fork typed at the CLI draws an edge on Windows.** The resolver skipped the
+  argv walk and the deep scan there — a leftover from before the process table
+  existed — so `claude --fork-session` was a root forever.
+- **A window opened on nothing converts itself on Windows.** The workspace
+  file's relative anchor was resolved with the host's path module against a path
+  that came out of a file, so the answer depended on which platform was asking
+  and Auto-switch refused to convert a window that was in fact its own.
+- **"Login expired" is no longer said on evidence that does not support it.** On
+  Windows the credentials file is the only tier there is, and the read looked for
+  the refresh token only beside the access token and gave up entirely on a file
+  carrying a byte-order mark, which is what an editor or a redirect leaves. A
+  refresh token found anywhere now means the CLI will renew it, and the row says
+  **sign-in expired** only for a lapsed token with no refresh token at all. An
+  account that answered with no windows yet reads **no usage yet**.
+- **A ticked Recommended Setup step that landed nothing is named.** The receipt
+  listed only the steps that applied, so a step whose dialog was closed left no
+  trace on screen when its neighbours succeeded — which is how "I picked a
+  folder, no project appeared, and there was no error" happens.
+- **The generated-settings check no longer fails on a CRLF working copy**, and
+  `.gitattributes` pins LF at checkout so it cannot come back.
+
+### Added
+
+- **The `+` on a window with no projects offers to make its folder one.** A
+  first session on a fresh machine used to land on a plain folder row with
+  nothing saying that projects exist. The offer comes *after* the launch, so the
+  `+` still opens no dialog, and it is asked only when there are no projects at
+  all and only for the first session in that folder.
+
+### Changed
+
+- **Codex hooks refuse on Windows in words, and are no longer offered there.** A
+  Codex hook entry cannot name a shell and Flock's needs `/bin/sh`, so the step
+  could only ever refuse; Recommended Setup stops offering it and the refusal
+  says why. The Claude hooks have a PowerShell spelling and are unaffected.
+
 ## [0.6.0] — 2026-09-07
 
 ### Security
