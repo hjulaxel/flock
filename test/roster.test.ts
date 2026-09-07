@@ -18,6 +18,7 @@ import {
   type DiscoveryWorld,
   isProcessAlive,
   isSpareCommand,
+  mayTypeInto,
   psCommands,
   normalizeStatus,
   parseRoster,
@@ -26,8 +27,15 @@ import {
   rosterSignature,
   sameRoster,
 } from '../src/roster';
+import type { TypeTarget } from '../src/roster';
 import type { ProcessSnapshot } from '../src/processTable';
-import { isSessionId, type RosterEntry, type RosterResult } from '../src/types';
+import { idleCloseDecisions } from '../src/idleClose';
+import {
+  isSessionId,
+  type RosterEntry,
+  type RosterResult,
+  type TypeRefusal,
+} from '../src/types';
 
 /**
  * The measured output of `claude agents --json` on this machine (CLI 2.1.220).
@@ -560,6 +568,195 @@ describe('normalizeStatus decision table', () => {
       status: 'unknown',
       attention: 'none',
     });
+  });
+});
+
+// The whole extension → live-session channel is `terminal.sendText(text,
+// true)`: the string plus ENTER. So the question is whether Enter would be
+// read as an ANSWER — which is what a waiting row is, a session sitting on a
+// permission dialog — or would land in a SHELL, which is what an exited CLI
+// leaves behind under `lineage.exitToShell`. One arm per refusal.
+describe('mayTypeInto', () => {
+  const row = (patch: Partial<RosterEntry>): RosterEntry => ({
+    sessionId: '0f000001-0000-4000-8000-000000000001',
+    ...patch,
+  });
+  /** A live CLAUDE session with a row: the ordinary case, so every other test
+   *  can state only the fact it is about. */
+  const target = (patch: Partial<TypeTarget> = {}): TypeTarget => ({
+    status: 'idle',
+    row: true,
+    rosterOk: true,
+    ...patch,
+  });
+  /** The wiring's line, verbatim: resolve the chain's roster row, normalise
+   *  it, ask the predicate. A session with no row reads as `unknown`. */
+  const mayTypeIntoRow = (
+    entry: RosterEntry | undefined,
+    patch: Partial<TypeTarget> = {},
+  ): 'ok' | TypeRefusal =>
+    mayTypeInto({
+      ...target(patch),
+      status: entry === undefined ? 'unknown' : normalizeStatus(entry).status,
+      row: entry !== undefined,
+    });
+
+  it('refuses waiting — Enter at a permission dialog is an answer', () => {
+    expect(mayTypeInto(target({ status: 'waiting' }))).toBe('waiting');
+    // From EITHER raw field, because normalizeStatus reaches `waiting` from
+    // both and this predicate reads its answer rather than the fields.
+    expect(mayTypeIntoRow(row({ status: 'waiting' }))).toBe('waiting');
+    expect(mayTypeIntoRow(row({ state: 'blocked' }))).toBe('waiting');
+    expect(mayTypeIntoRow(row({ status: 'WAITING ' }))).toBe('waiting');
+    expect(mayTypeIntoRow(row({ status: 'idle', state: 'blocked' }))).toBe(
+      'waiting',
+    );
+  });
+
+  it('allows busy — the note is meant to arrive during work', () => {
+    expect(mayTypeInto(target({ status: 'busy' }))).toBe('ok');
+    for (const patch of [
+      { status: 'busy' },
+      { status: 'working' },
+      { state: 'running' },
+      { state: 'working' },
+    ]) {
+      expect(mayTypeIntoRow(row(patch))).toBe('ok');
+    }
+  });
+
+  it('allows idle', () => {
+    expect(mayTypeInto(target({ status: 'idle' }))).toBe('ok');
+    expect(mayTypeIntoRow(row({ status: 'idle' }))).toBe('ok');
+  });
+
+  it('allows unknown on a row that EXISTS', () => {
+    // The deliberate arm. `unknown` is not evidence of a prompt — a prompt is
+    // reported as waiting/blocked — and it is what a row the CLI under-filled
+    // looks like. Refusing it would make Wrap and Close With Summary fail
+    // whenever the CLI omitted a field.
+    expect(mayTypeInto(target({ status: 'unknown' }))).toBe('ok');
+    expect(mayTypeIntoRow(row({}))).toBe('ok');
+    expect(mayTypeIntoRow(row({ status: 'brand-new-status' }))).toBe('ok');
+  });
+
+  // THE EXIT-TO-SHELL ARM. `lineage.exitToShell` is ON by default: when the
+  // CLI exits, tmux respawns the user's login shell in the same pane, so the
+  // tab stays and the terminal stays BOUND while the roster row disappears
+  // entirely. Typing there is a command line plus Enter, and for the summary
+  // note the text is model-authored prose.
+  it('refuses a session with no row at all once the roster HAS been read', () => {
+    expect(mayTypeInto(target({ status: 'unknown', row: false }))).toBe('gone');
+    expect(mayTypeIntoRow(undefined)).toBe('gone');
+  });
+
+  it('allows a missing row when nobody has successfully looked', () => {
+    // A failed fetch keeps the previous snapshot on purpose, and before the
+    // first fetch there is none — so an absence proves nothing and refusing it
+    // would turn a roster hiccup into an outage for a verb a person clicked.
+    expect(
+      mayTypeInto(target({ status: 'unknown', row: false, rosterOk: false })),
+    ).toBe('ok');
+    expect(mayTypeIntoRow(undefined, { rosterOk: false })).toBe('ok');
+  });
+
+  // THE CODEX ARM, and the reason it cannot be folded into `waiting`. Only the
+  // opt-in PermissionRequest hook can ever put a Codex row at `waiting`; the
+  // rollout tail's whole vocabulary is busy|idle, and a Codex approval prompt
+  // happens MID-TASK, so the last rollout event is `task_started` and the row
+  // reads `busy` with a dialog on screen.
+  it('refuses codex when its prompts cannot reach Flock', () => {
+    expect(
+      mayTypeInto(target({ status: 'busy', provider: 'codex' })),
+    ).toBe('blind');
+    expect(
+      mayTypeInto(
+        target({ status: 'busy', provider: 'codex', promptsVisible: false }),
+      ),
+    ).toBe('blind');
+    // Every status, not just busy: absence of `waiting` is only evidence when
+    // something could have said `waiting`.
+    for (const status of ['idle', 'busy', 'unknown'] as const) {
+      expect(mayTypeInto(target({ status, provider: 'codex' }))).toBe('blind');
+    }
+  });
+
+  it('allows codex once its prompts are visible', () => {
+    expect(
+      mayTypeInto(
+        target({ status: 'busy', provider: 'codex', promptsVisible: true }),
+      ),
+    ).toBe('ok');
+    // And `waiting` still wins ahead of it — the hook is exactly what raised
+    // that status, so it is the most literal refusal there is.
+    expect(
+      mayTypeInto(
+        target({ status: 'waiting', provider: 'codex', promptsVisible: true }),
+      ),
+    ).toBe('waiting');
+  });
+
+  it('does not ask the codex question of a claude session', () => {
+    // `promptsVisible` is the Codex arm's input and nothing else's: a Claude
+    // row's `waiting` comes from the roster itself, so a wiring that answered
+    // false here must not lose the wrap verb on every Claude session.
+    expect(
+      mayTypeInto(target({ status: 'busy', promptsVisible: false })),
+    ).toBe('ok');
+    expect(
+      mayTypeInto(
+        target({ status: 'busy', provider: 'claude', promptsVisible: false }),
+      ),
+    ).toBe('ok');
+  });
+
+  // One rule, two modules: `waiting` means a human is being asked something,
+  // so neither the lifecycle nor the keystroke channel may touch that session.
+  it('agrees with idleClose about a waiting session being untouchable', () => {
+    const now = 5_000_000;
+    const waiting = {
+      sessionId: 'w',
+      isActiveTab: false,
+      status: 'waiting' as const,
+      pinned: false,
+      closeAfterTurn: false,
+      lastActivityMs: now - 60 * 60_000, // an hour past a 30-minute window
+    };
+    const plan = idleCloseDecisions({
+      now,
+      closeAfterMinutes: 30,
+      sessions: [waiting],
+    });
+    // idleClose refuses to close it and queues it instead...
+    expect(plan.close).toEqual([]);
+    expect(plan.graceKill).toEqual([]);
+    expect(plan.markCloseAfterTurn).toEqual(['w']);
+    // ...and this channel refuses to type into it. Same status, same refusal.
+    expect(mayTypeInto(target({ status: waiting.status }))).toBe('waiting');
+  });
+
+  it('parts company with idleClose on busy, deliberately', () => {
+    // idleClose will not CLOSE a busy session (closing aborts the turn), but
+    // typing into one is safe and intended: the text lands in the input box as
+    // the next turn, and the wrap prompt and `/compact` are both meant for a
+    // session that is working.
+    const now = 5_000_000;
+    const plan = idleCloseDecisions({
+      now,
+      closeAfterMinutes: 30,
+      sessions: [
+        {
+          sessionId: 'b',
+          isActiveTab: false,
+          status: 'busy',
+          pinned: false,
+          closeAfterTurn: false,
+          lastActivityMs: now - 60 * 60_000,
+        },
+      ],
+    });
+    expect(plan.close).toEqual([]);
+    expect(mayTypeInto(target({ status: 'busy' }))).toBe('ok');
   });
 });
 

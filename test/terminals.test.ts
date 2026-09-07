@@ -19,12 +19,28 @@ import {
   nodeIdOfTerminal,
   quoteForCmd,
   shimLaunch,
+  verbTokenOfTerminal,
 } from '../src/terminals';
+import {
+  ENV_VERB_TOKEN,
+  ensureVerbToken,
+  verbTokenVerdict,
+} from '../src/agentVerbs';
+import { setLogSink } from '../src/log';
 import { tmuxNameOfTerminal } from '../src/tmux';
 import { ENV_NODE_ID, SESSION_ID_RE } from '../src/types';
 
 const CHILD = '0f0000c1-0000-4000-8000-0000000000c1';
 const PARENT = '0f0000a1-0000-4000-8000-0000000000a1';
+
+/** The verbs launch token (src/agentVerbs.ts) rides beside the node id on
+ *  every launch, and it is a fresh secret per session — so a test that spells
+ *  the environment out asks for the same value the launch used. This is the
+ *  call `launch()` itself makes, and it is idempotent by design, so it hands
+ *  back the token whether it runs before the launch or after it. */
+const verbToken = (sessionId: string): string => ensureVerbToken(sessionId);
+
+const HEX64 = /^[0-9a-f]{64}$/;
 
 describe('buildShellArgs', () => {
   it('mints a root session with just --session-id', () => {
@@ -679,6 +695,8 @@ describe('launch wraps in the private tmux server when the wiring says so', () =
       '/code/api',
       '-e',
       `${ENV_NODE_ID}=${CHILD}`,
+      '-e',
+      `${ENV_VERB_TOKEN}=${verbToken(CHILD)}`,
       '--',
       '/bin/claude',
       '--session-id',
@@ -981,6 +999,7 @@ describe('launch carries LaunchOptions.env into BOTH tiers', () => {
     expect(captured[0]?.['env']).toEqual({
       CLAUDE_CONFIG_DIR: '/work/.claude',
       [ENV_NODE_ID]: CHILD,
+      [ENV_VERB_TOKEN]: verbToken(CHILD),
     });
     expect(captured[0]).not.toHaveProperty('strictEnv');
     // The account env rides ONLY creationOptions.env — argv is unaffected.
@@ -988,30 +1007,41 @@ describe('launch carries LaunchOptions.env into BOTH tiers', () => {
     registry.dispose();
   });
 
-  it('the node-id stamp always wins a collision with the profile env', async () => {
+  it('both stamps always win a collision with the profile env', async () => {
+    // The profile env comes from a state file the user can hand-edit, so it
+    // can name either of our variables. The node id decides which row the
+    // terminal is, and the launch token decides whether the session can ask
+    // to be forked — a profile must be able to poison neither.
     const captured: Array<Record<string, unknown>> = [];
     fakeHost(captured);
     const registry = new TerminalRegistry({ claudeBinary: () => '/bin/claude' });
 
     await registry.launch({
       sessionId: CHILD,
-      env: { [ENV_NODE_ID]: 'poisoned-value' },
+      env: {
+        [ENV_NODE_ID]: 'poisoned-value',
+        [ENV_VERB_TOKEN]: 'f'.repeat(64),
+      },
     });
 
-    expect((captured[0]?.['env'] as Record<string, string>)[ENV_NODE_ID]).toBe(
-      CHILD,
-    );
+    const env = captured[0]?.['env'] as Record<string, string>;
+    expect(env[ENV_NODE_ID]).toBe(CHILD);
+    expect(env[ENV_VERB_TOKEN]).toBe(verbToken(CHILD));
+    expect(env[ENV_VERB_TOKEN]).not.toBe('f'.repeat(64));
     registry.dispose();
   });
 
-  it('with no env at all, creationOptions.env is exactly the node-id stamp', async () => {
+  it('with no env at all, creationOptions.env is exactly the two stamps', async () => {
     const captured: Array<Record<string, unknown>> = [];
     fakeHost(captured);
     const registry = new TerminalRegistry({ claudeBinary: () => '/bin/claude' });
 
     await registry.launch({ sessionId: CHILD });
 
-    expect(captured[0]?.['env']).toEqual({ [ENV_NODE_ID]: CHILD });
+    expect(captured[0]?.['env']).toEqual({
+      [ENV_NODE_ID]: CHILD,
+      [ENV_VERB_TOKEN]: verbToken(CHILD),
+    });
     registry.dispose();
   });
 
@@ -1025,7 +1055,11 @@ describe('launch carries LaunchOptions.env into BOTH tiers', () => {
       env: { 'bad key': 'x', GOOD: 'y' },
     });
 
-    expect(captured[0]?.['env']).toEqual({ GOOD: 'y', [ENV_NODE_ID]: CHILD });
+    expect(captured[0]?.['env']).toEqual({
+      GOOD: 'y',
+      [ENV_NODE_ID]: CHILD,
+      [ENV_VERB_TOKEN]: verbToken(CHILD),
+    });
     registry.dispose();
   });
 
@@ -1056,6 +1090,8 @@ describe('launch carries LaunchOptions.env into BOTH tiers', () => {
       'CLAUDE_CONFIG_DIR=/work/.claude',
       '-e',
       `${ENV_NODE_ID}=${CHILD}`,
+      '-e',
+      `${ENV_VERB_TOKEN}=${verbToken(CHILD)}`,
       '--',
       '/bin/claude',
       '--session-id',
@@ -1069,8 +1105,128 @@ describe('launch carries LaunchOptions.env into BOTH tiers', () => {
     expect(captured[0]?.['env']).toEqual({
       CLAUDE_CONFIG_DIR: '/work/.claude',
       [ENV_NODE_ID]: CHILD,
+      [ENV_VERB_TOKEN]: verbToken(CHILD),
     });
     registry.dispose();
+  });
+});
+
+// --------------------------------------------- the verbs launch token (v5)
+
+describe('every launch stamps a verbs launch token', () => {
+  // The proof the in-session fork verb checks: a per-launch secret only the
+  // session's own processes can read, so a request that names ANOTHER
+  // session cannot produce it. src/agentVerbs.ts argues the design; these
+  // are the two halves this module owns — the stamp, and re-learning it
+  // after a window reload.
+
+  afterEach(() => {
+    delete (vscodeMock.window as { createTerminal?: unknown }).createTerminal;
+    delete (vscodeMock.window as { terminals?: unknown }).terminals;
+    setLogSink(null);
+  });
+
+  function fakeHost(captured: Array<Record<string, unknown>>): void {
+    (
+      vscodeMock.window as {
+        createTerminal?: (o: Record<string, unknown>) => unknown;
+      }
+    ).createTerminal = (opts) => {
+      captured.push(opts);
+      return {
+        name: opts['name'],
+        creationOptions: opts,
+        processId: Promise.resolve(42),
+        show: () => {},
+        dispose: () => {},
+      };
+    };
+  }
+
+  it('is a 32-byte secret, one per session, and the verbs watcher accepts it', async () => {
+    const captured: Array<Record<string, unknown>> = [];
+    fakeHost(captured);
+    const registry = new TerminalRegistry({ claudeBinary: () => '/bin/claude' });
+
+    await registry.launch({ sessionId: CHILD });
+    await registry.launch({ sessionId: PARENT });
+
+    const first = (captured[0]?.['env'] as Record<string, string>)[
+      ENV_VERB_TOKEN
+    ];
+    const second = (captured[1]?.['env'] as Record<string, string>)[
+      ENV_VERB_TOKEN
+    ];
+    expect(first).toMatch(HEX64);
+    expect(second).toMatch(HEX64);
+    expect(first).not.toBe(second);
+
+    // The end the verb cares about: this window vouches for each token under
+    // the session it stamped it for, and for no other.
+    expect(verbTokenVerdict(CHILD, first)).toBe('ok');
+    expect(verbTokenVerdict(PARENT, second)).toBe('ok');
+    expect(verbTokenVerdict(CHILD, second)).toBe('mismatch');
+    registry.dispose();
+  });
+
+  it('never appears in a log line, an event or the binding', async () => {
+    // It is a credential. It may live in exactly two places: the session's
+    // own environment, and the window's heap.
+    const lines: string[] = [];
+    setLogSink((line) => lines.push(line));
+    const captured: Array<Record<string, unknown>> = [];
+    fakeHost(captured);
+    const registry = new TerminalRegistry({ claudeBinary: () => '/bin/claude' });
+    const seen: string[] = [];
+    registry.onDidBind((b) => seen.push(JSON.stringify(b)));
+
+    const binding = await registry.launch({ sessionId: CHILD });
+    registry.rebind(CHILD, PARENT); // a re-key logs both ids
+    registry.reassociate();
+
+    const token = verbToken(CHILD);
+    expect(token).toMatch(HEX64);
+    expect(lines.length).toBeGreaterThan(0); // the sink really is installed
+    expect(lines.join('\n')).not.toContain(token);
+    expect(JSON.stringify(binding)).not.toContain(token);
+    expect(seen.join('\n')).not.toContain(token);
+    registry.dispose();
+  });
+
+  it('is re-learned from a revived terminal, keyed on the STAMPED id', () => {
+    // Window reload: the pty survives, creationOptions comes back with the
+    // env in it, and the extension host has forgotten everything. Re-minting
+    // here would leave the running claude holding a secret this window no
+    // longer recognises — i.e. the session would lose the verb on every
+    // reload — so the token is read back out of the same place the node id
+    // is. `SOMEONE_ELSE` was never launched in this process, so nothing but
+    // the adopt path can put its token in the table.
+    const SOMEONE_ELSE = '0f0000e1-0000-4000-8000-0000000000e1';
+    const revived = {
+      name: 'claude · 0f0000e1',
+      creationOptions: {
+        env: { [ENV_NODE_ID]: SOMEONE_ELSE, [ENV_VERB_TOKEN]: 'a'.repeat(64) },
+      },
+      processId: Promise.resolve(77),
+      show: () => {},
+      dispose: () => {},
+    };
+    (vscodeMock.window as { terminals?: unknown }).terminals = [revived];
+    expect(verbTokenVerdict(SOMEONE_ELSE, 'a'.repeat(64))).toBe('unknown');
+
+    const registry = new TerminalRegistry({ claudeBinary: () => '/bin/claude' });
+    expect(registry.reassociate()).toBe(1);
+
+    expect(verbTokenOfTerminal(revived)).toBe('a'.repeat(64));
+    expect(verbTokenVerdict(SOMEONE_ELSE, 'a'.repeat(64))).toBe('ok');
+    expect(verbTokenVerdict(SOMEONE_ELSE, 'b'.repeat(64))).toBe('mismatch');
+    registry.dispose();
+  });
+
+  it('reads nothing out of a terminal that is not ours', () => {
+    expect(verbTokenOfTerminal({})).toBeNull();
+    expect(verbTokenOfTerminal({ creationOptions: { pty: {} } })).toBeNull();
+    expect(verbTokenOfTerminal({ creationOptions: { env: {} } })).toBeNull();
   });
 });
 

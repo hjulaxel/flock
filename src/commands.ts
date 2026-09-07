@@ -106,6 +106,7 @@ import {
   composeForkNote,
   forkNoteDeliverable,
   forkPurposeOf,
+  sendRefusalSentence,
 } from './forkNote';
 import {
   COMPACT_SUMMARY_WAIT_MS,
@@ -3884,6 +3885,15 @@ export function activeForkTarget(deps: CommandDeps): ForkTargetResolution {
  *   * the parent is DETACHED under the tmux grace — its tab is gone by
  *     definition, which is what "parked" means.
  *
+ * A FIFTH, from the guard rather than the host: a parent whose tab IS here but
+ * which Flock will not press Enter into — waiting on a permission prompt, on a
+ * provider whose prompts Flock cannot see, or with its CLI gone and a login
+ * shell in its pane (roster.mayTypeInto, applied in the wiring). Silent for
+ * the same reason as the other four here: the tree already carries the fork
+ * edge, and the note is a courtesy to the model. Close With Summary DOES
+ * speak up about it, because there the mode the user picked promised to tell
+ * the parent — see tellParentOfSummary.
+ *
  * In every one of those the note is dropped, one line goes to the output
  * channel, and nothing is written on the parent's record. NOTHING IS QUEUED,
  * deliberately: a mailbox would be a second lifecycle to get wrong — how long
@@ -3931,10 +3941,14 @@ async function notifyParentOfFork(
       childLabel: labelFor(deps, childId),
       ...(purpose !== undefined ? { purpose } : {}),
     });
-    if (!deps.sendTextToSession(tip, note)) {
-      // The host said `here` a moment ago, so this is the race rather than the
-      // ordinary case: the tab closed between the two calls.
-      log('fork note: send refused for', shortId(tip), '— no bound terminal');
+    const sent = deps.sendTextToSession(tip, note);
+    if (sent !== 'sent') {
+      // The host said `here` a moment ago, so `no-terminal` is the race rather
+      // than the ordinary case: the tab closed between the two calls.
+      // `waiting` is not a race at all — the tab is open and the session is
+      // sitting on a prompt — so the log names which of the two it was rather
+      // than asserting the one it usually is.
+      log('fork note: not sent to', shortId(tip), `— ${sent}`);
       return;
     }
     log('fork note: told', shortId(tip), 'about', shortId(childId));
@@ -6643,6 +6657,9 @@ async function awaitSummaryWithProgress(
  *      terminal bound in this window — a closed row, another window's session,
  *      a foreign process and a parked wrap all fail here, and all of them are
  *      ordinary rather than exotic.
+ *   3b. A SESSION ON A PROMPT, nothing sent, and said differently: the tab is
+ *      here and the user is looking at it, so the refusal names the prompt
+ *      rather than a terminal that is plainly present (SendTextOutcome).
  *   4. Only then is the keystroke spent.
  *
  * A TIMEOUT CLOSES NOTHING, and that is the important one. The session is
@@ -6690,18 +6707,29 @@ async function closeWithCompaction(
   // current.
   const tip = deps.tipOf(sessionId);
   const sinceMs = Date.now();
-  if (!deps.sendTextToSession(tip, COMPACT_PROMPT)) {
+  const sent = deps.sendTextToSession(tip, COMPACT_PROMPT);
+  if (sent !== 'sent') {
     const host = hostOf(deps, tip);
     const CLOSE = 'Close Without a Summary';
     const TYPE = 'Type a Summary…';
-    const answer = await vscode.window.showWarningMessage(
-      host === 'foreign'
-        ? `${hostSentence(host, { label })} Flock cannot type \`/compact\` into it.`
-        : `Flock: "${label}" has no terminal in this window, so \`/compact\` ` +
-            'cannot be sent to it. Only a session open here can be compacted.',
-      CLOSE,
-      TYPE,
-    );
+    // A REFUSAL IS NOT A MISSING TERMINAL. When the guard declined, the tab is
+    // in this window and the user can see it, so "no terminal in this window"
+    // would be a plain falsehood — and offering Close Without a Summary FIRST
+    // would nudge them into closing a session that is holding an open prompt.
+    // So those branches say what is true, offer only the summary they asked
+    // for, and leave closing to the verb that means it.
+    const refusal = sendRefusalSentence(sent, label);
+    const answer =
+      refusal !== null
+        ? await vscode.window.showWarningMessage(refusal, TYPE)
+        : await vscode.window.showWarningMessage(
+            host === 'foreign'
+              ? `${hostSentence(host, { label })} Flock cannot type \`/compact\` into it.`
+              : `Flock: "${label}" has no terminal in this window, so \`/compact\` ` +
+                  'cannot be sent to it. Only a session open here can be compacted.',
+            CLOSE,
+            TYPE,
+          );
     if (answer === CLOSE) await closeFlow(deps, sessionId);
     else if (answer === TYPE) await closeWithTypedSummary(deps, sessionId);
     return;
@@ -6780,12 +6808,22 @@ async function closeWithCompaction(
 /**
  * Type the branch's conclusion into its parent conversation.
  *
- * The same channel, the same limits and the same silence on failure as the
- * fork note — see notifyParentOfFork, whose comment enumerates the four
- * ordinary states in which a parent cannot be typed into. Not awaited by the
- * close and never allowed to fail it: a branch whose summary was recorded and
- * whose tab was closed did what was asked, and a sentence that did not land in
- * a conversation elsewhere is not a reason to leave a session open.
+ * The same channel and the same limits as the fork note — see
+ * notifyParentOfFork, whose comment enumerates the four ordinary states in
+ * which a parent cannot be typed into. Not awaited by the close and never
+ * allowed to fail it: a branch whose summary was recorded and whose tab was
+ * closed did what was asked, and a sentence that did not land in a
+ * conversation elsewhere is not a reason to leave a session open.
+ *
+ * SILENT FOR THOSE FOUR, and NOT for a parent that is waiting. The four are
+ * all parents the person cannot see doing anything — closed, foreign, parked,
+ * another window's — and the tree already carries the fork edge for them, so a
+ * toast would be noise. A WAITING parent is different in the only way that
+ * matters: its tab is open in this window, the mode they chose promises
+ * "tell the parent", and nothing else in the flow would ever tell them the
+ * note did not go. One status-bar line, not a modal — the summary itself was
+ * recorded and the close succeeded, so there is nothing to decide, only
+ * something to know.
  */
 function tellParentOfSummary(
   deps: CommandDeps,
@@ -6799,8 +6837,18 @@ function tellParentOfSummary(
       log('close with summary: parent', shortId(parentTip), 'is not open here');
       return;
     }
-    if (!deps.sendTextToSession(parentTip, summaryForParentNote(raw, childLabel))) {
-      log('close with summary: parent', shortId(parentTip), 'refused the note');
+    const sent = deps.sendTextToSession(
+      parentTip,
+      summaryForParentNote(raw, childLabel),
+    );
+    if (sent === 'sent') return;
+    log('close with summary: parent', shortId(parentTip), `was not told — ${sent}`);
+    if (sent !== 'no-terminal') {
+      vscode.window.setStatusBarMessage(
+        `Flock: "${childLabel}" was summarised — its parent was not told, ` +
+          'Flock will not type into it while it may be waiting for you',
+        5000,
+      );
     }
   } catch (err) {
     logError('commands.tellParentOfSummary', err);
@@ -9308,16 +9356,22 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     const id = await targetSession(deps, arg, 'Wrap up which session?');
     if (!id) return;
     // The ONE remaining sendText in the whole extension.
-    if (!deps.sendTextToSession(id, WRAP_PROMPT)) {
+    const sent = deps.sendTextToSession(id, WRAP_PROMPT);
+    if (sent !== 'sent') {
       // Naming the host rather than the missing terminal: "Wrap needs the
       // session terminal in this window" is true and leaves the user with
       // nothing to do about it, where "this is running outside Flock" says why
-      // there is no terminal to type into.
+      // there is no terminal to type into. And when the GUARD refused, that
+      // sentence is not even true — the terminal is right there — so each of
+      // those reasons gets its own, naming the one thing that would let the
+      // wrap through (sendRefusalSentence).
       const host = hostOf(deps, id);
+      const label = labelFor(deps, id);
       void vscode.window.showWarningMessage(
-        host === 'foreign'
-          ? `${hostSentence(host, { label: labelFor(deps, id) })} Ask it to wrap up where it is running.`
-          : 'Wrap needs the session terminal in this window.',
+        sendRefusalSentence(sent, label) ??
+          (host === 'foreign'
+            ? `${hostSentence(host, { label })} Ask it to wrap up where it is running.`
+            : 'Wrap needs the session terminal in this window.'),
       );
       return;
     }

@@ -734,11 +734,46 @@ export interface DispatchRecord extends DispatchEntry {
   done?: DispatchOutcome;
   /** ISO stamp when `done` was set; the sweep clock. */
   doneAt?: string;
+  /**
+   * THE LAUNCH CLAIM: the windowId of the window that is starting this entry.
+   *
+   * Every window runs its own dispatcher over this one shared queue, and they
+   * arm the same timer on the same account reset time — so "see a pending
+   * entry, launch it, then settle it" launches it in BOTH windows, milliseconds
+   * apart, and the second settle only discovers the collision after two claude
+   * processes are already sharing one `--session-id`. That is the exact
+   * second-writer hazard this file's record design exists to prevent.
+   *
+   * So the claim is written BEFORE the launch: the window writes its id here,
+   * confirms the write REACHED THE STORE (a claim only this window can see
+   * fences nobody — state.claimDispatch), re-reads to confirm the claim came
+   * back as its own (the merge is newest-wins, and state.claimDispatch refuses
+   * to overwrite a live claim, so a losing window can always discover that it
+   * lost), and only then launches. Absent means nobody is launching it.
+   */
+  claimedBy?: string;
+  /** ISO stamp of the claim — its staleness clock. Only meaningful next to
+   *  `claimedBy`; state.ts drops one without the other, because a claim with
+   *  no clock could never be reclaimed and a clock with no owner names nobody. */
+  claimedAt?: string;
 }
 
 /** As the other tombstone TTLs, and for the same reason: comfortably longer
  *  than any window could still hold the live record in memory. */
 export const DISPATCH_DONE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+
+/**
+ * How long a launch claim holds before another window may take the entry.
+ *
+ * Unlike the tombstone TTLs above, this one is SHORT on purpose. It covers
+ * exactly the gap between the claim and the settle — mint the record, open the
+ * terminal, pin the account — and a window that dies inside that gap must not
+ * park the entry forever, which is what an unexpiring claim would do. Five
+ * minutes is the dispatcher's own retry cadence (dispatchHost's
+ * DISPATCH_RETRY_MS): no launch still running after it is going to finish, and
+ * the very next retry pass in any window is the one that reclaims the entry.
+ */
+export const DISPATCH_CLAIM_TTL_MS = 5 * 60 * 1000;
 
 /** One rate-limit window as the provider reports it. */
 export interface UsageWindow {
@@ -4039,6 +4074,47 @@ export interface BackgroundJob {
   live: boolean;
 }
 
+/**
+ * Why the keystroke guard refused a session — `mayTypeInto`'s answer when it
+ * is not `'ok'` (src/roster.ts, which argues each arm).
+ *
+ *   'waiting'  the session's row says it is on a permission prompt. Enter
+ *              there ANSWERS the dialog.
+ *   'blind'    a row exists, but this provider's prompts cannot reach Flock at
+ *              all, so the absence of `waiting` is not evidence of anything.
+ *              Hook-less Codex, which is the default.
+ *   'gone'     the roster was read and no generation of this conversation is
+ *              in it. The CLI has exited; with `lineage.exitToShell` (on by
+ *              default) the pane it left behind is the user's LOGIN SHELL and
+ *              is still bound, so Enter there runs the text as a COMMAND.
+ *
+ * Three, not one, because the remedy differs: answer the prompt, install the
+ * Codex hooks, relaunch the session. `forkNote.sendRefusalSentence` turns each
+ * into the sentence a caller shows.
+ */
+export type TypeRefusal = 'waiting' | 'blind' | 'gone';
+
+/**
+ * What `sendTextToSession` did — a REASON, never a bare boolean.
+ *
+ *   'sent'         the text was typed into a terminal in this window.
+ *   'no-terminal'  no terminal here holds any generation of the session: it
+ *                  is closed, foreign, parked, or another window's. The
+ *                  ordinary case, and the one every caller's message was
+ *                  already written for.
+ *   a TypeRefusal  a terminal IS here and the guard would not press Enter
+ *                  into it — see above.
+ *
+ * The refusals are why this is not a boolean. Every one of them is REACHABLE
+ * while the tab is open and visible in this window, so "no terminal in this
+ * window" — true for `no-terminal` — reads as a plain falsehood to a user
+ * looking straight at the tab, and the action it suggests (close it) is the
+ * wrong one for a session holding an open prompt. A union forces every caller
+ * to say which happened; a boolean let one of them (the summary note to a
+ * parent) report delivery of a note that was never sent.
+ */
+export type SendTextOutcome = 'sent' | 'no-terminal' | TypeRefusal;
+
 export interface CommandDeps {
   // model
   getForest(): SessionForest;
@@ -4256,7 +4332,9 @@ export interface CommandDeps {
    *  simply skip that tier and fall through to the next one. */
   activeSessionId?(): string | null;
   renameTerminal(sessionId: string, name: string): Promise<boolean>;
-  sendTextToSession(sessionId: string, text: string): boolean;
+  /** Type text (and press Enter) into a session's terminal — see
+   *  SendTextOutcome for why the answer is a reason rather than a boolean. */
+  sendTextToSession(sessionId: string, text: string): SendTextOutcome;
   closeTerminal(sessionId: string): boolean;
   /** End a DETACHED session's process — one under a grace countdown, whose
    *  terminal is already gone so `closeTerminal` has nothing to dispose. Kills

@@ -11,18 +11,24 @@
 //   decideDispatch   FIFO; a tier never widens; one launch per account per
 //                    decision; nextWakeAt is the earliest instant the answer
 //                    can change, and the queue never goes deaf.
+//   dispatchClaim    who may launch one entry — the rule that keeps two
+//                    windows from starting one queued session twice, and the
+//                    reason a dead window's claim does not park it forever.
 
 import { describe, expect, it } from 'vitest';
 
 import {
+  DISPATCH_CLAIM_TTL_MS,
   DISPATCH_RECHECK_MS,
   DISPATCH_UTILIZATION_CEILING,
   MAX_DISPATCH_PROMPT_CHARS,
+  claimableDispatch,
   decideDispatch,
+  dispatchClaim,
   dispatchable,
   isDispatchEntry,
 } from '../src/dispatch';
-import type { DispatchEntry } from '../src/dispatch';
+import type { DispatchEntry, DispatchRecord } from '../src/dispatch';
 import type { AccountProfile, UsageSnapshot, UsageWindow } from '../src/types';
 
 // ------------------------------------------------------------------ helpers
@@ -256,6 +262,83 @@ describe('decideDispatch', () => {
       now: NOW,
     });
     expect(d.nextWakeAt).toBe(soon);
+  });
+});
+
+// -------------------------------------------------------------- dispatchClaim
+
+describe('dispatchClaim', () => {
+  const ME = 'window-a';
+  const OTHER = 'window-b';
+
+  function claimed(by: string, agoMs: number): DispatchRecord {
+    return {
+      id: 'e1',
+      createdAt: NOW - HOUR,
+      updatedAt: new Date(NOW - agoMs).toISOString(),
+      claimedBy: by,
+      claimedAt: new Date(NOW - agoMs).toISOString(),
+    };
+  }
+
+  const unclaimed: DispatchRecord = {
+    id: 'e1',
+    createdAt: NOW - HOUR,
+    updatedAt: new Date(NOW - HOUR).toISOString(),
+  };
+
+  it('an unclaimed entry is free, and free is claimable', () => {
+    expect(dispatchClaim(unclaimed, ME, NOW)).toBe('free');
+    expect(claimableDispatch('free')).toBe(true);
+  });
+
+  it('our own live claim is `mine` — the only verdict that may launch', () => {
+    expect(dispatchClaim(claimed(ME, 1_000), ME, NOW)).toBe('mine');
+    // Re-claimable too: a retry of a launch that did not bind is still ours.
+    expect(claimableDispatch('mine')).toBe(true);
+  });
+
+  it("another window's live claim is taken, and nothing may be done to it", () => {
+    expect(dispatchClaim(claimed(OTHER, 1_000), ME, NOW)).toBe('taken');
+    expect(claimableDispatch('taken')).toBe(false);
+  });
+
+  it('a claim older than the TTL is stale, and stale is reclaimable', () => {
+    expect(
+      dispatchClaim(claimed(OTHER, DISPATCH_CLAIM_TTL_MS + 1), ME, NOW),
+    ).toBe('stale');
+    expect(dispatchClaim(claimed(OTHER, DISPATCH_CLAIM_TTL_MS), ME, NOW)).toBe(
+      'stale',
+    );
+    // One millisecond inside the window still belongs to its owner.
+    expect(
+      dispatchClaim(claimed(OTHER, DISPATCH_CLAIM_TTL_MS - 1), ME, NOW),
+    ).toBe('taken');
+    expect(claimableDispatch('stale')).toBe(true);
+  });
+
+  it('a settled entry is nobody\'s, however it was claimed', () => {
+    const rec = { ...claimed(ME, 1_000), done: 'launched' as const };
+    expect(dispatchClaim(rec, ME, NOW)).toBe('settled');
+    expect(claimableDispatch('settled')).toBe(false);
+  });
+
+  it('half a claim is no claim: an owner with no clock could never expire', () => {
+    const noStamp: DispatchRecord = { ...unclaimed, claimedBy: OTHER };
+    const noOwner: DispatchRecord = { ...unclaimed, claimedAt: new Date(NOW).toISOString() };
+    const junkStamp: DispatchRecord = {
+      ...unclaimed,
+      claimedBy: OTHER,
+      claimedAt: 'whenever',
+    };
+    expect(dispatchClaim(noStamp, ME, NOW)).toBe('free');
+    expect(dispatchClaim(noOwner, ME, NOW)).toBe('free');
+    expect(dispatchClaim(junkStamp, ME, NOW)).toBe('free');
+  });
+
+  it('a window with no id owns nothing and may launch nothing', () => {
+    expect(dispatchClaim(unclaimed, '', NOW)).toBe('taken');
+    expect(dispatchClaim(claimed('', 1_000), '', NOW)).toBe('taken');
   });
 });
 

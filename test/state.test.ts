@@ -14,6 +14,7 @@ import * as path from 'node:path';
 import {
   StateStore,
   mergeChainRecords,
+  mergeDispatchRecords,
   mergeStates,
   migrateState,
   mintedBranchKey,
@@ -22,6 +23,7 @@ import {
 } from '../src/state';
 import { PATHS_FOLD_CASE, pathKey } from '../src/projects';
 import {
+  DISPATCH_CLAIM_TTL_MS,
   DISPATCH_DONE_TTL_MS,
   EXTENSION_ID,
   STATE_SCHEMA_VERSION,
@@ -2702,6 +2704,291 @@ describe('state: dispatch queue', () => {
     const store = makeStore(dir);
     await store.load();
     expect(store.dispatchEntries().map((d) => d.id)).toEqual([S2]);
+  });
+
+  it('claims once: a second window finds the entry taken and writes nothing', async () => {
+    const dir = tempDir();
+    const a = makeStore(dir);
+    await a.load();
+    await a.queueDispatch({ id: S1, createdAt: 5 });
+    const b = makeStore(dir);
+    await b.load();
+
+    await a.claimDispatch(S1, 'window-a');
+    expect(a.dispatchEntries()[0]?.claimedBy).toBe('window-a');
+
+    // B claims the same entry. The mutator runs inside the read-merge-write
+    // pass, so it sees A's claim and refuses — and B's own memory now holds
+    // A's record, which is how B discovers that it lost.
+    await b.claimDispatch(S1, 'window-b');
+    expect(b.dispatchEntries()[0]?.claimedBy).toBe('window-a');
+    expect((readFile(dir) as LineageState).dispatch?.[S1]?.claimedBy).toBe(
+      'window-a',
+    );
+  });
+
+  it('re-claiming our own entry refreshes the stamp; a stale claim is reclaimable', async () => {
+    const dir = tempDir();
+    const store = makeStore(dir);
+    await store.load();
+    await store.queueDispatch({ id: S1, createdAt: 5 });
+
+    await store.claimDispatch(S1, 'window-a');
+    const first = store.dispatchEntries()[0]?.claimedAt;
+    await delay(2);
+    await store.claimDispatch(S1, 'window-a'); // the retry is still ours
+    expect(store.dispatchEntries()[0]?.claimedAt).not.toBe(first);
+
+    // A window that died mid-launch left this behind. Without a TTL the entry
+    // would be parked forever; with one, the next window takes it.
+    const stale = new Date(Date.now() - DISPATCH_CLAIM_TTL_MS - 60_000).toISOString();
+    seedStateFile(
+      dir,
+      state({
+        dispatch: {
+          [S2]: {
+            id: S2,
+            createdAt: 5,
+            updatedAt: stale,
+            claimedBy: 'window-dead',
+            claimedAt: stale,
+          },
+        },
+      }),
+    );
+    const next = makeStore(dir);
+    await next.load();
+    await next.claimDispatch(S2, 'window-b');
+    expect(next.dispatchEntries().find((d) => d.id === S2)?.claimedBy).toBe(
+      'window-b',
+    );
+  });
+
+  it('releases only our own claim, and never a settled entry', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.queueDispatch({ id: S1, createdAt: 5 });
+    await store.claimDispatch(S1, 'window-a');
+
+    await store.releaseDispatchClaim(S1, 'window-b'); // not yours to drop
+    expect(store.dispatchEntries()[0]?.claimedBy).toBe('window-a');
+
+    await store.releaseDispatchClaim(S1, 'window-a');
+    expect(store.dispatchEntries()[0]?.claimedBy).toBeUndefined();
+    expect(store.dispatchEntries()[0]?.claimedAt).toBeUndefined();
+
+    // A settled record is a tombstone: nobody claims it again.
+    await store.settleDispatch(S1, 'launched');
+    await store.claimDispatch(S1, 'window-a');
+    expect(store.dispatchEntries()[0]?.claimedBy).toBeUndefined();
+  });
+
+  // A CLAIM ONLY FENCES THE WINDOWS THAT CAN SEE IT. When state.json exists
+  // but cannot be read, the batch is applied to THIS window's memory and
+  // nothing is written — so the re-read every window does (dispatchEntries,
+  // then dispatchClaim) says `mine` in ALL of them at once, because the file
+  // is unreadable for all of them and the dispatcher's premise is that they
+  // wake on the same reset. Two `claude --session-id <id>` processes on one
+  // transcript is exactly the hazard the claim exists to prevent, so the
+  // promise has to be the WRITE, not the read-back.
+  it('resolves false when the claim reached memory but not the file', async () => {
+    const dir = tempDir();
+    const a = makeStore(dir);
+    await a.load();
+    await a.queueDispatch({ id: S1, createdAt: 5 });
+    const b = makeStore(dir);
+    await b.load();
+
+    // The file is there but unreadable — a directory in its place gives
+    // EISDIR, which root cannot read through either (the same fixture the
+    // read-outage suite below uses).
+    const saved = path.join(dir, 'state.json.saved');
+    fs.renameSync(a.filePath, saved);
+    fs.mkdirSync(a.filePath);
+
+    // BOTH windows claim, and both would see their own claim in memory.
+    const aWon = await a.claimDispatch(S1, 'window-a');
+    const bWon = await b.claimDispatch(S1, 'window-b');
+    expect(a.dispatchEntries()[0]?.claimedBy).toBe('window-a');
+    expect(b.dispatchEntries()[0]?.claimedBy).toBe('window-b');
+    // ...and neither is authorised to launch, because neither wrote anything.
+    expect(aWon).toBe(false);
+    expect(bWon).toBe(false);
+    expect(fs.statSync(a.filePath).isDirectory()).toBe(true);
+
+    // Fail-closed is free: the entry is still queued, and the next claim on a
+    // readable file is a real one.
+    fs.rmdirSync(a.filePath);
+    fs.renameSync(saved, a.filePath);
+    expect(await a.claimDispatch(S1, 'window-a')).toBe(true);
+    expect((readFile(dir) as LineageState).dispatch?.[S1]?.claimedBy).toBe(
+      'window-a',
+    );
+  });
+
+  it('says true for a claim that landed and false for one it refused', async () => {
+    const dir = tempDir();
+    const a = makeStore(dir);
+    await a.load();
+    await a.queueDispatch({ id: S1, createdAt: 5 });
+    const b = makeStore(dir);
+    await b.load();
+
+    expect(await a.claimDispatch(S1, 'window-a')).toBe(true);
+    // Taken by A, so B's claim is refused rather than written.
+    expect(await b.claimDispatch(S1, 'window-b')).toBe(false);
+    // Nothing to claim, nothing claimed.
+    expect(await a.claimDispatch(S2, 'window-a')).toBe(false);
+    expect(await a.claimDispatch('', 'window-a')).toBe(false);
+    expect(await a.claimDispatch(S1, '')).toBe(false);
+    // A tombstone is nobody's.
+    await a.settleDispatch(S1, 'launched');
+    expect(await a.claimDispatch(S1, 'window-a')).toBe(false);
+  });
+
+  // WITHOUT THE LOCK, THE MERGE IS WHAT MAKES ONE OWNER. `acquireLock` gives
+  // up after LOCK_MAX_WAIT_MS and the caller writes anyway — a stuck lock must
+  // never mean a user's edit silently does nothing — and in that mode
+  // newest-wins made the claim depend on WRITE ORDER: a re-merge after a
+  // detected conflict could resurrect this window's own claim over the one
+  // already on disk, so the loser never discovered it lost and both launched.
+  it('converges on the FIRST claimer whatever order the writes landed in', () => {
+    const early = '2026-09-07T10:00:00.000Z';
+    const late = '2026-09-07T10:00:00.400Z';
+    const a: DispatchRecord = {
+      id: S1,
+      createdAt: 5,
+      claimedBy: 'window-a',
+      claimedAt: early,
+      updatedAt: early,
+    };
+    const b: DispatchRecord = {
+      id: S1,
+      createdAt: 5,
+      claimedBy: 'window-b',
+      claimedAt: late,
+      updatedAt: late, // wrote LAST, and still loses
+    };
+    // Both orders, because the two windows see the pair in opposite orders.
+    expect(mergeDispatchRecords(a, b).claimedBy).toBe('window-a');
+    expect(mergeDispatchRecords(b, a).claimedBy).toBe('window-a');
+  });
+
+  it('breaks an exact tie by window id, so both windows still agree', () => {
+    const at = '2026-09-07T10:00:00.000Z';
+    const rec = (by: string): DispatchRecord => ({
+      id: S1,
+      createdAt: 5,
+      claimedBy: by,
+      claimedAt: at,
+      updatedAt: at,
+    });
+    expect(mergeDispatchRecords(rec('window-a'), rec('window-b')).claimedBy).toBe(
+      'window-a',
+    );
+    expect(mergeDispatchRecords(rec('window-b'), rec('window-a')).claimedBy).toBe(
+      'window-a',
+    );
+  });
+
+  it('still lets a RECLAIM past an expired claim win', () => {
+    // The reason earlier-wins is conditional. A claim taken because the
+    // previous one expired is at least one TTL later; if earlier always won,
+    // the dead window's claim would come back out of every merge and park the
+    // entry for good.
+    const dead = '2026-09-07T10:00:00.000Z';
+    const reclaim = new Date(
+      Date.parse(dead) + DISPATCH_CLAIM_TTL_MS + 1_000,
+    ).toISOString();
+    const a: DispatchRecord = {
+      id: S1,
+      createdAt: 5,
+      claimedBy: 'window-dead',
+      claimedAt: dead,
+      updatedAt: dead,
+    };
+    const b: DispatchRecord = {
+      id: S1,
+      createdAt: 5,
+      claimedBy: 'window-b',
+      claimedAt: reclaim,
+      updatedAt: reclaim,
+    };
+    expect(mergeDispatchRecords(a, b).claimedBy).toBe('window-b');
+    expect(mergeDispatchRecords(b, a).claimedBy).toBe('window-b');
+  });
+
+  it('leaves every other transition on newest-wins', () => {
+    const t1 = '2026-09-07T10:00:00.000Z';
+    const t2 = '2026-09-07T10:00:01.000Z';
+    const claimed: DispatchRecord = {
+      id: S1,
+      createdAt: 5,
+      claimedBy: 'window-a',
+      claimedAt: t1,
+      updatedAt: t1,
+    };
+    // A RELEASE — later stamp, no claim on it — must not be undone by the
+    // claim it replaces.
+    const released: DispatchRecord = { id: S1, createdAt: 5, updatedAt: t2 };
+    expect(mergeDispatchRecords(claimed, released).claimedBy).toBeUndefined();
+    expect(mergeDispatchRecords(released, claimed).claimedBy).toBeUndefined();
+    // A SETTLE is a tombstone, whichever side holds it.
+    const settled: DispatchRecord = {
+      id: S1,
+      createdAt: 5,
+      done: 'launched',
+      doneAt: t2,
+      updatedAt: t2,
+    };
+    expect(mergeDispatchRecords(claimed, settled).done).toBe('launched');
+    expect(mergeDispatchRecords(settled, claimed).done).toBe('launched');
+    // A RE-CLAIM by the same window keeps the fresher stamp.
+    const refreshed: DispatchRecord = { ...claimed, claimedAt: t2, updatedAt: t2 };
+    expect(mergeDispatchRecords(claimed, refreshed).claimedAt).toBe(t2);
+    expect(mergeDispatchRecords(refreshed, claimed).claimedAt).toBe(t2);
+  });
+
+  it('a queued entry never arrives pre-claimed', async () => {
+    const store = makeStore(tempDir());
+    await store.load();
+    await store.queueDispatch({
+      id: S1,
+      createdAt: 5,
+      claimedBy: 'window-x',
+      claimedAt: nowIso(),
+    } as never);
+    expect(store.dispatchEntries()[0]?.claimedBy).toBeUndefined();
+  });
+
+  it('drops half a claim on load, and keeps the record', async () => {
+    const dir = tempDir();
+    const stamp = nowIso();
+    seedStateFile(
+      dir,
+      state({
+        dispatch: {
+          // An owner with no clock could never expire — the claim goes, the
+          // queued intent stays.
+          [S1]: { id: S1, createdAt: 5, updatedAt: stamp, claimedBy: 'w' },
+          [S2]: {
+            id: S2,
+            createdAt: 5,
+            updatedAt: stamp,
+            claimedAt: 'whenever',
+            claimedBy: 'w',
+          },
+          [S3]: { id: S3, createdAt: 5, updatedAt: stamp, claimedBy: 'w', claimedAt: stamp },
+        } as unknown as Record<string, DispatchRecord>,
+      }),
+    );
+    const store = makeStore(dir);
+    await store.load();
+    const byId = new Map(store.dispatchEntries().map((d) => [d.id, d]));
+    expect([...byId.keys()].sort()).toEqual([S1, S2, S3].sort());
+    expect(byId.get(S1)?.claimedBy).toBeUndefined();
+    expect(byId.get(S2)?.claimedBy).toBeUndefined();
+    expect(byId.get(S3)?.claimedBy).toBe('w'); // a whole claim survives
   });
 
   it('drops hand-edited junk on load: key/id mismatch, bad done, missing stamp', async () => {

@@ -12,7 +12,10 @@ import {
   composeForkNote,
   forkNoteDeliverable,
   forkPurposeOf,
+  sendRefusalSentence,
 } from '../src/forkNote';
+import * as forkNote from '../src/forkNote';
+import { mayTypeInto } from '../src/roster';
 
 describe('composeForkNote', () => {
   it('is a non-empty single line, trimmed and capped', () => {
@@ -127,5 +130,86 @@ describe('forkNoteDeliverable', () => {
     expect(forkNoteDeliverable('flock')).toBe(false);
     expect(forkNoteDeliverable('foreign')).toBe(false);
     expect(forkNoteDeliverable('none')).toBe(false);
+  });
+});
+
+// TWO QUESTIONS, not one, and this is the seam between them. The host answers
+// "is there a terminal to type into at all"; `mayTypeInto` answers "would
+// typing into it answer somebody's permission dialog". No value of SessionHost
+// can tell you the second — a parent hosted HERE may be sitting on a prompt
+// this very second — so that refusal lives at the keystroke, in
+// src/extension.ts's `sendTextToSession`, where the status is known.
+describe('the host question is not the may-I-type question', () => {
+  it('says `here` for a waiting parent, which the status then refuses', () => {
+    // Read together, these two are the whole reason the guard is not here: a
+    // deliverable parent is not the same thing as a typeable one.
+    expect(forkNoteDeliverable('here')).toBe(true);
+    expect(
+      mayTypeInto({ status: 'waiting', row: true, rosterOk: true }),
+    ).toBe('waiting');
+  });
+
+  it('keeps the may-I-type rule out of this module rather than copying it', () => {
+    // A second copy of the roster's decision table is the failure mode this
+    // pins: two predicates answering "may I type" that can drift apart. This
+    // module composes text and asks about the host; the one thing it knows
+    // about a refusal is what to SAY, which is text, which is what this module
+    // is for.
+    expect(Object.keys(forkNote).sort()).toEqual([
+      'MAX_FORK_NOTE_CHARS',
+      'composeForkNote',
+      'forkNoteDeliverable',
+      'forkPurposeOf',
+      'sendRefusalSentence',
+    ]);
+  });
+});
+
+// THE REFUSAL SENTENCES. Each one is what a user reads when the channel
+// declined, so each has to be true of the state it names and has to end in the
+// thing that would change it. The bug these are pinned against is the opposite:
+// "no terminal in this window" shown about a tab the user was looking at.
+describe('sendRefusalSentence', () => {
+  it('names the prompt for a waiting session, and what to do', () => {
+    const s = sendRefusalSentence('waiting', 'auth work');
+    expect(s).toContain('"auth work"');
+    expect(s).toContain('waiting for your answer');
+    expect(s).toContain('try again');
+    // Never the sentence that is false while the tab is open in this window.
+    expect(s).not.toContain('no terminal');
+  });
+
+  it('says Flock cannot TELL for a provider whose prompts are invisible', () => {
+    const s = sendRefusalSentence('blind', 'codex run');
+    expect(s).toContain('"codex run"');
+    expect(s).toContain('cannot tell');
+    // The remedy, because this one is permanent until the user acts: on the
+    // default settings a hook-less Codex session never becomes typeable.
+    expect(s).toContain('Codex hooks');
+    // Not asserted as waiting: Flock does not know that it is.
+    expect(s).not.toContain('is waiting for your answer');
+  });
+
+  it('says the tab is a shell for a session whose CLI has gone', () => {
+    const s = sendRefusalSentence('gone', 'old branch');
+    expect(s).toContain('"old branch"');
+    expect(s).toContain('shell');
+    expect(s).toContain('Relaunch');
+  });
+
+  it('leaves `sent` and `no-terminal` to the caller', () => {
+    // `sent` needs no sentence; `no-terminal` is caller-specific — the wrap
+    // verb names the foreign host, the fork note says nothing at all — so a
+    // shared sentence there would be worse than none.
+    expect(sendRefusalSentence('sent', 'x')).toBeNull();
+    expect(sendRefusalSentence('no-terminal', 'x')).toBeNull();
+  });
+
+  it('survives a label that is empty or multi-line', () => {
+    // Same one-line channel discipline as the note itself: these go into a
+    // notification, and a label is user-supplied.
+    expect(sendRefusalSentence('waiting', '')).toContain('"that session"');
+    expect(sendRefusalSentence('waiting', '   ')).toContain('"that session"');
+    expect(sendRefusalSentence('waiting', 'a\n  b')).toContain('"a b"');
   });
 });

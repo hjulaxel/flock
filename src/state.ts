@@ -14,9 +14,12 @@
 // workspace) and can be merged record-by-record instead of clobbered.
 //
 // This module deliberately depends on nothing from vscode — only ./types,
-// ./log, ./projects, ./accounts (both pure) and node:fs/promises, node:path,
-// node:process. The watcher lives in extension.ts and calls reloadFromDisk(),
-// which is what keeps this module unit-testable with no mock.
+// ./log, ./projects, ./accounts, ./dispatch (all pure) and node:fs/promises,
+// node:path, node:process. The watcher lives in extension.ts and calls
+// reloadFromDisk(), which is what keeps this module unit-testable with no
+// mock. ./dispatch is here for one function: the claim rule under
+// `claimDispatch`. That rule is the dispatcher's, the host asks it too, and
+// two copies of it would eventually disagree about who owns a launch.
 //
 // Two of the top-level shapes are about ACCOUNTS. `accounts` is an ordinary
 // record map and merges like every other one. `accountSettings` is the file's
@@ -42,6 +45,7 @@ import {
   isProviderId,
   isRoutingChoice,
   isSessionId,
+  DISPATCH_CLAIM_TTL_MS,
   DISPATCH_DONE_TTL_MS,
   isDispatchEntry,
   type AccountProfile,
@@ -71,6 +75,7 @@ import {
   projectDirs,
 } from './projects';
 import { isAccountId, isEnvVarName, nextOrder, sortProfiles } from './accounts';
+import { claimableDispatch, dispatchClaim } from './dispatch';
 
 // ------------------------------------------------------------------ constants
 
@@ -463,7 +468,9 @@ function sanitizeAccount(key: string, value: unknown): AccountProfile | null {
 function sanitizeDispatch(key: string, value: unknown): DispatchRecord | null {
   if (!isDispatchEntry(value)) return null;
   if (value.id !== key) return null;
-  const rec = value as unknown as Record<string, unknown>;
+  // A shallow copy, so the claim normalisation below edits the store's record
+  // and never the blob the caller handed us. Unknown fields still survive.
+  const rec = { ...(value as unknown as Record<string, unknown>) };
   if (typeof rec.updatedAt !== 'string' || rec.updatedAt === '') return null;
   if (
     rec.done !== undefined &&
@@ -473,6 +480,22 @@ function sanitizeDispatch(key: string, value: unknown): DispatchRecord | null {
     return null;
   }
   if (rec.doneAt !== undefined && typeof rec.doneAt !== 'string') return null;
+  // THE LAUNCH CLAIM is the pair or it is nothing (see DispatchRecord): an
+  // owner with no clock can never expire, and a clock with no owner names
+  // nobody. Junk here drops the CLAIM, not the record — losing a queued intent
+  // to a hand edit would be the larger loss, and an unclaimed entry is exactly
+  // what the claim protocol expects to find and is safe to re-claim.
+  if (
+    !isNonEmptyString(rec.claimedBy) ||
+    !isNonEmptyString(rec.claimedAt) ||
+    !Number.isFinite(Date.parse(rec.claimedAt))
+  ) {
+    if (rec.claimedBy !== undefined || rec.claimedAt !== undefined) {
+      log('state: dropped an unusable dispatch claim on', key);
+    }
+    delete rec.claimedBy;
+    delete rec.claimedAt;
+  }
   return rec as unknown as DispatchRecord;
 }
 
@@ -1238,6 +1261,87 @@ function newerWins<T>(
   return out;
 }
 
+/** `newerWins`, with the per-key decision handed to a caller's rule. Same
+ *  key union and same "only one side has it" handling; only the both-sides
+ *  case differs. */
+function mergeMaps<T>(
+  disk: Record<string, T> | undefined,
+  mem: Record<string, T> | undefined,
+  pick: (a: T, b: T) => T,
+): Record<string, T> {
+  const out: Record<string, T> = {};
+  const d = disk ?? {};
+  const m = mem ?? {};
+  for (const key of new Set([...Object.keys(d), ...Object.keys(m)])) {
+    const dv = d[key];
+    const mv = m[key];
+    if (dv === undefined) {
+      if (mv !== undefined) out[key] = mv;
+      continue;
+    }
+    if (mv === undefined) {
+      out[key] = dv;
+      continue;
+    }
+    out[key] = pick(dv, mv);
+  }
+  return out;
+}
+
+/**
+ * Which of two versions of one dispatch record survives.
+ *
+ * Newest-wins for every transition EXCEPT a contested claim, because that one
+ * has to converge the same way in both windows whatever order the bytes landed
+ * in — see the merge site above for why the lock is not always there to make
+ * that moot.
+ *
+ * The exception: neither side settled, and both carry a WHOLE claim
+ * (`claimedBy` and `claimedAt`) by different windows, WITHIN one claim TTL of
+ * each other. Then the EARLIER `claimedAt` wins, with ties broken by the
+ * lexicographically smaller `claimedBy` — a total order, computed from the
+ * records alone, so two windows that never see each other's writes in the same
+ * order still name the same owner.
+ *
+ * The TTL condition is what keeps a RECLAIM working. Two windows racing on one
+ * account reset claim milliseconds apart; a claim taken because the previous
+ * one EXPIRED is by definition at least DISPATCH_CLAIM_TTL_MS later, and if
+ * earlier-always-won the dead window's claim would come back out of a merge
+ * forever and park the entry for good. So a gap that big means the later claim
+ * is the legitimate one, and newest-wins decides it — still from the two
+ * records alone, so still the same answer in both windows.
+ *
+ * Everything else stays newest-wins: a settle is a tombstone and must not be
+ * undone, a release (a claim removed) is a later `updatedAt` with no claim on
+ * it, and a re-claim by the same window is a refreshed stamp.
+ *
+ * Exported for tests.
+ */
+export function mergeDispatchRecords(
+  a: DispatchRecord,
+  b: DispatchRecord,
+): DispatchRecord {
+  const whole = (r: DispatchRecord): boolean =>
+    r.done === undefined &&
+    isNonEmptyString(r.claimedBy) &&
+    isNonEmptyString(r.claimedAt);
+  if (whole(a) && whole(b) && a.claimedBy !== b.claimedBy) {
+    const ta = Date.parse(a.claimedAt ?? '');
+    const tb = Date.parse(b.claimedAt ?? '');
+    const contested =
+      Number.isFinite(ta) &&
+      Number.isFinite(tb) &&
+      Math.abs(ta - tb) < DISPATCH_CLAIM_TTL_MS;
+    if (contested) {
+      if (ta !== tb) return ta < tb ? a : b;
+      return (a.claimedBy ?? '') < (b.claimedBy ?? '') ? a : b;
+    }
+  }
+  // ISO-8601 strings compare correctly as strings; ties go to `b`, which is
+  // memory at the call site, exactly as newerWins does.
+  return (a.updatedAt ?? '') > (b.updatedAt ?? '') ? a : b;
+}
+
 /** Union two chain records: the newer side's member order wins, the older
  *  side's unseen members are appended. Exported for tests. */
 export function mergeChainRecords(a: ChainRecord, b: ChainRecord): ChainRecord {
@@ -1345,9 +1449,26 @@ export function mergeStates(
   out.chains = mergeChainMaps(disk.chains, mem.chains);
 
   // A dispatch record is one VALUE whose lifecycle only moves forward
-  // (queued → settled), and a settled record is its own tombstone — so
-  // newest-wins never resurrects a launch. See DispatchRecord.
-  out.dispatch = newerWins(disk.dispatch, mem.dispatch, (d) => d.updatedAt ?? '');
+  // (queued → claimed → settled), and a settled record is its own tombstone —
+  // so newest-wins never resurrects a launch. See DispatchRecord.
+  //
+  // THE CLAIM IS THE ONE TRANSITION NEWEST-WINS CANNOT DECIDE, so it has its
+  // own rule (mergeDispatchRecords). Under the store's advisory lock the claim
+  // is a mutex and the merge never sees two live claims at all. But the lock
+  // is documented to be bypassable — acquireLock gives up after
+  // LOCK_MAX_WAIT_MS and the caller writes anyway, because a stuck lock must
+  // never mean a user's edit silently does nothing — and in that mode
+  // newest-wins made convergence depend on WRITE ORDER: a re-merge after a
+  // detected conflict could resurrect this window's own claim over the one
+  // already on disk, so both windows ended up believing they held it and both
+  // launched. The claim tie-break below is a total order both windows compute
+  // identically from the same two records, so the FIRST claimer wins however
+  // the bytes landed.
+  out.dispatch = mergeMaps(
+    disk.dispatch,
+    mem.dispatch,
+    mergeDispatchRecords,
+  );
 
   // A workspace snapshot is one VALUE — the layout as last saved — so
   // newest-wins is the whole story.
@@ -1820,7 +1941,9 @@ export class StateStore implements DisposableLike {
   // --------------------------------------------------------------- dispatch
 
   /** Every dispatch record, settled ones included — copies, no order. The
-   *  dispatcher filters to pending itself; the queue view may want both. */
+   *  dispatcher filters to pending itself; the queue view may want both. Also
+   *  the read half of the claim protocol: the host calls this immediately
+   *  after claimDispatch to see WHOSE claim came back (see claimDispatch). */
   dispatchEntries(): DispatchRecord[] {
     return Object.values(this.memory.dispatch ?? {}).map((d) => ({ ...d }));
   }
@@ -1840,8 +1963,119 @@ export class StateStore implements DisposableLike {
         log('state: refusing to re-queue dispatch entry', entry.id);
         return;
       }
-      state.dispatch[entry.id] = { ...entry, updatedAt: stamp };
+      // A parked intent is never claimed. A caller (or a seed file) that
+      // arrived carrying one would hand the entry to a window that never asked
+      // for it, and hold it there for the whole claim TTL.
+      const rec = { ...entry, updatedAt: stamp } as DispatchRecord;
+      delete rec.claimedBy;
+      delete rec.claimedAt;
+      state.dispatch[entry.id] = rec;
       log('state: queued dispatch entry', entry.id);
+    });
+  }
+
+  /**
+   * Claim one pending entry for `windowId`, unless a live claim by another
+   * window already stands.
+   *
+   * THE MUTEX under "one queued entry, exactly one launch", AND THE RECEIPT
+   * THAT IT WAS ONE. Two halves, and both are needed:
+   *
+   *   the mutex     the mutator runs INSIDE one read → merge → write → verify
+   *                 pass, so whatever the other window wrote is already merged
+   *                 in by the time the rule below looks: the second claimer
+   *                 sees the first one's claim and writes nothing at all. The
+   *                 caller then re-reads (dispatchEntries) and launches only
+   *                 if the claim came back as its own — dispatchClaim's
+   *                 `mine`. That read is what makes a LOST race visible: this
+   *                 window's memory now holds the winner's record, because the
+   *                 merge put it there.
+   *   the receipt   `true` only when the claim actually reached DISK. The
+   *                 re-read alone is not enough, because it reads MEMORY: when
+   *                 state.json exists but cannot be read (the EACCES/EBUSY
+   *                 case flushLocked documents), the batch is applied to this
+   *                 window's memory and nothing is written — so the re-read
+   *                 says `mine` in EVERY window at once, since the file is
+   *                 unreadable for all of them and the dispatcher's premise is
+   *                 that they all wake on the same reset. Two windows, one
+   *                 `--session-id`, no race needed. `deferredForRead` is
+   *                 exactly "this batch is unwritten", so it is what the
+   *                 promise reports.
+   *
+   * Fail-closed is free here: a claim that did not persist launches nothing,
+   * the entry stays queued, and the next pass — or the next window — takes it
+   * once the file is readable again.
+   *
+   * AND WHEN THERE IS NO LOCK. `acquireLock` gives up after LOCK_MAX_WAIT_MS
+   * and this writes anyway, so "the mutex" is not always a mutex. What still
+   * makes one owner then is the MERGE: mergeDispatchRecords keeps the earlier
+   * `claimedAt` on a contested claim, which is a total order both windows
+   * compute identically, so the loser's re-read shows it the winner's record
+   * however the bytes landed.
+   *
+   * Claiming is not settling. A claim expires (DISPATCH_CLAIM_TTL_MS) so a
+   * window that dies mid-launch cannot park an entry forever; a settle never
+   * does, because it is the queue's tombstone.
+   */
+  claimDispatch(id: string, windowId: string): Promise<boolean> {
+    if (!isNonEmptyString(id) || !isNonEmptyString(windowId)) {
+      log('state: refusing to claim a dispatch entry without an id');
+      return Promise.resolve(false);
+    }
+    // Set by the mutator, read after the flush it belongs to has resolved.
+    // The mutator can run more than once (patchMemory re-applies the batch on
+    // a conflict retry, and a deferred batch runs again later), which is
+    // harmless: the flag only ever moves from false to true, and it is read
+    // once.
+    let claimed = false;
+    return this.enqueue((state, stamp) => {
+      const rec = isPlainObject(state.dispatch) ? state.dispatch[id] : undefined;
+      if (rec === undefined) {
+        log('state: cannot claim unknown dispatch entry', id);
+        return;
+      }
+      const verdict = dispatchClaim(rec, windowId, Date.parse(stamp));
+      if (!claimableDispatch(verdict)) {
+        log('state: dispatch entry', id, 'is', verdict, '— not claiming it');
+        return;
+      }
+      rec.claimedBy = windowId;
+      rec.claimedAt = stamp;
+      rec.updatedAt = stamp;
+      claimed = true;
+      log('state: claimed dispatch entry', id, 'for window', windowId);
+    }).then(() => {
+      if (!claimed) return false;
+      if (this.deferredForRead) {
+        log(
+          'state: the claim on dispatch entry',
+          id,
+          'is in memory only — state.json could not be read, so it does not',
+          'authorise a launch',
+        );
+        return false;
+      }
+      return true;
+    });
+  }
+
+  /** Drop OUR claim on an entry whose launch started nothing, so the next
+   *  window to look may take it immediately instead of waiting out the TTL.
+   *  Another window's claim is left exactly where it is — a release that could
+   *  clear someone else's claim would be the double-launch hole again, from
+   *  the other side. */
+  releaseDispatchClaim(id: string, windowId: string): Promise<void> {
+    if (!isNonEmptyString(id) || !isNonEmptyString(windowId)) {
+      return Promise.resolve();
+    }
+    return this.enqueue((state, stamp) => {
+      const rec = isPlainObject(state.dispatch) ? state.dispatch[id] : undefined;
+      if (rec === undefined) return;
+      if (dispatchClaim(rec, windowId, Date.parse(stamp)) !== 'mine') return;
+      delete rec.claimedBy;
+      delete rec.claimedAt;
+      rec.updatedAt = stamp;
+      log('state: released the claim on dispatch entry', id);
     });
   }
 

@@ -1,8 +1,12 @@
 // src/terminals.ts — terminal launch, binding, re-association, rename.
 //
-// Imports vscode, ./types, ./log, ./tmux, node:crypto, and ./accounts — the
-// last only for its env-var-name guard, borrowed rather than copied so the two
-// modules cannot disagree about what a legal variable name is.
+// Imports vscode, ./types, ./log, ./tmux, node:crypto, ./accounts and
+// ./agentVerbs — the last two only for one borrowed helper each, rather than
+// copied, so the modules cannot disagree: ./accounts for what a legal
+// environment-variable name is, ./agentVerbs for the verbs channel's launch
+// token (see THE LAUNCH TOKEN below). Never the other way round — ./agentVerbs
+// must not import this module, because ./commands imports ./agentVerbs and
+// ./commands may not reach the terminal layer at all (see its header).
 //
 // ACCOUNT ENVIRONMENT. `LaunchOptions.env` is the chosen account's
 // environment (CLAUDE_CONFIG_DIR / CODEX_HOME / an API key), and it has to
@@ -11,9 +15,20 @@
 // detachable one. A wrapped launch that set only the terminal's env would hand
 // the variables to the tmux CLIENT and leave claude — which lives inside the
 // server — on whatever the SERVER was started with, i.e. on whichever account
-// happened to open the first wrapped session since the last reboot. The stamp
-// is written LAST in both places so a profile can never overwrite the node id
-// the whole binding table is keyed on.
+// happened to open the first wrapped session since the last reboot. The two
+// stamps are written LAST in both places so a profile can never overwrite the
+// node id the whole binding table is keyed on, nor the launch token the verbs
+// channel authenticates with.
+//
+// THE LAUNCH TOKEN. Every launch also stamps ENV_VERB_TOKEN — a fresh secret,
+// minted and remembered by ./agentVerbs — beside the node id. It is what lets
+// the in-session fork verb tell "this session asked to be forked" from "some
+// process on this machine typed this session's id into a file"; agentVerbs.ts
+// argues the whole design. Two rules here: it is stamped wherever the node id
+// is stamped (a session whose environment carries one but not the other could
+// not use the verb), and it is NEVER logged, shown, or written to a record —
+// like an API key in the account environment, which rides the same two
+// channels and has the same rule.
 //
 // Design invariants, each established empirically. Do not "improve" them away:
 //
@@ -37,7 +52,9 @@
 //   * Re-association after a window RELOAD: the pty survives and the revived
 //     Terminal object's `creationOptions` is reconstructed from the persisted
 //     launch config INCLUDING `env`, so we stamp ENV_NODE_ID at creation and
-//     read it back. After a full app RESTART the process is relaunched (new
+//     read it back — and the launch token with it, which is how the verb
+//     survives a reload without the secret ever touching a file of ours.
+//     After a full app RESTART the process is relaunched (new
 //     pid), so we additionally match `Terminal.processId` against the roster's
 //     per-session pid — claude being the terminal process makes that exact.
 //   * Never set `strictEnv`: claude needs the inherited environment to find its
@@ -65,6 +82,7 @@ import type {
   TmuxSpawn,
 } from './types';
 import { isEnvVarName } from './accounts';
+import { ENV_VERB_TOKEN, adoptVerbToken, ensureVerbToken } from './agentVerbs';
 import { buildCodexArgs } from './codex';
 import { shimLaunch } from './shim';
 import { isPidAlive, listDescendants, reapSurvivors } from './procs';
@@ -378,21 +396,41 @@ export function launchEnv(
   return out;
 }
 
-/**
- * Read our node-id stamp back out of a terminal's creation options. Guarded:
- * `creationOptions` is `TerminalOptions | ExtensionTerminalOptions`, and the
- * latter (a pty-backed extension terminal) has no `env` at all.
- */
+/** Read our node-id stamp back out of a terminal's creation options. */
 export function nodeIdOfTerminal(terminal: {
   readonly creationOptions?: unknown;
 }): string | null {
+  const raw = stampOfTerminal(terminal, ENV_NODE_ID);
+  return isSessionId(raw) ? raw : null;
+}
+
+/**
+ * The verbs launch token out of the same place, for the same reason: a window
+ * reload hands `creationOptions.env` back, so the token can be re-learned
+ * instead of re-minted — re-minting would leave the running claude holding a
+ * secret this window no longer recognises, and the session would lose the
+ * fork verb every time somebody reloaded the window. Unvalidated on purpose:
+ * agentVerbs.adoptVerbToken owns what a token looks like.
+ */
+export function verbTokenOfTerminal(terminal: {
+  readonly creationOptions?: unknown;
+}): unknown {
+  return stampOfTerminal(terminal, ENV_VERB_TOKEN);
+}
+
+/** One env value out of a terminal's creation options, or null. Guarded:
+ *  `creationOptions` is `TerminalOptions | ExtensionTerminalOptions`, and the
+ *  latter (a pty-backed extension terminal) has no `env` at all. */
+function stampOfTerminal(
+  terminal: { readonly creationOptions?: unknown },
+  key: string,
+): unknown {
   const opts = terminal.creationOptions;
   if (!opts || typeof opts !== 'object') return null;
   if ('pty' in opts) return null; // ExtensionTerminalOptions — not ours
   const env = (opts as { env?: unknown }).env;
   if (!env || typeof env !== 'object') return null;
-  const raw = (env as Record<string, unknown>)[ENV_NODE_ID];
-  return isSessionId(raw) ? raw : null;
+  return (env as Record<string, unknown>)[key] ?? null;
 }
 
 /** Default terminal name for a session: the CLI that is running in it, then
@@ -732,6 +770,19 @@ export class TerminalRegistry implements DisposableLike {
     // existed — must behave exactly as passing no environment at all did.
     const profileEnv = launchEnv(opts.env);
 
+    // The two stamps, together and last, wherever an environment is built
+    // below. `sessionId` is the launch id — the key the verbs table is on, and
+    // the id the CLI inside this process will report, whatever generation the
+    // row has churned to by then. ensureVerbToken re-uses the token this
+    // window already holds for the session, which is what a restore that
+    // RE-ATTACHES a live tmux session needs: `-e` cannot re-stamp a session
+    // tmux is only attaching to, so the process keeps the secret it was
+    // created with and the two must still agree.
+    const stamp: Record<string, string> = {
+      [ENV_NODE_ID]: sessionId,
+      [ENV_VERB_TOKEN]: ensureVerbToken(sessionId),
+    };
+
     // DETACH TIER: wrap the launch in the private tmux server when the wiring
     // says so. The terminal process becomes the tmux client; claude runs in
     // the server, and disposing the terminal detaches instead of killing.
@@ -767,14 +818,14 @@ export class TerminalRegistry implements DisposableLike {
         ...(typeof opts.cwd === 'string' && opts.cwd !== ''
           ? { cwd: opts.cwd }
           : {}),
-        // The hook re-key stamp must reach the CLAUDE process's environment,
-        // and the server keeps the FIRST client's env for every later
-        // session — `-e` (session environment) is what makes each wrap carry
-        // its own id. The terminal's env stamp below still exists, but it
-        // only reaches the tmux client. The account environment rides the same
-        // flags, for exactly the same reason, and is written FIRST so the stamp
-        // always wins a collision.
-        env: { ...profileEnv, [ENV_NODE_ID]: sessionId },
+        // The hook re-key stamp and the verbs launch token must reach the
+        // CLAUDE process's environment, and the server keeps the FIRST
+        // client's env for every later session — `-e` (session environment) is
+        // what makes each wrap carry its own. The terminal's env stamp below
+        // still exists, but it only reaches the tmux client. The account
+        // environment rides the same flags, for exactly the same reason, and
+        // is written FIRST so the stamps always win a collision.
+        env: { ...profileEnv, ...stamp },
         command: [binary, ...shellArgs],
       });
       shellPath = tmux.binary;
@@ -794,11 +845,11 @@ export class TerminalRegistry implements DisposableLike {
         shellPath: spawnable.shellPath,
         shellArgs: spawnable.shellArgs,
         cwd: opts.cwd,
-        // The stamp that survives a window reload inside creationOptions, and
-        // the account environment beside it. Both are reconstructed for a
+        // The stamps that survive a window reload inside creationOptions, and
+        // the account environment beside them. All are reconstructed for a
         // revived terminal, so a reloaded window's re-launch (if any) lands on
-        // the same account.
-        env: { ...profileEnv, [ENV_NODE_ID]: sessionId },
+        // the same account — and bind() re-learns the launch token from here.
+        env: { ...profileEnv, ...stamp },
         // NEVER strictEnv — claude needs the inherited environment.
         location,
         // A project chat sits among session tabs and must read as a different
@@ -1412,6 +1463,15 @@ export class TerminalRegistry implements DisposableLike {
       terminalName,
       createdAt: Date.now(),
     };
+    // Re-learn the verbs launch token from creationOptions — the one path that
+    // carries it across a window reload (see the file header). Keyed on the
+    // STAMPED id and not on `sessionId`: rebind() moves this binding onto each
+    // new generation id, while the CLI inside the process keeps reporting the
+    // id it was launched with, so the table has to stay on that one. A no-op
+    // on the launch path (the token is already held) and after a full app
+    // restart (a revived terminal has no env then) — never a place the token
+    // is stored, only re-learned.
+    adoptVerbToken(nodeIdOfTerminal(terminal), verbTokenOfTerminal(terminal));
     // Detach tier: recover the tmux session name from creationOptions, which
     // is how a REVIVED terminal (window reload) keeps it. Losing it would
     // downgrade the session's next park from detach to kill — the dispose

@@ -26,6 +26,25 @@
 //     does not happen. Those are the ordinary cases, not the edge cases, which
 //     is why `forkNoteDeliverable` exists as its own testable predicate and
 //     why the setting that turns this on is off by default.
+//   * It is REFUSED to a session Flock will not press Enter into — one that is
+//     WAITING on a permission dialog, one whose provider cannot report a
+//     dialog at all, and one whose CLI has exited leaving a bound login shell.
+//     That rule is not enforced here and cannot be — see
+//     `forkNoteDeliverable` — it lives in `mayTypeInto` (src/roster.ts) and is
+//     applied where the channel is bound to the terminal registry
+//     (src/extension.ts's `sendTextToSession`), immediately before the
+//     keystroke, so it covers all four callers of the channel and any added
+//     later. From here it shows up as the ordinary answer this module was
+//     already built for: the note was not delivered.
+//
+//     "Immediately before" is code ORDER, not clock. The status it reads is a
+//     roster snapshot up to one poll interval old (DEFAULT_POLL_INTERVAL_MS,
+//     3 s, and older after a failed fetch, where the wiring keeps the last
+//     good rows on purpose) — so a session that walked into a dialog within
+//     the last few seconds still reads busy/idle and IS typed into. What the
+//     placement buys is that all four callers are covered and that there is no
+//     second, wider gap between an up-front check and the keystroke. The
+//     sub-poll race stays open.
 //
 // NOTHING IS QUEUED when the note cannot be delivered, and that is a decision
 // rather than an omission. A mailbox would be a second lifecycle to get wrong
@@ -42,6 +61,7 @@
 // up with untested text.
 
 import type { SessionHost } from './hosts';
+import type { SendTextOutcome } from './types';
 
 /**
  * How long a note into a live conversation may be.
@@ -113,12 +133,69 @@ export function composeForkNote(opts: {
  * real, ordinary state in which the extension has no terminal to type into —
  * `flock` is another window's tab or a parked wrap, `foreign` is a process
  * Flock never launched, `none` is a closed row — and in every one of them
- * `sendTextToSession` returns false. Asking this question up front is what
- * lets the caller log a reason a person can act on instead of reporting a
- * bare failure.
+ * `sendTextToSession` answers `'no-terminal'`. Asking this question up front
+ * is what lets the caller log a reason a person can act on instead of
+ * reporting a bare failure.
+ *
+ * WHAT IT DOES NOT ANSWER, deliberately: whether the parent may be typed into
+ * RIGHT NOW. That is `mayTypeInto` (src/roster.ts) on the parent's roster
+ * status, and it is a different question in three ways this predicate cannot
+ * paper over. It asks a different fact — `HostFacts` carries `live` and, on
+ * purpose, no `status`, and `CommandDeps` has no status accessor at all, so
+ * the caller in commands.ts could not hand one over even if the signature took
+ * it. It reads a different clock — a status is a snapshot from the last roster
+ * tick, and a session can walk into a permission prompt between the check and
+ * the keystroke, which is the same race this module's caller already logs when
+ * a tab closes in that gap. And it protects something else — the host question
+ * is about whether a note can be delivered, the status question is about
+ * whether delivering it would ANSWER A DIALOG, which is not a courtesy that
+ * may be paid a moment late. So the refusal is the last thing before the
+ * keystroke, in the wiring, for every caller of the channel at once — which
+ * covers all four callers but still reads a poll-old snapshot, so it narrows
+ * that race rather than closing it (see the header). Read this predicate
+ * accordingly: `true` means there is a terminal to type into, never that the
+ * note will be typed.
  */
 export function forkNoteDeliverable(host: SessionHost): boolean {
   return host === 'here';
+}
+
+/**
+ * The sentence a caller shows when the channel refused — one per reason, and
+ * each one ends in the thing the person can actually do.
+ *
+ * Here rather than at the four call sites because it is the same three
+ * sentences in all of them, and because a refusal message is exactly the kind
+ * of text this module exists to keep testable (see the header): the wrap
+ * warning and the `/compact` warning had drifted into saying "no terminal in
+ * this window" about a tab the user was looking at.
+ *
+ * `null` for the two outcomes a caller must word itself. `'sent'` needs no
+ * sentence, and `'no-terminal'` is genuinely caller-specific — the wrap verb
+ * names the foreign host, the fork note says nothing at all — so a shared
+ * sentence there would be worse than none.
+ */
+export function sendRefusalSentence(
+  outcome: SendTextOutcome,
+  label: string,
+): string | null {
+  const name = collapse(label) || 'that session';
+  switch (outcome) {
+    case 'waiting':
+      return `Flock: "${name}" is waiting for your answer — answer its prompt, then try again.`;
+    // Named for what Flock cannot see rather than for what the session is
+    // doing, because it does not know: a hook-less Codex row reads `busy`
+    // whether or not a permission dialog is on screen.
+    case 'blind':
+      return `Flock cannot tell whether "${name}" is waiting for your approval, so it will not type into it — install the Codex hooks, or answer and quiet the session first.`;
+    // Worded for what Flock OBSERVED — the row is absent — because the same
+    // absence covers a session started seconds ago that has not registered
+    // yet. Both answers are the same: do not type into it.
+    case 'gone':
+      return `Flock: "${name}" is not in the session roster — an exited CLI leaves its tab on a shell, so Flock will not type into it. Relaunch it from the Flock sidebar.`;
+    default:
+      return null;
+  }
 }
 
 /** Whitespace collapsed to single spaces and trimmed — the shape the one-line

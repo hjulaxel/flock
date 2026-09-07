@@ -70,6 +70,7 @@ import type {
   ProjectRecord,
   RecommendedWorld,
   RoutingChoice,
+  SendTextOutcome,
   SessionForest,
   SessionNode,
   SubprojectRecord,
@@ -1051,7 +1052,7 @@ function chatDeps(
       return over.focusSession ? over.focusSession(id) : false;
     },
     renameTerminal: async () => false,
-    sendTextToSession: () => false,
+    sendTextToSession: () => 'no-terminal',
     closeTerminal: () => false,
     focusWindowFor: async () => false,
     openProject: async () => undefined,
@@ -6058,7 +6059,10 @@ describe('wrap names the host when there is no terminal to type into', () => {
 
   const SESSION = uuid(2);
 
-  function wrapHarness(host: 'foreign' | 'flock'): {
+  function wrapHarness(
+    host: 'foreign' | 'flock' | 'here',
+    outcome: SendTextOutcome = 'no-terminal',
+  ): {
     warnings: string[];
     run: (command: string, arg: string) => Promise<void>;
   } {
@@ -6072,8 +6076,8 @@ describe('wrap names the host when there is no terminal to type into', () => {
     const { deps } = chatDeps(undefined);
     const harness = withRegisteredCommands({
       ...deps,
-      getForest: () => forestOf([node(SESSION)]),
-      sendTextToSession: () => false,
+      getForest: () => forestOf([node(SESSION, { label: 'auth' })]),
+      sendTextToSession: () => outcome,
       hostOf: () => host,
     });
     return { warnings, run: (command, arg) => harness.run(command, arg) };
@@ -6089,6 +6093,36 @@ describe('wrap names the host when there is no terminal to type into', () => {
     const h = wrapHarness('flock');
     await h.run(COMMANDS.wrapSession, SESSION);
     expect(h.warnings[0]).toContain('this window');
+  });
+
+  // THE GUARD'S REFUSALS ARE NOT A MISSING TERMINAL. The tab is open in this
+  // window and the user is looking at it, so "Wrap needs the session terminal
+  // in this window" would be a plain falsehood — the defect this pins.
+  it('says the session is waiting, not that its terminal is missing', async () => {
+    const h = wrapHarness('here', 'waiting');
+    await h.run(COMMANDS.wrapSession, SESSION);
+    expect(h.warnings[0]).toContain('waiting for your answer');
+    expect(h.warnings[0]).toContain('auth');
+    expect(h.warnings[0]).not.toContain('this window');
+  });
+
+  it('says Flock cannot TELL, and how to fix that, for a hook-less Codex', async () => {
+    // The refusal that costs a whole provider its wrap verb on the default
+    // settings, so the message has to name the remedy rather than the symptom.
+    const h = wrapHarness('here', 'blind');
+    await h.run(COMMANDS.wrapSession, SESSION);
+    expect(h.warnings[0]).toContain('cannot tell');
+    expect(h.warnings[0]).toContain('Codex hooks');
+  });
+
+  it('says the tab is a shell for a session whose CLI has exited', async () => {
+    // `lineage.exitToShell` is on by default: the pane keeps the tab and
+    // respawns the login shell, so the terminal stays BOUND. Typing there runs
+    // the text as a command.
+    const h = wrapHarness('here', 'gone');
+    await h.run(COMMANDS.wrapSession, SESSION);
+    expect(h.warnings[0]).toContain('shell');
+    expect(h.warnings[0]).toContain('Relaunch');
   });
 });
 
@@ -6444,7 +6478,7 @@ describe('the add / import flows', () => {
       launchSession: nope,
       focusSession: () => false,
       renameTerminal: async () => false,
-      sendTextToSession: () => false,
+      sendTextToSession: () => 'no-terminal',
       closeTerminal: () => false,
       focusWindowFor: async () => false,
       openProject: async () => undefined,
@@ -7872,7 +7906,7 @@ describe('a fork tells its parent, when asked to', () => {
   function noteHarness(
     over: {
       notifyParentOnFork?: () => boolean;
-      sendTextToSession?: (id: string, text: string) => boolean;
+      sendTextToSession?: (id: string, text: string) => SendTextOutcome;
       host?: 'here' | 'flock' | 'foreign' | 'none';
     } = {},
   ): NoteHarness {
@@ -7919,7 +7953,9 @@ describe('a fork tells its parent, when asked to', () => {
       hostOf: () => over.host ?? 'here',
       sendTextToSession: (id, text) => {
         sends.push([id, text]);
-        return over.sendTextToSession ? over.sendTextToSession(id, text) : true;
+        return over.sendTextToSession
+          ? over.sendTextToSession(id, text)
+          : 'sent';
       },
       launchSession: async (opts) => {
         launches.push(opts);
@@ -7974,7 +8010,7 @@ describe('a fork tells its parent, when asked to', () => {
   it('never fails the fork when the note does not land', async () => {
     const h = noteHarness({
       notifyParentOnFork: () => true,
-      sendTextToSession: () => false,
+      sendTextToSession: () => 'no-terminal',
     });
     await h.run(COMMANDS.forkSession, PARENT);
     expect(h.launches).toHaveLength(1);
@@ -8033,6 +8069,8 @@ describe('close with summary drives /compact and reads back what the CLI wrote',
     patches: Array<{ id: string; patch: Partial<EditorialRecord> }>;
     closedTerminals: string[];
     warnings: string[];
+    offers: string[][];
+    statuses: string[];
     waits: Array<[string, number, number]>;
     /** The store itself, so a test can act as ANOTHER actor: the compaction
      *  wait is up to two minutes long, and the idle sweep, a second window or
@@ -8046,7 +8084,7 @@ describe('close with summary drives /compact and reads back what the CLI wrote',
       mode?: CloseSummaryMode | undefined;
       summary?: string | undefined;
       reader?: boolean;
-      sendTextToSession?: (id: string, text: string) => boolean;
+      sendTextToSession?: (id: string, text: string) => SendTextOutcome;
       provider?: 'codex';
       answer?: string;
       tipOf?: (id: string) => string;
@@ -8059,18 +8097,26 @@ describe('close with summary drives /compact and reads back what the CLI wrote',
     const patches: Array<{ id: string; patch: Partial<EditorialRecord> }> = [];
     const closedTerminals: string[] = [];
     const warnings: string[] = [];
+    const offers: string[][] = [];
+    const statuses: string[] = [];
     const waits: Array<[string, number, number]> = [];
     (
       mockWindow as {
         showWarningMessage?: (m: unknown, ...rest: unknown[]) => Promise<unknown>;
       }
-    ).showWarningMessage = async (message) => {
+    ).showWarningMessage = async (message, ...rest) => {
       warnings.push(String(message));
+      // The OFFERS matter as much as the sentence: a refusal that put "Close
+      // Without a Summary" first was nudging the user into closing a session
+      // sitting on an open permission prompt.
+      offers.push(rest.filter((r) => typeof r === 'string') as string[]);
       return over.answer;
     };
     (
       mockWindow as { setStatusBarMessage?: (m: string, ms?: number) => void }
-    ).setStatusBarMessage = () => {};
+    ).setStatusBarMessage = (m) => {
+      statuses.push(m);
+    };
 
     const records: Record<string, EditorialRecord> = {
       [PARENT]: { id: PARENT, parentId: null },
@@ -8103,7 +8149,9 @@ describe('close with summary drives /compact and reads back what the CLI wrote',
       ...(over.tipOf ? { tipOf: over.tipOf } : {}),
       sendTextToSession: (id, text) => {
         sends.push([id, text]);
-        return over.sendTextToSession ? over.sendTextToSession(id, text) : true;
+        return over.sendTextToSession
+          ? over.sendTextToSession(id, text)
+          : 'sent';
       },
       ...(over.mode !== undefined
         ? { closeSummaryMode: (): CloseSummaryMode => over.mode as CloseSummaryMode }
@@ -8125,6 +8173,8 @@ describe('close with summary drives /compact and reads back what the CLI wrote',
       patches,
       closedTerminals,
       warnings,
+      offers,
+      statuses,
       waits,
       records,
       run: harness.run,
@@ -8242,12 +8292,72 @@ describe('close with summary drives /compact and reads back what the CLI wrote',
   it('refuses before typing anything when the session has no terminal here', async () => {
     const h = summaryHarness({
       mode: 'compact-and-tell-parent',
-      sendTextToSession: () => false,
+      sendTextToSession: () => 'no-terminal',
     });
     await h.run(COMMANDS.closeWithSummary, CHILD);
     expect(h.waits).toEqual([]);
     expect(h.closedTerminals).toEqual([]);
     expect(h.warnings.join(' ')).toContain('no terminal in this window');
+  });
+
+  // THE FLOW THAT BROKE SILENTLY. `compact-and-tell-parent` promises "tell the
+  // parent", and a WAITING parent is the one no-delivery case the person can
+  // see doing something: its tab is open in this window. Before this the note
+  // was refused and nothing at all was said, so the user was left believing a
+  // note had landed.
+  it('says so when the parent was not told because it is waiting', async () => {
+    const h = summaryHarness({
+      mode: 'compact-and-tell-parent',
+      summary: 'Traced the drift to a stale cache key.',
+      // The `/compact` to the CHILD goes through; the note to the PARENT is
+      // refused, which is exactly the shape the guard produces.
+      sendTextToSession: (id) => (id === PARENT ? 'waiting' : 'sent'),
+    });
+    await h.run(COMMANDS.closeWithSummary, CHILD);
+
+    // The close and the summary still happened — a sentence that did not land
+    // elsewhere is not a reason to leave a session open.
+    expect(h.closedTerminals).toEqual([CHILD]);
+    expect(h.records[CHILD].summary).toContain('stale cache key');
+    // And the person is told, once, in the status bar rather than a modal:
+    // there is nothing to decide, only something to know.
+    const said = h.statuses.join(' ');
+    expect(said).toContain('redis cache');
+    expect(said).toContain('parent was not told');
+    expect(h.warnings).toEqual([]);
+  });
+
+  it('stays silent when the parent simply has no terminal here', async () => {
+    // The four ordinary cases — closed, foreign, parked, another window's —
+    // are parents the person cannot see, and the tree already carries the fork
+    // edge. A toast for those would be noise, which is why this is not "warn
+    // whenever the note fails".
+    const h = summaryHarness({
+      mode: 'compact-and-tell-parent',
+      summary: 'done',
+      sendTextToSession: (id) => (id === PARENT ? 'no-terminal' : 'sent'),
+    });
+    await h.run(COMMANDS.closeWithSummary, CHILD);
+    expect(h.closedTerminals).toEqual([CHILD]);
+    expect(h.statuses.join(' ')).not.toContain('parent was not told');
+  });
+
+  // The /compact refusal used to say "has no terminal in this window" about a
+  // tab the user was looking at, and to offer closing that session first.
+  it('names the prompt, and does not offer to close a waiting session', async () => {
+    const h = summaryHarness({
+      mode: 'compact-and-tell-parent',
+      sendTextToSession: () => 'waiting',
+    });
+    await h.run(COMMANDS.closeWithSummary, CHILD);
+    expect(h.waits).toEqual([]); // it never got as far as waiting
+    // The harness records the ATTEMPT; the wiring is what refuses it, so what
+    // this pins is that nothing followed the refusal.
+    expect(h.sends).toHaveLength(1);
+    expect(h.warnings.join(' ')).toContain('waiting for your answer');
+    expect(h.warnings.join(' ')).not.toContain('no terminal in this window');
+    // Type a Summary is still offered; Close Without a Summary is not.
+    expect(h.offers[0]).toEqual(['Type a Summary…']);
   });
 
   it('declines by name on Codex, and sends nothing when the offer is refused', async () => {

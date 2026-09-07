@@ -31,6 +31,14 @@
 // problem only the user can fix; launching and letting the CLI show its login
 // prompt is the honest outcome, and it is what the interactive router does
 // with the same snapshot.
+//
+// WHICH WINDOW MAY LAUNCH IT is a decision too, so it lives here as well:
+// `dispatchClaim` below. `decideDispatch` answers "is this entry worth
+// launching now", which every window answers the same way at the same instant
+// — so something has to answer "and is it MINE to launch". That rule reads one
+// record and a clock, which makes it exactly as pure as the rest of this file;
+// the read-write-verify around it is dispatchHost's, and the mutex under it is
+// state.claimDispatch's.
 
 import { DEFAULT_PROVIDER, isProviderId } from './types';
 import type {
@@ -49,12 +57,69 @@ import { resolveRouting } from './routing';
 // alone. Re-exported here so this module stays the one import a consumer of
 // the dispatcher needs.
 export {
+  DISPATCH_CLAIM_TTL_MS,
   MAX_DISPATCH_PROMPT_CHARS,
   MAX_DISPATCH_TITLE_CHARS,
   isDispatchEntry,
 } from './types';
-export type { DispatchEntry } from './types';
-import type { DispatchEntry } from './types';
+export type { DispatchEntry, DispatchRecord } from './types';
+import { DISPATCH_CLAIM_TTL_MS } from './types';
+import type { DispatchEntry, DispatchRecord } from './types';
+
+// ------------------------------------------------------------------- claim
+
+/**
+ * What a window may do with one queue entry, given who claimed it.
+ *
+ *   settled  someone launched or cancelled it; nobody may touch it again.
+ *   free     nobody has claimed it — take it.
+ *   stale    a claim stands, but older than DISPATCH_CLAIM_TTL_MS: the window
+ *            that wrote it died mid-launch, and an unreclaimable claim would
+ *            park the entry forever. Take it.
+ *   mine     this window holds the claim — and this is the ONLY verdict that
+ *            permits a launch.
+ *   taken    a live claim by another window. Do nothing at all: not launch,
+ *            not settle. Settling here is worse than doing nothing, because
+ *            the winner's launch is still in flight and a settle would make
+ *            the record a tombstone before its owner had written its outcome.
+ */
+export type DispatchClaimVerdict =
+  | 'settled'
+  | 'free'
+  | 'stale'
+  | 'mine'
+  | 'taken';
+
+/** THE "may I take this entry" RULE, pure and total. Both sides of the
+ *  protocol ask it: state.claimDispatch to decide whether to write a claim at
+ *  all (under the store's lock, where it is the mutex), and the host to decide
+ *  whether the claim it read back is its own. One rule, so the two can never
+ *  disagree about who owns a launch. */
+export function dispatchClaim(
+  rec: Pick<DispatchRecord, 'done' | 'claimedBy' | 'claimedAt'>,
+  windowId: string,
+  now: number,
+): DispatchClaimVerdict {
+  // A window with no id cannot own anything, so it must never launch: treating
+  // it as `taken` is the safe end of that — it holds rather than races.
+  if (typeof windowId !== 'string' || windowId === '') return 'taken';
+  if (rec.done !== undefined) return 'settled';
+  const by = rec.claimedBy;
+  const at = typeof rec.claimedAt === 'string' ? Date.parse(rec.claimedAt) : NaN;
+  // A claim is the PAIR or it is nothing — an owner with no clock could never
+  // expire, which is the one failure this TTL exists to prevent.
+  if (typeof by !== 'string' || by === '' || !Number.isFinite(at)) return 'free';
+  if (now - at >= DISPATCH_CLAIM_TTL_MS) return 'stale';
+  return by === windowId ? 'mine' : 'taken';
+}
+
+/** The three verdicts a window may write its own claim over. Not 'taken' (the
+ *  other window is mid-launch) and not 'settled' (the record is a tombstone);
+ *  'mine' is included because re-claiming refreshes the stamp, and a retry of
+ *  a launch that did not bind is still this window's launch. */
+export function claimableDispatch(verdict: DispatchClaimVerdict): boolean {
+  return verdict === 'free' || verdict === 'stale' || verdict === 'mine';
+}
 
 // -------------------------------------------------------------------- gate
 

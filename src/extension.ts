@@ -83,6 +83,7 @@ import type {
   ProviderId,
   RosterEntry,
   RosterResult,
+  SendTextOutcome,
   SessionForest,
   SessionSwitching,
   SubprojectRecord,
@@ -139,6 +140,7 @@ import {
   RosterPoller,
   fetchRosterMulti,
   findClaudeBinary,
+  mayTypeInto,
   normalizeStatus,
   sameRoster,
 } from './roster';
@@ -858,6 +860,12 @@ export async function activate(
 
   let lastEntries: RosterEntry[] = [];
   let haveRoster = false;
+  /** Did the LAST roster fetch succeed? Not the same fact as `haveRoster`,
+   *  which stays true forever once one fetch has landed: a failed fetch keeps
+   *  the previous snapshot on purpose (onResult), so anything that reads an
+   *  ABSENCE from `lastEntries` as evidence — mayTypeInto's no-row arm — has
+   *  to know whether anybody actually looked. False before the first fetch. */
+  let lastFetchOk = false;
   /** An editorial change (label / hidden / recorded edge) arrived since the
    *  last build — those live only in `records`, so a byte-identical roster
    *  still has to be re-rendered. */
@@ -3164,6 +3172,41 @@ export async function activate(
       logError('extension.codexHooksAvailable', err);
     }
     return codexBin() !== null;
+  };
+
+  /**
+   * Can a CODEX session's permission prompt reach Flock at all?
+   *
+   * The one input to `mayTypeInto`'s Codex arm, and the reason that arm
+   * exists: `PermissionRequest` is the ONLY thing that can ever put a Codex
+   * row at `waiting` — the rollout tail's whole vocabulary is busy|idle, and a
+   * Codex approval prompt happens mid-task, so without the hook the row reads
+   * `busy` with a dialog on screen. Two facts, and both are needed:
+   *
+   *   installed   the hook entries are in the Codex homes (a separate consent
+   *               from the Claude hooks, off until the user gives it).
+   *   live        a Codex hook event has actually ARRIVED recently
+   *               (HooksManager.codexHooksActive). Installing cannot establish
+   *               this: the entry has to be trusted inside a Codex session,
+   *               which only the user can do — so "installed" alone would let
+   *               an untrusted install re-open the hole while claiming it was
+   *               shut.
+   *
+   * Window-wide rather than per-session, which is the residual: one hooked
+   * Codex session firing events vouches for a second Codex session in a home
+   * that has no hooks. Narrowing that needs a per-session trust fact nothing
+   * currently records.
+   */
+  const codexPromptsVisible = (): boolean => {
+    try {
+      return (
+        codexHooksManager.getState().installed === true &&
+        hooksManager.codexHooksActive()
+      );
+    } catch (err) {
+      logError('extension.codexPromptsVisible', err);
+      return false;
+    }
   };
 
   const hookEventSink = (e: HookEvent): void => {
@@ -6662,8 +6705,53 @@ export async function activate(
       }
       return false;
     },
-    sendTextToSession: (sessionId, text) =>
-      chainAliases(sessionId).some((id) => registry.sendText(id, text)),
+    // The ONE extension → live-session channel, and it is keystrokes: the
+    // registry types the string and presses Enter. So the STATE of the target
+    // is asked before anything is typed — a session showing a permission
+    // dialog is answering a question, and Enter into that dialog is Flock
+    // authorising a tool call on the user's behalf, unattended. `mayTypeInto`
+    // owns that rule (src/roster.ts, beside the decision table it shares) and
+    // this is where the facts it asks for are gathered; the placement is what
+    // covers all four callers of the channel at once, but the status it reads
+    // is still a snapshot up to one poll interval old, so the sub-poll race is
+    // narrowed here rather than closed. The chain's row is what is looked up, exactly as the
+    // idle-chat sweep does, because the terminal is bound under the launch-
+    // time id while the roster reports whichever generation is running.
+    //
+    // A refusal is a REASON, not a false: `'waiting'` is reachable with the
+    // tab open and visible, and a caller that reported that as "no terminal in
+    // this window" would be telling the user something they can see is untrue.
+    // See SendTextOutcome.
+    sendTextToSession: (sessionId, text): SendTextOutcome => {
+      const aliases = chainAliases(sessionId);
+      const entry = lastEntries.find((e) => aliases.includes(e.sessionId));
+      const status =
+        entry === undefined ? ('unknown' as const) : normalizeStatus(entry).status;
+      // Asked over the chain: a Codex conversation that re-keyed carries the
+      // provider on the generation the record was written for.
+      const provider = aliases
+        .map((id) => sessionProviderFor(id))
+        .find((p) => p !== undefined);
+      const verdict = mayTypeInto({
+        status,
+        row: entry !== undefined,
+        rosterOk: lastFetchOk,
+        ...(provider !== undefined ? { provider } : {}),
+        promptsVisible: provider === 'codex' ? codexPromptsVisible() : true,
+      });
+      if (verdict !== 'ok') {
+        log(
+          'sendText: refused for',
+          shortId(sessionId),
+          `— ${verdict} (status '${status}', provider '${provider ?? 'claude'}',` +
+            ` row ${String(entry !== undefined)})`,
+        );
+        return verdict;
+      }
+      return aliases.some((id) => registry.sendText(id, text))
+        ? 'sent'
+        : 'no-terminal';
+    },
     // The CLOSE verb means "end this session" — for a wrapped terminal the
     // dispose only detaches, so the kill intent rides along. The workspace
     // sweep calls the registry directly, without it.
@@ -7393,16 +7481,40 @@ export async function activate(
   // launchSession so a dispatched session takes the same account-safe path
   // every clicked one does (pin backfill, parked-alias attach); the entry's
   // id becomes the session id — minted at queue time, so a crash between
-  // decide and launch cannot double-start.
+  // decide and launch cannot double-start. A minted id is not enough against
+  // the OTHER double-start, though: every open window runs one of these over
+  // the same store and wakes on the same reset time, so the host claims the
+  // entry through the store and re-reads it before launching (`claim` below).
   dispatchHost = new DispatchHost({
     pending: () => store.dispatchEntries().filter((d) => d.done === undefined),
+    // The claim, and the identity it is written under. Every window runs one
+    // of these hosts over the one shared store, so the store is where "this
+    // entry is mine to launch" has to be decided; the windowId is minted once
+    // per activation (registerFocusIntegration, far above) and is exactly the
+    // identity window records are already namespaced by.
+    windowId: focusIntegration.windowId,
+    claim: (id) => store.claimDispatch(id, focusIntegration.windowId),
+    release: (id) => store.releaseDispatchClaim(id, focusIntegration.windowId),
     settle: (id, done) => store.settleDispatch(id, done),
+    // The SCOPE FENCE as a question the host may ask before it decides, so a
+    // folder this window cannot open never spends the account's one launch
+    // per round nor blocks the entry behind it. One line, and the same
+    // predicate the launch below re-asks as its backstop.
+    canHost: (entry) => !outsideScope(scopeFolders(), entry.cwd),
     profiles: () => accountDeps.accounts(),
     usageMap: () => accountDeps.usageMap(),
     refreshUsage: (profiles, force) => accountDeps.refreshUsage(profiles, force),
     defaultRouting: () => accountDeps.defaultRouting(),
     launch: async (l) => {
       const entry = l.entry;
+      // THE SCOPE FENCE, asked before anything is minted. `launchSession`
+      // enforces it as the backstop under every verb, but it answers `null`
+      // for a refusal and for a failed bind alike — and the dispatcher's
+      // retry loop must not treat "this is the wrong window" as a hiccup it
+      // can outlive, or a folder-mode window retries the same entry every
+      // five minutes for as long as it is open while the entry looks queued
+      // and healthy. Same predicate the fence itself uses, one call.
+      if (outsideScope(scopeFolders(), entry.cwd)) return 'fenced';
       const title = entry.title ?? defaultSessionTitle(entry.cwd, []);
       await commandDeps.recordLaunch(entry.id, null, entry.cwd);
       await commandDeps.upsertRecord(entry.id, { title });
@@ -7417,14 +7529,14 @@ export async function activate(
           ? { provider: 'codex' as const }
           : {}),
       });
-      if (!binding) return false;
+      if (!binding) return 'failed';
       try {
         await accountDeps.pinSession(entry.id, l.profile.id);
       } catch (err) {
         logError('dispatch.pinSession', err);
       }
       refreshNow();
-      return true;
+      return 'launched';
     },
     now: () => Date.now(),
     notify: (m) => void vscode.window.showInformationMessage(m),
@@ -7900,10 +8012,14 @@ export async function activate(
   const onResult = (rawResult: RosterResult): void => {
     if (!rawResult.ok) {
       // Keep the last good forest — the tree must not flash empty because the
-      // CLI was briefly unavailable.
+      // CLI was briefly unavailable. The flag is how a reader tells "no row
+      // for this session" from "nobody looked": the rows below are the old
+      // ones, so an absence in them proves nothing until a fetch succeeds.
+      lastFetchOk = false;
       log('roster: fetch failed —', rawResult.error ?? 'unknown error');
       return;
     }
+    lastFetchOk = true;
 
     // Codex rows join HERE, before anything reads the entries, so change
     // detection, re-association, the forest and every consumer past this point

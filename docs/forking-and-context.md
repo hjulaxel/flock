@@ -432,6 +432,17 @@ it:
   line in the Flock output channel. Those are the ordinary cases, not the edge
   cases, which is why `forkNoteDeliverable` is its own predicate and why the
   setting is off by default.
+- **It is never sent to a parent that is holding a prompt.** Because the note
+  ends in Enter, a note arriving while the parent is asking *"Run this command?
+  Yes / No"* would answer it, and Flock answering a permission prompt for you is
+  not a thing this channel is allowed to do. A parent that is waiting is
+  refused, and so are the two states where Flock cannot be sure it is not
+  waiting: a Codex parent without the Codex hooks installed, whose prompts are
+  invisible from outside, and a parent that has dropped off the roster, where
+  `/exit` may have left your own shell in that pane. The rule lives in one
+  predicate (`mayTypeInto`, src/roster.ts) rather than in each caller. A
+  refusal costs a note, not a retry — and because the roster is polled, a
+  prompt you have just answered can still refuse for one poll.
 
 And note what the close-with-summary path is **not**: Flock cannot ask a model
 for a summary. It has no API client. What it does is send `/compact` and read

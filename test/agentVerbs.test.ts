@@ -15,6 +15,7 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -22,19 +23,24 @@ import * as process from 'node:process';
 
 import {
   AgentVerbsManager,
+  ENV_VERB_TOKEN,
   MAX_AGENT_FORKS,
   MAX_AGENT_PROMPT_CHARS,
   MAX_AGENT_TITLE_CHARS,
   VERBS_VERSION,
+  adoptVerbToken,
   clampForkCount,
+  ensureVerbToken,
   fallbackHome,
   parseRequestText,
   renderSkillMd,
   renderVerbScript,
   requestsDir,
+  verbTokenVerdict,
   verbsScriptPath,
   verbsSkillDir,
 } from '../src/agentVerbs';
+import { setLogSink } from '../src/log';
 import type {
   AgentForkOutcome,
   AgentForkRequest,
@@ -50,7 +56,32 @@ import type {
 } from '../src/types';
 
 const SID = '0f0000a1-0000-4000-8000-0000000000a1';
+const OTHER_SID = '0f0000d1-0000-4000-8000-0000000000d1';
 const REQ_ID = '11111111-2222-4333-8444-555555555555';
+
+/** The launch token this "window" holds for a session — the same call
+ *  terminals.launch() makes when it stamps the session's environment, and
+ *  idempotent, so asking again is asking for the value that was stamped.
+ *  A test that wants a session Flock never launched simply never calls it. */
+const tokenFor = (sessionId: string): string => ensureVerbToken(sessionId);
+
+/** A well-formed token that belongs to nobody. */
+const STRANGER_TOKEN = 'c0ffee'.padEnd(64, '0');
+
+/** A valid v2 fork request for `node`, with the proof in it. */
+function forkRequest(
+  over: Record<string, unknown> = {},
+  node: string = SID,
+): Record<string, unknown> {
+  return {
+    v: 2,
+    verb: 'fork',
+    node,
+    token: tokenFor(node),
+    count: 1,
+    ...over,
+  };
+}
 
 /** Mode bits are a POSIX idea; on Windows Node reports 0666/0444 whatever
  *  the ACL says, so the permission tests have nothing to measure there. */
@@ -182,36 +213,74 @@ function makeExecutor(opts: { bound?: boolean; fail?: string } = {}) {
 
 describe('parseRequestText', () => {
   it('accepts a minimal fork request', () => {
-    const parsed = parseRequestText(
-      JSON.stringify({ v: 1, verb: 'fork', node: SID, count: 3 }),
-    );
-    expect(parsed).toEqual({ verb: 'fork', node: SID, count: 3 });
+    const parsed = parseRequestText(JSON.stringify(forkRequest({ count: 3 })));
+    expect(parsed).toEqual({
+      verb: 'fork',
+      node: SID,
+      token: tokenFor(SID),
+      count: 3,
+    });
   });
 
   it('carries the prompt through', () => {
     const parsed = parseRequestText(
-      JSON.stringify({ v: 1, verb: 'fork', node: SID, count: 1, prompt: 'go' }),
+      JSON.stringify(forkRequest({ prompt: 'go' })),
     );
-    expect(parsed).toEqual({ verb: 'fork', node: SID, count: 1, prompt: 'go' });
+    expect(parsed).toEqual({
+      verb: 'fork',
+      node: SID,
+      token: tokenFor(SID),
+      count: 1,
+      prompt: 'go',
+    });
   });
 
   it('rejects junk, wrong versions, unknown verbs and missing sessions', () => {
     expect(parseRequestText('not json')).toHaveProperty('error');
     expect(parseRequestText('[1,2]')).toHaveProperty('error');
     expect(
-      parseRequestText(JSON.stringify({ v: 2, verb: 'fork', node: SID })),
+      parseRequestText(JSON.stringify(forkRequest({ v: 3 }))),
     ).toHaveProperty('error');
     expect(
-      parseRequestText(JSON.stringify({ v: 1, verb: 'merge', node: SID })),
+      parseRequestText(JSON.stringify(forkRequest({ verb: 'merge' }))),
     ).toHaveProperty('error');
     expect(
-      parseRequestText(JSON.stringify({ v: 1, verb: 'fork', node: 'nope' })),
+      parseRequestText(JSON.stringify(forkRequest({ node: 'nope' }))),
     ).toHaveProperty('error');
+  });
+
+  it('rejects v1: a CLI that old cannot have carried a token', () => {
+    // The whole v4 wire format, which is now exactly the request a forger
+    // would hand-write. Refused by VERSION, so "no token" below means one
+    // thing only.
+    const parsed = parseRequestText(
+      JSON.stringify({ v: 1, verb: 'fork', node: SID, count: 3 }),
+    );
+    expect(parsed).toEqual({ error: 'unknown request version' });
+  });
+
+  it('refuses a request with no launch token, or a malformed one', () => {
+    // The identity check v4 had was `isSessionId(node)` and nothing else —
+    // i.e. anything that could type a uuid could name any session on the
+    // machine. A name is not a proof.
+    const without = { ...forkRequest() };
+    delete without['token'];
+    expect(parseRequestText(JSON.stringify(without))).toEqual({
+      error:
+        'the request carries no launch token — only a session Flock started ' +
+        'can ask Flock to fork it',
+    });
+    for (const bad of ['', 'nope', 'A'.repeat(64), 'ab', 7, null, {}]) {
+      expect(
+        parseRequestText(JSON.stringify(forkRequest({ token: bad }))),
+        JSON.stringify(bad),
+      ).toHaveProperty('error');
+    }
   });
 
   it('clamps the count instead of refusing it', () => {
     const at = (count: unknown) =>
-      parseRequestText(JSON.stringify({ v: 1, verb: 'fork', node: SID, count }));
+      parseRequestText(JSON.stringify(forkRequest({ count })));
     expect(at(0)).toMatchObject({ count: 1 });
     expect(at(999)).toMatchObject({ count: MAX_AGENT_FORKS });
     expect(at('three')).toMatchObject({ count: 1 });
@@ -221,17 +290,14 @@ describe('parseRequestText', () => {
 
   it('carries fork names through, trimmed', () => {
     const parsed = parseRequestText(
-      JSON.stringify({
-        v: 1,
-        verb: 'fork',
-        node: SID,
-        count: 2,
-        titles: [' redis cache ', 'SQL approach'],
-      }),
+      JSON.stringify(
+        forkRequest({ count: 2, titles: [' redis cache ', 'SQL approach'] }),
+      ),
     );
     expect(parsed).toEqual({
       verb: 'fork',
       node: SID,
+      token: tokenFor(SID),
       count: 2,
       titles: ['redis cache', 'SQL approach'],
     });
@@ -239,9 +305,7 @@ describe('parseRequestText', () => {
 
   it('refuses names that do not line up one-per-fork', () => {
     const at = (count: number, titles: unknown) =>
-      parseRequestText(
-        JSON.stringify({ v: 1, verb: 'fork', node: SID, count, titles }),
-      );
+      parseRequestText(JSON.stringify(forkRequest({ count, titles })));
     expect(at(3, ['a', 'b'])).toHaveProperty('error');
     expect(at(1, [])).toHaveProperty('error');
     expect(at(2, ['a', 7])).toHaveProperty('error');
@@ -254,15 +318,48 @@ describe('parseRequestText', () => {
   it('refuses an oversized or non-string prompt — never truncates one', () => {
     const long = 'x'.repeat(MAX_AGENT_PROMPT_CHARS + 1);
     expect(
-      parseRequestText(
-        JSON.stringify({ v: 1, verb: 'fork', node: SID, prompt: long }),
-      ),
+      parseRequestText(JSON.stringify(forkRequest({ prompt: long }))),
     ).toHaveProperty('error');
     expect(
-      parseRequestText(
-        JSON.stringify({ v: 1, verb: 'fork', node: SID, prompt: 7 }),
-      ),
+      parseRequestText(JSON.stringify(forkRequest({ prompt: 7 }))),
     ).toHaveProperty('error');
+  });
+});
+
+describe('verbTokenVerdict', () => {
+  it('vouches for a session this window launched, and for nothing else', () => {
+    const launched = '0f0000b1-0000-4000-8000-0000000000b1';
+    const never = '0f0000b2-0000-4000-8000-0000000000b2';
+    const token = tokenFor(launched);
+
+    expect(token).toMatch(/^[0-9a-f]{64}$/);
+    expect(verbTokenVerdict(launched, token)).toBe('ok');
+    // The attack this exists for: a session that knows ITS token and another
+    // session's id (they are listed by `claude agents --json`).
+    expect(verbTokenVerdict(launched, tokenFor(never))).toBe('mismatch');
+    expect(verbTokenVerdict(launched, STRANGER_TOKEN)).toBe('mismatch');
+    expect(verbTokenVerdict(launched, undefined)).toBe('mismatch');
+    expect(verbTokenVerdict(launched, token.toUpperCase())).toBe('mismatch');
+    // A session this window never launched: no opinion, so the watcher
+    // leaves the request alone rather than answering for another window.
+    const unknown = '0f0000b3-0000-4000-8000-0000000000b3';
+    expect(verbTokenVerdict(unknown, STRANGER_TOKEN)).toBe('unknown');
+  });
+
+  it('adopts a token once — a second source of truth never overwrites it', () => {
+    // The window-reload path (terminals.bind) re-learns a token from a
+    // revived terminal's creationOptions. The live process holds the fact, so
+    // the first value in wins and anything shaped wrong is ignored.
+    const adopted = '0f0000b4-0000-4000-8000-0000000000b4';
+    adoptVerbToken(adopted, 'not a token');
+    expect(verbTokenVerdict(adopted, 'not a token')).toBe('unknown');
+    adoptVerbToken(adopted, STRANGER_TOKEN);
+    expect(verbTokenVerdict(adopted, STRANGER_TOKEN)).toBe('ok');
+    adoptVerbToken(adopted, 'd'.repeat(64));
+    expect(verbTokenVerdict(adopted, 'd'.repeat(64))).toBe('mismatch');
+    // And nothing is remembered for a name that is not a session id.
+    adoptVerbToken('nope', STRANGER_TOKEN);
+    expect(verbTokenVerdict('nope', STRANGER_TOKEN)).toBe('unknown');
   });
 });
 
@@ -339,6 +436,51 @@ describe('the rendered files', () => {
     expect(script).toContain('fs.mkdirSync(DIR, { recursive: true, mode: 0o700 });');
     expect(script).toContain("{ mode: 0o600 });");
     expect(VERBS_VERSION).toBeGreaterThanOrEqual(4);
+  });
+
+  it('v5: the CLI reads the launch token and puts it in a v2 request', () => {
+    // The rendered CLI is the only place the token can come from — it is a
+    // generated artifact, so a bump has to rewrite installed copies (the
+    // selfHeal tests above are what make that true).
+    const script = renderVerbScript();
+    expect(script).toContain(ENV_VERB_TOKEN);
+    expect(script).toContain('token: proof.token');
+    expect(script).toContain('v: 2');
+    // And it never prints the thing: the only mention is the read and the
+    // assignment into the body.
+    expect(script.match(/LINEAGE_VERB_TOKEN/g)).toHaveLength(1);
+    expect(script).not.toContain('console.log(proof');
+    expect(VERBS_VERSION).toBeGreaterThanOrEqual(5);
+  });
+
+  it('pins the rendered artifacts to the version, so text cannot change without a bump', () => {
+    // WHY A FINGERPRINT. The two assertions above are floors
+    // (`toBeGreaterThanOrEqual`), which is right for "v4's mode arguments are
+    // still there" but does not do the job the version exists for: the CLI and
+    // the skill are files written into the user's home, and `selfHeal` rewrites
+    // an installed copy only when the STORED version is older than
+    // VERBS_VERSION. Change the rendered text without bumping and every
+    // existing install keeps running the old script for ever, silently — the
+    // failure this suite cannot otherwise see.
+    //
+    // So: any edit to either artifact changes this hash and fails here. Bump
+    // VERBS_VERSION and update both constants in the same commit, which is the
+    // whole point — the two facts move together or the test says so.
+    const fingerprint = createHash('sha256')
+      .update(renderVerbScript())
+      .update(renderSkillMd('/home/u/.lineage/flock-verbs.mjs'))
+      .digest('hex');
+    expect({ version: VERBS_VERSION, fingerprint }).toEqual({
+      version: 6,
+      fingerprint: '563db0743df47c7077a4971f7fb068bcd7d2c162124b3d47cc3444197e0d44d6',
+    });
+  });
+
+  it('v5: the skill tells the model the verb needs a Flock-launched session', () => {
+    const skill = renderSkillMd('/home/u/.lineage/flock-verbs.mjs');
+    expect(skill).toContain('only works in a session Flock itself launched');
+    // Never the variable name, and never a way to fish for the value.
+    expect(skill).not.toContain(ENV_VERB_TOKEN);
   });
 });
 
@@ -438,15 +580,14 @@ describe('the request watcher', () => {
     const { executor, calls } = makeExecutor({ bound: true });
     manager.startWatcher(executor);
 
-    writeRequest(home, {
-      v: 1,
-      verb: 'fork',
-      node: SID,
-      count: 2,
-      prompt: 'start with the tests',
-    });
+    writeRequest(
+      home,
+      forkRequest({ count: 2, prompt: 'start with the tests' }),
+    );
     expect(await until(() => fs.existsSync(replyPath(home)))).toBe(true);
 
+    // The token stopped at the watcher: the executor runs the fork and never
+    // holds the secret.
     expect(calls).toEqual([
       { node: SID, count: 2, prompt: 'start with the tests' },
     ]);
@@ -461,12 +602,15 @@ describe('the request watcher', () => {
   });
 
   it('a window that does not host the session still answers, after its head start', async () => {
+    // Hosting decides claim PRIORITY, holding the launch token decides
+    // eligibility — a window that launched a session it no longer hosts (it
+    // was parked, or its tab was closed) still answers for it.
     const home = tempHome();
     const { manager } = makeManager(home, { claimDelayMs: 30 });
     const { executor, calls } = makeExecutor({ bound: false });
     manager.startWatcher(executor);
 
-    writeRequest(home, { v: 1, verb: 'fork', node: SID, count: 1 });
+    writeRequest(home, forkRequest());
     expect(await until(() => fs.existsSync(replyPath(home)))).toBe(true);
     expect(calls).toHaveLength(1);
   });
@@ -480,7 +624,7 @@ describe('the request watcher', () => {
     behind.manager.startWatcher(loser.executor);
     bound.manager.startWatcher(winner.executor);
 
-    writeRequest(home, { v: 1, verb: 'fork', node: SID, count: 3 });
+    writeRequest(home, forkRequest({ count: 3 }));
     expect(await until(() => fs.existsSync(replyPath(home)))).toBe(true);
     // Give the slow window's claim timer time to fire into the rename ENOENT.
     await new Promise((r) => setTimeout(r, 500));
@@ -510,7 +654,7 @@ describe('the request watcher', () => {
       requestTtlMs: 50,
     });
     const { executor, calls } = makeExecutor({ bound: true });
-    const file = writeRequest(home, { v: 1, verb: 'fork', node: SID, count: 1 });
+    const file = writeRequest(home, forkRequest());
     const old = new Date(Date.now() - 60_000);
     fs.utimesSync(file, old, old);
     manager.startWatcher(executor);
@@ -528,11 +672,217 @@ describe('the request watcher', () => {
     const { executor } = makeExecutor({ bound: true, fail: 'no transcript' });
     manager.startWatcher(executor);
 
-    writeRequest(home, { v: 1, verb: 'fork', node: SID, count: 1 });
+    writeRequest(home, forkRequest());
     expect(await until(() => fs.existsSync(replyPath(home)))).toBe(true);
     const reply = readReply(home);
     expect(reply.ok).toBe(false);
     expect(reply.error).toBe('no transcript');
+  });
+});
+
+// ------------------------------------------------- provenance (v5)
+
+describe('a fork request must prove it came from the session it names', () => {
+  // THE HOLE this closes: ~/.lineage/requests is writable by anything running
+  // as this user, session ids are discoverable (`claude agents --json`), and
+  // v4 checked only that `node` was uuid-SHAPED. So one Bash step, sub-agent
+  // or MCP server inside session A could ask for eight forks of session B
+  // with an opening prompt of its choosing — and the verb forks quietly.
+  //
+  // Every case below writes the request file directly, which is exactly what
+  // the attacker can do; the difference is only ever what is inside it.
+
+  afterEach(() => setLogSink(null));
+
+  it('the right token forks', async () => {
+    const home = tempHome();
+    const { manager } = makeManager(home);
+    const { executor, calls } = makeExecutor({ bound: true });
+    manager.startWatcher(executor);
+
+    writeRequest(home, forkRequest({ count: 2 }));
+    expect(await until(() => fs.existsSync(replyPath(home)))).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(readReply(home).ok).toBe(true);
+  });
+
+  it('refuses a request with no token at all', async () => {
+    const home = tempHome();
+    const { manager } = makeManager(home, { claimDelayMs: 10 });
+    const { executor, calls } = makeExecutor({ bound: true });
+    manager.startWatcher(executor);
+
+    const body = { ...forkRequest({ count: 8 }) };
+    delete body['token'];
+    writeRequest(home, body);
+
+    expect(await until(() => fs.existsSync(replyPath(home)))).toBe(true);
+    expect(calls).toHaveLength(0);
+    const reply = readReply(home);
+    expect(reply.ok).toBe(false);
+    expect(String(reply.error)).toContain('no launch token');
+  });
+
+  it('refuses a made-up token for a session it did launch', async () => {
+    const home = tempHome();
+    const { manager } = makeManager(home, { claimDelayMs: 10 });
+    const { executor, calls } = makeExecutor({ bound: true });
+    tokenFor(SID); // this window launched it, so it has an opinion
+    manager.startWatcher(executor);
+
+    writeRequest(home, forkRequest({ token: STRANGER_TOKEN }));
+
+    expect(await until(() => fs.existsSync(replyPath(home)))).toBe(true);
+    expect(calls).toHaveLength(0);
+    const reply = readReply(home);
+    expect(reply.ok).toBe(false);
+    // Worded for the BENIGN cause it usually is — another window re-attached
+    // the terminal, so the running process still holds that window's token —
+    // and pointing at the one thing that fixes it. Not an accusation: this
+    // window's evidence is that the token is not the one IT stamped, which is
+    // not evidence that nobody stamped it.
+    expect(String(reply.error)).toContain('re-attached by another Flock window');
+    expect(String(reply.error)).toContain('relaunch');
+  });
+
+  // THE REFUSAL MUST NOT RACE THE WINDOW THAT CAN HONOUR THE REQUEST. Every
+  // other error verdict (too large, expired, malformed) is one every window
+  // reaches identically, so arming it at the claim delay is harmless. A
+  // MISMATCH is window-DEPENDENT: after a park and restore by a second window,
+  // that window minted its own token for the session while the running process
+  // still holds the launching window's — so it holds the WRONG token and would
+  // otherwise arm a refusal at exactly the delay the window with the RIGHT
+  // token uses. The refusal renames and deletes the file, so winning that race
+  // turns a genuine self-fork into an intermittent accusation.
+  //
+  // The token table is module scope — one per extension host, which is what
+  // makes it private to a window — so two windows cannot be modelled in one
+  // process. What is pinned instead is the ORDERING that makes the race
+  // unloseable: a claimable request always gets its answer before a mismatched
+  // one gets its refusal, however slow the machine is.
+  it('arms a mismatch refusal strictly after any claim could land', async () => {
+    const home = tempHome();
+    const { manager } = makeManager(home, { claimDelayMs: 120 });
+    const { executor, calls } = makeExecutor({ bound: true });
+    tokenFor(SID); // this window launched SID, so it has an opinion
+    manager.startWatcher(executor);
+
+    const MISMATCH = '33333333-3333-4333-8444-555555555555';
+    // The mismatched one FIRST, so it has every advantage.
+    writeRequest(home, forkRequest({ token: STRANGER_TOKEN }), MISMATCH);
+    writeRequest(home, forkRequest({}, OTHER_SID));
+
+    // The honourable request is answered...
+    expect(await until(() => fs.existsSync(replyPath(home)))).toBe(true);
+    expect(calls).toHaveLength(1);
+    // ...while the refusal is still waiting out its longer delay, even though
+    // its file was written first.
+    expect(fs.existsSync(replyPath(home, MISMATCH))).toBe(false);
+    // And it does land eventually — a mismatch gets an answer, not a timeout.
+    expect(await until(() => fs.existsSync(replyPath(home, MISMATCH)))).toBe(
+      true,
+    );
+    expect(readReply(home, MISMATCH).ok).toBe(false);
+  });
+
+  it('refuses a token that belongs to a DIFFERENT session', async () => {
+    // The whole attack in one line: session OTHER_SID holds its own token
+    // (it inherited it, legitimately), and names SID in the request.
+    const home = tempHome();
+    const { manager } = makeManager(home, { claimDelayMs: 10 });
+    const { executor, calls } = makeExecutor({ bound: true });
+    manager.startWatcher(executor);
+
+    writeRequest(
+      home,
+      forkRequest({ token: tokenFor(OTHER_SID), count: MAX_AGENT_FORKS }),
+    );
+
+    expect(await until(() => fs.existsSync(replyPath(home)))).toBe(true);
+    expect(calls).toHaveLength(0);
+    expect(readReply(home).ok).toBe(false);
+  });
+
+  it('a session no window launched is left alone, not answered', async () => {
+    // This window cannot tell a real request from a forged one for a session
+    // it never launched — another window may hold that token — so it claims
+    // nothing. Nobody answering is what the CLI's 30-second withdrawal is
+    // for, and it reports exactly that.
+    const home = tempHome();
+    const NEVER = '0f0000f1-0000-4000-8000-0000000000f1';
+    const { manager } = makeManager(home, { claimDelayMs: 10 });
+    const { executor, calls } = makeExecutor({ bound: true });
+    manager.startWatcher(executor);
+
+    const file = writeRequest(home, {
+      v: 2,
+      verb: 'fork',
+      node: NEVER,
+      token: STRANGER_TOKEN,
+      count: 3,
+    });
+
+    await new Promise((r) => setTimeout(r, 200));
+    expect(calls).toHaveLength(0);
+    expect(fs.existsSync(replyPath(home))).toBe(false);
+    expect(fs.existsSync(file)).toBe(true); // still there for its own window
+  });
+
+  it('says it once, not once per tick, about a request it left alone', async () => {
+    // The file it declined to claim stays in the directory for up to the
+    // CLI's 30 seconds, and the fallback tick re-reads the directory every
+    // couple of seconds. One line, then silence.
+    const lines: string[] = [];
+    setLogSink((line) => lines.push(line));
+    const home = tempHome();
+    const NEVER = '0f0000f2-0000-4000-8000-0000000000f2';
+    const { manager } = makeManager(home, { claimDelayMs: 10, fallbackMs: 20 });
+    manager.startWatcher(makeExecutor({ bound: true }).executor);
+
+    writeRequest(home, {
+      v: 2,
+      verb: 'fork',
+      node: NEVER,
+      token: STRANGER_TOKEN,
+      count: 1,
+    });
+    await new Promise((r) => setTimeout(r, 220));
+
+    expect(
+      lines.filter((l) => l.includes('no launch token here')),
+    ).toHaveLength(1);
+  });
+
+  it('never writes a token to the log, the reply or a message', async () => {
+    const lines: string[] = [];
+    setLogSink((line) => lines.push(line));
+    const home = tempHome();
+    const { manager } = makeManager(home, { claimDelayMs: 10 });
+    const { executor } = makeExecutor({ bound: true });
+    manager.startWatcher(executor);
+
+    // One honoured request and one refused one, so both paths are covered.
+    writeRequest(home, forkRequest({ prompt: 'go' }));
+    expect(await until(() => fs.existsSync(replyPath(home)))).toBe(true);
+    const goodReply = fs.readFileSync(replyPath(home), 'utf8');
+
+    const second = '22222222-2222-4333-8444-555555555555';
+    writeRequest(home, forkRequest({ token: STRANGER_TOKEN }), second);
+    expect(await until(() => fs.existsSync(replyPath(home, second)))).toBe(
+      true,
+    );
+    const badReply = fs.readFileSync(replyPath(home, second), 'utf8');
+
+    const log = lines.join('\n');
+    expect(lines.length).toBeGreaterThan(0); // the sink is really installed
+    // It did explain — and the line says what this window can actually see
+    // ("not the token stamped here") rather than pronouncing a forgery.
+    expect(log).toContain('does not carry the token stamped here');
+    for (const secret of [tokenFor(SID), STRANGER_TOKEN]) {
+      expect(log).not.toContain(secret);
+      expect(goodReply).not.toContain(secret);
+      expect(badReply).not.toContain(secret);
+    }
   });
 });
 
@@ -609,7 +959,7 @@ function forkDeps(over: { launchFails?: boolean } = {}) {
     },
     focusSession: () => false,
     renameTerminal: async () => false,
-    sendTextToSession: () => false,
+    sendTextToSession: () => 'no-terminal',
     closeTerminal: () => false,
     focusWindowFor: async () => false,
     openProject: async () => undefined,
@@ -726,6 +1076,18 @@ describe('the rendered CLI', () => {
    *  still gives up at 8 s, well inside this. */
   const CLI_TIMEOUT_MS = 20_000;
 
+  /** A launch token as the extension would have stamped it: 32 bytes of hex.
+   *  Spelled out rather than minted so the assertions can name the value the
+   *  child is expected to copy into its request. */
+  const CLI_TOKEN = 'ab'.repeat(32);
+
+  /** The environment a Flock-launched session gives the CLI: the node id and
+   *  the proof, which is the only pair the CLI accepts. */
+  const inSession = (): Record<string, string> => ({
+    LINEAGE_NODE_ID: SID,
+    [ENV_VERB_TOKEN]: CLI_TOKEN,
+  });
+
   /** The env the CLI child runs with. Minimal ON PURPOSE: the test runner may
    *  itself live inside tmux or a Flock terminal, and inheriting that env
    *  would hand the script an identity the test did not choose.
@@ -813,7 +1175,7 @@ describe('the rendered CLI', () => {
     const done = runCli(
       home,
       ['fork', '--count', '2', '--prompt', 'hello'],
-      { LINEAGE_NODE_ID: SID },
+      inSession(),
     );
 
     // Play the extension's part: claim the request, write the reply.
@@ -831,7 +1193,7 @@ describe('the rendered CLI', () => {
       fs.readFileSync(path.join(dir, reqName), 'utf8'),
     ) as Record<string, unknown>;
     expect(body).toMatchObject({
-      v: 1,
+      v: 2,
       verb: 'fork',
       node: SID,
       count: 2,
@@ -857,7 +1219,7 @@ describe('the rendered CLI', () => {
     const done = runCli(
       home,
       ['fork', '--prompt', 'the plan nobody else should read'],
-      { LINEAGE_NODE_ID: SID },
+      inSession(),
     );
     const dir = requestsDir(home);
     expect(
@@ -887,7 +1249,7 @@ describe('the rendered CLI', () => {
     fs.mkdirSync(path.dirname(verbsScriptPath(home)), { recursive: true });
     fs.writeFileSync(verbsScriptPath(home), renderVerbScript());
 
-    const done = runCli(home, ['fork'], { LINEAGE_NODE_ID: SID });
+    const done = runCli(home, ['fork'], inSession());
     const dir = requestsDir(home);
     expect(
       await until(() =>
@@ -908,14 +1270,20 @@ describe('the rendered CLI', () => {
     expect(result.stderr).toContain('no transcript');
   }, CLI_TIMEOUT_MS);
 
-  it('says so when it cannot tell which session it is in', async () => {
+  it('says so when the environment names no Flock launch at all', async () => {
     const home = tempHome();
     fs.mkdirSync(path.dirname(verbsScriptPath(home)), { recursive: true });
     fs.writeFileSync(verbsScriptPath(home), renderVerbScript());
 
     const result = await runCli(home, ['fork'], {});
     expect(result.code).toBe(1);
-    expect(result.stderr).toContain('Could not tell which session');
+    // NOT "Flock did not launch this session", which is false for the three
+    // commonest ways a live session loses its stamp — running when the
+    // extension updated, revived after an app restart, re-attached in another
+    // window — and which the model relays to the user as fact.
+    expect(result.stderr).toContain('no Flock launch stamp');
+    expect(result.stderr).toContain('relaunched from the Flock sidebar');
+    expect(result.stderr).not.toContain('Flock did not launch this session');
     // And it left no request behind for a window to trip over later.
     expect(
       fs.existsSync(requestsDir(home)) &&
@@ -931,7 +1299,7 @@ describe('the rendered CLI', () => {
     const done = runCli(
       home,
       ['fork', '--name', 'redis cache', '--name', 'SQL approach'],
-      { LINEAGE_NODE_ID: SID },
+      inSession(),
     );
     const dir = requestsDir(home);
     expect(
@@ -971,7 +1339,7 @@ describe('the rendered CLI', () => {
     const result = await runCli(
       home,
       ['fork', '--count', '3', '--name', 'only one'],
-      { LINEAGE_NODE_ID: SID },
+      inSession(),
     );
     expect(result.code).toBe(1);
     expect(result.stderr).toContain('one --name per fork');
@@ -986,10 +1354,71 @@ describe('the rendered CLI', () => {
     fs.mkdirSync(path.dirname(verbsScriptPath(home)), { recursive: true });
     fs.writeFileSync(verbsScriptPath(home), renderVerbScript());
 
-    const result = await runCli(home, ['fork', '--count', '50'], {
-      LINEAGE_NODE_ID: SID,
-    });
+    const result = await runCli(home, ['fork', '--count', '50'], inSession());
     expect(result.code).toBe(1);
     expect(result.stderr).toContain('--count');
+  }, CLI_TIMEOUT_MS);
+
+  it('v5: writes the launch token it was given, and nothing else', async () => {
+    const home = tempHome();
+    fs.mkdirSync(path.dirname(verbsScriptPath(home)), { recursive: true });
+    fs.writeFileSync(verbsScriptPath(home), renderVerbScript());
+
+    const done = runCli(home, ['fork', '--count', '2'], inSession());
+    const dir = requestsDir(home);
+    expect(
+      await until(() =>
+        fs.existsSync(dir) &&
+        fs.readdirSync(dir).some((f) => /^[0-9a-f-]{36}\.json$/.test(f)),
+      ),
+    ).toBe(true);
+    const reqName = fs
+      .readdirSync(dir)
+      .find((f) => /^[0-9a-f-]{36}\.json$/.test(f))!;
+    const body = JSON.parse(
+      fs.readFileSync(path.join(dir, reqName), 'utf8'),
+    ) as Record<string, unknown>;
+    // The proof, copied verbatim out of the environment the launch stamped,
+    // on the version of the wire that carries it.
+    expect(body).toMatchObject({ v: 2, node: SID, token: CLI_TOKEN });
+
+    fs.writeFileSync(
+      path.join(dir, reqName.replace(/\.json$/, '.reply.json')),
+      JSON.stringify({ ok: true, forked: [SID, SID], titles: ['a', 'b'] }),
+    );
+    const result = await done;
+    expect(result.code).toBe(0);
+    // Not into the terminal, and not into the transcript: whatever the CLI
+    // says about the fork, it never says the secret.
+    expect(result.stdout).not.toContain(CLI_TOKEN);
+    expect(result.stderr).not.toContain(CLI_TOKEN);
+  }, CLI_TIMEOUT_MS);
+
+  it('v5: refuses to write a request when the environment has no token', async () => {
+    // A session Flock did not launch — or one launched by a Flock older than
+    // this build. v4 wrote the request anyway (it only needed an id), and the
+    // extension would now refuse it; dying here with the reason beats a
+    // 30-second wait for that refusal.
+    const home = tempHome();
+    fs.mkdirSync(path.dirname(verbsScriptPath(home)), { recursive: true });
+    fs.writeFileSync(verbsScriptPath(home), renderVerbScript());
+
+    const envs: Array<Record<string, string>> = [
+      { LINEAGE_NODE_ID: SID }, // id, no proof
+      { LINEAGE_NODE_ID: SID, [ENV_VERB_TOKEN]: 'not-a-token' },
+      { [ENV_VERB_TOKEN]: CLI_TOKEN }, // proof, no id
+      { CLAUDE_SESSION_ID: SID }, // v4 accepted this one on its own
+    ];
+    for (const env of envs) {
+      const result = await runCli(home, ['fork'], env);
+      expect(result.code, JSON.stringify(env)).toBe(1);
+      expect(result.stderr).toContain('no Flock launch stamp');
+      expect(result.stderr).not.toContain('Flock did not launch this session');
+      expect(
+        fs.existsSync(requestsDir(home)) &&
+          fs.readdirSync(requestsDir(home)).length > 0,
+        'it left a request behind',
+      ).toBe(false);
+    }
   }, CLI_TIMEOUT_MS);
 });
