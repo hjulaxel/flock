@@ -38,12 +38,24 @@ describe('windowsProcessQuery', () => {
     expect(args[args.length - 2]).toBe('-Command');
     const script = args[args.length - 1] ?? '';
     // The four facts every caller needs, and nothing that could be user input.
-    for (const token of ['Get-CimInstance Win32_Process', 'ProcessId', 'ParentProcessId', 'CommandLine', 'CreationDate', 'ConvertTo-Json']) {
+    for (const token of ['Get-CimInstance', 'Win32_Process', 'ProcessId', 'ParentProcessId', 'CommandLine', 'CreationDate', 'ConvertTo-Json']) {
       expect(script).toContain(token);
     }
     // An array even for a table of one, and UTF-8 for a path with an umlaut.
     expect(script).toContain('-InputObject @(');
     expect(script).toContain('OutputEncoding');
+  });
+
+  it('asks UTF-8 for no preamble, and CIM for four properties only', () => {
+    const script = windowsProcessQuery().at(-1) ?? '';
+    // `[Text.Encoding]::UTF8` carries a BOM and .NET writes it on the first
+    // redirected write, which made stdout unparseable and the table empty.
+    expect(script).toContain('UTF8Encoding $false');
+    expect(script).not.toContain('[System.Text.Encoding]::UTF8;');
+    // `-Property` is where the sweep's time goes: without it CIM materialises
+    // every Win32_Process column for every process, and a windows-latest
+    // runner took longer than the timeout to do it.
+    expect(script).toContain('-Property ProcessId, ParentProcessId, CommandLine, CreationDate');
   });
 });
 
@@ -69,6 +81,18 @@ describe('parseWindowsProcessJson', () => {
     expect(parseWindowsProcessJson('not json').size).toBe(0);
     expect(parseWindowsProcessJson('').size).toBe(0);
     expect(parseWindowsProcessJson('[{"ProcessId":"nope"},{"ProcessId":-1},null,5]').size).toBe(0);
+  });
+
+  it('survives a leading BOM, which is the whole table when it does not', () => {
+    // PowerShell's console encoding can put one in front of the JSON, and
+    // `JSON.parse` refuses it. The old parser caught the throw and returned
+    // nothing, so every Windows caller was told "no such process" — the
+    // descendant walk reaped nothing, the argv walk found no parent, and the
+    // failure was invisible because an empty table is a legitimate answer.
+    const table = parseWindowsProcessJson('﻿' + ROWS);
+    expect(table.get(1200)?.ppid).toBe(800);
+    // Byte for byte the same answer as without it.
+    expect([...table.keys()]).toEqual([...parseWindowsProcessJson(ROWS).keys()]);
   });
 });
 

@@ -70,6 +70,20 @@ function readState(file) {
 
 /** The verdict goes to a file, not only to the exit code: the launcher
  *  (run.mjs) cannot rely on the editor exiting, so this is what it reads. */
+/** Where the suite has got to, for the launcher to read if it never gets a
+ *  verdict at all. Overwritten, never appended: the last line is the answer.
+ *  Best effort throughout — a run must never fail because a diagnostic could
+ *  not be written. */
+function progress(phase) {
+  const file = process.env.FLOCK_SMOKE_PROGRESS;
+  if (!file) return;
+  try {
+    fs.writeFileSync(file, phase);
+  } catch {
+    // The verdict is what matters; this is only for a timeout.
+  }
+}
+
 function report(ok, message) {
   const file = process.env.FLOCK_SMOKE_RESULT;
   if (!file) return;
@@ -94,6 +108,7 @@ exports.run = async function run() {
 
 async function suite() {
   const id = `${pkg.publisher}.${pkg.name}`;
+  progress('starting — the extension host is up');
 
   // The isolation run.mjs promised, checked FIRST: every assertion below
   // exercises activation against a home directory, and if it is the real one
@@ -105,8 +120,10 @@ async function suite() {
   const ext = vscode.extensions.getExtension(id);
   assert.ok(ext, `${id} is not loaded in the test host`);
 
+  progress(`activating ${id}`);
   await ext.activate();
   assert.ok(ext.isActive, 'activate() resolved but isActive is false');
+  progress('activated; checking the contributed commands');
 
   // Every command the manifest contributes must exist, or the palette offers
   // verbs that fail with "command not found". getCommands(true) includes the
@@ -119,7 +136,9 @@ async function suite() {
 
   // One verb end to end, the cheapest one: a refresh rebuilds the tree from
   // whatever the roster says, which here is nothing.
+  progress('running lineage.refresh');
   await vscode.commands.executeCommand('lineage.refresh');
+  progress('waiting for the store to appear under the isolated home');
 
   // The machine-wide store must land under the ISOLATED home — proof that the
   // store resolved a home at all, and that it was ours, not the developer's.
@@ -129,7 +148,9 @@ async function suite() {
   assert.ok(fs.existsSync(stateFile), `no state file appeared at ${stateFile}`);
   assert.ok(readState(stateFile), `the store at ${stateFile} is not readable JSON`);
 
+  progress('making a project out of the workspace folder');
   const project = await makeAProject(stateFile);
+  progress('done — writing the verdict');
 
   return (
     `${id} ${pkg.version} activated on ${process.platform}; ` +

@@ -44,7 +44,16 @@ import { fileURLToPath } from 'node:url';
 
 /** How long the whole run may take once the editor is spawned. A cold start
  *  on a CI runner is ten to twenty seconds; the suite itself is under one. */
-const DEADLINE_MS = 180_000;
+/**
+ * WAS 180 s, on the measurement that a cold CI start is ten to twenty seconds.
+ * A macos-latest runner blew through it while the same commit passed on the
+ * other two, and the suite's own waits are all bounded (15 s for the store,
+ * 15 s for the project), so what ran out was the EDITOR's cold start, not
+ * anything under test. A generous ceiling costs nothing on a green run — the
+ * launcher stops the moment the verdict file appears — and a tight one turns a
+ * slow runner into a red build about nothing.
+ */
+const DEADLINE_MS = 300_000;
 /** How long the editor gets to quit on its own after the verdict, before the
  *  tree is killed. It usually does not, which is why this is short. */
 const QUIT_GRACE_MS = 5_000;
@@ -56,6 +65,10 @@ const home = path.join(scratch, 'home');
 const userData = path.join(scratch, 'user-data');
 const workspace = path.join(scratch, 'workspace');
 const resultFile = path.join(scratch, 'result.json');
+/** Overwritten by the suite as it advances, so a deadline can say where it
+ *  stopped. Deliberately NOT the verdict file, which the launcher treats as
+ *  final the moment it exists. */
+const progressFile = path.join(scratch, 'progress.txt');
 for (const dir of [home, userData, workspace]) fs.mkdirSync(dir, { recursive: true });
 
 /** @type {Record<string, string>} */
@@ -67,6 +80,7 @@ const env = {
   // took, before anything else is asserted; and where the verdict goes.
   FLOCK_SMOKE_HOME: home,
   FLOCK_SMOKE_RESULT: resultFile,
+  FLOCK_SMOKE_PROGRESS: progressFile,
   // The folder the editor is opened on, below. The suite makes a PROJECT out
   // of it, which is a write into the store naming a directory — so it checks
   // the folder the workbench reports against this one first, and refuses to
@@ -141,7 +155,20 @@ try {
   } else if (exited) {
     verdict = { ok: false, message: `the editor exited (code ${String(child.exitCode)}) before the suite reported` };
   } else {
-    verdict = { ok: false, message: `no verdict after ${String(DEADLINE_MS / 1000)}s` };
+    // How far it got, when it got nowhere. The suite stamps each phase into a
+    // second file (FLOCK_SMOKE_PROGRESS); without it a timeout said only "no
+    // verdict", which does not distinguish an editor that never started from a
+    // suite stuck on one assertion.
+    let reached = 'nothing was stamped — the extension host may not have started';
+    try {
+      reached = fs.readFileSync(progressFile, 'utf8').trim() || reached;
+    } catch {
+      // The default says it.
+    }
+    verdict = {
+      ok: false,
+      message: `no verdict after ${String(DEADLINE_MS / 1000)}s; last phase: ${reached}`,
+    };
   }
 
   // Let a well-behaved editor leave on its own, then insist.
