@@ -923,8 +923,18 @@ describe('computeGrouping: the scope fence over PROJECT rows', () => {
 describe('the Windows first run: one dialog folder, one window, two sessions', () => {
   /** What the dialog stored (commands.pickDirectory → normalizeDir). */
   const STORED = 'C:/Users/axel/code/shape_inference_standalone';
-  /** What the workbench publishes as this window's folder. */
-  const SCOPE = 'c:\\Users\\axel\\code\\shape_inference_standalone';
+  /** What the workbench publishes as this window's folder: backslashed, and on
+   *  a real Windows machine drive-letter-lower-cased by `Uri.fsPath` too. The
+   *  SEPARATOR difference is platform-free — `normalizeDir` folds `\` on every
+   *  OS — so it is pinned here, on all three runners. The drive-letter CASE
+   *  difference is not: only a case-folding platform (darwin, win32) makes
+   *  `c:` and `C:` one directory, and on Linux they are genuinely two. It gets
+   *  its own `runIf` block below rather than being smuggled into every
+   *  assertion, where it made these tests pass on macOS and fail on Linux for
+   *  a reason that had nothing to do with what they were checking. */
+  const SCOPE = 'C:\\Users\\axel\\code\\shape_inference_standalone';
+  /** The same folder as the workbench spells it, lower-case drive and all. */
+  const SCOPE_LOWER = 'c:\\Users\\axel\\code\\shape_inference_standalone';
   /** What the roster reads off the running CLI. */
   const CWD = 'C:\\Users\\axel\\code\\shape_inference_standalone';
 
@@ -982,9 +992,32 @@ describe('the Windows first run: one dialog folder, one window, two sessions', (
     // on Windows the two spellings of one directory differ in exactly that
     // character. Both shipped platforms fold; Linux does not, and there the
     // two really are different paths.
-    const lower = matchProject([proj], SCOPE);
+    const lower = matchProject([proj], SCOPE_LOWER);
     expect(lower === null).toBe(!PATHS_FOLD_CASE);
   });
+
+  // THE REAL WINDOWS PAIR, where both differences land at once: the workbench
+  // publishes the scope with a lower-case drive and the roster reads an
+  // upper-case one, so the fence only holds because the platform folds case.
+  // Asserted on macOS as well as Windows — the two platforms that fold — and
+  // skipped on Linux, where a drive letter is not a thing a path has.
+  it.runIf(PATHS_FOLD_CASE)(
+    'keeps the row when the scope and the cwd differ in the drive letter too',
+    () => {
+      const result = grouping({
+        visibleRootIds: ['s1', 's2'],
+        cwdOf: cwdMap({ s1: CWD, s2: CWD }),
+        scopeDirs: [SCOPE_LOWER],
+        projects: [proj],
+      });
+      expect(result.projects.map((p) => p.label)).toEqual([
+        'shape_inference_standalone',
+      ]);
+      expect(result.projects[0].rootIds).toEqual(['s1', 's2']);
+      expect(result.loose).toEqual([]);
+      expect(result.outOfScopeCount).toBe(0);
+    },
+  );
 });
 
 describe('computeGrouping: a window opened on part of a project', () => {

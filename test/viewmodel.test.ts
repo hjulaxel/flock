@@ -109,7 +109,14 @@ const keys = (rows: { key: string }[]): string[] => rows.map((r) => r.key);
 // hand over, because "no project row appeared" is a claim about the pair.
 describe('buildViewModel: a Windows project row reaches the tree', () => {
   const STORED = 'C:/Users/axel/code/shape_inference_standalone';
-  const SCOPE = 'c:\\Users\\axel\\code\\shape_inference_standalone';
+  // Backslashed, like the workbench and the roster really spell it. The
+  // separator difference is what this pins, and `normalizeDir` folds `\` on
+  // every OS, so the assertion means the same thing on all three runners. The
+  // drive-letter CASE difference `Uri.fsPath` also introduces belongs to a
+  // case-folding platform only (see test/projects.test.ts, where it has its
+  // own guarded test) — spelling it here made this pass on macOS and fail on
+  // Linux for a reason that was not about the tree.
+  const SCOPE = 'C:\\Users\\axel\\code\\shape_inference_standalone';
   const CWD = 'C:\\Users\\axel\\code\\shape_inference_standalone';
 
   it('draws the project, with the sessions under it and nothing loose', () => {
