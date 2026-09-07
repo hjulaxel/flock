@@ -64,12 +64,17 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'flock-smoke-'));
 const home = path.join(scratch, 'home');
 const userData = path.join(scratch, 'user-data');
 const workspace = path.join(scratch, 'workspace');
+/** Where the editor writes its extensions manifest. Under the throwaway, not
+ *  under the cached `.vscode-test` — see the `--extensions-dir` comment. */
+const extensionsDir = path.join(scratch, 'extensions');
 const resultFile = path.join(scratch, 'result.json');
 /** Overwritten by the suite as it advances, so a deadline can say where it
  *  stopped. Deliberately NOT the verdict file, which the launcher treats as
  *  final the moment it exists. */
 const progressFile = path.join(scratch, 'progress.txt');
-for (const dir of [home, userData, workspace]) fs.mkdirSync(dir, { recursive: true });
+for (const dir of [home, userData, workspace, extensionsDir]) {
+  fs.mkdirSync(dir, { recursive: true });
+}
 
 /** @type {Record<string, string>} */
 const env = {
@@ -114,7 +119,6 @@ try {
   // CLI wrapper, which hands off to the app and exits at once, taking the
   // "did it quit" signal with it.
   const executable = await downloadAndUnzipVSCode();
-  const cache = path.join(root, '.vscode-test');
   const args = [
     workspace,
     // The same flags runTests passes, for the same reasons (see its source):
@@ -128,7 +132,16 @@ try {
     '--disable-workspace-trust',
     '--disable-extensions',
     '--disable-gpu',
-    `--extensions-dir=${path.join(cache, 'extensions')}`,
+    // THE THROWAWAY, not `cache`. CI caches the whole of `.vscode-test` —
+    // that is the point, the editor download is ~150 MB per OS — and this
+    // directory is the one thing under it the editor WRITES. A run left an
+    // `extensions/extensions.json` in the cache, the next run restored it, and
+    // a newer build refused it: "Unable to create file 'extensions.json' that
+    // already exists when overwrite flag is not set". The host then came up
+    // with the extension loaded and `activate()` never resolving — a 300-second
+    // timeout on macOS whose cause was invisible until the suite started
+    // stamping its phase. Runtime state does not belong in a cached directory.
+    `--extensions-dir=${extensionsDir}`,
     `--user-data-dir=${userData}`,
     `--extensionDevelopmentPath=${root}`,
     `--extensionTestsPath=${path.join(root, 'test', 'smoke', 'index.js')}`,
