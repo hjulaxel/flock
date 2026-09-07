@@ -22,6 +22,11 @@ const STORE_WAIT_MS = 15_000;
  *  phase, where the launcher timing out can only say that nothing came back. */
 const ACTIVATE_WAIT_MS = 120_000;
 
+/** How long one workbench command gets. Generous for a command that does no
+ *  I/O, and far inside the launcher's deadline so a command that never settles
+ *  is REPORTED by name rather than swallowing the whole run. */
+const COMMAND_WAIT_MS = 30_000;
+
 /** Reject with `what`, plus whatever the extension last logged, if `promise`
  *  has not settled in time. The log is the only account of activation there is
  *  (an OutputChannel cannot be read back), which is why the extension mirrors
@@ -302,20 +307,45 @@ async function makeAProject(stateFile) {
     'the project was not named after its directory',
   );
 
-  // Whatever the flow left on screen — the inline input on the new row, or the
-  // rename box behind it — is dismissed, so the editor is not sitting on a
-  // prompt when the launcher goes looking for it. Best effort: the run is
-  // already decided by this point.
+  // BOTH OF THESE ARE BOUNDED, and each has its own phase stamp.
+  //
+  // This is where the run hung: the store poll above had already succeeded (a
+  // failed poll reports in milliseconds), so the 300-second timeout was spent
+  // in one of the two awaited workbench commands below — and `try/catch` does
+  // not bound an await, which is why the "best effort" one could take the whole
+  // run with it. A promise the workbench never settles is not something this
+  // suite can prevent, but it is something it must be able to REPORT: with a
+  // stamp either side, the next occurrence names the command instead of the
+  // step, which is the difference between a harness problem and a Flock one.
+  //
+  // `closeQuickOpen` is the suspect. The flow deliberately leaves an inline
+  // rename open (create first, name after), so this is asked to dismiss an
+  // input box that another, un-awaited command chain is still driving.
+
+  progress('dismissing the inline rename (workbench.action.closeQuickOpen)');
   try {
-    await vscode.commands.executeCommand('workbench.action.closeQuickOpen');
-  } catch {
-    // Nothing depends on it.
+    await withTimeout(
+      Promise.resolve(vscode.commands.executeCommand('workbench.action.closeQuickOpen')),
+      COMMAND_WAIT_MS,
+      'workbench.action.closeQuickOpen did not settle',
+    );
+  } catch (err) {
+    // Nothing depends on it — but say so, because a workbench command that
+    // never settles is worth knowing about even when it costs nothing here.
+    console.log(`smoke: closeQuickOpen did not settle: ${String(err)}`);
   }
 
   // One more refresh, now that there IS something to draw: the tree has no API
   // to read a row back from, so this is the cheap half — rebuilding it over a
-  // real project record whose rootDir is a native path must not throw.
-  await vscode.commands.executeCommand('lineage.refresh');
+  // real project record whose rootDir is a native path must not throw. THIS one
+  // is Flock's own command, so a hang here is a Flock bug and the timeout is
+  // the assertion that says so.
+  progress('rebuilding the tree over the new project (lineage.refresh)');
+  await withTimeout(
+    Promise.resolve(vscode.commands.executeCommand('lineage.refresh')),
+    COMMAND_WAIT_MS,
+    'lineage.refresh did not settle over a real project record',
+  );
 
   return stored;
 }
