@@ -4260,6 +4260,22 @@ export interface CommandDeps {
   ): Promise<void>;
   // terminals (D)
   launchSession(opts: LaunchOptions): Promise<TerminalBinding | null>;
+  /** Is this launch directory PROVABLY gone? True only for a path that is
+   *  definitely not a directory any more (ENOENT, or a file sitting where the
+   *  folder was); false for one we simply cannot read, so a launch is never
+   *  refused on the strength of not knowing.
+   *
+   *  The verbs that MINT BEFORE THEY LAUNCH ask this first. A project pointing
+   *  at a deleted folder made every New Session in it do nothing at all — the
+   *  terminal's shell exited on the missing cwd — while the record, the row and
+   *  the title were minted around the launch that never happened. The registry
+   *  refuses such a launch too (terminals.directoryIsGone, the backstop for
+   *  every path), but by then the row exists; this is what stops the click from
+   *  leaving one behind.
+   *
+   *  Optional: absent means "cannot tell", and every unit double is in that
+   *  position — the flows then behave exactly as they did before. */
+  directoryIsGone?(cwd: string): boolean;
   /** `lineage.launch.mode`: hand a NEW conversation to another extension instead
    *  of opening a terminal here, and adopt whatever session id turns up on the
    *  roster afterwards. Resolves to the delegate's label when it ran, or null

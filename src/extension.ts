@@ -209,7 +209,7 @@ import {
   windowModelChoices,
 } from './recommend';
 import type { ContextualOfferId } from './recommend';
-import { chatAutoCloseVictims } from './chatAutoClose';
+import { chatAutoCloseVictims, isChatConversation } from './chatAutoClose';
 import { frontSession, mayFollowSelection } from './switcher';
 import { type WhereAmI, whereAmI } from './whereami';
 import { registerShellsView } from './shellsView';
@@ -323,7 +323,12 @@ import type { WebtreeController } from './webtree';
 // every other launch in this file goes through `registry.launch`, but a tmux
 // respawn replaces the pane's command directly and therefore has to spell the
 // argv and the environment the same way the launcher would.
-import { TerminalRegistry, buildShellArgs, launchEnv } from './terminals';
+import {
+  TerminalRegistry,
+  buildShellArgs,
+  directoryIsGone,
+  launchEnv,
+} from './terminals';
 import { TerminalMatcher, terminalPid } from './terminalMatch';
 import {
   adoptBackgroundJob,
@@ -860,6 +865,16 @@ export async function activate(
     sessionId,
     ...chainIndex.membersOf(sessionId).filter((m) => m !== sessionId),
   ];
+
+  /** The three reads `isChatConversation` needs (src/chatAutoClose.ts), bound
+   *  to this window's store and its CURRENT chain index — `chainIndex` is
+   *  rebuilt every tick, so the arrow is what keeps this from closing over a
+   *  stale one. */
+  const chatReads = {
+    getRecord: (id: string) => store.get(id),
+    tipOf: (id: string) => chainIndex.tipOf(id),
+    allRecords: () => store.all(),
+  };
 
   /**
    * Which conversations are mid-compaction, and which have just finished one.
@@ -5530,6 +5545,20 @@ export async function activate(
         // Flock-only model keeps the switch VERB but never fires it for you —
         // that difference is the whole of what separates the two.
         if (!projectSwitchingOn(lineageMode())) return;
+        // A CHAT NEVER RE-SCOPES THE WINDOW. A chat is a conversation ABOUT a
+        // project, not one of the tabs the project is worked in — the same
+        // fact that keeps it out of every layout (workspaces.layoutFacts) and
+        // exempt from solo mode (commands.soloEnforce). Its cwd is the
+        // project's root all the same, so without this the focus that opening
+        // one HANDS IT read as "the user started working in project A": the
+        // window switched, and the switch swept the sessions of the project
+        // the user was actually in off the screen. Asking a question must not
+        // cost you the session you asked it about. The window follows
+        // SESSIONS; a chat is asked for and answered wherever you are.
+        if (isChatConversation(chatReads, sessionId)) {
+          log('workspaces: focus moved into a chat — not switching');
+          return;
+        }
         const tip = chainIndex.tipOf(sessionId);
         const cwd =
           forest.nodes.get(tip)?.cwd ??
@@ -6376,6 +6405,11 @@ export async function activate(
         void store.upsert(alias, { boundWindowId: null });
       }
     },
+    // The same probe the registry's own launch gate runs (terminals.launch), so
+    // the verb that refuses BEFORE minting a record and the launch that refuses
+    // after cannot disagree about whether a directory is still there.
+    directoryIsGone: (cwd) => directoryIsGone(cwd),
+
     recordLaunch: async (childId, parentId, cwd) => {
       // Every create verb calls this BEFORE launching, which is exactly when
       // the optimistic row wants to exist: the record is written, the row

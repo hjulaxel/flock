@@ -6,6 +6,10 @@
 // than throw, because a terminal that cannot be created must not take the whole
 // sidebar down with it. That is asserted here too.
 
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+
 import { afterEach, describe, expect, it } from 'vitest';
 import * as vscodeMock from 'vscode';
 
@@ -27,8 +31,15 @@ import {
   verbTokenVerdict,
 } from '../src/agentVerbs';
 import { setLogSink } from '../src/log';
+import { missingCwdMessage } from '../src/projects';
 import { tmuxNameOfTerminal } from '../src/tmux';
 import { ENV_NODE_ID, SESSION_ID_RE } from '../src/types';
+
+/** A launch cwd that REALLY EXISTS. `launch` refuses a directory that is gone
+ *  — a project left pointing at a deleted folder used to mint a record, open
+ *  nothing, and leave a row with no process behind it — so a launch test has
+ *  to name a directory that is actually there. */
+const REAL_CWD = os.tmpdir();
 
 const CHILD = '0f0000c1-0000-4000-8000-0000000000c1';
 const PARENT = '0f0000a1-0000-4000-8000-0000000000a1';
@@ -642,6 +653,80 @@ describe('TerminalRegistry.rebind (/fork and re-key follow the terminal)', () =>
 
 // ------------------------------------------------- detach tier (src/tmux.ts)
 
+describe('launch refuses a working directory that is gone', () => {
+  // The bug: a project whose folder was moved or deleted — a merged worktree,
+  // a renamed directory — answered every New Session with nothing at all. The
+  // terminal was created with a cwd that does not exist, so the shell exited
+  // at once, while the record, the row and the title were all minted around
+  // it. What the user then had was a session row with no process, no
+  // transcript, and no explanation; forking it refused ("no transcript"), and
+  // a Codex row, still under its provisional id, reported itself as running
+  // outside Flock.
+
+  function host(captured: Array<Record<string, unknown>>): void {
+    const w = vscodeMock.window as unknown as Record<string, unknown>;
+    w['createTerminal'] = (opts: Record<string, unknown>) => {
+      captured.push(opts);
+      return {
+        name: opts['name'],
+        creationOptions: opts,
+        processId: Promise.resolve(42),
+        show: () => {},
+        dispose: () => {},
+      };
+    };
+  }
+
+  const registry = (): TerminalRegistry =>
+    new TerminalRegistry({ claudeBinary: () => '/bin/claude' });
+
+  it('creates no terminal, and returns null, for a directory that is not there', async () => {
+    const captured: Array<Record<string, unknown>> = [];
+    host(captured);
+    const gone = path.join(os.tmpdir(), 'flock-no-such-dir-6f2c1a');
+
+    expect(
+      await registry().launch({ sessionId: CHILD, cwd: gone }),
+    ).toBeNull();
+    expect(captured).toEqual([]);
+  });
+
+  it('names the missing directory, so the message is about the project and not the verb', () => {
+    expect(missingCwdMessage('/code/plc-meeting')).toContain('/code/plc-meeting');
+  });
+
+  it('a FILE where the directory should be is refused the same way', async () => {
+    const captured: Array<Record<string, unknown>> = [];
+    host(captured);
+    const file = path.join(os.tmpdir(), 'flock-cwd-is-a-file-6f2c1a');
+    fs.writeFileSync(file, '');
+    try {
+      expect(
+        await registry().launch({ sessionId: CHILD, cwd: file }),
+      ).toBeNull();
+      expect(captured).toEqual([]);
+    } finally {
+      fs.rmSync(file, { force: true });
+    }
+  });
+
+  it('launches anyway when there is no cwd to check — that is "wherever the window is"', async () => {
+    const captured: Array<Record<string, unknown>> = [];
+    host(captured);
+    expect(await registry().launch({ sessionId: CHILD })).not.toBeNull();
+    expect(captured).toHaveLength(1);
+  });
+
+  it('launches into a directory that exists', async () => {
+    const captured: Array<Record<string, unknown>> = [];
+    host(captured);
+    expect(
+      await registry().launch({ sessionId: CHILD, cwd: REAL_CWD }),
+    ).not.toBeNull();
+    expect(captured[0]?.['cwd']).toBe(REAL_CWD);
+  });
+});
+
 describe('launch wraps in the private tmux server when the wiring says so', () => {
   afterEach(() => {
     delete (vscodeMock.window as { createTerminal?: unknown }).createTerminal;
@@ -677,7 +762,7 @@ describe('launch wraps in the private tmux server when the wiring says so', () =
       }),
     });
 
-    const binding = await registry.launch({ sessionId: CHILD, cwd: '/code/api' });
+    const binding = await registry.launch({ sessionId: CHILD, cwd: REAL_CWD });
 
     expect(binding?.tmuxName).toBe(`lineage-${CHILD}`);
     expect(registry.tmuxNameOf(CHILD)).toBe(`lineage-${CHILD}`);
@@ -692,7 +777,7 @@ describe('launch wraps in the private tmux server when the wiring says so', () =
       '-s',
       `lineage-${CHILD}`,
       '-c',
-      '/code/api',
+      REAL_CWD,
       '-e',
       `${ENV_NODE_ID}=${CHILD}`,
       '-e',
@@ -1073,7 +1158,7 @@ describe('launch carries LaunchOptions.env into BOTH tiers', () => {
 
     await registry.launch({
       sessionId: CHILD,
-      cwd: '/code/api',
+      cwd: REAL_CWD,
       env: { CLAUDE_CONFIG_DIR: '/work/.claude' },
     });
 
@@ -1085,7 +1170,7 @@ describe('launch carries LaunchOptions.env into BOTH tiers', () => {
       '-s',
       `lineage-${CHILD}`,
       '-c',
-      '/code/api',
+      REAL_CWD,
       '-e',
       'CLAUDE_CONFIG_DIR=/work/.claude',
       '-e',

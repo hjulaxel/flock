@@ -69,6 +69,7 @@
 
 import * as vscode from 'vscode';
 import { randomUUID } from 'node:crypto';
+import * as fs from 'node:fs';
 
 import { ENV_NODE_ID, isSessionId, shortId } from './types';
 import type {
@@ -84,6 +85,7 @@ import type {
 import { isEnvVarName } from './accounts';
 import { ENV_VERB_TOKEN, adoptVerbToken, ensureVerbToken } from './agentVerbs';
 import { buildCodexArgs } from './codex';
+import { missingCwdMessage } from './projects';
 import { shimLaunch } from './shim';
 import { isPidAlive, listDescendants, reapSurvivors } from './procs';
 import {
@@ -162,6 +164,32 @@ const MISSING_CODEX_BINARY_MESSAGE =
 const RESTRICTED_MESSAGE =
   'Flock cannot start a Claude session here: VS Code blocks terminals in ' +
   'Restricted Mode. Trust this workspace and try again.';
+
+/**
+ * Is this launch directory PROVABLY gone? Three answers collapse into two on
+ * purpose:
+ *
+ *   * it is there and it is a directory      -> false, launch
+ *   * it is there and it is a FILE           -> true, refuse (a terminal
+ *     cannot cd into a file either, and the message is the same one)
+ *   * ENOENT                                 -> true, refuse
+ *   * anything else — EACCES, an unmounted share, a stat that throws for a
+ *     reason we did not enumerate -> FALSE, launch anyway.
+ *
+ * The last line is the important one. This gate exists to explain a failure,
+ * never to invent one: an unreadable path is not evidence of a missing path,
+ * and a launch refused on the strength of not knowing would be a worse bug
+ * than the one this fixes.
+ */
+export function directoryIsGone(cwd: string): boolean {
+  if (cwd.trim() === '') return false;
+  try {
+    return !fs.statSync(cwd).isDirectory();
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    return code === 'ENOENT' || code === 'ENOTDIR';
+  }
+}
 
 /** How a bound terminal ended. `shutdown` = the window closed/reloaded (the
  *  session is very likely still alive), `user` = the user killed it. */
@@ -735,6 +763,31 @@ export class TerminalRegistry implements DisposableLike {
       : this.deps.claudeBinary();
     if (!binary) {
       showError(isCodex ? MISSING_CODEX_BINARY_MESSAGE : MISSING_BINARY_MESSAGE);
+      return null;
+    }
+
+    // THE DIRECTORY HAS TO BE THERE. A terminal created with a cwd that does
+    // not exist gets a shell that exits immediately: the tab flashes and is
+    // gone, no claude ever runs, no transcript is ever written — while every
+    // piece of bookkeeping AROUND the launch succeeds. The record is minted,
+    // the row appears, and the only missing thing is the process. A project
+    // whose directory was moved or deleted — a merged worktree, a renamed
+    // folder — makes every New Session in it do precisely that, and the row it
+    // leaves behind then goes on to be misread by everything downstream: no
+    // transcript to fork, and (for a Codex launch, which is bound under a
+    // provisional id until its rollout appears) a row that ends up reported as
+    // "running outside Flock".
+    //
+    // CHECKED HERE, at the one gate all eight launch verbs pass through,
+    // because "did it start?" must not depend on which verb asked. An absent
+    // `cwd` is left alone: that means "wherever the window is", which is not a
+    // claim about a directory. A path we cannot stat (a permission error, a
+    // network mount mid-hiccup) is NOT treated as missing — refusing a launch
+    // on the strength of not knowing would be worse than the flash of a
+    // terminal that fails on its own.
+    if (opts.cwd !== undefined && directoryIsGone(opts.cwd)) {
+      showError(missingCwdMessage(opts.cwd));
+      log('terminals: refusing launch — cwd is gone:', opts.cwd);
       return null;
     }
 

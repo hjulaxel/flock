@@ -113,6 +113,7 @@ import {
   type WorkspaceSnapshot,
   type WorkspaceTabRecord,
 } from './types';
+import { isChatConversation } from './chatAutoClose';
 import { isWithin, projectDirs } from './projects';
 
 // ------------------------------------------------------------- pure helpers
@@ -1875,25 +1876,23 @@ export class WorkspaceManager {
     return groups && Array.isArray(groups.all) ? groups : undefined;
   }
 
-  /** Is this session a project chat? Asked of BOTH the launch-time id and the
-   *  chain tip: a terminal is bound under the id it launched with, while a
-   *  `--resume` mints a new generation and the record follows the tip. Being a
-   *  chat names the conversation, so either id carrying the flag settles it.
-   *
-   *  When neither does, the STORE is walked for any record whose chain
-   *  resolves to the same tip: the `chat` flag is written once, at birth, so
-   *  a chat reopened twice runs bound under a generation id nothing ever
-   *  flagged — and only its birth record still says what the conversation
-   *  is. */
+  /** Is this session a project chat? The rule is
+   *  `chatAutoClose.isChatConversation` — asked of the launch-time id, the
+   *  chain tip, and any record whose chain resolves to that tip — and it is
+   *  shared with solo mode and the auto-switch so that "what a chat is
+   *  exempt from" cannot come to mean three different things. `safeTip`
+   *  rather than the raw dep, so a chain read that throws costs a rung of the
+   *  ladder and not the switch; a throw here answers "not a chat", which
+   *  treats it as an ordinary session rather than exempting a session. */
   private isChat(sessionId: string): boolean {
     try {
-      if (this.deps.getRecord(sessionId)?.chat === true) return true;
-      const tip = this.safeTip(sessionId);
-      if (tip !== sessionId && this.deps.getRecord(tip)?.chat === true) {
-        return true;
-      }
-      return Object.values(this.deps.allRecords()).some(
-        (r) => r.chat === true && this.safeTip(r.id) === tip,
+      return isChatConversation(
+        {
+          getRecord: (id) => this.deps.getRecord(id),
+          tipOf: (id) => this.safeTip(id),
+          allRecords: () => this.deps.allRecords(),
+        },
+        sessionId,
       );
     } catch (err) {
       logError('workspaces.isChat', err);

@@ -92,6 +92,7 @@ import type {
 // than copying the chain is what stops a row and an archive-browser entry
 // from disagreeing about what a session is called.
 import { transcriptFallbackName } from './archive';
+import { isChatConversation as isChatOf } from './chatAutoClose';
 // The ONE "is this session over?" predicate, defined where SessionNode is (see
 // lineage.sessionIsOver): the row's dimming, the promotion pass and every verb
 // here have to agree about a single node, and a second copy in this file would
@@ -122,6 +123,7 @@ import {
   isWithin,
   matchProject,
   matchProjects,
+  missingCwdMessage,
   normalizeDir,
   pathKey,
   projectClaiming,
@@ -2400,6 +2402,8 @@ async function newSessionFlow(
   // the ROUTING resolved gates it the same way, inside `delegated`.
   if (account === undefined && (await delegated(deps, cwd, title, routed))) return;
 
+  if (refuseMissingCwd(deps, cwd)) return;
+
   const sessionId = randomUUID();
   await deps.recordLaunch(sessionId, null, cwd);
   await deps.upsertRecord(sessionId, { title });
@@ -4068,6 +4072,7 @@ async function forkFlow(
   // the CLICKED row: `recordedResolution` (lineage.ts) puts a 'minted' edge
   // first in the cascade and treats it as exact, so this is what the tree
   // shows and inference never overrides it back to the transcript's owner.
+  if (refuseMissingCwd(deps, cwd)) return;
   await deps.recordLaunch(childId, clickedId, cwd);
   await deps.upsertRecord(childId, { title });
 
@@ -5824,6 +5829,8 @@ export async function chatFlow(
   const cwd = dirs[0];
   if (!cwd) return;
 
+  if (refuseMissingCwd(deps, cwd)) return;
+
   const sessionId = randomUUID();
   // Numbered from what the project ALREADY has, so two chats never wear the
   // same tab title — the one thing that stops "several chats at once" from
@@ -7160,6 +7167,51 @@ async function pinLaunch(
   }
 }
 
+/**
+ * Refuse a verb that would start a session in a directory that is not there,
+ * BEFORE it mints anything.
+ *
+ * The bug this closes: `plc-meeting`'s folder had been deleted, and every New
+ * Session on that project answered with nothing whatsoever. The terminal was
+ * created with a cwd that no longer existed, so its shell exited at once — but
+ * the record, the row and the title were all minted first, so each click left
+ * a session row with no process and no transcript. Forking one then refused
+ * ("no transcript"), and a Codex row, still bound under the provisional id it
+ * holds until its rollout appears, reported itself as *running outside Flock*.
+ * Four rows, three misleading messages, and not one of them said "that folder
+ * is gone".
+ *
+ * The registry refuses the launch as well (terminals.directoryIsGone) — that
+ * is the backstop every one of the eight launch call sites passes through.
+ * This is the earlier half, and the only one that can keep the click from
+ * leaving a row behind.
+ *
+ * A wiring without the dep cannot tell, and says nothing: the registry still
+ * catches it a moment later.
+ */
+function refuseMissingCwd(deps: CommandDeps, cwd: string | undefined): boolean {
+  if (typeof cwd !== 'string' || cwd === '') return false;
+  try {
+    if (deps.directoryIsGone?.(cwd) !== true) return false;
+  } catch (err) {
+    logError('commands.refuseMissingCwd', err);
+    return false;
+  }
+  log('launch: refusing — cwd is gone:', cwd);
+  // Feature-detected: `chatFlow` and the other create verbs are unit-tested
+  // against a host with an empty `window`, and a refusal that THREW would take
+  // the verb down harder than the launch it is declining.
+  try {
+    const w: Partial<typeof vscode.window> = vscode.window;
+    if (typeof w.showWarningMessage === 'function') {
+      void w.showWarningMessage(missingCwdMessage(cwd));
+    }
+  } catch (err) {
+    logError('commands.refuseMissingCwd.show', err);
+  }
+  return true;
+}
+
 /** `lineage.soloSession`, applied after a session's tab opened or came
  *  forward: ask the wiring to park every OTHER session tab and pin this one.
  *  Awaited so the park's record writes land before the flow moves on; a
@@ -7185,20 +7237,14 @@ async function soloEnforce(
   }
 }
 
-/** Is this id a project CHAT's? Asked of the id, its tip, and — because the
- *  `chat` flag is written once, at birth, and inherited only in the forest's
- *  collapsed overlay (which a rowless chat never surfaces through) — of any
- *  record in the store whose chain resolves to the same tip. Without the last
- *  step, a chat reopened twice answers "session": its current tip is a
- *  generation nothing ever wrote `chat` onto. Callers treat a throw as "not a
- *  chat", which fails toward the pre-chat behaviour. */
+/** Is this id a project CHAT's? The rule itself is
+ *  `chatAutoClose.isChatConversation` — one answer for every exemption a chat
+ *  gets, because three call sites deriving it separately is how the
+ *  auto-switch came to have no exemption at all. This is the dep bag adapted
+ *  to it; callers treat a throw as "not a chat", which fails toward the
+ *  pre-chat behaviour. */
 function isChatConversation(deps: CommandDeps, sessionId: string): boolean {
-  if (deps.getRecord(sessionId)?.chat === true) return true;
-  const tip = deps.tipOf(sessionId);
-  if (deps.getRecord(tip)?.chat === true) return true;
-  return Object.values(deps.allRecords()).some(
-    (r) => r.chat === true && deps.tipOf(r.id) === tip,
-  );
+  return isChatOf(deps, sessionId);
 }
 
 /** The project a directory belongs to, for routing purposes only. */
