@@ -418,14 +418,35 @@ and `~/code/api` can both be projects and each session lands in the right one.
 Nothing is written to your session records, so renaming a project, adding a
 directory, or deleting it entirely never rewrites session state.
 
-A right-click gives you nine things — **Switch Workspace…** (not in the
+**When a project's folder moves, Flock follows it.** A project owns its
+directories by path and nothing else, so moving one on disk used to leave the
+project pointing at nothing — and every consequence was silent: the Explorer
+skips a directory that is not there, membership stops matching, and a new
+session got a shell that exited the moment it started. Now the launch says
+what is wrong, by name, and offers to find the folder; **Locate Project
+Folder…** on the row asks the same question at any time.
+
+Finding it means looking for the one thing a move preserves — the folder's
+**name** — starting beside where it used to be and widening a ring at a time,
+including *upwards*, because a folder pulled out of its parent is the ordinary
+case. A directory a session is already running in counts for more than a
+lookalike. You are shown what was found and what will move before anything is
+written, because following a folder moves the project, its subprojects, and the
+recorded directory of every session that ever ran there — a project that
+followed its folder while its own history stayed behind would be half a
+feature. Two equally good answers are a question, never a coin toss, and a
+folder that was **renamed** as well as moved cannot be found by name at all:
+both land on a folder picker. Nothing on disk is touched either way — this
+rewrites Flock's records, not your files.
+
+A right-click gives you ten things — **Switch Workspace…** (not in the
 one-folder-per-project model: scope this window to this project, from the row you
 are already looking at),
 **New Session**, **New Chat**, **Old Chats…**, **Archived Sessions…** (this
 project's archived sessions, searchable by name, showing each one's age and
 directory, restorable several at a time),
 **Add Subproject**, **Rename
-Project**, **Close Project**, **Delete Project** — and **Settings**, which holds
+Project**, **Locate Project Folder…**, **Close Project**, **Delete Project** — and **Settings**, which holds
 what a project *is* rather than what you do to it: which directory is the main
 one, which to remove, the provider, the AI account, **Switch Workspace…** again
 and **Open in New Window**. Deleting a project

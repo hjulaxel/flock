@@ -1163,6 +1163,16 @@ export const COMMANDS = {
    *  `ProjectRecord.hidden`, the flag that already existed for exactly this and
    *  never had a verb of its own. */
   closeProject: 'lineage.closeProject',
+  /** FOLLOW A MOVED FOLDER. A project owns its directories by path and nothing
+   *  else, so moving one on disk leaves the project pointing at nothing — and
+   *  every consequence is silent (the Explorer skips a missing directory,
+   *  membership stops matching, a launch gets a shell that exits at once).
+   *  This looks for where the folder went, by the one thing a move preserves —
+   *  its name — and moves the project, its subprojects and the recorded cwd of
+   *  every session that ran there, in one write. Offered by the launch refusal
+   *  that first notices, and available on the row for the times nobody
+   *  launched anything. The decision is src/relocate.ts. */
+  locateProject: 'lineage.locateProject',
   /** The door back in: a picker over every CLOSED project — the project
    *  history — at the top level of the view, where a closed project has no row
    *  to right-click. Deliberately NOT `openProject`, which is an older and
@@ -4276,6 +4286,17 @@ export interface CommandDeps {
    *  Optional: absent means "cannot tell", and every unit double is in that
    *  position — the flows then behave exactly as they did before. */
   directoryIsGone?(cwd: string): boolean;
+  /** Directories that EXIST and could be where `missing` went, gathered by
+   *  walking out from the missing path (the wiring's job — this module never
+   *  touches a filesystem). Which of them is the answer, or whether they are
+   *  too alike to choose between, is `relocate.planRelocation`.
+   *
+   *  Optional: without it the locate verb can still offer the folder picker,
+   *  which is the fallback for "we could not find it" anyway. */
+  findMovedDirectory?(missing: string): Array<{
+    dir: string;
+    source: 'search' | 'session';
+  }>;
   /** `lineage.launch.mode`: hand a NEW conversation to another extension instead
    *  of opening a terminal here, and adopt whatever session id turns up on the
    *  roster afterwards. Resolves to the delegate's label when it ran, or null

@@ -4,6 +4,37 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **A project whose folder moved is followed to where it went.** 0.8.2 made a
+  launch into a missing directory say so instead of doing nothing; this is the
+  other half — where the folder actually is. The launch refusal now offers to
+  find it, and **Locate Project Folder…** on the project row asks the same
+  question whenever you like.
+
+  Finding it means looking for the one thing a move preserves: the folder's
+  **name**, starting beside where it used to be and widening a ring at a time —
+  including *upwards*, because a folder pulled out of its parent is the ordinary
+  case and is exactly what happened here (`research/ai-builder/plc-meeting`
+  became `research/plc-meeting`). A search that started at the nearest surviving
+  ancestor and only looked down would never see it, however deep it went. A
+  directory a session is already running in outranks a lookalike: something
+  opened it after the move, which is evidence rather than resemblance.
+
+  Following a folder moves the project, every subproject filed under it, and the
+  recorded directory of every session that ever ran there — a project that
+  followed its folder while its own history stayed behind would be half a
+  feature, since membership is derived from each session's directory. You are
+  told what was found and what will move before any of it is written: repointing
+  a project rewrites what all of its sessions belong to, and a folder that looks
+  missing only because a volume is not mounted must never be followed to some
+  same-named directory lying around. Two equally good answers are a question,
+  not a coin toss; a folder renamed as well as moved cannot be found by name at
+  all. Both land on a folder picker. Nothing on disk is touched either way —
+  this rewrites Flock's records, never your files.
+
 ## [0.8.2] — 2026-09-08
 
 ### Fixed

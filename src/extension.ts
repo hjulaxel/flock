@@ -112,6 +112,7 @@ import {
 } from './tmux';
 import {
   type ProjectMatch,
+  baseName,
   matchProject,
   matchProjects,
   preferredClaimant,
@@ -154,6 +155,7 @@ import {
 } from './codex';
 import type { CodexRowFacts, RolloutActivity } from './codex';
 import { CodexHooksManager } from './codexHooks';
+import { searchRoots } from './relocate';
 import { handoffRefusal } from './handoff';
 import { CODEX_HOME_ENV } from './accounts';
 
@@ -427,6 +429,109 @@ const DONE_DEDUPE_MS = 15_000;
 const HEADER_NEGATIVE_TTL_MS = 60_000;
 /** Above this the header memo is pruned down to the ids still on the roster. */
 const HEADER_CACHE_SOFT_MAX = 256;
+
+
+/**
+ * Directories that EXIST and could be where a moved project folder went.
+ *
+ * The read-the-world half of src/relocate.ts, which decides which of them is
+ * the answer. Two sources, and neither is a filesystem crawl:
+ *
+ *   * WHERE SESSIONS ARE. Any recorded cwd that exists and carries the name.
+ *     Something opened that directory, which is the strongest evidence a
+ *     search can offer, and it costs one stat.
+ *   * OUT FROM THE OLD PATH, near first. Look under the folder's own parent,
+ *     then under its grandparent, and so on for RELOCATE_MAX_CLIMB levels —
+ *     each time a short way down. CLIMBING IS THE POINT: the case that
+ *     produced this feature moved `research/ai-builder/plc-meeting` to
+ *     `research/plc-meeting`, and a search that started at the nearest
+ *     SURVIVING ancestor would have started at `ai-builder`, looked only
+ *     downward, and found nothing — the folder went up. A folder that moved
+ *     went somewhere near where it was: out of its parent, into a sibling,
+ *     one level along. Widening a ring at a time finds all of those and finds
+ *     the nearest one first.
+ *
+ * BOUNDED HARD, because somebody is waiting on it: RELOCATE_MAX_VISITS
+ * directory reads across the whole search, each ring at most
+ * RELOCATE_MAX_DEPTH deep, every directory read at most once however many
+ * rings contain it, and hidden or build directories never descended into. It
+ * is allowed to find nothing — the verb's fallback is the folder dialog.
+ */
+const RELOCATE_MAX_VISITS = 600;
+const RELOCATE_MAX_DEPTH = 2;
+const RELOCATE_MAX_CLIMB = 3;
+const RELOCATE_SKIP = new Set([
+  'node_modules', 'dist', 'out', 'build', 'target', 'vendor', 'Library',
+  '.git', '.venv', 'venv', '__pycache__',
+]);
+
+function findMovedDirectory(
+  missing: string,
+  cwds: () => readonly string[],
+): Array<{ dir: string; source: 'search' | 'session' }> {
+  const wanted = baseName(missing);
+  if (wanted === '' || wanted === '/') return [];
+  const found: Array<{ dir: string; source: 'search' | 'session' }> = [];
+  const seen = new Set<string>();
+  const add = (dir: string, source: 'search' | 'session'): void => {
+    const key = pathKey(dir);
+    if (key === '' || key === pathKey(missing) || seen.has(key)) return;
+    seen.add(key);
+    found.push({ dir, source });
+  };
+  const isDir = (p: string): boolean => {
+    try {
+      return fsSync.statSync(p).isDirectory();
+    } catch {
+      return false;
+    }
+  };
+
+  // A session's cwd first: cheapest, and the best evidence when it hits.
+  for (const cwd of cwds()) {
+    if (baseName(cwd) === wanted && isDir(cwd)) add(cwd, 'session');
+  }
+
+  // Then the rings, nearest first. `read` is shared across them so a wider
+  // ring never re-reads what a narrower one already covered.
+  const read = new Set<string>();
+  let visits = 0;
+  const ring = (root: string): void => {
+    const queue: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
+    while (queue.length > 0 && visits < RELOCATE_MAX_VISITS) {
+      const next = queue.shift();
+      if (!next) break;
+      const key = pathKey(next.dir);
+      if (read.has(key)) continue;
+      read.add(key);
+      visits++;
+      let entries: fsSync.Dirent[];
+      try {
+        entries = fsSync.readdirSync(next.dir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const child = `${normalizeDir(next.dir)}/${entry.name}`;
+        if (entry.name === wanted) add(child, 'search');
+        if (
+          next.depth < RELOCATE_MAX_DEPTH &&
+          !entry.name.startsWith('.') &&
+          !RELOCATE_SKIP.has(entry.name)
+        ) {
+          queue.push({ dir: child, depth: next.depth + 1 });
+        }
+      }
+    }
+  };
+
+  for (const root of searchRoots(missing, RELOCATE_MAX_CLIMB)) {
+    if (isDir(root)) ring(root);
+    if (visits >= RELOCATE_MAX_VISITS) break;
+  }
+  return found;
+}
 
 export async function activate(
   context: vscode.ExtensionContext,
@@ -6409,6 +6514,12 @@ export async function activate(
     // the verb that refuses BEFORE minting a record and the launch that refuses
     // after cannot disagree about whether a directory is still there.
     directoryIsGone: (cwd) => directoryIsGone(cwd),
+    findMovedDirectory: (missing) =>
+      findMovedDirectory(missing, () =>
+        Object.values(store.all())
+          .map((r) => r.cwd)
+          .filter((c): c is string => typeof c === 'string' && c !== ''),
+      ),
 
     recordLaunch: async (childId, parentId, cwd) => {
       // Every create verb calls this BEFORE launching, which is exactly when
