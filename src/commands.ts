@@ -92,6 +92,7 @@ import type {
 // than copying the chain is what stops a row and an archive-browser entry
 // from disagreeing about what a session is called.
 import { transcriptFallbackName } from './archive';
+import { planRelocation, relocationWrites } from './relocate';
 import { isChatConversation as isChatOf } from './chatAutoClose';
 // The ONE "is this session over?" predicate, defined where SessionNode is (see
 // lineage.sessionIsOver): the row's dimming, the promotion pass and every verb
@@ -7167,6 +7168,217 @@ async function pinLaunch(
   }
 }
 
+
+// ------------------------------------------------- following a moved folder
+//
+// See src/relocate.ts for what a move IS and why only a same-named directory
+// counts as one. This is the verb: find it, confirm it, write it down.
+
+/**
+ * The project's directories that are not there any more, main one first.
+ * Empty is the ordinary answer, and the check is skipped entirely by a wiring
+ * that cannot stat — "cannot tell" must never read as "gone".
+ */
+function missingDirsOf(
+  deps: CommandDeps,
+  project: ProjectRecord,
+): string[] {
+  if (deps.directoryIsGone === undefined) return [];
+  return projectDirs(project).filter((dir) => {
+    try {
+      return deps.directoryIsGone?.(dir) === true;
+    } catch (err) {
+      logError('commands.missingDirsOf', err);
+      return false;
+    }
+  });
+}
+
+/**
+ * FOLLOW A PROJECT FOLDER THAT MOVED.
+ *
+ * The shape of it, and why each answer is what it is:
+ *
+ *   * NOTHING MISSING — say so and stop. The verb is reachable from the
+ *     palette, where the person may just be checking.
+ *   * FOUND, unambiguously — offer the move, naming both paths and how many
+ *     sessions come with it. Offered rather than taken: repointing rewrites
+ *     what every session in the project belongs to, and a folder that looks
+ *     missing because a volume is not mounted would otherwise be followed to
+ *     whatever same-named directory happens to be lying around. One click is
+ *     a small price for never doing that behind someone's back.
+ *   * AMBIGUOUS — the candidates, in a picker. Two directories with the same
+ *     name are a question, not a coin toss.
+ *   * NOWHERE — the folder dialog, which is the honest fallback and also the
+ *     answer for a folder that was renamed as well as moved.
+ *
+ * The write is one batch: the project, its subprojects, and the recorded cwd
+ * of every session that ever ran under the old path. A project that followed
+ * its folder while its history stayed behind would be the feature half-done.
+ */
+export async function locateProjectFlow(
+  deps: CommandDeps,
+  projectId: string,
+): Promise<void> {
+  const project = deps.getProject(projectId);
+  if (!project) {
+    void vscode.window.showInformationMessage('Flock: that project no longer exists.');
+    return;
+  }
+  const missing = missingDirsOf(deps, project);
+  const gone = missing[0];
+  if (gone === undefined) {
+    void vscode.window.showInformationMessage(
+      `Flock: every directory of "${project.name}" is where it should be.`,
+    );
+    return;
+  }
+
+  const plan = planRelocation({
+    missing: gone,
+    candidates: safeCandidates(deps, gone),
+  });
+
+  if (plan.kind === 'found') {
+    const moved = await applyRelocation(deps, gone, plan.dir, project.name);
+    if (!moved) return;
+    return;
+  }
+
+  if (plan.kind === 'ambiguous') {
+    const pick = await vscode.window.showQuickPick(
+      plan.dirs.map((dir) => ({ label: baseName(dir), description: dir, dir })),
+      {
+        title: `Where did "${project.name}" go?`,
+        placeHolder: `${gone} is not there any more — which of these is it?`,
+      },
+    );
+    if (!pick) return;
+    await applyRelocation(deps, gone, pick.dir, project.name, { asked: true });
+    return;
+  }
+
+  await locateByHand(deps, gone, project.name);
+}
+
+/** The candidates, never allowed to take the verb down with them: a wiring
+ *  without the search, or a walk that threw halfway, both mean "we found
+ *  nothing", which lands on the folder dialog. */
+function safeCandidates(
+  deps: CommandDeps,
+  missing: string,
+): Array<{ dir: string; source: 'search' | 'session' }> {
+  try {
+    return deps.findMovedDirectory?.(missing) ?? [];
+  } catch (err) {
+    logError('commands.findMovedDirectory', err);
+    return [];
+  }
+}
+
+/** The folder dialog: "we could not find it, you tell us". Also the way out
+ *  for a folder that was RENAMED as well as moved, which nothing can find by
+ *  name. */
+async function locateByHand(
+  deps: CommandDeps,
+  missing: string,
+  name: string,
+): Promise<void> {
+  const choice = await vscode.window.showWarningMessage(
+    `Flock: "${name}" points at ${missing}, which is not there any more, and ` +
+      'nothing with that name is nearby. Locate it?',
+    'Locate…',
+  );
+  if (choice !== 'Locate…') return;
+  const picked = await vscode.window.showOpenDialog({
+    canSelectFiles: false,
+    canSelectFolders: true,
+    canSelectMany: false,
+    openLabel: 'This is the folder',
+    title: `Where is "${name}" now?`,
+  });
+  const dir = picked?.[0]?.fsPath;
+  if (dir === undefined || dir === '') return;
+  await applyRelocation(deps, missing, dir, name, { asked: true });
+}
+
+/**
+ * Write the move down: the project, every subproject under the old path, and
+ * every session record that ran there.
+ *
+ * `asked` skips the confirmation — the person has just pointed at the folder
+ * or picked it out of a list, and asking again would be asking twice.
+ */
+async function applyRelocation(
+  deps: CommandDeps,
+  from: string,
+  to: string,
+  name: string,
+  opts?: { asked?: boolean },
+): Promise<boolean> {
+  const writes = relocationWrites({
+    from,
+    to,
+    projects: deps.allProjects(),
+    records: deps.allRecords(),
+  });
+  if (writes.projects.length === 0 && writes.records.length === 0) {
+    void vscode.window.showInformationMessage(
+      `Flock: nothing to move — "${name}" already points at ${to}.`,
+    );
+    return false;
+  }
+
+  if (opts?.asked !== true) {
+    const sessions = writes.records.length;
+    const also =
+      writes.projects.length > 1
+        ? `, ${writes.projects.length - 1} subproject${writes.projects.length === 2 ? '' : 's'}`
+        : '';
+    const choice = await vscode.window.showWarningMessage(
+      `Flock: "${name}" looks like it moved to ${to}. Follow it? The project` +
+        `${also} and ${sessions} session${sessions === 1 ? '' : 's'} recorded ` +
+        `under ${from} move with it.`,
+      'Follow it',
+      'Locate…',
+    );
+    if (choice === 'Locate…') {
+      await locateByHand(deps, from, name);
+      return false;
+    }
+    if (choice !== 'Follow it') return false;
+  }
+
+  // Projects first: a window that dies between the two writes has a project
+  // pointing at a directory that is there, which is the state the user asked
+  // for. The reverse order would leave the sessions somewhere their project
+  // no longer reaches.
+  for (const p of writes.projects) {
+    try {
+      await deps.upsertProject(p.id, p.patch);
+    } catch (err) {
+      logError('commands.relocate.project', err);
+    }
+  }
+  for (const r of writes.records) {
+    try {
+      await deps.upsertRecord(r.id, { cwd: r.cwd });
+    } catch (err) {
+      logError('commands.relocate.record', err);
+    }
+  }
+  log(
+    'relocate:', from, '->', to,
+    `(${writes.projects.length} project(s), ${writes.records.length} session(s))`,
+  );
+  deps.refresh();
+  void vscode.window.showInformationMessage(
+    `Flock: "${name}" now points at ${to} — ${writes.records.length} ` +
+      `session${writes.records.length === 1 ? '' : 's'} moved with it.`,
+  );
+  return true;
+}
+
 /**
  * Refuse a verb that would start a session in a directory that is not there,
  * BEFORE it mints anything.
@@ -7198,14 +7410,30 @@ function refuseMissingCwd(deps: CommandDeps, cwd: string | undefined): boolean {
     return false;
   }
   log('launch: refusing — cwd is gone:', cwd);
+  // THE OFFER RIDES ON THE REFUSAL. This is the moment the person is looking
+  // at the problem, and a folder that moved is the likeliest reason a project
+  // directory is gone — so the message that says what is wrong also carries
+  // the verb that fixes it, rather than leaving them to find it on a row whose
+  // sessions have just stopped working. Only when there is a project to fix:
+  // a bare directory launch has nothing to repoint.
+  const projectId = projectIdForCwd(deps, cwd);
   // Feature-detected: `chatFlow` and the other create verbs are unit-tested
   // against a host with an empty `window`, and a refusal that THREW would take
   // the verb down harder than the launch it is declining.
   try {
     const w: Partial<typeof vscode.window> = vscode.window;
-    if (typeof w.showWarningMessage === 'function') {
-      void w.showWarningMessage(missingCwdMessage(cwd));
+    if (typeof w.showWarningMessage !== 'function') return true;
+    const message = missingCwdMessage(cwd);
+    if (projectId === undefined) {
+      void w.showWarningMessage(message);
+      return true;
     }
+    void Promise.resolve(w.showWarningMessage(message, 'Find the folder')).then(
+      async (choice) => {
+        if (choice === 'Find the folder') await locateProjectFlow(deps, projectId);
+      },
+      (err: unknown) => logError('commands.refuseMissingCwd.offer', err),
+    );
   } catch (err) {
     logError('commands.refuseMissingCwd.show', err);
   }
@@ -10181,6 +10409,12 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   // project that is already closed is a menu entry that lies about what it is
   // about to do. Their `when` clauses are complements — close is on the row,
   // open is at the top of the view, because a closed project HAS no row.
+  register(COMMANDS.locateProject, 'locate project', async (arg?: unknown) => {
+    const id = projectIdFromArg(arg);
+    if (!id) return;
+    await locateProjectFlow(deps, id);
+  });
+
   register(COMMANDS.closeProject, 'close project', async (arg?: unknown) => {
     const id =
       projectIdFromArg(arg) ?? (await pickProject(deps, 'Close which project?'));

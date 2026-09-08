@@ -153,6 +153,12 @@
         "icon": "$(archive)"
       },
       {
+        "command": "lineage.locateProject",
+        "title": "Locate Project Folder...",
+        "category": "Flock",
+        "icon": "$(search)"
+      },
+      {
         "command": "lineage.reopenProject",
         "title": "Open Project...",
         "category": "Flock",
@@ -1087,13 +1093,18 @@
           "when": "view == lineageSessions && viewItem =~ /;project;/"
         },
         {
-          "command": "lineage.closeProject",
+          "command": "lineage.locateProject",
           "group": "1_manage@3",
           "when": "view == lineageSessions && viewItem =~ /;project;/"
         },
         {
-          "command": "lineage.deleteProject",
+          "command": "lineage.closeProject",
           "group": "1_manage@4",
+          "when": "view == lineageSessions && viewItem =~ /;project;/"
+        },
+        {
+          "command": "lineage.deleteProject",
+          "group": "1_manage@5",
           "when": "view == lineageSessions && viewItem =~ /;project;/"
         },
         {
