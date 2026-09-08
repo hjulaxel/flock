@@ -7,7 +7,13 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { chatAutoCloseVictims, type ChatTabFacts } from '../src/chatAutoClose';
+import {
+  chatAutoCloseVictims,
+  isChatConversation,
+  type ChatChainReads,
+  type ChatTabFacts,
+} from '../src/chatAutoClose';
+import type { EditorialRecord } from '../src/types';
 
 const NOW = 1_755_600_000_000; // any fixed moment; only differences matter
 const MIN = 60_000;
@@ -94,5 +100,70 @@ describe('chatAutoCloseVictims', () => {
         chat('keep-busy', { status: 'busy' }),
       ]),
     ).toEqual(['a', 'b']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isChatConversation — THE answer to "is this conversation a chat?", shared by
+// every rule that exempts one: solo mode (commands.soloEnforce), the layout
+// snapshot and the switch's kill tier (workspaces), and the auto-switch that
+// must not re-scope the window for a chat (extension.ts). The cases below are
+// the ones each of those got wrong separately.
+
+/** A store of records plus a chain, in the shape the predicate reads. `chain`
+ *  maps any generation id to its tip; ids not in it are their own tip. */
+function reads(
+  records: Record<string, Partial<EditorialRecord>>,
+  chain: Record<string, string> = {},
+): ChatChainReads {
+  const all = Object.fromEntries(
+    Object.entries(records).map(([id, r]) => [id, { id, ...r } as EditorialRecord]),
+  );
+  return {
+    getRecord: (id) => all[id],
+    tipOf: (id) => chain[id] ?? id,
+    allRecords: () => all,
+  };
+}
+
+describe('isChatConversation', () => {
+  it('a chat is a chat, and a session is not', () => {
+    const r = reads({ c: { chat: true }, s: {} });
+    expect(isChatConversation(r, 'c')).toBe(true);
+    expect(isChatConversation(r, 's')).toBe(false);
+  });
+
+  it('an id nothing knows about is not a chat', () => {
+    expect(isChatConversation(reads({}), 'never-seen')).toBe(false);
+  });
+
+  it('answers for the TIP when the flag is on the tip', () => {
+    // The terminal is bound under the launch-time id; a re-key moved the row.
+    const r = reads({ born: {}, tip: { chat: true } }, { born: 'tip' });
+    expect(isChatConversation(r, 'born')).toBe(true);
+  });
+
+  it('answers for a REOPENED chat, whose bound id nothing ever flagged', () => {
+    // The `chat` flag is written once, at birth. Reopen the chat from Chat
+    // History and the terminal runs under a fresh generation: neither that id
+    // nor the tip carries the flag, and only the birth record still says what
+    // the conversation is. Getting this wrong is a chat that answers
+    // "session" — which is a chat in a layout, parked under a grace deadline,
+    // and an auto-switch fired off a question.
+    const r = reads(
+      { born: { chat: true }, again: {} },
+      { born: 'again', again: 'again' },
+    );
+    expect(isChatConversation(r, 'again')).toBe(true);
+  });
+
+  it('does not spread across conversations that merely share a store', () => {
+    // Another chat in the same project must not make this session one.
+    const r = reads(
+      { chatBorn: { chat: true }, chatTip: {}, session: {} },
+      { chatBorn: 'chatTip' },
+    );
+    expect(isChatConversation(r, 'session')).toBe(false);
+    expect(isChatConversation(r, 'chatTip')).toBe(true);
   });
 });

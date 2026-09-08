@@ -1126,6 +1126,36 @@ function chatRecord(
 }
 
 describe('chatFlow', () => {
+  it('a project whose directory is GONE mints nothing and launches nothing', async () => {
+    // The bug: `plc-meeting`'s folder had been deleted and the project still
+    // pointed at it. Every verb that starts something there created a terminal
+    // whose shell exited on the missing cwd — so nothing ran — while the
+    // record and the row were minted first. Each click left a session with no
+    // process and no transcript: unforkable ("no transcript"), and, on a Codex
+    // launch still under its provisional id, reported as running OUTSIDE
+    // Flock. The refusal has to come before the mint, or the click still costs
+    // a row.
+    const { deps, calls } = chatDeps(projectOf());
+    deps.directoryIsGone = (cwd) => cwd === '/Users/a/code/magma';
+
+    await chatFlow(deps, 'p1');
+
+    expect(calls.records).toEqual([]);
+    expect(calls.launches).toEqual([]);
+    expect(calls.order).toEqual([]);
+  });
+
+  it('a directory that is merely unreadable is NOT refused', async () => {
+    // "Cannot tell" is not "gone". A launch refused on the strength of not
+    // knowing would be a worse bug than the one above.
+    const { deps, calls } = chatDeps(projectOf());
+    deps.directoryIsGone = () => false;
+
+    await chatFlow(deps, 'p1');
+
+    expect(calls.launches).toHaveLength(1);
+  });
+
   it('mints a chat, records it BEFORE launching, and remembers the id', async () => {
     const { deps, calls } = chatDeps(projectOf());
     await chatFlow(deps, 'p1');

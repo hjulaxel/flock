@@ -691,6 +691,15 @@ always switch explicitly from the palette (**Flock: Switch Workspace…**) or a
 project row's context menu — and, in the auto-switch model, from the
 `$(layers)` status-bar item, which that model is the only one to draw.
 
+**A chat never moves the window.** The window follows *sessions*, and only
+sessions. Opening
+a chat about another project — the chat button on its row, or **Old Chats…** —
+starts it where you are and leaves the workspace exactly as it was: a chat is a
+conversation *about* a project, not one of the tabs that project is worked in,
+which is the same reason no saved layout ever names one. Before this, the focus
+a new chat takes read as "you have started working over there", and the switch
+that followed put away the sessions of the project you were actually in.
+
 ### Where you are
 
 The `$(layers)` item says where the conversation **in front** is, not merely

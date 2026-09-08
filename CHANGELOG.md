@@ -4,6 +4,48 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A project whose folder is gone now says so, instead of doing nothing.**
+  Every New Session in `plc-meeting` answered with nothing whatsoever: the
+  project still pointed at a directory that had been deleted, and a terminal
+  created with a working directory that does not exist gets a shell that exits
+  immediately. Nothing ran — but the record, the row and the title were minted
+  *before* the launch, so each click left a session with no process and no
+  transcript, and each of those was then misread by everything downstream:
+  forking one refused ("no transcript"), and a Codex launch, which is bound
+  under a provisional id until its rollout file appears, produced a row that
+  reported itself as **running outside Flock** — Flock's own session, disowned
+  by Flock. Four rows, three misleading messages, and not one of them said the
+  folder was missing. A launch into a directory that is provably gone is now
+  refused, by name: *Flock cannot start a session in "…" — that directory does
+  not exist any more.* The verbs check before they mint, so a click costs no
+  row, and the terminal registry checks again at the one gate all eight launch
+  verbs pass through. A directory that merely cannot be read — a permission
+  error, a share mid-hiccup — is never treated as missing: refusing a launch on
+  the strength of not knowing would be the worse bug.
+
+- **Asking a question no longer moves the window.** In the Auto-switch model,
+  the workspace follows your focus — and a project CHAT was taking that focus
+  with it. A chat's working directory is the project's root, so opening one
+  about project A while you were working in project B read as "you have started
+  working in A": the window switched, and the switch put away B's own sessions
+  on the way out. Axel's report of it was the plainest possible statement of
+  what that costs — "I was in a chat in one project, and the previous session in
+  the other project disappeared." Nothing was lost (the session detached under
+  its grace with a countdown row, or archived with the marker that resumes it on
+  the way back), but nobody asked for any of it. A chat is a conversation
+  *about* a project, not one of the tabs the project is worked in: it re-scopes
+  nothing now, which is the same fact that already keeps it out of every saved
+  layout and exempt from solo mode. Those three exemptions were three separate
+  derivations of "is this a chat?" — the auto-switch had none at all — and they
+  are now one shared answer (`chatAutoClose.isChatConversation`), so the next
+  rule inherits it instead of re-deriving it. It answers for a chat reopened
+  from Chat History too, whose terminal runs under a generation id nothing ever
+  flagged.
+
 ## [0.8.1] — 2026-09-07
 
 ### Fixed

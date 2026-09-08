@@ -17,6 +17,31 @@ import {
   MAX_PROJECT_NAME_LEN,
   isProviderId,
 } from './types';
+
+/**
+ * What to say when a verb would start a session in a directory that is not
+ * there — a project left pointing at a folder that was moved, renamed or
+ * deleted (a merged worktree is the common one).
+ *
+ * HERE, in the pure module, because two layers say it: the command flows
+ * refuse before they mint a record, and the terminal registry refuses again at
+ * the one gate every launch verb passes through. One fact, one wording — the
+ * rule hosts.ts states for its own three surfaces.
+ *
+ * It NAMES THE PATH. The whole difficulty of this failure is that nothing on
+ * screen says which directory is missing: the verb was "New Session" on a
+ * project row that still looks perfectly well, and the Explorer skips a
+ * missing directory silently.
+ */
+export function missingCwdMessage(cwd: string): string {
+  return (
+    `Flock cannot start a session in "${cwd}" — that directory does not ` +
+    'exist any more. It was moved, renamed or deleted; point the project at ' +
+    'where it lives now (right-click the project → Settings) or close the ' +
+    'project.'
+  );
+}
+
 import type {
   BranchInfo,
   EditorialRecord,
