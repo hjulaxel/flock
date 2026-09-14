@@ -697,6 +697,15 @@ describe('buildViewModel: directory subproject rows', () => {
     ]);
   });
 
+  it('gives the directory row’s + the same second verb the project row’s has', () => {
+    // Right-click asks which account first. The title is what makes the gesture
+    // discoverable, and it is the SAME title on both rows because it is the
+    // same gesture — a directory row is where the project row's `+` went.
+    const plus = rows()[1].actions?.[0];
+    expect(plus?.altTitle).toBe('Right-click to choose the account');
+    expect(rows()[0].actions?.[1].altTitle).toBe(plus?.altTitle);
+  });
+
   it('keeps the + on a single-directory project', () => {
     const out = buildViewModel(
       input(forestOf([node(A)]), {

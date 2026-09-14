@@ -986,6 +986,7 @@ export function rosterSignature(entries: RosterEntry[]): string {
       e.cwd ?? '',
       e.kind ?? '',
       e.startedAt ?? '',
+      e.lastActivityAt ?? '',
       e.name ?? '',
       e.status ?? '',
       e.state ?? '',

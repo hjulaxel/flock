@@ -358,8 +358,8 @@ export interface RolloutMeta {
   path: string;
   /** `session_meta.payload.cwd` — the directory Codex recorded for the run. */
   cwd?: string;
-  /** Epoch ms from the record's own ISO-Z timestamp; birthtime as a fallback.
-   *  NEVER from the filename, whose clock is local (see ROLLOUT_RE). */
+  /** Session creation time from payload.timestamp. The outer timestamp can
+   *  be minutes later, when the first prompt flushes the record to disk. */
   startedAt?: number;
   /** File mtime — last activity, the same role `ArchivedSession.endedAt` has. */
   endedAt: number;
@@ -526,10 +526,15 @@ export function readRolloutMeta(file: string): RolloutMeta | null {
     if (originator !== undefined) out.originator = originator;
     const cwd = extractJsonString(head, 'cwd');
     if (cwd !== undefined) out.cwd = cwd;
-    const ts = extractJsonString(head, 'timestamp');
-    if (ts !== undefined) {
+    const payloadAt = head.indexOf('"payload":{');
+    const payloadHead = payloadAt < 0 ? '' : head.slice(payloadAt + '"payload":{'.length);
+    for (const ts of [extractJsonString(payloadHead, 'timestamp'), extractJsonString(head, 'timestamp')]) {
+      if (ts === undefined) continue;
       const parsed = Date.parse(ts);
-      if (Number.isFinite(parsed)) out.startedAt = parsed;
+      if (Number.isFinite(parsed)) {
+        out.startedAt = parsed;
+        break;
+      }
     }
   }
   if (out.startedAt === undefined && Number.isFinite(st.birthtimeMs) && st.birthtimeMs > 0) {
@@ -678,6 +683,8 @@ export interface MatchRolloutOptions {
    *  whatever rollout turns up next would bind the row to an unrelated
    *  session the user started by hand. */
   windowMs?: number;
+  /** Recovery after a delayed first write must not choose between sessions. */
+  requireUnique?: boolean;
 }
 
 /** Default belief window for a match. Generous next to a CLI that opens its
@@ -755,12 +762,48 @@ export function matchRollout(
       const got = normalizeDir(meta.cwd);
       if (got === undefined || got !== wantCwd) continue;
     }
+    if (best !== null && opts.requireUnique) return null;
     if (best === null || startedAt < (best.startedAt ?? Infinity)) best = meta;
   }
   if (best !== null) {
     log(`codex: matched rollout ${best.sessionId} for a launch in ${wantCwd ?? '(no cwd)'}`);
   }
   return best;
+}
+
+export interface PendingCodexLaunch {
+  sessionId: string;
+  cwd: string;
+  spawnedAt: number;
+  sessionsDir: string;
+}
+
+/** A delayed first prompt can create the rollout after the launch watcher
+ * stops. Its session timestamp still identifies the original launch. Only
+ * unambiguous matches within the original window and account are recoverable. */
+export function matchPendingCodexLaunches(
+  launches: readonly PendingCodexLaunch[],
+  candidates: readonly RolloutMeta[],
+  taken: ReadonlySet<string>,
+  windowMs: number,
+): Map<string, RolloutMeta> {
+  const matches = new Map<string, RolloutMeta>();
+  const owners = new Map<string, number>();
+  for (const launch of launches) {
+    const root = normalizeDir(launch.sessionsDir);
+    if (!root || !Number.isFinite(launch.spawnedAt)) continue;
+    const hit = matchRollout(candidates.filter((meta) => {
+      const file = normalizeDir(meta.path);
+      return file !== undefined && file.startsWith(root + '/');
+    }), { ...launch, taken, windowMs, requireUnique: true });
+    if (!hit) continue;
+    matches.set(launch.sessionId, hit);
+    owners.set(hit.sessionId, (owners.get(hit.sessionId) ?? 0) + 1);
+  }
+  for (const [id, hit] of matches) {
+    if (owners.get(hit.sessionId) !== 1) matches.delete(id);
+  }
+  return matches;
 }
 
 /**
@@ -1203,6 +1246,11 @@ export function parseCodexAuth(text: string | null): CodexIdentity | null {
 
 export type RolloutActivity = 'busy' | 'idle';
 
+export interface RolloutActivityMark {
+  status: RolloutActivity;
+  at?: number;
+}
+
 /** Tail budget for the activity read: a turn's closing records are a few
  *  hundred bytes each, but a turn can END with a large tool output, and the
  *  `task_complete` sits after it. */
@@ -1217,11 +1265,18 @@ const IDLE_EVENTS: ReadonlySet<string> = new Set(['task_complete', 'turn_aborted
  * CLI writes the instant a prompt is submitted, a beat before `task_started`.
  */
 export function rolloutActivityFromTail(text: string): RolloutActivity | null {
+  return rolloutActivityMarkFromTail(text)?.status ?? null;
+}
+
+/** Turn boundaries win, with conversation output as a fallback when a long
+ * turn has pushed its boundary out of the window. Bookkeeping is not work. */
+export function rolloutActivityMarkFromTail(text: string): RolloutActivityMark | null {
   if (typeof text !== 'string' || text === '') return null;
   const lines = text.split('\n');
+  let working: RolloutActivityMark | null = null;
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
-    if (line === undefined || !line.includes('"event_msg"')) continue;
+    if (line === undefined || line === '') continue;
     let parsed: unknown;
     try {
       parsed = JSON.parse(line);
@@ -1233,10 +1288,29 @@ export function rolloutActivityFromTail(text: string): RolloutActivity | null {
     if (!isRecordValue(payload)) continue;
     const type = payload['type'];
     if (typeof type !== 'string') continue;
-    if (BUSY_EVENTS.has(type)) return 'busy';
-    if (IDLE_EVENTS.has(type)) return 'idle';
+    const stamp = typeof parsed['timestamp'] === 'string'
+      ? Date.parse(parsed['timestamp']) : Number.NaN;
+    const mark = (status: RolloutActivity): RolloutActivityMark => ({
+      status,
+      ...(Number.isFinite(stamp) ? { at: stamp } : {}),
+    });
+    if (parsed['type'] === 'event_msg') {
+      if (BUSY_EVENTS.has(type)) return working ?? mark('busy');
+      if (IDLE_EVENTS.has(type)) return mark('idle');
+    }
+    if (parsed['type'] !== 'response_item') continue;
+    if (type === 'message' && payload['role'] === 'assistant' &&
+        (payload['phase'] === 'final_answer' || payload['phase'] === 'final')) {
+      return working ?? mark('idle');
+    }
+    if (working === null && (
+      (type === 'message' && payload['role'] === 'assistant') ||
+      type === 'reasoning' || type === 'function_call' ||
+      type === 'function_call_output' || type === 'custom_tool_call' ||
+      type === 'custom_tool_call_output'
+    )) working = mark('busy');
   }
-  return null;
+  return working;
 }
 
 /** `rolloutActivityFromTail` over a file's tail. Null for an unreadable file
@@ -1249,4 +1323,27 @@ export function readRolloutActivity(file: string): RolloutActivity | null {
     return null;
   }
   return rolloutActivityFromTail(tail);
+}
+
+/** Codex writes /rename titles into this append-only index, outside rollouts. */
+export function readCodexSessionNames(sessionsDirs: readonly string[]): Map<string, string> {
+  const names = new Map<string, string>();
+  const stamps = new Map<string, number>();
+  for (const dir of new Set(sessionsDirs)) {
+    let text: string;
+    try { text = readTail(path.join(path.dirname(dir), 'session_index.jsonl'), 256 * 1024); }
+    catch { continue; }
+    for (const line of text.split('\n')) {
+      let rec: unknown;
+      try { rec = JSON.parse(line); } catch { continue; }
+      if (!isRecordValue(rec) || !isSessionId(rec['id']) ||
+          typeof rec['thread_name'] !== 'string' || rec['thread_name'].trim() === '') continue;
+      const at = typeof rec['updated_at'] === 'string' ? Date.parse(rec['updated_at']) : 0;
+      const stamp = Number.isFinite(at) ? at : 0;
+      if (stamp < (stamps.get(rec['id']) ?? 0)) continue;
+      names.set(rec['id'], rec['thread_name'].trim().replace(/\s+/g, ' '));
+      stamps.set(rec['id'], stamp);
+    }
+  }
+  return names;
 }

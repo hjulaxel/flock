@@ -662,6 +662,98 @@ describe('buildViewModel: row content', () => {
     expect(rows[0].icon).toEqual({ type: 'codicon', id: 'none' });
   });
 
+  // WHICH ACCOUNT THIS PROJECT'S NEXT SESSION WOULD START ON, in the hover.
+  //
+  // The project row's description is deliberately empty — a permanent fact you
+  // set up once does not belong in the widest, most-read row in the tree — so
+  // the hover is where this goes, under the same rule the directories follow.
+  describe('the account line in a project row hover', () => {
+    const project = {
+      type: 'project' as const,
+      projectId: 'p1',
+      label: 'API',
+      rootDir: '/code/api',
+      dirs: ['/code/api'],
+      provider: 'claude' as ProviderId,
+      rootIds: [],
+    };
+
+    it('appends the account under the label and the directories', () => {
+      const rows = buildViewModel(
+        input(
+          forestOf([node(A)]),
+          { projects: [project] },
+          { accountFor: () => 'Magma' },
+        ),
+      );
+      expect(rows[0].tooltip).toBe('API\n/code/api\naccount: Magma');
+    });
+
+    it('draws no line at all when the wiring has no answer', () => {
+      // An unwired lookup, an account roster that is empty, and a project whose
+      // routing cannot be resolved all arrive here the same way: as nothing.
+      // The hover must then read exactly as it did before accounts existed —
+      // asserting a routing we cannot read is worse than saying nothing.
+      const unwired = buildViewModel(
+        input(forestOf([node(A)]), { projects: [project] }),
+      );
+      expect(unwired[0].tooltip).toBe('API\n/code/api');
+      const empty = buildViewModel(
+        input(
+          forestOf([node(A)]),
+          { projects: [project] },
+          { accountFor: () => undefined },
+        ),
+      );
+      expect(empty[0].tooltip).toBe('API\n/code/api');
+      const blank = buildViewModel(
+        input(
+          forestOf([node(A)]),
+          { projects: [project] },
+          { accountFor: () => '   ' },
+        ),
+      );
+      expect(blank[0].tooltip).toBe('API\n/code/api');
+    });
+
+    it('cannot be made to forge a line of its own', () => {
+      // The hover is ONE string and the client splits it on newlines, so a
+      // label carrying one would draw a second line the model never wrote.
+      // Folded at the seam rather than trusted, because the text upstream is a
+      // user-chosen account name.
+      const rows = buildViewModel(
+        input(
+          forestOf([node(A)]),
+          { projects: [project] },
+          { accountFor: () => 'Magma\nnot a real line' },
+        ),
+      );
+      expect(rows[0].tooltip).toBe('API\n/code/api\naccount: Magma not a real line');
+    });
+
+    it('is asked about the project by id, once per project row', () => {
+      const asked: string[] = [];
+      buildViewModel(
+        input(
+          forestOf([node(A)]),
+          {
+            projects: [
+              project,
+              { ...project, projectId: 'p2', label: 'Web', rootDir: '/code/web', dirs: ['/code/web'] },
+            ],
+          },
+          {
+            accountFor: (id) => {
+              asked.push(id);
+              return id === 'p1' ? 'Magma' : 'Auto (global default)';
+            },
+          },
+        ),
+      );
+      expect(asked).toEqual(['p1', 'p2']);
+    });
+  });
+
   it('gives a project row the chat and then the new-session action, both named after it', () => {
     const rows = buildViewModel(
       input(forestOf([node(A)]), {
@@ -682,7 +774,16 @@ describe('buildViewModel: row content', () => {
     // left to right, and the `+` is specified to sit RIGHT of the chat glyph.
     expect(rows[0].actions).toEqual([
       { id: 'chat', icon: 'chat', title: 'New chat in API' },
-      { id: 'newSession', icon: 'add', title: 'New session in API' },
+      {
+        id: 'newSession',
+        icon: 'add',
+        title: 'New session in API',
+        // The `+` carries a SECOND verb on its right-click — pick the account
+        // rather than take the routed one. Asserted here rather than in a test
+        // of its own because the strip is a contract and an alt verb that
+        // appeared on the wrong button would be invisible otherwise.
+        altTitle: 'Right-click to choose the account',
+      },
     ]);
   });
 

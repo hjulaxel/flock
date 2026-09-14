@@ -627,6 +627,47 @@ describe('LineageWebtreeProvider row actions (via the "action" message)', () => 
     });
     expect(calls.runCommand).toEqual([]);
   });
+
+  // THE RIGHT-CLICK HALF OF THE `+`. Left-click starts a session where the
+  // routing says; right-click asks which account first. Its own message and its
+  // own allowlist, so the alt gesture can only ever reach a verb deliberately
+  // put there.
+  it('routes the alt new-session action to newSessionFromPicker', async () => {
+    const { calls, priv } = setup();
+    await priv.onMessage({
+      type: 'actionAlt',
+      key: 'project:p1',
+      action: 'newSession',
+    });
+    // The same project-shaped arg the left-click sends, so the picker flow
+    // cannot tell this from a context-menu invocation either.
+    expect(calls.runCommand).toEqual([
+      ['newSessionFromPicker', { type: 'project', projectId: 'p1' }],
+    ]);
+  });
+
+  it('gives the alt gesture NO verb on an action that was never offered one', async () => {
+    // `chat` has a left-click verb and no alt one. Falling back to the ordinary
+    // action table here would give every button a second meaning nobody
+    // specified — which is exactly what a second table exists to prevent.
+    const { calls, priv } = setup();
+    await priv.onMessage({
+      type: 'actionAlt',
+      key: 'project:p1',
+      action: 'chat',
+    });
+    expect(calls.runCommand).toEqual([]);
+  });
+
+  it('refuses an alt action aimed at a row that is not a project', async () => {
+    const { calls, priv } = setup();
+    await priv.onMessage({
+      type: 'actionAlt',
+      key: `session:${ROOT}`,
+      action: 'newSession',
+    });
+    expect(calls.runCommand).toEqual([]);
+  });
 });
 
 // ------------------------------------------------------------------ beginRename
@@ -1196,10 +1237,12 @@ describe('LineageWebtreeProvider: subproject rows', () => {
       action: 'newSessionInSubproject',
       key: subprojectRowKey('p1', 'dir:/proj/api'),
     });
+    // With the row's own `id` — the shape the native menu sends, and what lets
+    // the verb find a NAMED lane rather than just its directory.
     expect(calls.runCommand).toEqual([
       [
         'newSessionInSubproject',
-        { type: 'subproject', projectId: 'p1', dir: '/proj/api' },
+        { type: 'subproject', projectId: 'p1', dir: '/proj/api', id: 'dir:/proj/api' },
       ],
     ]);
   });
@@ -1208,6 +1251,35 @@ describe('LineageWebtreeProvider: subproject rows', () => {
     const { provider, calls } = setup();
     await internals(provider).onMessage({
       type: 'action',
+      action: 'newSessionInSubproject',
+      key: subprojectRowKey('p1', 'dir:/etc'),
+    });
+    expect(calls.runCommand).toEqual([]);
+  });
+
+  // THE RIGHT-CLICK HALF of a directory row's `+`: the same lookup, the same
+  // argument, and the picker verb instead of the plain one — so "on which
+  // account?" starts in the directory whose button it was, not the project's
+  // first one.
+  it('routes a right-click on the + to newSessionFromPicker, with the same subproject arg', async () => {
+    const { provider, calls } = setup();
+    await internals(provider).onMessage({
+      type: 'actionAlt',
+      action: 'newSessionInSubproject',
+      key: subprojectRowKey('p1', 'dir:/proj/api'),
+    });
+    expect(calls.runCommand).toEqual([
+      [
+        'newSessionFromPicker',
+        { type: 'subproject', projectId: 'p1', dir: '/proj/api', id: 'dir:/proj/api' },
+      ],
+    ]);
+  });
+
+  it('refuses the right-click for a directory the current model does not show', async () => {
+    const { provider, calls } = setup();
+    await internals(provider).onMessage({
+      type: 'actionAlt',
       action: 'newSessionInSubproject',
       key: subprojectRowKey('p1', 'dir:/etc'),
     });

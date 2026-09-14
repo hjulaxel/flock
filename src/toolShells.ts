@@ -616,6 +616,8 @@ export class ShellRunSet {
   /** backgroundTaskId → tool_use id, so a completion notice that names only
    *  the task can still find its run. */
   private readonly byTask = new Map<string, string>();
+  /** Codex write_stdin call ids point back to the command's process id. */
+  private readonly codexPolls = new Map<string, string>();
 
   constructor(private readonly sessionId: string) {}
 
@@ -638,9 +640,71 @@ export class ShellRunSet {
     const type = rec['type'];
     if (type === 'assistant') this.ingestAssistant(rec);
     else if (type === 'user') this.ingestUser(rec);
+    else if (type === 'response_item') this.ingestCodex(rec);
     // Checked on EVERY record, not just `user` ones — see notificationTextOf
     // for why the completion notice has no single home.
     this.ingestNotification(rec);
+  }
+
+  private ingestCodex(rec: Record<string, unknown>): void {
+    const payload = rec['payload'];
+    if (!isRecord(payload) || typeof payload['call_id'] !== 'string') return;
+    const id = payload['call_id'];
+    const at = epochOf(rec);
+    if (payload['type'] === 'function_call') {
+      let args: unknown;
+      try { args = JSON.parse(String(payload['arguments'] ?? '')); } catch { return; }
+      if (!isRecord(args)) return;
+      const name = String(payload['name'] ?? '').split('.').pop();
+      if (name === 'write_stdin') {
+        const runId = this.byTask.get(String(args['session_id']));
+        if (runId !== undefined) this.codexPolls.set(id, runId);
+        return;
+      }
+      if (name !== 'exec_command' && name !== 'shell_command' && name !== 'shell') return;
+      const raw = args['cmd'] ?? args['command'];
+      const command = typeof raw === 'string' ? raw
+        : Array.isArray(raw) && raw.every(v => typeof v === 'string') ? raw.join(' ') : '';
+      if (command === '' || this.runs.has(id)) return;
+      this.runs.set(id, { id, sessionId: this.sessionId,
+        command: truncate(command, MAX_COMMAND_CHARS), startedAt: at, outcome: 'running' });
+      this.trim();
+      return;
+    }
+    if (payload['type'] !== 'function_call_output') return;
+    const run = this.runs.get(this.codexPolls.get(id) ?? id);
+    this.codexPolls.delete(id);
+    if (run === undefined || !isLive(run)) return;
+    let output: unknown = payload['output'];
+    if (typeof output === 'string') {
+      try { output = JSON.parse(output); } catch { /* CLI text envelope */ }
+    }
+    const text = typeof output === 'string' ? output
+      : isRecord(output) && typeof output['output'] === 'string' ? output['output'] : '';
+    // Only the CLI envelope, before stdout. A command can print these words.
+    const envelope = text.split(/\n(?:Output|Final output):\s*\n/)[0];
+    const meta = isRecord(output) && isRecord(output['metadata']) ? output['metadata'] : output;
+    const code = isRecord(meta) && typeof meta['exit_code'] === 'number'
+      ? meta['exit_code'] : !isRecord(output)
+        ? /(?:^|\n)Process exited with code (-?\d+)/.exec(envelope)?.[1] : undefined;
+    const processId = isRecord(output) ? output['session_id']
+      : /(?:^|\n)Process running with session ID (\S+)/.exec(envelope)?.[1];
+    if (code === undefined && (typeof processId === 'string' || typeof processId === 'number')) {
+      run.outcome = 'background';
+      run.backgroundId = String(processId);
+      this.byTask.set(run.backgroundId, run.id);
+      return;
+    }
+    if (code !== undefined && Number.isInteger(Number(code))) {
+      run.exitCode = Number(code);
+      run.outcome = run.exitCode === 0 ? 'ok' : 'failed';
+    } else {
+      // An answered tool call with no exit metadata has ended, but cannot
+      // be labelled successful on the strength of arbitrary stdout.
+      run.outcome = looksDenied(text) || /rejected by user/i.test(text) ? 'denied' : 'failed';
+      run.reason = reasonOf(text) ?? 'No exit status recorded';
+    }
+    run.endedAt = at;
   }
 
   private ingestAssistant(rec: Record<string, unknown>): void {

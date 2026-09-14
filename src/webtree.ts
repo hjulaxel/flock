@@ -157,6 +157,20 @@ const PROJECT_ROW_ACTIONS: Record<string, keyof typeof COMMANDS | undefined> = {
   unfoldBranches: 'unfoldBranches',
 };
 
+/** A row action's SECOND verb — what right-clicking the button runs, against
+ *  what left-clicking it runs (PROJECT_ROW_ACTIONS above). Its own table for
+ *  exactly the reason that one is a table: the page names an action id and this
+ *  side decides which command that is, so the alt gesture can only ever reach a
+ *  verb the extension deliberately put here. An action with no entry has no alt
+ *  verb, which is the state of every action but one. */
+const PROJECT_ROW_ALT_ACTIONS: Record<string, keyof typeof COMMANDS | undefined> = {
+  // `+` says "start a session here"; right-click says "…on which account?".
+  // The picker is newSessionFromPicker's, which already offers the routed
+  // choice first with the reason it won — so the two gestures agree about what
+  // would have happened, and differ only in whether you get to overrule it.
+  newSession: 'newSessionFromPicker',
+};
+
 /** The links on a branch — its name, and its `#42` — and the verbs they run. A
  *  THIRD allowlist, separate from PROJECT_ROW_ACTIONS above because these resolve
  *  through a checkout rather than a project (see linkTargetFor) and hand the
@@ -588,6 +602,32 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  /**
+   * What a subproject row's `+` hands its verb: `{type:'subproject', projectId,
+   * dir, id}` — exactly the shape subprojectArgOf() reads, and the same one the
+   * row's native context menu sends, so the command cannot tell a button from a
+   * menu. Or undefined for a key naming no directory row on screen.
+   *
+   * `id` is the row's own, off the context the model wrote (a SubprojectRecord
+   * id for a named lane, `dir:<key>` for an implicit row). It is what lets the
+   * verb find the LANE — its name, its branch pin, the stamp the session gets —
+   * and without it a named lane's `+` launched a session that belonged to no
+   * lane at all.
+   */
+  private subprojectTargetFor(
+    key: unknown,
+  ): { type: 'subproject'; projectId: string; dir: string; id: string } | undefined {
+    const row = this.subprojectRowFor(key);
+    if (!row?.cwd || row.cwd === '' || !row.projectId) return undefined;
+    const id = row.context['id'];
+    return {
+      type: 'subproject',
+      projectId: row.projectId,
+      dir: row.cwd,
+      id: typeof id === 'string' ? id : '',
+    };
+  }
+
   /** The rendered branch row a client message names, or undefined. Looked up in
    *  the model this view just posted, which is what makes a click unable to
    *  reach a worktree the user was not looking at. */
@@ -684,6 +724,11 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
         ? {}
         : {
             accountLabelOf: (id: string) => this.deps.accountLabelOf?.(id),
+          }),
+      ...(this.deps.projectAccountOf === undefined
+        ? {}
+        : {
+            accountFor: (id: string) => this.deps.projectAccountOf?.(id),
           }),
       viewId: INLINE_VIEW_ID,
       now: Date.now(),
@@ -1503,13 +1548,9 @@ ${branchPaletteCss()}  }
           // project row's `+` is withdrawn while these exist precisely so that
           // no button in the tree has to guess which directory was meant.
           if (String(msg.action) === 'newSessionInSubproject') {
-            const row = this.subprojectRowFor(msg.key);
-            if (!row?.cwd || row.cwd === '' || !row.projectId) return;
-            await this.deps.runCommand('newSessionInSubproject', {
-              type: 'subproject',
-              projectId: row.projectId,
-              dir: row.cwd,
-            });
+            const target = this.subprojectTargetFor(msg.key);
+            if (!target) return;
+            await this.deps.runCommand('newSessionInSubproject', target);
             return;
           }
           const command = PROJECT_ROW_ACTIONS[String(msg.action)];
@@ -1518,6 +1559,34 @@ ${branchPaletteCss()}  }
           if (!projectId) return;
           // Exactly the shape projectIdFromArg() reads, so the handler cannot
           // tell a row action from a native context-menu invocation.
+          await this.deps.runCommand(command, {
+            type: 'project',
+            projectId,
+          });
+          return;
+        }
+
+        case 'actionAlt': {
+          // The right-click half of a row action. Same discipline as 'action':
+          // the page names an allowlisted action id, never a command, and the
+          // project is resolved from the ROW KEY rather than taken from the
+          // message. The argument shape is the one projectIdFromArg() reads, so
+          // the handler cannot tell this from a native context-menu invocation.
+          //
+          // A SUBPROJECT row's `+` has the same second verb — the picker — and
+          // resolves through the same lookup its left-click does, so the
+          // directory a right-click starts in is the one whose button it was.
+          // The picker verb reads the subproject shape before the project one.
+          if (String(msg.action) === 'newSessionInSubproject') {
+            const target = this.subprojectTargetFor(msg.key);
+            if (!target) return;
+            await this.deps.runCommand('newSessionFromPicker', target);
+            return;
+          }
+          const command = PROJECT_ROW_ALT_ACTIONS[String(msg.action)];
+          if (command === undefined) return;
+          const projectId = projectIdFromKey(msg.key);
+          if (!projectId) return;
           await this.deps.runCommand(command, {
             type: 'project',
             projectId,

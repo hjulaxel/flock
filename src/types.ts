@@ -823,7 +823,17 @@ export interface UsageSnapshot {
   /** Epoch ms when these numbers were read. */
   fetchedAt: number;
   stale?: boolean;
-  error?: 'no-credentials' | 'expired' | 'token-stale' | 'http' | 'parse';
+  error?:
+    | 'no-credentials'
+    | 'expired'
+    | 'token-stale'
+    | 'rate-limited'
+    | 'polling-paused'
+    | 'http'
+    | 'parse';
+  /** Earliest allowed next attempt, epoch ms. Includes the server's minimum
+   *  wait or Flock's fallback backoff, and is preserved across cached renders. */
+  retryAt?: number;
   /** Who the profile's config dir says is signed in
    *  (`oauthAccount.emailAddress` from its `.claude.json`; for a Codex home,
    *  the `email` claim of the id token in its `auth.json`). Identity, not
@@ -1528,7 +1538,7 @@ export const COMMANDS = {
    *  All Sessions" say which way they go rather than needing a `when` clause and
    *  a second command id each. */
   settingsMenu: 'lineage.settingsMenu',
-  // ACCOUNTS. Eleven verbs, and they live here rather than in a table of their own
+  // ACCOUNTS. Twelve verbs, and they live here rather than in a table of their own
   // next to the view for the reason every other id does: a test cross-checks
   // THIS object against the manifest in both directions, so a second table is a
   // set of commands nothing checks — invisible when it is missing from
@@ -1541,6 +1551,17 @@ export const COMMANDS = {
    *  browser hand-off is Claude Code's, and wrapping it would mean holding a
    *  token this extension has no business holding. */
   loginAccount: 'lineage.loginAccount',
+  /** Rename an account — the LABEL and nothing else.
+   *
+   *  Safe in a way almost nothing else about an account is, and worth saying
+   *  why: the label is display text. The id is what every session pin names,
+   *  the config directory is where the login and the transcripts live, and
+   *  neither is derived from the label after the account is created (`slugify`
+   *  runs once, in the add flow). So a rename cannot strand a conversation,
+   *  move a credential, or change which subscription anything bills to — which
+   *  is precisely why it can be an input box on a row instead of a dialog with
+   *  a warning in it. */
+  renameAccount: 'lineage.renameAccount',
   removeAccount: 'lineage.removeAccount',
   /** Copy the allowlisted keys of `~/.claude.json` into this account's own
    *  identity file AGAIN, overwriting: the MCP server definitions (their `env`
@@ -2069,6 +2090,9 @@ export interface RosterEntry {
   cwd?: string;
   kind?: SessionKind;
   startedAt?: number;    // epoch millis
+  /** Codex's latest conversation event, so a turn completed between roster
+   * polls still invalidates the view even when its status remains idle. */
+  lastActivityAt?: number;
   name?: string;
   status?: string;       // raw, e.g. "waiting" | "idle" — often absent
   state?: string;        // raw, e.g. "blocked" — often absent
@@ -3621,6 +3645,13 @@ export interface TreeDeps {
    *  Optional, like every lookup here: absent means the hover reads exactly as
    *  it did before accounts could be switched. */
   accountLabelOf?(sessionId: string): string | undefined;
+  /** Which account a PROJECT'S NEW sessions will launch on, already worded by
+   *  `routing.describeRouting` — the project-level counterpart of
+   *  `accountLabelOf` above, and a different question: that one says where a
+   *  conversation ALREADY runs, this says where the next one would start. One
+   *  hover line on the project row, for the same reason and under the same
+   *  rule. Optional; absent draws no line. */
+  projectAccountOf?(projectId: string): string | undefined;
   /** Which CLI wrote this conversation — the fact behind the row's
    *  `;claude;` / `;codex;` token pair, and therefore behind whether "Move to
    *  Account…" is in its menu. See ViewModelInput.sessionCli for the rule that
@@ -3950,12 +3981,8 @@ export interface LimitsReader {
   /** Fetch (or serve from cache) this account's windows. Must never throw —
    *  a failure is a snapshot with `error` set, or `null`.
    *
-   *  `force` steps over the reader's own minimum interval and backoff. It is
-   *  part of the interface rather than a detail of one implementation because
-   *  the manual refresh verb is meaningless without it: the reader MUST rate-
-   *  limit itself (a repaint asks for every row at once) and a Refresh button
-   *  that silently returns the cache is a button that lies. A reader with no
-   *  such notion may ignore the flag. */
+   *  `force` requests a fresh reading. It may bypass cache freshness, but must
+   *  still respect request spacing and rate-limit cooldowns. */
   readUsage(
     profile: AccountProfile,
     options?: { force?: boolean },

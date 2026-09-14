@@ -28,6 +28,46 @@ const T1 = '2026-08-30T01:00:12.000Z';
 const MS0 = Date.parse(T0);
 const MS1 = Date.parse(T1);
 
+describe('Codex shell calls', () => {
+  const call = (call_id: string, name: string, args: unknown) => JSON.stringify({
+    type: 'response_item', timestamp: T0,
+    payload: { type: 'function_call', call_id, name, arguments: JSON.stringify(args) },
+  });
+  const result = (call_id: string, output: unknown) => JSON.stringify({
+    type: 'response_item', timestamp: T1,
+    payload: { type: 'function_call_output', call_id, output },
+  });
+
+  it('shows a running command and pairs its exit status by call id', () => {
+    const start = call('run', 'exec_command', { cmd: 'npm test' });
+    expect(parseShellRuns(start, SESSION)[0]).toMatchObject({ command: 'npm test', outcome: 'running' });
+    const runs = parseShellRuns(start + '\n' + result('run',
+      'Process exited with code 1\nFinal output:\nTest failed'), SESSION);
+    expect(runs[0]).toMatchObject({ command: 'npm test', outcome: 'failed', exitCode: 1, endedAt: MS1 });
+  });
+
+  it('tracks a yielded process through write_stdin polls to completion', () => {
+    const lines = [call('run', 'exec_command', { cmd: 'npm test' }),
+      result('run', 'Process running with session ID 123\nOutput:\n'),
+      call('poll', 'write_stdin', { session_id: 123 }),
+      result('poll', JSON.stringify({ session_id: 123, output: 'Working' }))];
+    expect(parseShellRuns(lines.join('\n'), SESSION)[0].outcome).toBe('background');
+    lines.push(call('poll2', 'write_stdin', { session_id: 123 }),
+      result('poll2', JSON.stringify({ exit_code: 0, output: 'Passed' })));
+    expect(parseShellRuns(lines.join('\n'), SESSION)).toHaveLength(1);
+    expect(parseShellRuns(lines.join('\n'), SESSION)[0]).toMatchObject({ outcome: 'ok', exitCode: 0 });
+  });
+
+  it('supports shell metadata and ignores non-shell tools and stdout that resembles status', () => {
+    const lines = [call('other', 'spawn_agent', { task_name: 'worker' }),
+      call('shell', 'shell', { command: ['sh', '-c', 'pwd'] }),
+      result('shell', JSON.stringify({ output: 'Process exited with code 42', metadata: { exit_code: 0 } }))];
+    const runs = parseShellRuns(lines.join('\n'), SESSION);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ outcome: 'ok', exitCode: 0 });
+  });
+});
+
 /** An assistant record issuing one Bash call. */
 function ask(
   id: string,

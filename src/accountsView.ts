@@ -544,7 +544,12 @@ export function formatUsageSummary(
   if (snapshot.error === 'token-stale') {
     return who === '' ? 'usage n/a' : `${who} · usage n/a`;
   }
-  if (snapshot.error !== undefined) return 'usage unavailable';
+  const paused = snapshot.error === 'rate-limited' || snapshot.error === 'polling-paused';
+  const back = paused ? untilLabel(snapshot.retryAt, now) : '';
+  const pause = paused
+    ? 'Flock usage polling paused' + (back === '' ? '' : ` · back ${back}`)
+    : '';
+  if (snapshot.error !== undefined && !paused) return 'usage unavailable';
 
   const parts: string[] = [];
   const five = pct(snapshot.fiveHour);
@@ -565,6 +570,7 @@ export function formatUsageSummary(
   const opus = pct(snapshot.sevenDayOpus);
   if (opus !== undefined) parts.push(`opus ${String(opus)}%`);
   if (parts.length === 0) {
+    if (pause !== '') return who === '' ? pause : `${who} · ${pause}`;
     // A signed-in account with nothing measured yet — a Codex login that has
     // not taken a turn, which is every Codex row on a fresh machine — shows its
     // name and says why there is no meter. "no usage yet" is the same wording
@@ -575,7 +581,8 @@ export function formatUsageSummary(
     }
     return snapshot.stale === true ? 'stale' : '';
   }
-  return parts.join(' · ') + (snapshot.stale === true ? ' (stale)' : '');
+  const reading = parts.join(' · ') + (snapshot.stale === true ? ' (stale)' : '');
+  return pause === '' ? reading : `${pause} · ${reading}`;
 }
 
 /**
@@ -811,6 +818,16 @@ export class AccountsViewProvider implements vscode.TreeDataProvider<AccountRow>
         md.appendMarkdown(
           'Signed in — the cached access token has aged out and the CLI ' +
             'renews it on its next run. Nothing to fix here.\n\n',
+        );
+      } else if (state === 'rate-limited' || state === 'polling-paused') {
+        const back = untilLabel(snapshot?.retryAt, now);
+        md.appendMarkdown(
+          (state === 'rate-limited'
+            ? 'Flock paused usage polling after its request was rate-limited. '
+            : 'Flock is waiting to refresh usage safely. ') +
+          (back === '' ? '' : `The next attempt is allowed ${back}. `) +
+          'Refresh also respects this pause. Previous readings remain visible; ' +
+          'this is not an account usage limit or a sign-in problem.\n\n',
         );
       }
 
