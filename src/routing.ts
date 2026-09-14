@@ -174,6 +174,10 @@ function usageReason(
   // 'token-stale' falls through to the generic line on purpose: the account is
   // signed in and perfectly routable, we just have no meter for it this minute.
   // Naming the sign-in here would be the same false alarm the row avoids.
+  // 'rate-limited' is the same situation with a different cause and gets its
+  // own words for the same reason the row does: the account is fine, the METER
+  // is throttled, and "unavailable" in a picker reads as "do not choose this".
+  else if (snapshot.error === 'rate-limited' || snapshot.error === 'polling-paused') parts.push('Flock usage polling paused');
   else if (snapshot.error) parts.push('usage unavailable');
   else parts.push('fresh 5h window');
 

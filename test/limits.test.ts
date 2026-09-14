@@ -34,6 +34,8 @@
 //      returned snapshot, not in a log line, not in a thrown error.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fsp from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { setLogSink } from '../src/log';
@@ -44,10 +46,13 @@ import {
   DEFAULT_CONFIG_DIR_NAME,
   KEYCHAIN_SERVICE,
   KEYCHAIN_TIMEOUT_MS,
-  LimitsService,
+  LimitsService as ProductionLimitsService,
   MIN_FETCH_INTERVAL_MS,
+  REQUEST_SPACING_MS,
   STALE_AFTER_MS,
+  USAGE_CACHE_TTL_MS,
   createLimitsService,
+  createUsageCache,
   credentialsPathFor,
   IDENTITY_FILE,
   formatUsageSummary,
@@ -55,11 +60,31 @@ import {
   keychainServiceFor,
   parseResetAt,
   parseUsageBody,
+  parseUsageCache,
+  retryAfterMs,
   supportsUsage,
   weekdayFor,
 } from '../src/limits';
-import type { HttpRequestInit, HttpResponseLike } from '../src/limits';
+import type {
+  CachedUsage,
+  LimitsDeps,
+  HttpRequestInit,
+  HttpResponseLike,
+  UsageCacheStore,
+} from '../src/limits';
 import type { AccountProfile, UsageSnapshot } from '../src/types';
+
+import { createUsageRequestScheduler } from '../src/usageSchedule';
+
+// Parsing and credential tests use zero spacing; the scheduling suite below
+// and usageSchedule.test.ts exercise the production budget with controlled time.
+class LimitsService extends ProductionLimitsService {
+  constructor(deps: LimitsDeps = {}) {
+    super({ ...deps, scheduler: deps.scheduler ?? createUsageRequestScheduler(undefined, {
+      now: deps.now, sleep: deps.sleep, spacingMs: 0,
+    }) });
+  }
+}
 
 // ------------------------------------------------------------------ helpers
 
@@ -451,6 +476,106 @@ describe('LimitsService — credential resolution order', () => {
       ['find-generic-password', '-s', 'Claude Code-credentials-dd2b293a', '-w'],
       KEYCHAIN_TIMEOUT_MS,
     );
+  });
+
+  // ---- the login is not the first token in the document
+  //
+  // Claude Code keeps every MCP server's OAuth grant in the SAME keychain item
+  // as the sign-in, under `mcpOAuth`, and that section comes FIRST. The shape
+  // below is the real payload of a profile that had authorised the Figma MCP
+  // server (token prefixes changed, structure kept). A walk that took the
+  // first `accessToken` in document order sent the Figma token to Anthropic,
+  // which answered 429 with an hour-long Retry-After — for that profile only,
+  // because the other profile's MCP grants were empty strings.
+
+  /** The real keychain shape: MCP grants first, some live, then the login. */
+  function keychainWithMcpGrants(login: Record<string, unknown> | undefined): string {
+    const doc: Record<string, unknown> = {
+      mcpOAuth: {
+        'railway|b12ecd269c942ba3': {
+          serverName: 'railway',
+          serverUrl: 'https://mcp.railway.com',
+          accessToken: '',
+          discoveryState: { oauthMetadataFound: true },
+        },
+        'plugin:figma:figma|d39d3b6252bc1ac5': {
+          serverName: 'plugin:figma:figma',
+          serverUrl: 'https://mcp.figma.com/mcp',
+          accessToken: 'figu_FOREIGN-TOKEN',
+          discoveryState: { oauthMetadataFound: true },
+          clientId: 'client',
+          clientSecret: 'secret',
+          redirectUri: 'http://localhost:57740/callback',
+          refreshToken: 'figur_FOREIGN-REFRESH',
+          expiresAt: BASE + 90 * 24 * 3_600_000,
+        },
+      },
+    };
+    if (login !== undefined) doc['claudeAiOauth'] = login;
+    return JSON.stringify(doc);
+  }
+
+  function serviceOnKeychain(blob: string | null, clock: () => number) {
+    let authHeader = '';
+    const readFile = vi.fn(async (): Promise<string | null> => null);
+    const exec = vi.fn(async (): Promise<string | null> => blob);
+    const fetchFn = vi.fn(async (_url: string, init: HttpRequestInit): Promise<HttpResponseLike> => {
+      authHeader = init.headers['Authorization'];
+      return okResponse(bodyWithFiveHour(54));
+    });
+    const service = new LimitsService({
+      readFile,
+      exec,
+      fetch: fetchFn,
+      now: clock,
+      homeDir: HOME,
+      platform: 'darwin',
+    });
+    return { service, fetchFn, auth: () => authHeader };
+  }
+
+  it("an MCP server's live token ahead of the login is never the Bearer — the login section is the only one read", async () => {
+    const clock = BASE;
+    const { service, fetchFn, auth } = serviceOnKeychain(
+      keychainWithMcpGrants({
+        accessToken: 'sk-ant-oat01-THE-LOGIN',
+        refreshToken: 'sk-ant-ort01-REFRESH',
+        expiresAt: BASE + 3_600_000,
+        scopes: ['user:inference', 'user:profile'],
+        subscriptionType: 'team',
+      }),
+      () => clock,
+    );
+
+    const out = await service.readUsage(profile('p', { configDir: '/Users/axelh/.lineage/profiles/magma' }));
+    expect(out?.fiveHour?.utilization).toBe(54);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(auth()).toBe('Bearer sk-ant-oat01-THE-LOGIN');
+  });
+
+  it('a document with MCP grants and NO login section is "no-credentials" — a foreign token is not a fallback', async () => {
+    const clock = BASE;
+    const { service, fetchFn } = serviceOnKeychain(keychainWithMcpGrants(undefined), () => clock);
+
+    const out = await service.readUsage(profile('p', { configDir: '/Users/axelh/.lineage/profiles/magma' }));
+    expect(out?.error).toBe('no-credentials');
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("a lapsed login beside a fresh MCP token is token-stale — the MCP token's expiry and refresh token are not the login's", async () => {
+    const clock = BASE;
+    const { service, fetchFn } = serviceOnKeychain(
+      keychainWithMcpGrants({
+        accessToken: 'sk-ant-oat01-LAPSED',
+        refreshToken: 'sk-ant-ort01-REFRESH',
+        expiresAt: BASE - 1,
+      }),
+      () => clock,
+    );
+
+    const out = await service.readUsage(profile('p', { configDir: '/Users/axelh/.lineage/profiles/magma' }));
+    expect(out?.error).toBe('token-stale');
+    expect(fetchFn).not.toHaveBeenCalled();
   });
 
   it('a custom configDir whose keychain item is ALSO missing is "no-credentials"', async () => {
@@ -1022,8 +1147,651 @@ describe('LimitsService — 401 -> expired', () => {
   });
 });
 
-describe('LimitsService — 429 -> http, with backoff and stale last-good numbers', () => {
-  it('degrades to the last good snapshot, backs off exponentially, gates retries until the backoff clears, and force bypasses it', async () => {
+// A NON-2xx IS THE ONE FAILURE THAT USED TO LEAVE NO TRACE.
+//
+// A thrown fetch is logged, and a body that will not parse is logged by the
+// caller — but a well-formed 403 or 429 returned silently, and the row it
+// produces says only "usage unavailable" with no identity in front of it. So
+// the single state a person cannot diagnose from the row was also the single
+// state the log said nothing about. The STATUS is the whole diagnosis.
+
+describe('LimitsService — a refused request names its status in the log', () => {
+  afterEach(() => setLogSink(null));
+
+  it('logs the status, and never the body', async () => {
+    const lines: string[] = [];
+    setLogSink((line) => lines.push(line));
+    const filePath = credentialsPathFor(profile('p'), HOME);
+    const service = new LimitsService({
+      readFile: async (file: string) => (file === filePath ? credBlob('TOKEN') : null),
+      // An error body carrying something that must not reach a log. This
+      // endpoint is the one place a token could be echoed back, so the body is
+      // not read at all on the failure path.
+      fetch: async () => ({ status: 403, text: async () => '{"echo":"TOKEN"}' }),
+      now: () => BASE,
+      homeDir: HOME,
+      platform: 'darwin',
+    });
+
+    const snap = await service.readUsage(profile('p'));
+    expect(snap?.error).toBe('http');
+    const joined = lines.join('\n');
+    expect(joined).toContain('limits: usage request refused');
+    expect(joined).toContain('HTTP 403');
+    expect(joined).not.toContain('TOKEN');
+  });
+
+  it('says nothing on a 200, and nothing on a 401 — which has its own answer', async () => {
+    // 401 is not a refusal to diagnose: it resolves to a sign-in state the row
+    // already names in words, so a log line for it would be noise on the one
+    // path that is already self-explanatory.
+    const lines: string[] = [];
+    setLogSink((line) => lines.push(line));
+    const filePath = credentialsPathFor(profile('p'), HOME);
+    const service = new LimitsService({
+      readFile: async (file: string) => (file === filePath ? credBlob('TOKEN') : null),
+      fetch: async () => ({ status: 401, text: async () => '' }),
+      now: () => BASE,
+      homeDir: HOME,
+      platform: 'darwin',
+    });
+
+    await service.readUsage(profile('p'));
+    expect(lines.join('\n')).not.toContain('usage request refused');
+  });
+});
+
+// A MANUAL REFRESH TRIES MORE THAN ONCE.
+//
+// The limit on this endpoint is a BURST limit: several calls in quick
+// succession trip it, and it recovers in between. Measured 2026-09-13 — a row
+// that had shown nothing for hours answered `200` on the FIRST hand-made call.
+// Flock was never being refused; it had asked once, lost the coin flip, and
+// backed off for twenty minutes.
+
+describe('LimitsService — manual refresh respects a throttle', () => {
+  it.each(['2544', '10800', undefined])('makes one attempt and respects the pause (%s)', async (header) => {
+    let clock = BASE;
+    const fetch = vi.fn(async (): Promise<HttpResponseLike> => ({
+      status: 429, text: async () => '', headers: { get: () => header ?? null },
+    }));
+    const service = new LimitsService({
+      readFile: async () => credBlob('TOKEN'), fetch, now: () => clock, platform: 'linux',
+    });
+    const first = await service.readUsage(profile('p'), { force: true });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(first?.retryAt).toBe(BASE + (header ? Number(header) * 1000 : BACKOFF_BASE_MS));
+    for (const offset of [10_000, 20_000, 30_000]) {
+      clock = BASE + offset;
+      await service.readUsage(profile('p'), { force: true });
+    }
+    expect(fetch).toHaveBeenCalledTimes(1);
+    clock = first!.retryAt!;
+    await service.readUsage(profile('p'), { force: true });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+});
+
+// REMEMBERING THE LAST GOOD READING.
+//
+// `settleFailure` has always degraded to the last good numbers rather than
+// blanking the row — but "last good" lived only in this process's memory, so it
+// was empty in every freshly opened window. A window that opened into a
+// throttle therefore had nothing to degrade TO, and two accounts whose numbers
+// were perfectly readable showed an empty row all evening.
+
+describe('LimitsService — the last good reading survives a restart', () => {
+  function cacheDouble(seed?: Map<string, CachedUsage>): {
+    store: UsageCacheStore;
+    saved: Array<{ id: string; entry: CachedUsage }>;
+  } {
+    const saved: Array<{ id: string; entry: CachedUsage }> = [];
+    return {
+      store: {
+        load: async () => seed ?? null,
+        save: (id, entry) => {
+          saved.push({ id, entry });
+        },
+      },
+      saved,
+    };
+  }
+
+  const p = profile('p', { configDir: '/cfg' });
+
+  function serviceWith(
+    cache: UsageCacheStore,
+    responses: HttpResponseLike[],
+    now = BASE,
+  ) {
+    const filePath = credentialsPathFor(p, HOME);
+    let i = 0;
+    return new LimitsService({
+      readFile: async (file: string) => (file === filePath ? credBlob('TOKEN') : null),
+      fetch: async () => responses[Math.min(i++, responses.length - 1)],
+      cache,
+      now: () => now,
+      homeDir: HOME,
+      platform: 'darwin',
+    });
+  }
+
+  it('writes a success and never writes a failure', async () => {
+    const { store, saved } = cacheDouble();
+    const service = serviceWith(store, [okResponse(bodyWithFiveHour(30))]);
+    await service.readUsage(p);
+    expect(saved).toHaveLength(1);
+    expect(saved[0]?.id).toBe('p');
+    expect(saved[0]?.entry.configDir).toBe('/cfg');
+    expect(saved[0]?.entry.snapshot.fiveHour?.utilization).toBe(30);
+
+    // A throttle right after must not overwrite it — a cache of failures is a
+    // way to make a row show numbers nobody measured.
+    const throttling = serviceWith(cacheDouble().store, []);
+    void throttling;
+    const { store: s2, saved: saved2 } = cacheDouble();
+    const failing = serviceWith(s2, [{ status: 429, text: async () => '' }]);
+    await failing.readUsage(p);
+    expect(saved2).toEqual([]);
+  });
+
+  it('shows the remembered numbers instead of an empty row when the first call is refused', async () => {
+    // THE BUG, end to end: a brand-new window (empty memory) whose very first
+    // request is throttled.
+    const seed = new Map<string, CachedUsage>([
+      ['p', { configDir: '/cfg', snapshot: { fetchedAt: BASE - 60_000, fiveHour: { utilization: 14 }, sevenDay: { utilization: 53 } } }],
+    ]);
+    const { store } = cacheDouble(seed);
+    const service = serviceWith(store, [{ status: 429, text: async () => '' }]);
+
+    const snap = await service.readUsage(p);
+    expect(snap?.error).toBe('rate-limited');
+    // The numbers are THERE, and flagged for what they are.
+    expect(snap?.fiveHour?.utilization).toBe(14);
+    expect(snap?.sevenDay?.utilization).toBe(53);
+    // NOT flagged stale: the reading is a minute old, which is the current
+    // answer. `stale` is about the numbers' age, never about whether the
+    // attempt behind them failed — that fact rides on `error`.
+    expect(snap?.stale).toBeUndefined();
+    // Preserve the reading and explain why Flock is waiting to refresh it.
+    expect(formatUsageSummary(snap, BASE)).toBe('Flock usage polling paused → 10m · 5h 14% · wk 53%');
+  });
+
+  it('serves the remembered numbers before anything has been fetched', async () => {
+    const seed = new Map<string, CachedUsage>([
+      ['p', { configDir: '/cfg', snapshot: { fetchedAt: BASE - 60_000, fiveHour: { utilization: 14 } } }],
+    ]);
+    const { store } = cacheDouble(seed);
+    const service = serviceWith(store, [okResponse(bodyWithFiveHour(30))]);
+    await service.readUsage(p);
+    // cached() is the render path that cannot await; after the seed it has an
+    // answer on the very first repaint of a new window.
+    expect(service.cached(p)).not.toBeNull();
+  });
+
+  it('refuses numbers remembered against a DIFFERENT config directory', async () => {
+    // A profile whose directory moved is a different login, and its old numbers
+    // are somebody else's. Same rule the in-memory entry applies.
+    const seed = new Map<string, CachedUsage>([
+      ['p', { configDir: '/somewhere-else', snapshot: { fetchedAt: BASE - 60_000, fiveHour: { utilization: 99 } } }],
+    ]);
+    const { store } = cacheDouble(seed);
+    const service = serviceWith(store, [{ status: 429, text: async () => '' }]);
+    const snap = await service.readUsage(p);
+    expect(snap?.fiveHour).toBeUndefined();
+  });
+
+  it('survives a cache that throws on load or save', async () => {
+    const angry: UsageCacheStore = {
+      load: async () => {
+        throw new Error('nope');
+      },
+      save: () => {
+        throw new Error('nope');
+      },
+    };
+    const service = serviceWith(angry, [okResponse(bodyWithFiveHour(30))]);
+    const snap = await service.readUsage(p);
+    // A cache that will not work is a cache that misses, never a meter that
+    // fails.
+    expect(snap?.fiveHour?.utilization).toBe(30);
+  });
+});
+
+describe('LimitsService — a reading that arrives while the window is running', () => {
+  // `load` runs once, at startup. That is right for the common path and wrong
+  // for the two cases that matter most: another window getting a reading this
+  // one cannot, and somebody putting one there by hand. Both used to need a
+  // restart before the row could see them.
+  const p = profile('p', { configDir: '/cfg' });
+
+  function movingCache(): { store: UsageCacheStore; contents: Map<string, CachedUsage> } {
+    const contents = new Map<string, CachedUsage>();
+    let loads = 0;
+    return {
+      contents,
+      store: {
+        // Memoised, exactly as the real one is: the FIRST load is empty and
+        // stays empty for any caller that only ever calls `load`.
+        load: async () => (loads++ === 0 ? new Map() : new Map()),
+        reload: async () => new Map(contents),
+        save: () => undefined,
+      },
+    };
+  }
+
+  it('picks up a reading written after startup, without a restart', async () => {
+    const { store, contents } = movingCache();
+    const filePath = credentialsPathFor(p, HOME);
+    const service = new LimitsService({
+      readFile: async (file: string) => (file === filePath ? credBlob('TOKEN') : null),
+      fetch: async () => ({ status: 429, text: async () => '' }),
+      cache: store,
+      sleep: async () => undefined,
+      now: () => BASE,
+      homeDir: HOME,
+      platform: 'darwin',
+    });
+
+    // Nothing on disk yet: the row has nothing, and says why.
+    const first = await service.readUsage(p);
+    expect(first?.error).toBe('rate-limited');
+    expect(first?.fiveHour).toBeUndefined();
+
+    // Another window (or a hand-written seed) lands a reading.
+    contents.set('p', {
+      configDir: '/cfg',
+      snapshot: { fetchedAt: BASE, fiveHour: { utilization: 17 }, sevenDay: { utilization: 54 } },
+    });
+
+    const second = await service.readUsage(p, { force: true });
+    // The numbers are there — no restart — and still honestly flagged.
+    expect(second?.fiveHour?.utilization).toBe(17);
+    expect(second?.sevenDay?.utilization).toBe(54);
+    expect(second?.stale).toBeUndefined();
+    expect(second?.error).toBe('rate-limited');
+    expect(formatUsageSummary(second, BASE)).toBe('Flock usage polling paused → 10m · 5h 17% · wk 54%');
+  });
+
+  it('does not re-read when the refresh succeeded', async () => {
+    let reloads = 0;
+    const store: UsageCacheStore = {
+      load: async () => new Map(),
+      reload: async () => {
+        reloads += 1;
+        return new Map();
+      },
+      save: () => undefined,
+    };
+    const filePath = credentialsPathFor(p, HOME);
+    const service = new LimitsService({
+      readFile: async (file: string) => (file === filePath ? credBlob('TOKEN') : null),
+      fetch: async () => okResponse(bodyWithFiveHour(30)),
+      cache: store,
+      now: () => BASE,
+      homeDir: HOME,
+      platform: 'darwin',
+    });
+    await service.readUsage(p);
+    // The happy path must not pay for the unhappy one.
+    expect(reloads).toBe(0);
+  });
+});
+
+describe('createUsageCache — a write must not delete what it did not read', () => {
+  // THE REGRESSION. The first version rebuilt the whole document from the
+  // accounts this window knew about, so an account it had never successfully
+  // read — the throttled one the cache exists for — was dropped on the next
+  // write. Measured: a seeded entry survived seven minutes before the next
+  // repaint erased it. Two windows do the same to each other.
+  let dir = '';
+  let file = '';
+
+  beforeEach(async () => {
+    dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'flock-usage-'));
+    file = path.join(dir, 'usage-cache.json');
+  });
+  afterEach(async () => {
+    await fsp.rm(dir, { recursive: true, force: true });
+  });
+
+  /** The debounce is 1s; give the write room to land. */
+  const settled = (): Promise<void> => new Promise((r) => setTimeout(r, 1_400));
+
+  function doc(accounts: Record<string, { configDir: string; util: number; at: number }>) {
+    const out: Record<string, unknown> = {};
+    for (const [id, a] of Object.entries(accounts)) {
+      out[id] = {
+        configDir: a.configDir,
+        snapshot: { fetchedAt: a.at, fiveHour: { utilization: a.util } },
+      };
+    }
+    return JSON.stringify({ version: 1, accounts: out });
+  }
+
+  it('keeps an account another writer put there', async () => {
+    const now = Date.now();
+    await fsp.writeFile(file, doc({ magma: { configDir: '/m', util: 16, at: now } }));
+
+    // A window that never loaded, and knows only about `personal`.
+    const cache = createUsageCache(file);
+    cache.save('personal', {
+      configDir: '/p',
+      snapshot: { fetchedAt: now, fiveHour: { utilization: 40 } },
+    });
+    await settled();
+
+    const after = parseUsageCache(await fsp.readFile(file, 'utf-8'), now);
+    expect([...(after?.keys() ?? [])].sort()).toEqual(['magma', 'personal']);
+    expect(after?.get('magma')?.snapshot.fiveHour?.utilization).toBe(16);
+  });
+
+  it('does not push a staler reading over a fresher one', async () => {
+    const now = Date.now();
+    await fsp.writeFile(file, doc({ magma: { configDir: '/m', util: 99, at: now } }));
+
+    const cache = createUsageCache(file);
+    // An idle window flushing something it read an hour ago.
+    cache.save('magma', {
+      configDir: '/m',
+      snapshot: { fetchedAt: now - 60 * 60_000, fiveHour: { utilization: 5 } },
+    });
+    await settled();
+
+    const after = parseUsageCache(await fsp.readFile(file, 'utf-8'), now);
+    expect(after?.get('magma')?.snapshot.fiveHour?.utilization).toBe(99);
+  });
+
+  it('still writes when there is no file yet', async () => {
+    const now = Date.now();
+    const cache = createUsageCache(file);
+    cache.save('magma', {
+      configDir: '/m',
+      snapshot: { fetchedAt: now, fiveHour: { utilization: 16 } },
+    });
+    await settled();
+    const after = parseUsageCache(await fsp.readFile(file, 'utf-8'), now);
+    expect(after?.get('magma')?.snapshot.fiveHour?.utilization).toBe(16);
+  });
+});
+
+describe('parseUsageCache', () => {
+  it('drops a document it does not recognise', () => {
+    expect(parseUsageCache(null, BASE)).toBeNull();
+    expect(parseUsageCache('not json', BASE)).toBeNull();
+    expect(parseUsageCache('{"version":99,"accounts":{}}', BASE)).toBeNull();
+    expect(parseUsageCache('{"version":1}', BASE)).toBeNull();
+  });
+
+  it('drops a reading older than the window it describes', () => {
+    const fresh = JSON.stringify({
+      version: 1,
+      accounts: { p: { configDir: '/cfg', snapshot: { fetchedAt: BASE - 1000, fiveHour: { utilization: 10 } } } },
+    });
+    expect(parseUsageCache(fresh, BASE)?.size).toBe(1);
+    const ancient = JSON.stringify({
+      version: 1,
+      accounts: {
+        p: {
+          configDir: '/cfg',
+          snapshot: { fetchedAt: BASE - USAGE_CACHE_TTL_MS - 1, fiveHour: { utilization: 10 } },
+        },
+      },
+    });
+    // Past five hours the five-hour figure is not stale, it is WRONG — the
+    // window it counted has rolled over.
+    expect(ancient && parseUsageCache(ancient, BASE)?.size).toBe(0);
+  });
+
+  it('refuses numbers no provider could have said, and hand-written failures', () => {
+    const bad = JSON.stringify({
+      version: 1,
+      accounts: {
+        a: { configDir: '/c', snapshot: { fetchedAt: BASE, fiveHour: { utilization: 4000 } } },
+        b: { configDir: '/c', snapshot: { fetchedAt: BASE, fiveHour: { utilization: -5 } } },
+        c: { configDir: '/c', snapshot: { fetchedAt: BASE, error: 'http', fiveHour: { utilization: 10 } } },
+        d: { configDir: '/c', snapshot: { fetchedAt: BASE } },
+      },
+    });
+    // Every one of these is dropped: two impossible percentages, a failure
+    // somebody wrote by hand, and a snapshot with no windows to seed.
+    expect(parseUsageCache(bad, BASE)?.size).toBe(0);
+  });
+
+  it('marks everything it returns stale', () => {
+    const text = JSON.stringify({
+      version: 1,
+      accounts: { p: { configDir: '/cfg', snapshot: { fetchedAt: BASE, fiveHour: { utilization: 10 } } } },
+    });
+    expect(parseUsageCache(text, BASE)?.get('p')?.snapshot.stale).toBe(true);
+  });
+});
+
+// THE CREDENTIAL HALF OF THE DIAGNOSIS.
+//
+// Every credential verdict — "not signed in", "sign-in expired", "usage n/a" —
+// reached the row as three words and wrote nothing anywhere, so a live account
+// reading `usage n/a` could not be told apart from a keychain the editor cannot
+// read. The tier and the shape of the document now go to the log; the token and
+// the blob never do.
+
+describe('LimitsService — a credential it cannot use says which tier and why', () => {
+  const p = profile('p', { configDir: '/cfg' });
+
+  async function verdictFor(over: {
+    file?: string | null;
+    keychain?: string | null;
+  }): Promise<string> {
+    const lines: string[] = [];
+    setLogSink((line) => lines.push(line));
+    try {
+      const service = new LimitsService({
+        readFile: async () => over.file ?? null,
+        exec: async () => over.keychain ?? null,
+        fetch: async () => okResponse(bodyWithFiveHour(10)),
+        now: () => BASE,
+        homeDir: HOME,
+        platform: 'darwin',
+      });
+      await service.readUsage(p);
+      return lines.join('\n');
+    } finally {
+      setLogSink(null);
+    }
+  }
+
+  it('names the keychain SERVICE, so a wrong hash is visible', async () => {
+    const log = await verdictFor({ file: null, keychain: null });
+    expect(log).toContain('limits: no usable credential');
+    expect(log).toContain('account p');
+    // The service name is a hash of the config dir and is a public identifier —
+    // and it is the one thing that proves the right item was asked for.
+    expect(log).toContain(keychainServiceFor('/cfg'));
+    expect(log).toContain('no-document');
+  });
+
+  it('tells "nothing there" apart from "there and not JSON"', async () => {
+    expect(await verdictFor({ keychain: '' })).toContain('no-document');
+    expect(await verdictFor({ keychain: 'not json at all' })).toContain('unparseable');
+  });
+
+  it('tells a lapsed token apart from a document with no token in it', async () => {
+    // The two ways to reach `usage n/a`. They mean different things — one is a
+    // token the CLI will renew, the other a document that never had one — and
+    // the row says the same three words for both.
+    const lapsed = JSON.stringify({
+      claudeAiOauth: {
+        accessToken: 'AT',
+        refreshToken: 'RT',
+        expiresAt: BASE - 60_000,
+      },
+    });
+    const logLapsed = await verdictFor({ keychain: lapsed });
+    expect(logLapsed).toContain('stale from keychain');
+    expect(logLapsed).toContain('lapsed');
+    expect(logLapsed).not.toContain('AT');
+    expect(logLapsed).not.toContain('RT');
+
+    const tokenless = JSON.stringify({ claudeAiOauth: { refreshToken: 'RT' } });
+    const logTokenless = await verdictFor({ keychain: tokenless });
+    expect(logTokenless).toContain('no-access-token');
+    expect(logTokenless).not.toContain('RT');
+  });
+
+  it('says nothing at all when the credential is usable', async () => {
+    const good = JSON.stringify({
+      claudeAiOauth: { accessToken: 'AT', refreshToken: 'RT', expiresAt: BASE + 3_600_000 },
+    });
+    const log = await verdictFor({ keychain: good });
+    expect(log).not.toContain('no usable credential');
+  });
+});
+
+// A refusal must result in silence for the entire requested interval.
+describe('LimitsService — a 429 that states a wait is obeyed, not guessed at', () => {
+  /** A 429 carrying `retry-after`, in the seconds spelling the endpoint uses. */
+  function throttled(seconds: string | null): HttpResponseLike {
+    return {
+      status: 429,
+      text: async () => '',
+      headers: { get: (name: string) => (name.toLowerCase() === 'retry-after' ? seconds : null) },
+    };
+  }
+
+  function serviceOn(responses: HttpResponseLike[], clockRef: { now: number }) {
+    const filePath = credentialsPathFor(profile('p'), HOME);
+    let i = 0;
+    const fetchFn = vi.fn(async (): Promise<HttpResponseLike> => {
+      const r = responses[Math.min(i, responses.length - 1)];
+      i += 1;
+      return r;
+    });
+    const service = new LimitsService({
+      readFile: async (file: string) => (file === filePath ? credBlob('TOKEN') : null),
+      fetch: fetchFn,
+      now: () => clockRef.now,
+      homeDir: HOME,
+      platform: 'darwin',
+    });
+    return { service, fetchFn };
+  }
+
+  it('stays quiet for the WHOLE stated wait, not just the guessed step', async () => {
+    // 1200s is what this endpoint actually asked for on 2026-09-12, and it is
+    // longer than BACKOFF_BASE_MS — which is the whole point. Every step of the
+    // guessed ladder below the stated wait is a request sent inside the quiet
+    // period the server just asked for.
+    const clock = { now: BASE };
+    const { service, fetchFn } = serviceOn([throttled('1200')], clock);
+    const p = profile('p');
+
+    const first = await service.readUsage(p);
+    expect(first?.error).toBe('rate-limited');
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+
+    // Past the guessed base step, and the old code would have asked again here
+    // — ten minutes into a twenty-minute window.
+    clock.now = BASE + BACKOFF_BASE_MS + 1;
+    await service.readUsage(p);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+
+    // Still inside the stated 1200s.
+    clock.now = BASE + 1_199_000;
+    await service.readUsage(p);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+
+    // Past it: one more attempt, and not before.
+    clock.now = BASE + 1_201_000;
+    await service.readUsage(p);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it('tells the row WHEN, so it can say a clock instead of a fault', async () => {
+    const clock = { now: BASE };
+    const { service } = serviceOn([throttled('1200')], clock);
+    const snap = await service.readUsage(profile('p'));
+    expect(snap?.retryAt).toBe(BASE + 1_200_000);
+    // "Flock usage polling paused", never "usage unavailable": nothing about this account is
+    // broken and there is nothing for the user to go and fix.
+    expect(formatUsageSummary(snap, BASE)).toBe('Flock usage polling paused → 20m');
+  });
+
+  it('keeps the longer of the stated wait and the ladder', async () => {
+    // A throttle that keeps recurring walks the ladder up underneath. Once the
+    // ladder is longer than what the server states, the ladder wins — the
+    // stated wait is a floor on politeness, not a ceiling on it.
+    const clock = { now: BASE };
+    const { service, fetchFn } = serviceOn([throttled('1')], clock);
+    const p = profile('p');
+    await service.readUsage(p);
+    // One second stated, two minutes guessed: we wait the two minutes.
+    clock.now += 1_500;
+    await service.readUsage(p);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    clock.now = BASE + BACKOFF_BASE_MS + 1;
+    await service.readUsage(p);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it('preserves a full day of server-requested quiet', async () => {
+    const clock = { now: BASE };
+    const { service } = serviceOn([throttled('86400')], clock);
+    const snap = await service.readUsage(profile('p'));
+    expect(snap?.retryAt).toBe(BASE + 86_400_000);
+  });
+
+  it('reads the HTTP-date spelling too, and ignores nonsense', () => {
+    const headers = (v: string | null) => ({
+      get: (name: string) => (name.toLowerCase() === 'retry-after' ? v : null),
+    });
+    expect(retryAfterMs(headers('300'), BASE)).toBe(300_000);
+    expect(retryAfterMs(headers(new Date(BASE + 120_000).toUTCString()), BASE)).toBe(120_000);
+    // A date already behind us is no answer, not a negative wait.
+    expect(retryAfterMs(headers(new Date(BASE - 60_000).toUTCString()), BASE)).toBeUndefined();
+    expect(retryAfterMs(headers('0'), BASE)).toBeUndefined();
+    expect(retryAfterMs(headers('soon'), BASE)).toBeUndefined();
+    expect(retryAfterMs(headers(null), BASE)).toBeUndefined();
+    expect(retryAfterMs(undefined, BASE)).toBeUndefined();
+    // A response object whose headers throw must not take a repaint down.
+    expect(
+      retryAfterMs(
+        {
+          get: () => {
+            throw new Error('nope');
+          },
+        },
+        BASE,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('logs the throttle and the wait, and never the token', async () => {
+    const lines: string[] = [];
+    setLogSink((line) => lines.push(line));
+    try {
+      const clock = { now: BASE };
+      const { service } = serviceOn([throttled('300')], clock);
+      await service.readUsage(profile('p'));
+      const joined = lines.join('\n');
+      expect(joined).toContain('limits: usage request throttled');
+      // WHICH ACCOUNT. Two accounts throttled in the same second produced two
+      // identical lines, and "which one is still locked out" could not be read
+      // off them — the exact question a person asks when one row recovers and
+      // the other does not.
+      expect(joined).toContain('account p');
+      // THE HEADER AS SENT. Logging only the honoured value made every long
+      // wait read as `1200s` — RETRY_AFTER_MAX_MS, our own clamp, reported back
+      // as though the server had said it.
+      expect(joined).toContain('retry-after: 300');
+      expect(joined).not.toContain('TOKEN');
+    } finally {
+      setLogSink(null);
+    }
+  });
+});
+
+describe('LimitsService — a 429 with no stated wait falls back to the guessed ladder', () => {
+  it('degrades to the last good snapshot, backs off exponentially, gates all retries until the backoff clears', async () => {
     let clock = BASE;
     const filePath = credentialsPathFor(profile('p'), HOME);
     const readFile = vi.fn(async (file: string): Promise<string | null> =>
@@ -1033,7 +1801,7 @@ describe('LimitsService — 429 -> http, with backoff and stale last-good number
       okResponse(bodyWithFiveHour(30)), // 1: establishes the last GOOD snapshot
       { status: 429, text: async () => '' }, // 2: first failure -> backoff base
       { status: 429, text: async () => '' }, // 4: second failure -> backoff doubles
-      okResponse(bodyWithFiveHour(5)), // 5: forced call, ignores the backoff gate
+      okResponse(bodyWithFiveHour(5)), // 5: success after the cooldown
     ];
     let i = 0;
     const fetchFn = vi.fn(async (): Promise<HttpResponseLike> => {
@@ -1055,11 +1823,16 @@ describe('LimitsService — 429 -> http, with backoff and stale last-good number
     expect(good?.fiveHour?.utilization).toBe(30);
     expect(good?.stale).toBeUndefined();
 
-    // 2. past the interval, the 429 lands: 'http', stale, last-good numbers kept.
+    // 2. past the interval, the 429 lands: 'rate-limited', stale, last-good
+    //    numbers kept. A throttle that states no Retry-After is the only case
+    //    left where the guessed ladder decides the wait.
     clock += MIN_FETCH_INTERVAL_MS + 1;
     const failed = await service.readUsage(p);
-    expect(failed?.error).toBe('http');
-    expect(failed?.stale).toBe(true);
+    expect(failed?.error).toBe('rate-limited');
+    // The row reports Flock's actual fallback deadline when there is no header.
+    expect(failed?.retryAt).toBe(clock + BACKOFF_BASE_MS);
+    // Five minutes old, inside STALE_AFTER_MS: still the current answer.
+    expect(failed?.stale).toBeUndefined();
     expect(failed?.fiveHour?.utilization).toBe(30);
     expect(fetchFn).toHaveBeenCalledTimes(2);
 
@@ -1075,7 +1848,7 @@ describe('LimitsService — 429 -> http, with backoff and stale last-good number
     clock += BACKOFF_BASE_MS + 1;
     const failedAgain = await service.readUsage(p);
     expect(fetchFn).toHaveBeenCalledTimes(3);
-    expect(failedAgain?.error).toBe('http');
+    expect(failedAgain?.error).toBe('rate-limited');
     expect(failedAgain?.fiveHour?.utilization).toBe(30); // still the original good
 
     // 5. immediately after (well inside both the interval AND the doubled
@@ -1083,7 +1856,9 @@ describe('LimitsService — 429 -> http, with backoff and stale last-good number
     expect(await service.readUsage(p)).toEqual(failedAgain);
     expect(fetchFn).toHaveBeenCalledTimes(3);
 
-    // ...but `force: true` bypasses the interval AND the backoff outright.
+    await service.readUsage(p, { force: true });
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+    clock = failedAgain!.retryAt!;
     const forced = await service.readUsage(p, { force: true });
     expect(fetchFn).toHaveBeenCalledTimes(4);
     expect(forced?.fiveHour?.utilization).toBe(5);
@@ -1127,8 +1902,17 @@ describe('LimitsService — an unrecognised body is "parse", degrading to the la
     clock += MIN_FETCH_INTERVAL_MS + 1;
     const out = await service.readUsage(p);
     expect(out?.error).toBe('parse');
-    expect(out?.stale).toBe(true);
+    // Five minutes old and still the current answer, so NOT flagged — the
+    // failure is carried by `error`, which is a fact about the last attempt
+    // rather than about the numbers.
+    expect(out?.stale).toBeUndefined();
     expect(out?.fiveHour?.utilization).toBe(62);
+
+    // Past STALE_AFTER_MS it IS flagged, which is the whole point of the flag.
+    clock += STALE_AFTER_MS + 1;
+    const old = await service.readUsage(p);
+    expect(old?.stale).toBe(true);
+    expect(old?.fiveHour?.utilization).toBe(62);
   });
 
   it('with no prior good snapshot, a parse failure is just `{ fetchedAt, error }` — not stale (nothing to be stale relative to)', async () => {
@@ -1484,5 +2268,131 @@ describe('redaction — the token a fake credential provides never leaks', () =>
     const snapshot = await service.readUsage(profile('p'));
     expect(snapshot?.error).toBe('expired');
     assertNoLeak(snapshot);
+  });
+});
+
+describe('createUsageCache — the file stores a measurement, not a verdict', () => {
+  // `stale` is derived from `fetchedAt` at the seam that draws a row. It got
+  // into the file through the merge path — parseUsageCache marks what it reads
+  // stale by default, and an account this window never refreshed is written
+  // straight back out — which left the cache storing one window's opinion about
+  // age beside the reading it was an opinion about.
+  it('never writes a stale flag back out, however it got into memory', async () => {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'flock-usage-'));
+    const file = path.join(dir, 'usage-cache.json');
+    const settled = (): Promise<void> => new Promise((r) => setTimeout(r, 1_400));
+
+    // An entry only this file knows about, exactly as a previous window left it.
+    await fsp.writeFile(
+      file,
+      JSON.stringify({
+        version: 1,
+        accounts: {
+          quiet: {
+            configDir: '/cfg',
+            snapshot: { fetchedAt: Date.now(), fiveHour: { utilization: 17 } },
+          },
+        },
+      }),
+      'utf-8',
+    );
+
+    const cache = createUsageCache(file);
+    // Reading marks it stale in memory — that is the parser's safe default.
+    const loaded = await cache.load();
+    expect(loaded?.get('quiet')?.snapshot.stale).toBe(true);
+
+    // A write for a DIFFERENT account merges 'quiet' back in and rewrites it.
+    cache.save('busy', {
+      configDir: '/cfg',
+      snapshot: { fetchedAt: Date.now(), fiveHour: { utilization: 40 } },
+    });
+    await settled();
+
+    const onDisk = JSON.parse(await fsp.readFile(file, 'utf-8')) as {
+      accounts: Record<string, { snapshot: Record<string, unknown> }>;
+    };
+    // Both accounts survive the merge — and neither carries the verdict.
+    expect(Object.keys(onDisk.accounts).sort()).toEqual(['busy', 'quiet']);
+    expect('stale' in onDisk.accounts['quiet'].snapshot).toBe(false);
+    expect('stale' in onDisk.accounts['busy'].snapshot).toBe(false);
+    // The measurement it is derived FROM is still there.
+    expect(onDisk.accounts['quiet'].snapshot['fetchedAt']).toBeTypeOf('number');
+
+    await fsp.rm(dir, { recursive: true, force: true });
+  });
+});
+
+// TWO ACCOUNTS, ONE TICK.
+//
+// THE BUG: the accounts view reads every due account in a single `Promise.all`,
+// and because they are all read together their timers expire together — so N
+// accounts fired in the same millisecond, every interval. Raising
+// MIN_FETCH_INTERVAL_MS from one minute to five addressed how OFTEN that
+// happened and not that it happened at all; a tighter interval on a
+// synchronised burst is still a burst. The log that caught it showed two
+// different logins refused in the same second, 23:06:55, on 2026-09-13.
+describe('LimitsService — requests are spaced, however many arrive at once', () => {
+  function spacedService() {
+    const a = profile('a', { configDir: '/cfg-a' });
+    const b = profile('b', { configDir: '/cfg-b' });
+    const starts: number[] = [];
+    let clock = BASE;
+    const service = new ProductionLimitsService({
+      readFile: async () => credBlob('TOKEN'),
+      fetch: vi.fn(async (): Promise<HttpResponseLike> => {
+        starts.push(clock);
+        return okResponse(bodyWithFiveHour(20));
+      }),
+      sleep: async (ms: number) => {
+        clock += ms;
+      },
+      now: () => clock,
+      homeDir: HOME,
+      platform: 'darwin',
+    });
+    return { service, a, b, starts };
+  }
+
+  it('does not let two accounts leave in the same instant', async () => {
+    const { service, a, b, starts } = spacedService();
+    // Exactly what the view does: both in one tick, nothing awaited between.
+    await Promise.all([service.readUsage(a), service.readUsage(b)]);
+    expect(starts).toHaveLength(2);
+    expect(starts[1] - starts[0]).toBeGreaterThanOrEqual(REQUEST_SPACING_MS);
+  });
+
+  it('costs the first request nothing — the gap is between, not before', async () => {
+    const { service, a, starts } = spacedService();
+    await service.readUsage(a);
+    expect(starts).toEqual([BASE]);
+  });
+
+  it('does not wedge every account behind one failed request', async () => {
+    const a = profile('a', { configDir: '/cfg-a' });
+    const b = profile('b', { configDir: '/cfg-b' });
+    let clock = BASE;
+    let n = 0;
+    const service = new ProductionLimitsService({
+      readFile: async () => credBlob('TOKEN'),
+      fetch: vi.fn(async (): Promise<HttpResponseLike> => {
+        n += 1;
+        if (n === 1) throw new Error('socket hang up');
+        return okResponse(bodyWithFiveHour(31));
+      }),
+      sleep: async (ms: number) => {
+        clock += ms;
+      },
+      now: () => clock,
+      homeDir: HOME,
+      platform: 'darwin',
+    });
+    const [first, second] = await Promise.all([
+      service.readUsage(a),
+      service.readUsage(b),
+    ]);
+    expect(first?.error).toBe('http');
+    // The one behind it still went, and still got its numbers.
+    expect(second?.fiveHour?.utilization).toBe(31);
   });
 });

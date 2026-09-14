@@ -1153,16 +1153,25 @@ thread's turns carry the same rate-limit records as any other.
 | Fact | Claude row | Codex row |
 | --- | --- | --- |
 | Busy / idle | the CLI's registry, every poll | the rollout's own `task_started` / `task_complete` records, every poll; the hooks, instantly |
+| Age / context size | transcript prompt and usage records | rollout user prompts and `last_token_usage`, cached across long turns |
 | Waiting for you | the registry | the `PermissionRequest` hook only — the rollout never records a prompt |
-| Turn finished (red dot, bell) | registry transition; `Stop` hook | rollout transition; `Stop` hook |
+| Turn finished (red dot, bell) | registry transition; `Stop` hook | rollout completion timestamp, including turns between polls; `Stop` hook |
 | Compaction ring | `PreCompact` hook in, roster quiet out | `PreCompact` in, `PostCompact` out — Codex says when it ends |
 | Account meter | the CLI's usage endpoint | the rate limits the CLI writes after every turn, as old as the last turn (the hover says how old) |
 | Signed in as | `.claude.json` | the id token's `email` in `auth.json`, plus the plan |
 | Instant updates | **Install Instant-Update Hooks…** — a plugin directory | **Install Codex Hooks…** — entries merged into `~/.codex/hooks.json`, trusted once by you via `/hooks` |
 | Move to another login | **Move to Account…**, same CLI | not offered: Codex keeps its threads in a store Flock does not move |
 | Continue on the other CLI | **Continue on Another CLI…** → Codex | **Continue on Another CLI…** → Claude |
-| Fork and Compact, Close with Summary | yes | the plain verb, by name — both rest on `/compact` being a Claude command |
+| Fork and Compact | `/compact` as the fork's opening command | `/compact` sent to the fork once its terminal is ready; trusted hooks required |
+| Close with Summary | read back the CLI's compaction summary | ask the running session for a readable handoff summary, then save its final answer and close; trusted hooks required |
+| History / import / idle cleanup | Claude transcript index | Codex rollout index and conversation activity |
+| Shells | Bash calls and their results | structured `exec_command`, `shell_command`, `shell` calls and `write_stdin` results |
 | Named tabs | `--name` | Flock's own title; Codex has no naming flag |
+
+Codex ages and status updates continue when the Claude roster cannot be read.
+Names entered with Codex's `/rename` are read from `session_index.jsonl`.
+Codex can store compaction as opaque context, so its closing summary is a
+separate request through the running CLI, using that session's account.
 
 Gemini and `generic` rows still exist so a **project** can declare what it runs
 — that is what picks the logo — and so an account can keep its own config

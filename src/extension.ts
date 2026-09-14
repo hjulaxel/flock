@@ -147,23 +147,22 @@ import {
 } from './roster';
 import {
   codexRowIds,
+  matchPendingCodexLaunches,
   codexSessionsDir,
+  readCodexSessionNames,
   findCodexBinary,
   matchRollout,
-  readRolloutActivity,
   scanRollouts,
 } from './codex';
-import type { CodexRowFacts, RolloutActivity } from './codex';
+import type { CodexRowFacts, RolloutMeta, PendingCodexLaunch } from './codex';
+import { CodexCompletionTracker, CodexTranscriptCache, readFirstCodexPrompt } from './codexTranscript';
 import { CodexHooksManager } from './codexHooks';
 import { searchRoots } from './relocate';
 import { handoffRefusal } from './handoff';
 import { CODEX_HOME_ENV } from './accounts';
 
-/** Codex id discovery (see adoptCodexSession): how often to look for the
- *  rollout a launch produced, and how long to keep looking. The CLI opens its
- *  rollout within a second of starting, so this is generous by an order of
- *  magnitude — the cost of waiting is one late re-key, and the cost of giving
- *  up early is a row stuck on an id nothing else will ever mention. */
+/** Fast discovery after launch. The roster also reconciles delayed rollout
+ * writes against this same creation-time window after the watcher expires. */
 const CODEX_ADOPT_POLL_MS = 400;
 const CODEX_ADOPT_WINDOW_MS = 30_000;
 import {
@@ -246,7 +245,7 @@ import type { TranscriptStats } from './usage';
 // transcript is the compaction summary Flock just asked for. The wiring below
 // owns the locating, the chain walk and the polling; the module owns what
 // counts as an answer.
-import { parseCompactSummary } from './closeSummary';
+import { parseCompactSummary, parseCodexSummaryReply } from './closeSummary';
 import { WorkspaceManager } from './workspaces';
 import {
   ANCHOR_DIR_NAME,
@@ -292,7 +291,12 @@ import {
   sourceDirFor,
   transcriptCopyInConfigDir,
 } from './accountMove';
-import { pinnedLaunchProfile, pinnedProfile, rankUsage } from './routing';
+import {
+  describeRouting,
+  pinnedLaunchProfile,
+  pinnedProfile,
+  rankUsage,
+} from './routing';
 import { delegateFor, hostOfChain, resolveLaunchMode } from './hosts';
 import type { SessionHost } from './hosts';
 import {
@@ -310,8 +314,14 @@ import type {
   SwitchAccountResult,
   SwitchRunningState,
 } from './accountsView';
-import { LimitsService, formatUsageSummary } from './limits';
+import {
+  LimitsService,
+  USAGE_CACHE_FILE_NAME,
+  createUsageCache,
+  formatUsageSummary,
+} from './limits';
 import { StateStore } from './state';
+import { createUsageRequestScheduler, USAGE_SCHEDULE_FILE_NAME } from './usageSchedule';
 import { registerDecorations } from './decorations';
 // One pure function, for the project roll-up dot: the native tree's dot and
 // the inline sidebar's must answer the same question, and statusTone is where
@@ -1258,6 +1268,7 @@ export async function activate(
    * ticks, because this runs on the roster cadence.
    */
   let codexArchiveCache: ArchivedSession[] = [];
+  let codexRolloutCache: RolloutMeta[] = [];
   let lastCodexScan = 0;
   const codexArchived = (): ArchivedSession[] => {
     const now = Date.now();
@@ -1266,9 +1277,12 @@ export async function activate(
     }
     lastCodexScan = now;
     try {
-      codexArchiveCache = scanRollouts({
-        sessionsDirs: codexSessionsDirs(),
-      }).map((meta) => {
+      const sessionsDirs = codexSessionsDirs();
+      const names = readCodexSessionNames(sessionsDirs);
+      codexRolloutCache = scanRollouts({
+        sessionsDirs,
+      });
+      codexArchiveCache = codexRolloutCache.map((meta) => {
         const session: ArchivedSession = {
           sessionId: meta.sessionId,
           transcriptPath: meta.path,
@@ -1277,17 +1291,25 @@ export async function activate(
         };
         if (meta.startedAt !== undefined) session.startedAt = meta.startedAt;
         if (meta.cwd !== undefined) session.cwd = meta.cwd;
-        // No `label` and no `continuesId`, deliberately. A Codex rollout has
-        // no custom-title record to read a name from, and no continuation
-        // marker — so rather than guess at either, the row wears its id and
-        // stands alone, which is what both fields being absent already means
-        // everywhere else in the tree.
+        const label = names.get(meta.sessionId);
+        if (label !== undefined) session.label = label;
         return session;
       });
     } catch (err) {
       logError('extension.codexArchived', err);
     }
     return codexArchiveCache;
+  };
+
+  /** One transcript lookup for verbs, history and lifecycle reads on either CLI. */
+  const sessionTranscriptFile = (sessionId: string): string | null => {
+    for (const id of chainAliases(sessionId)) {
+      const codex = codexArchived().find((s) => s.sessionId === id);
+      if (codex !== undefined) return codex.transcriptPath;
+      const file = transcriptFile(id, { extraProjectsDirs: profileProjectsDirs() });
+      if (file !== null) return file;
+    }
+    return null;
   };
 
   /**
@@ -1383,7 +1405,16 @@ export async function activate(
   // turn ran with. Cached on the (mtime, size) the archive indexer already
   // stat'ed, so a transcript nobody has written to is never re-read.
   const statsCache = new TranscriptStatsCache();
-  context.subscriptions.push(statsCache);
+  const codexStatsCache = new CodexTranscriptCache();
+  const codexCompletions = new CodexCompletionTracker();
+  context.subscriptions.push(statsCache, codexStatsCache, codexCompletions);
+  const codexReadingFor = (id: string) => {
+    for (const alias of chainAliases(id)) {
+      const file = codexArchived().find((s) => s.sessionId === alias)?.transcriptPath;
+      if (file !== undefined) return codexStatsCache.get(file);
+    }
+    return undefined;
+  };
 
   /**
    * Tail stats for the sessions the tree is about to render.
@@ -1403,8 +1434,9 @@ export async function activate(
   const tailStatsFor = (
     liveIds: ReadonlySet<string>,
     records: Record<string, EditorialRecord>,
-  ): Map<string, TranscriptStats> => {
+  ): { tailStats: Map<string, TranscriptStats>; activityMtimes: Map<string, number> } => {
     const out = new Map<string, TranscriptStats>();
+    const activityMtimes = archiveIndexer.transcriptMtimes();
     const wanted = new Set<string>(liveIds);
     for (const record of Object.values(records)) {
       if (record.deleted === true) continue;
@@ -1418,8 +1450,20 @@ export async function activate(
         statsCache.get(s.sessionId, s.transcriptPath, s.endedAt, s.bytes),
       );
     }
+    const codexFiles = new Set<string>();
+    for (const s of codexArchived()) {
+      const tip = chainIndex.tipOf(s.sessionId);
+      if (!wanted.has(s.sessionId) && !wanted.has(tip)) continue;
+      codexFiles.add(s.transcriptPath);
+      const reading = codexStatsCache.get(s.transcriptPath);
+      // Prefer the current generation if both still have a rollout on disk.
+      if (out.has(tip) && s.sessionId !== tip) continue;
+      activityMtimes.set(tip, reading?.mtimeMs ?? s.endedAt);
+      if (reading !== undefined) out.set(tip, reading.stats);
+    }
     statsCache.prune(wanted);
-    return out;
+    codexStatsCache.prune(codexFiles);
+    return { tailStats: out, activityMtimes };
   };
 
   /**
@@ -1449,14 +1493,17 @@ export async function activate(
   const firstPromptCache = new Map<string, string>();
   let factsIndex: {
     from: readonly ArchivedSession[];
+    codexFrom: readonly ArchivedSession[];
     byId: Map<string, ArchivedSession>;
   } | null = null;
   const transcriptFacts = (sessionId: string): TranscriptFacts => {
     const all = archiveIndexer.current();
-    if (factsIndex === null || factsIndex.from !== all) {
+    const codex = codexArchived();
+    if (factsIndex === null || factsIndex.from !== all || factsIndex.codexFrom !== codex) {
       factsIndex = {
         from: all,
-        byId: new Map(all.map((s) => [s.sessionId, s] as const)),
+        codexFrom: codex,
+        byId: new Map([...all, ...codex].map((s) => [s.sessionId, s] as const)),
       };
     }
     const entry = factsIndex.byId.get(sessionId);
@@ -1484,7 +1531,9 @@ export async function activate(
     }
     let prompt: string | undefined;
     try {
-      prompt = readFirstPrompt(entry.transcriptPath);
+      prompt = sessionProviderFor(sessionId) === 'codex'
+        ? readFirstCodexPrompt(entry.transcriptPath)
+        : readFirstPrompt(entry.transcriptPath);
     } catch (err) {
       // readFirstPrompt swallows its own io errors; this is the belt to that
       // brace, because a picker must never fail to open over a bad file.
@@ -1712,11 +1761,10 @@ export async function activate(
     // chain-tip-collapsed — so this must be built AFTER collapseChains has
     // already run (it has, above) or a superseded generation's stale key
     // would never match a live entry's collapsed id.
-    const activityMtimes = archiveIndexer.transcriptMtimes();
     // Same keying and the same "must run after collapseChains" rule as
     // activityMtimes above, and for the same reason: a superseded generation's
     // id would never match a live entry's collapsed one.
-    const tailStats = tailStatsFor(liveIds, collapsed.records);
+    const { tailStats, activityMtimes } = tailStatsFor(liveIds, collapsed.records);
     // The compaction phases, asked per row rather than handed over as a map:
     // the answer depends on the CHAIN (a compaction re-mints the id, so the
     // PreCompact and its completion arrive under different generations) and on
@@ -1976,6 +2024,7 @@ export async function activate(
   const refreshNow = (): void => {
     pokeNow();
     forceArchiveScan = true; // an explicit refresh must see new/closed sessions
+    lastCodexScan = 0;
     if (haveRoster) void scheduleRebuild(lastEntries);
     else refreshViews();
   };
@@ -2660,6 +2709,8 @@ export async function activate(
       present.add(node.id);
       const prev = prevStatusById.get(node.id);
       prevStatusById.set(node.id, node.status);
+      const codexFinished = sessionProviderFor(node.id) === 'codex' &&
+        codexCompletions.observe(node.id, codexReadingFor(node.id)?.stats.completedAt);
       // The compaction half of the same two transitions, and it runs BEFORE
       // the `hidden` gate below on purpose: hiding a row is "stop telling me
       // about this one", not "freeze its state", and a hidden session whose
@@ -2689,7 +2740,7 @@ export async function activate(
       // node on every poll.
       const quieting = prev === 'busy' && node.status !== 'busy';
       const wasCompaction =
-        quieting &&
+        (quieting || codexFinished) &&
         (compaction.isCompacting(aliases) ||
           compaction.phaseOf(aliases, Date.now(), false) !== undefined);
       if (quieting) {
@@ -2701,7 +2752,8 @@ export async function activate(
       }
       if (node.hidden) continue;
       // The turn ended: it was working, now it is not.
-      if (prev === 'busy' && (node.status === 'waiting' || node.status === 'idle')) {
+      if ((prev === 'busy' && (node.status === 'waiting' || node.status === 'idle')) ||
+          (codexFinished && node.status === 'idle')) {
         // ...UNLESS what just ended was a compaction. A compaction is neither
         // work you asked for nor a question for you (the whole argument for
         // giving it a mark of its own — see src/compaction.ts), so calling it
@@ -2723,6 +2775,7 @@ export async function activate(
         }
       }
     }
+    codexCompletions.prune(present);
     for (const id of [...prevStatusById.keys()]) {
       if (!present.has(id)) {
         prevStatusById.delete(id);
@@ -2989,6 +3042,25 @@ export async function activate(
         );
       } catch (err) {
         logError('extension.accountLabelOf', err);
+        return undefined;
+      }
+    },
+    // Where the project's NEXT session would start, as the picker words it.
+    // The project's own override when it has one; otherwise the machine-wide
+    // default, named as such — "Auto" under a project that never chose is the
+    // truth, but it reads as a decision somebody made here, and this hover is
+    // the one place that distinction is cheap to draw.
+    projectAccountOf: (id) => {
+      try {
+        const project = store.getProject(id);
+        if (!project) return undefined;
+        const profiles = store.getAccounts();
+        if (profiles.length === 0) return undefined;
+        return project.routing === undefined
+          ? `${describeRouting(store.getDefaultRouting(), profiles)} (global default)`
+          : describeRouting(project.routing, profiles);
+      } catch (err) {
+        logError('extension.projectAccountOf', err);
         return undefined;
       }
     },
@@ -3264,12 +3336,6 @@ export async function activate(
     at: number;
   }
   const codexActivity = new Map<string, CodexActivityMark>();
-  interface CodexTailEntry {
-    mtimeMs: number;
-    size: number;
-    activity: RolloutActivity | null;
-  }
-  const codexTailCache = new Map<string, CodexTailEntry>();
 
   // The Codex half (src/codexHooks.ts): entries merged into every Codex
   // home's hooks.json — the machine's own and one per Codex account with its
@@ -4027,10 +4093,17 @@ export async function activate(
   // The usage numbers. This is the ONLY place the limits module is named: it
   // is not vscode-facing, the view and the verbs are, and neither may import
   // the other — so it crosses as a `LimitsReader` (types.ts), which the service
-  // implements outright. No adapter: the interface carries `force`, because a
-  // manual refresh that could not step over the service's own minimum-interval
-  // guard would be a button that silently returns the cache.
-  const limits = new LimitsService();
+  // implements outright. Manual refresh requests fresh data; the shared
+  // scheduler still enforces spacing and rate-limit cooldowns.
+  // The meter REMEMBERS its last good reading, in a small file beside
+  // state.json. Without it a window that opens while the usage endpoint is
+  // throttling has nothing to show and nothing to degrade to, which is how two
+  // perfectly readable accounts came to show an empty row all evening. A cache,
+  // not a record: losing it costs one network read.
+  const limits = new LimitsService({
+    cache: createUsageCache(path.join(stateHome.dir, USAGE_CACHE_FILE_NAME)),
+    scheduler: createUsageRequestScheduler(path.join(stateHome.dir, USAGE_SCHEDULE_FILE_NAME)),
+  });
   context.subscriptions.push(limits);
   const usageCache = new AccountUsageCache(limits);
   context.subscriptions.push(usageCache);
@@ -4833,19 +4906,16 @@ export async function activate(
    */
   const shellSessions = (): ShellSessionInfo[] => {
     const paths = new Map<string, string>();
-    for (const s of archiveIndexer.current()) {
+    for (const s of [...archiveIndexer.current(), ...codexArchived()]) {
       paths.set(s.sessionId, s.transcriptPath);
     }
     const out: ShellSessionInfo[] = [];
     for (const node of forest.nodes.values()) {
       if (node.ghost || node.archived || node.deleted) continue;
       if (node.status === 'exited') continue;
-      // A Codex session's rollout file is a different format entirely and
-      // holds no Bash tool calls of this shape; it would parse to nothing.
-      if (sessionProviderFor(node.id) === 'codex') continue;
       const file =
         paths.get(node.id) ??
-        transcriptFile(node.id, { extraProjectsDirs: profileProjectsDirs() });
+        sessionTranscriptFile(node.id);
       if (file === null || file === undefined || file === '') continue;
       out.push({
         id: node.id,
@@ -5304,10 +5374,8 @@ export async function activate(
         // been spoken to yet has no transcript (claude writes lazily), so the
         // bind time stands in — the window then counts from the tab opening.
         const mtimes = aliases
-          .map((id) =>
-            transcriptMtimeMs(id, { extraProjectsDirs: profileProjectsDirs() }),
-          )
-          .filter((m): m is number => m !== null);
+          .map((id) => lastRealActivityMs([id]))
+          .filter((m) => Number.isFinite(m));
         return {
           sessionId: binding.sessionId,
           // `launchedByUs` folded in: a chat some other window launched is
@@ -5402,11 +5470,11 @@ export async function activate(
   const lastRealActivityMs = (aliases: readonly string[]): number => {
     let best = Number.NaN;
     for (const id of aliases) {
-      const file = transcriptFile(id, {
-        extraProjectsDirs: profileProjectsDirs(),
-      });
+      const file = sessionTranscriptFile(id);
       if (file === null) continue;
-      const at = readTailStats(file).lastRecordAt;
+      const at = sessionProviderFor(id) === 'codex'
+        ? codexStatsCache.get(file)?.stats.lastRecordAt
+        : readTailStats(file).lastRecordAt;
       if (at !== undefined && (!Number.isFinite(best) || at > best)) best = at;
     }
     return best;
@@ -6351,17 +6419,13 @@ export async function activate(
 
     getForest: () => forest,
     refresh: refreshNow,
-    hasTranscript: (sessionId) =>
-      hasTranscript(sessionId, { extraProjectsDirs: profileProjectsDirs() }),
+    hasTranscript: (sessionId) => sessionTranscriptFile(sessionId) !== null,
     // The same lookup hasTranscript runs, kept as a pair on purpose: the
     // handoff brief has to NAME the file, and two different searches answering
     // the two questions would eventually disagree. Then the Codex store: a
     // rollout is the transcript of a Codex conversation, and the handoff
     // brief reads either layout (handoff.TRANSCRIPT_SHAPE).
-    transcriptPathOf: (sessionId) =>
-      transcriptFile(sessionId, { extraProjectsDirs: profileProjectsDirs() }) ??
-      codexArchived().find((s) => s.sessionId === sessionId)?.transcriptPath ??
-      null,
+    transcriptPathOf: sessionTranscriptFile,
     repairResumeLeaf: (sessionId) =>
       repairResumeLeaf(sessionId, { extraProjectsDirs: profileProjectsDirs() }),
     transcriptFacts,
@@ -6914,7 +6978,7 @@ export async function activate(
       const verdict = mayTypeInto({
         status,
         row: entry !== undefined,
-        rosterOk: lastFetchOk,
+        rosterOk: provider === 'codex' || lastFetchOk,
         ...(provider !== undefined ? { provider } : {}),
         promptsVisible: provider === 'codex' ? codexPromptsVisible() : true,
       });
@@ -7196,7 +7260,7 @@ export async function activate(
     unlistedSessions: () =>
       unlistedPool({
         entries: lastEntries,
-        archived: archiveIndexer.current(),
+        archived: [...archiveIndexer.current(), ...codexArchived()],
         records: store.all(),
         tipOf: (id) => chainIndex.tipOf(id),
         shownIds: new Set(forest.nodes.keys()),
@@ -7245,15 +7309,13 @@ export async function activate(
       const deadline = Date.now() + Math.max(0, timeoutMs);
       const read = (): string | undefined => {
         for (const id of chainAliases(chainIndex.tipOf(sessionId))) {
-          const file = transcriptFile(id, {
-            extraProjectsDirs: profileProjectsDirs(),
-          });
+          const file = sessionTranscriptFile(id);
           if (file === null) continue;
           try {
-            const found = parseCompactSummary(
-              readTranscriptTail(file, SUMMARY_TAIL_MAX_BYTES),
-              sinceMs,
-            );
+            const text = readTranscriptTail(file, SUMMARY_TAIL_MAX_BYTES);
+            const found = sessionProviderFor(id) === 'codex'
+              ? parseCodexSummaryReply(text, sinceMs)
+              : parseCompactSummary(text, sinceMs);
             if (found !== undefined) return found;
           } catch (err) {
             // A transcript that vanished or is being rewritten under us is a
@@ -8034,6 +8096,12 @@ export async function activate(
       const rec = records[id];
       const entry: RosterEntry = { sessionId: id, kind: 'interactive' };
       if (typeof rec?.cwd === 'string' && rec.cwd !== '') entry.cwd = rec.cwd;
+      const meta = codexArchived().find((s) => s.sessionId === id);
+      if (meta?.label !== undefined) entry.name = meta.label;
+      const startedAt = meta?.startedAt ?? Date.parse(rec?.createdAt ?? '');
+      if (Number.isFinite(startedAt)) entry.startedAt = startedAt;
+      const reading = codexReadingFor(id);
+      if (reading !== undefined) entry.lastActivityAt = reading.stats.lastRecordAt ?? reading.mtimeMs;
       const status = codexStatusFor(id);
       if (status !== undefined) entry.status = status;
       out.push(entry);
@@ -8067,35 +8135,16 @@ export async function activate(
   // past it and speaks for itself. Nothing here is REQUIRED by anything: with
   // hooks untrusted or off, the tail alone gives the amber and green dots.
 
-  // `codexActivity` and `codexTailCache` are declared up in section 7, beside
-  // the hook sink that writes the first of them: the sink can run during a
+  // `codexActivity` is declared up in section 7, beside
+  // the hook sink that writes it: the sink can run during a
   // later `await` of this activation, and a `const` declared down here would
   // still be in its temporal dead zone then.
 
   /** The rollout's own account of the session, cached on (mtime, size). */
   const codexTailStatus = (
     id: string,
-  ): { activity: RolloutActivity | null; mtimeMs: number } | undefined => {
-    let file: string | undefined;
-    for (const alias of chainAliases(id)) {
-      file = codexArchived().find((s) => s.sessionId === alias)?.transcriptPath;
-      if (file !== undefined) break;
-    }
-    if (file === undefined) return undefined;
-    let st: fsSync.Stats;
-    try {
-      st = fsSync.statSync(file);
-    } catch {
-      codexTailCache.delete(id);
-      return undefined;
-    }
-    const hit = codexTailCache.get(id);
-    if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) {
-      return { activity: hit.activity, mtimeMs: hit.mtimeMs };
-    }
-    const activity = readRolloutActivity(file);
-    codexTailCache.set(id, { mtimeMs: st.mtimeMs, size: st.size, activity });
-    return { activity, mtimeMs: st.mtimeMs };
+  ): ReturnType<CodexTranscriptCache['get']> => {
+    return codexReadingFor(id);
   };
 
   const codexStatusFor = (id: string): string | undefined => {
@@ -8111,10 +8160,13 @@ export async function activate(
       logError('extension.codexTailStatus', err);
       tail = undefined;
     }
-    if (mark !== undefined && (tail === undefined || mark.at >= tail.mtimeMs)) {
+    // A settings write can change mtime while Codex still awaits permission.
+    // Only a newer conversation event can supersede the hook's status.
+    if (mark !== undefined &&
+        (tail?.activity?.at === undefined || mark.at >= tail.activity.at)) {
       return mark.status;
     }
-    return tail?.activity ?? undefined;
+    return tail?.activity?.status;
   };
 
   /** The fetched roster with this window's Codex rows folded in. A Codex id
@@ -8208,6 +8260,7 @@ export async function activate(
         'for the launch bound as',
         shortId(provisionalId),
       );
+      lastCodexScan = 0;
       // The record FIRST, so the row that appears under the real id already
       // knows it is a Codex session, which account it is on and where it runs
       // — otherwise the next rebuild draws it with a Claude glyph and no pin.
@@ -8257,7 +8310,61 @@ export async function activate(
     (timer as unknown as { unref?: () => void }).unref?.();
   };
 
+  let recoveringCodex = false;
+  let recoveredCodexScan = 0;
+  const recoverPendingCodex = async (): Promise<void> => {
+    if (recoveringCodex) return;
+    codexArchived();
+    if (recoveredCodexScan === lastCodexScan) return;
+    recoveredCodexScan = lastCodexScan;
+    recoveringCodex = true;
+    try {
+      const records = store.all();
+      const known = new Set(codexRolloutCache.map((meta) => meta.sessionId));
+      const chained = new Set(store.getChains().flatMap((chain) => chain.members));
+      const launches: PendingCodexLaunch[] = [];
+      for (const record of Object.values(records)) {
+        if (record.provider !== 'codex' || !record.launchedByUs || record.deleted ||
+            known.has(record.id) || chained.has(record.id) || !record.cwd) continue;
+        const profile = store.getAccounts().find((p) => p.id === record.profileId);
+        if (record.profileId && profile === undefined) continue;
+        launches.push({ sessionId: record.id, cwd: record.cwd,
+          spawnedAt: Date.parse(record.createdAt),
+          sessionsDir: codexSessionsDir(profile?.configDir) });
+      }
+      const matches = matchPendingCodexLaunches(launches, codexRolloutCache,
+        new Set([...Object.keys(records), ...chained]), CODEX_ADOPT_WINDOW_MS);
+      for (const [oldId, meta] of matches) {
+        const record = store.get(oldId);
+        if (!record || record.deleted || store.get(meta.sessionId) ||
+            store.getChains().some((chain) => chain.members.includes(oldId))) continue;
+        if (record.boundWindowId && record.boundWindowId !== focusIntegration.windowId) continue;
+        // Preserve the lifecycle state: recovering a closed conversation must
+        // not reopen it, and transferring a parked process keeps its deadline.
+        await store.upsert(meta.sessionId, {
+          provider: 'codex', launchedByUs: true, cwd: record.cwd,
+          closed: record.closed, tmux: record.tmux, graceUntil: record.graceUntil,
+          stowedBySwitch: record.stowedBySwitch, boundWindowId: record.boundWindowId,
+          touchedAt: record.touchedAt, doneAt: record.doneAt, seenAt: record.seenAt,
+        });
+        if (record.profileId) await store.setSessionProfile(meta.sessionId, record.profileId);
+        const lane = store.getSessionSubproject(oldId);
+        if (lane) await store.setSessionSubproject(meta.sessionId, lane);
+        await store.appendChainMember(oldId, meta.sessionId);
+        registry.rebind(oldId, meta.sessionId);
+        await store.upsert(oldId, { boundWindowId: null, tmux: null, graceUntil: null });
+        log('codex: recovered delayed rollout', shortId(oldId), '->', shortId(meta.sessionId));
+      }
+      if (matches.size > 0) refreshNow();
+    } catch (err) {
+      logError('extension.recoverPendingCodex', err);
+    } finally {
+      recoveringCodex = false;
+    }
+  };
+
   const onResult = (rawResult: RosterResult): void => {
+    void recoverPendingCodex();
     if (!rawResult.ok) {
       // Keep the last good forest — the tree must not flash empty because the
       // CLI was briefly unavailable. The flag is how a reader tells "no row
@@ -8265,6 +8372,17 @@ export async function activate(
       // ones, so an absence in them proves nothing until a fetch succeeds.
       lastFetchOk = false;
       log('roster: fetch failed —', rawResult.error ?? 'unknown error');
+      // Codex is observed independently of `claude agents`. Keep the last
+      // Claude rows through a failed fetch, while Codex continues updating.
+      const entries = withCodexRows(lastEntries.filter(
+        (entry) => sessionProviderFor(entry.sessionId) !== 'codex',
+      ));
+      if (entries.length > 0 || haveRoster) {
+        lastEntries = entries;
+        haveRoster = true;
+        onRosterTick.fire();
+        void scheduleRebuild(entries);
+      }
       return;
     }
     lastFetchOk = true;

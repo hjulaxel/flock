@@ -93,6 +93,35 @@ export const MAX_RECORDED_SUMMARY_CHARS = 1000;
 const SUMMARY_PREAMBLE_PREFIX =
   'This session is being continued from a previous conversation';
 
+/** Codex's remote compaction can be opaque. Ask the running session for the
+ * human-readable conclusion that Close with Summary promises to preserve. */
+export const CODEX_SUMMARY_PROMPT =
+  '[Flock] This session is about to be closed. Reply with a concise handoff ' +
+  'summary of the work completed, decisions made, validation, and anything ' +
+  'unfinished. Do not run tools or make further changes.';
+
+/** Only a finished answer after the request counts, never commentary or an
+ * old response copied into a fork. */
+export function parseCodexSummaryReply(text: string, sinceMs: number): string | undefined {
+  let reply: string | undefined;
+  for (const line of text.split('\n')) {
+    let rec: unknown;
+    try { rec = JSON.parse(line); } catch { continue; }
+    if (!isPlainObject(rec) || rec['type'] !== 'response_item' ||
+        !isPlainObject(rec['payload'])) continue;
+    const at = typeof rec['timestamp'] === 'string' ? Date.parse(rec['timestamp']) : Number.NaN;
+    const p = rec['payload'];
+    if (!Number.isFinite(at) || at < sinceMs || p['type'] !== 'message' ||
+        p['role'] !== 'assistant' || (p['phase'] !== 'final_answer' && p['phase'] !== 'final') ||
+        !Array.isArray(p['content'])) continue;
+    const content = p['content'].flatMap((b: unknown) =>
+      isPlainObject(b) && b['type'] === 'output_text' && typeof b['text'] === 'string' ? [b['text']] : [],
+    ).join('\n').trim();
+    if (content !== '') reply = content;
+  }
+  return reply;
+}
+
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }

@@ -29,6 +29,7 @@ import {
   findCodexBinary,
   codexFallbackBinDirs,
   matchRollout,
+  matchPendingCodexLaunches,
   readRolloutMeta,
   scanRollouts,
   sessionIdOfRollout,
@@ -246,6 +247,7 @@ describe('the rollout store on disk', () => {
     meta: {
       cwd?: string;
       timestamp?: string;
+      sessionTimestamp?: string;
       /** `payload.session_id`, which for an interactive session equals the id
        *  in the FILENAME and for a spawned thread does not. */
       sessionId?: string;
@@ -262,6 +264,7 @@ describe('the rollout store on disk', () => {
       // then this file's own, then the parent when there is one.
       session_id: meta.sessionId ?? id,
       id,
+      ...(meta.sessionTimestamp ? { timestamp: meta.sessionTimestamp } : {}),
       ...(meta.parentThreadId !== undefined
         ? { parent_thread_id: meta.parentThreadId }
         : {}),
@@ -306,6 +309,25 @@ describe('the rollout store on disk', () => {
     // timestamp sit before it. Both facts must still come back.
     const file = writeRollout('2026-08-12', ID_A);
     expect(readRolloutMeta(file)?.cwd).toBe('/code/api');
+  });
+
+  it('matches a delayed first write by session creation time, including a truncated header', () => {
+    const file = writeRollout('2026-08-12', ID_A, {
+      sessionTimestamp: '2026-08-12T01:00:00.500Z',
+      timestamp: '2026-08-12T01:04:00.000Z',
+      originator: 'codex-tui',
+    });
+    const meta = readRolloutMeta(file)!;
+    expect(meta.startedAt).toBe(Date.parse('2026-08-12T01:00:00.500Z'));
+    expect(matchPendingCodexLaunches([{
+      sessionId: ID_B, cwd: '/code/api', spawnedAt: Date.parse('2026-08-12T01:00:00Z'),
+      sessionsDir: path.join(root, 'sessions'),
+    }], [meta], new Set([ID_B]), 30_000).get(ID_B)?.sessionId).toBe(ID_A);
+  });
+
+  it('falls back to the record timestamp when the session timestamp is invalid', () => {
+    const file = writeRollout('2026-08-12', ID_A, { sessionTimestamp: 'invalid' });
+    expect(readRolloutMeta(file)?.startedAt).toBe(Date.parse('2026-08-12T01:00:00.000Z'));
   });
 
   it('readRolloutMeta returns null for a file that is not a rollout, and never throws', () => {
@@ -443,6 +465,38 @@ describe('the rollout store on disk', () => {
     expect(
       scanRollouts({ sessionsDirs: [dir, dir], maxAgeDays: 100_000 }),
     ).toHaveLength(1);
+  });
+});
+
+describe('delayed Codex launch recovery', () => {
+  const T = Date.parse('2026-09-14T00:00:00Z');
+  const launch = { sessionId: ID_B, cwd: '/code/api', spawnedAt: T, sessionsDir: '/profiles/work/sessions' };
+  const candidate: RolloutMeta = { sessionId: ID_A, cwd: launch.cwd,
+    path: '/profiles/work/sessions/2026/09/14/rollout.jsonl',
+    startedAt: T + 500, endedAt: T + 240_000, bytes: 100, originator: 'codex-tui' };
+  const recover = (candidates: RolloutMeta[], launches = [launch], taken = new Set<string>()) =>
+    matchPendingCodexLaunches(launches, candidates, taken, 30_000);
+
+  it('does not match another account, a thread, an exec run, or an already claimed session', () => {
+    expect(recover([{ ...candidate, path: '/profiles/personal/sessions/rollout.jsonl' }]).size).toBe(0);
+    expect(recover([{ ...candidate, path: '/profiles/work/sessions-other/rollout.jsonl' }]).size).toBe(0);
+    expect(recover([{ ...candidate, threadOf: ID_B }]).size).toBe(0);
+    expect(recover([{ ...candidate, originator: 'codex_exec' }]).size).toBe(0);
+    expect(recover([candidate], [launch], new Set([ID_A])).size).toBe(0);
+    expect(recover([{ ...candidate, startedAt: T + 31_000 }]).size).toBe(0);
+  });
+
+  it('refuses ambiguous matches in either direction', () => {
+    expect(recover([candidate, { ...candidate, sessionId: ID_B }]).size).toBe(0);
+    expect(recover([candidate], [launch, { ...launch, sessionId: ID_A }]).size).toBe(0);
+  });
+
+  it('recovers separate account launches independently even when their start times coincide', () => {
+    const other = { ...candidate, sessionId: ID_B, path: '/profiles/personal/sessions/rollout.jsonl' };
+    const matches = recover([candidate, other], [launch,
+      { ...launch, sessionId: ID_A, sessionsDir: '/profiles/personal/sessions' }]);
+    expect(matches.get(ID_B)?.sessionId).toBe(ID_A);
+    expect(matches.get(ID_A)?.sessionId).toBe(ID_B);
   });
 });
 

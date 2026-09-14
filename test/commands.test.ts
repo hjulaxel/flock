@@ -2759,6 +2759,78 @@ describe('the subproject verbs', () => {
     expect(calls.launches[0].title).toBe('api');
   });
 
+  // The right-click half of a directory row's `+`, and the row's own "New
+  // Session on Account…": the account is asked first, then the launch is the
+  // one the left-click makes — same directory, same name — with the answer
+  // pinned to it.
+  it('newSessionFromPicker on a subproject row asks the account, then launches in THAT directory', async () => {
+    const two = app({ dirs: ['/code/app/api'] });
+    const WORK = accountProfile('work', { configDir: '/work/.claude' });
+    const PERSONAL = accountProfile('personal', { configDir: '/personal/.claude' });
+    const { accounts } = fakeAccountDeps([WORK, PERSONAL]);
+    const { deps, calls } = chatDeps(two, { projects: [two] });
+    const picks = scriptPicks('personal');
+    const { run } = withRegisteredCommands({ ...deps, accounts } as never);
+
+    await run(COMMANDS.newSessionFromPicker, {
+      type: 'subproject',
+      projectId: 'p1',
+      dir: '/code/app/api',
+    });
+
+    // ONE question, and it names the project the way the project row's does.
+    expect(picks.placeholders).toEqual(['Start a session in app on which account?']);
+    expect(calls.launches).toHaveLength(1);
+    // The DIRECTORY whose button was clicked — not the project's first one,
+    // which is where a subproject arg mistaken for a project arg would land.
+    expect(calls.launches[0].cwd).toBe('/code/app/api');
+    expect(calls.launches[0].title).toBe('api');
+    // The PICKED account, not the routed one: `personal` is nobody's default.
+    expect(calls.launches[0].profileId).toBe('personal');
+    expect(calls.launches[0].env).toMatchObject({
+      CLAUDE_CONFIG_DIR: '/personal/.claude',
+    });
+  });
+
+  it('newSessionFromPicker on a subproject row launches nothing when the picker is cancelled', async () => {
+    const two = app({ dirs: ['/code/app/api'] });
+    const { accounts } = fakeAccountDeps([accountProfile('work')]);
+    const { deps, calls } = chatDeps(two, { projects: [two] });
+    scriptPicks(undefined);
+    const { run } = withRegisteredCommands({ ...deps, accounts } as never);
+
+    await run(COMMANDS.newSessionFromPicker, {
+      type: 'subproject',
+      projectId: 'p1',
+      dir: '/code/app/api',
+    });
+
+    expect(calls.launches).toEqual([]);
+  });
+
+  it('newSessionFromPicker on a NAMED lane keeps the lane — its name, its stamp — on the picked account', async () => {
+    const two = app();
+    const store = laneStore([lane()]);
+    const WORK = accountProfile('work', { configDir: '/work/.claude' });
+    const { accounts } = fakeAccountDeps([WORK]);
+    const { deps, calls } = chatDeps(two, { projects: [two] });
+    Object.assign(deps as object, store.deps);
+    scriptPicks('work');
+    const { run } = withRegisteredCommands({ ...deps, accounts } as never);
+
+    await run(COMMANDS.newSessionFromPicker, {
+      type: 'subproject',
+      projectId: 'p1',
+      dir: '/code/app',
+      id: 'lane-1',
+    });
+
+    expect(calls.launches).toHaveLength(1);
+    expect(calls.launches[0].title).toBe('Server rewrite');
+    expect(calls.launches[0].subprojectId).toBe('lane-1');
+    expect(calls.launches[0].profileId).toBe('work');
+  });
+
   it("a lane pinning a branch launches in that branch's CHECKOUT — worktree-aware placement", async () => {
     const two = app();
     const store = laneStore([lane({ branch: 'feat/x' })]);
@@ -3019,6 +3091,56 @@ describe('configureProjectFlow: the project Settings menu', () => {
     // menu reopening behind one takes the keyboard off it — the same rule the
     // rename hand-off followed before it moved to the row.
     expect(state.opened).toBe(1);
+  });
+
+  // WHAT THE SETTING IS, not what the verb does. A row reading "Which account
+  // this project's new sessions launch on" restates its own label; the question
+  // people open this menu with is "which account IS it?", and answering it here
+  // is what stops them opening the picker to find out and cancelling it.
+  describe('the AI account row says the current setting', () => {
+    function accountRow(items: unknown[]): { label: string; description: string } {
+      const found = (items as Array<{ label: string; description?: string }>).find(
+        (i) => i.label.includes('Set AI Account'),
+      );
+      return { label: found?.label ?? '', description: found?.description ?? '' };
+    }
+
+    it('names the account when the project pins one', async () => {
+      const state = scriptMenu([undefined]);
+      const { deps } = chatDeps(
+        projectOf({ routing: { kind: 'account', id: 'magma' } }),
+      );
+      const { accounts } = fakeAccountDeps([
+        accountProfile('magma', { label: 'Magma' }),
+      ]);
+      await configureProjectFlow({ ...deps, accounts } as never, 'p1');
+      expect(accountRow(state.items[0]).description).toBe('Magma');
+    });
+
+    // A project that never chose is NOT the same as one that chose Auto, and
+    // this hover is where that distinction is cheap to draw: the global default
+    // is named, and named AS the global default.
+    it('names the global default, as the global default, when nothing is pinned', async () => {
+      const state = scriptMenu([undefined]);
+      const { deps } = chatDeps(projectOf());
+      const { accounts } = fakeAccountDeps(
+        [accountProfile('magma', { label: 'Magma' })],
+        { defaultRouting: () => ({ kind: 'account', id: 'magma' }) },
+      );
+      await configureProjectFlow({ ...deps, accounts } as never, 'p1');
+      expect(accountRow(state.items[0]).description).toBe('Global default · Magma');
+    });
+
+    it('falls back to the old blurb for a wiring with no account roster', async () => {
+      // Every unit double, and any host that did not pass `accounts`. Asserting
+      // a routing we cannot read would be worse than describing the verb.
+      const state = scriptMenu([undefined]);
+      const { deps } = chatDeps(projectOf());
+      await configureProjectFlow(deps, 'p1');
+      expect(accountRow(state.items[0]).description).toBe(
+        'Which account this project’s new sessions launch on',
+      );
+    });
   });
 
   // Only offered on a project that HAS more than one directory: both verbs are
@@ -4614,6 +4736,121 @@ describe('addAccount discloses what the new directory inherits before creating i
     expect(createdDirs).toEqual(['work']);
     expect(createdProviders).toEqual(['codex']);
     expect(upserted).toEqual(['work']);
+  });
+});
+
+// ------------------------------------------------------------ renaming an account
+//
+// The label is display text and nothing else: the id is what session pins name
+// and what `~/.lineage/profiles/<id>` is called, and neither is re-derived from
+// the label after the account exists. So rename is an input box with no
+// confirmation, and the tests that matter are about the two ways it must NOT
+// write — a name another account already has, and a name that did not change.
+
+describe('renameAccount moves the label and nothing else', () => {
+  afterEach(() => {
+    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
+    delete (mockWindow as InputHost).showInputBox;
+    delete (mockWindow as StatusHost).setStatusBarMessage;
+  });
+
+  /** Two accounts, and a recorder for every `upsertAccount` patch. */
+  function harness(typed: string | undefined): {
+    run: (id: string, ...args: unknown[]) => Promise<void>;
+    patches: Array<{ id: string; patch: Partial<AccountProfile> }>;
+    opened: Array<{ value?: string; valueSelection?: [number, number] }>;
+    validate: (value: string) => string | undefined | null;
+    refreshed: () => number;
+  } {
+    const patches: Array<{ id: string; patch: Partial<AccountProfile> }> = [];
+    const opened: Array<{ value?: string; valueSelection?: [number, number] }> = [];
+    let validate: (value: string) => string | undefined | null = () => undefined;
+    const { accounts, calls } = fakeAccountDeps(
+      [
+        accountProfile('magma', { label: 'Magma' }),
+        accountProfile('personal', { label: 'Personal' }),
+      ],
+      {
+        upsertAccount: async (id, patch) => {
+          patches.push({ id, patch });
+        },
+      },
+    );
+    (mockWindow as InputHost).showInputBox = async (opts) => {
+      opened.push({
+        ...(opts?.value === undefined ? {} : { value: opts.value }),
+        ...(opts?.valueSelection === undefined
+          ? {}
+          : { valueSelection: opts.valueSelection }),
+      });
+      if (opts?.validateInput) validate = opts.validateInput;
+      return typed;
+    };
+    (mockWindow as StatusHost).setStatusBarMessage = () => undefined;
+    // No project: renaming an account touches nothing project-shaped, and a
+    // harness that needed one would be describing a coupling that is not there.
+    const { deps } = chatDeps(undefined);
+    const { run } = withRegisteredCommands({
+      ...deps,
+      accounts,
+    } as never);
+    return {
+      run,
+      patches,
+      opened,
+      validate: (value) => validate(value),
+      refreshed: () => calls.refreshed,
+    };
+  }
+
+  it('opens on the current name, with it selected, and writes the new one', async () => {
+    const h = harness('Work');
+    await h.run(COMMANDS.renameAccount, { type: 'account', id: 'magma' });
+    // Explorer parity: the box is prefilled and the whole name is selected, so
+    // typing replaces it rather than appending to it.
+    expect(h.opened).toEqual([{ value: 'Magma', valueSelection: [0, 5] }]);
+    // The LABEL, alone. An id or a configDir in this patch would be the bug the
+    // whole verb is arranged to avoid.
+    expect(h.patches).toEqual([{ id: 'magma', patch: { label: 'Work' } }]);
+    expect(h.refreshed()).toBe(1);
+  });
+
+  it('refuses a name another account already has', async () => {
+    const h = harness(undefined);
+    await h.run(COMMANDS.renameAccount, { type: 'account', id: 'magma' });
+    // Case-insensitively: two rows that differ only in capitalisation are two
+    // rows nobody can tell apart.
+    expect(h.validate('personal')).toMatch(/already exists/i);
+    expect(h.validate('Personal')).toMatch(/already exists/i);
+    expect(h.validate('   ')).toMatch(/empty/i);
+  });
+
+  it('does not refuse the account its OWN name back', async () => {
+    // `selfId`. Without it, opening the box and pressing Enter — or fixing only
+    // the capitalisation of the name you already have — is refused as a clash
+    // with yourself, which is the one collision that cannot exist.
+    const h = harness(undefined);
+    await h.run(COMMANDS.renameAccount, { type: 'account', id: 'magma' });
+    expect(h.validate('Magma')).toBeUndefined();
+    expect(h.validate('MAGMA')).toBeUndefined();
+    expect(h.validate('Work')).toBeUndefined();
+  });
+
+  it('writes nothing when the box is cancelled', async () => {
+    const h = harness(undefined);
+    await h.run(COMMANDS.renameAccount, { type: 'account', id: 'magma' });
+    expect(h.patches).toEqual([]);
+    expect(h.refreshed()).toBe(0);
+  });
+
+  it('writes nothing when the name did not change', async () => {
+    // A no-op write still bumps `updatedAt`, which is the newest-wins merge key
+    // every other window resolves this record on — so "rename it to what it is
+    // already called" must not touch the store at all.
+    const h = harness('  Magma  ');
+    await h.run(COMMANDS.renameAccount, { type: 'account', id: 'magma' });
+    expect(h.patches).toEqual([]);
+    expect(h.refreshed()).toBe(0);
   });
 });
 
@@ -8418,16 +8655,18 @@ describe('close with summary drives /compact and reads back what the CLI wrote',
     expect(h.offers[0]).toEqual(['Type a Summary…']);
   });
 
-  it('declines by name on Codex, and sends nothing when the offer is refused', async () => {
+  it('asks Codex for a readable summary, records it and closes the session', async () => {
     const h = summaryHarness({
       mode: 'compact-and-tell-parent',
       provider: 'codex',
-      summary: 'unused',
+      summary: 'Fixed the session list and verified its tests.',
     });
     await h.run(COMMANDS.closeWithSummary, CHILD);
-    expect(h.sends).toEqual([]);
-    expect(h.closedTerminals).toEqual([]);
-    expect(h.warnings.join(' ')).toContain('Codex');
+    expect(h.sends[0][1]).toContain('[Flock] This session is about to be closed');
+    expect(h.sends[0][1]).not.toBe('/compact');
+    expect(h.closedTerminals).toEqual([CHILD]);
+    expect(h.records[CHILD].summary).toContain('Fixed the session list');
+    expect(h.warnings).toEqual([]);
   });
 
   it('falls back to the input box when the wiring cannot read a summary back', async () => {

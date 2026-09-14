@@ -111,6 +111,7 @@ import {
   sendRefusalSentence,
 } from './forkNote';
 import {
+  CODEX_SUMMARY_PROMPT,
   COMPACT_SUMMARY_WAIT_MS,
   summaryForParentNote,
   summaryForRecord,
@@ -2864,13 +2865,20 @@ async function startSessionInProjectDir(
   dir: string,
   stem: string,
   what: string,
-  /** The NAMED lane this launch is starting in, when it came from one. Stamped
-   *  onto the session for life — it is the only thing that can say which of two
-   *  lanes on one directory the session belongs to (see
-   *  EditorialRecord.subprojectId). Absent for a launch from an implicit
-   *  directory row, which needs no stamp: the directory answers on its own. */
-  subprojectId?: string,
+  opts?: {
+    /** The NAMED lane this launch is starting in, when it came from one. Stamped
+     *  onto the session for life — it is the only thing that can say which of two
+     *  lanes on one directory the session belongs to (see
+     *  EditorialRecord.subprojectId). Absent for a launch from an implicit
+     *  directory row, which needs no stamp: the directory answers on its own. */
+    subprojectId?: string;
+    /** The account the user just PICKED, when they did — the right-click half of
+     *  a directory row's `+`. Overrules the routing for this one session, the
+     *  same way `newSessionInProjectFlow` takes one for the project row. */
+    account?: AccountProfile;
+  },
 ): Promise<void> {
+  const subprojectId = opts?.subprojectId;
   // Named for the DIRECTORY, not the project: under a project that has split
   // into rows, "app 3" tells you nothing and "api 2" tells you which row it is
   // in. The counter is scoped to the whole project so two directories never
@@ -2881,8 +2889,9 @@ async function startSessionInProjectDir(
   );
 
   // The directory belongs to the project whose row it came from, so the routing
-  // question is already answered — no directory lookup.
-  const routed = routeNewSession(deps, project.id);
+  // question is already answered — no directory lookup. A picked account skips
+  // the routing altogether; see routeNewSession.
+  const routed = routeNewSession(deps, project.id, opts?.account);
 
   const sessionId = randomUUID();
   await deps.recordLaunch(sessionId, null, dir);
@@ -2907,6 +2916,71 @@ async function startSessionInProjectDir(
   deps.refresh();
   void deps.revealSession(sessionId);
   await nameJustCreatedSession(deps, sessionId);
+}
+
+/**
+ * A session in one named DIRECTORY of a project — a subproject row's `+`.
+ *
+ * The directory arrives already resolved (the views look it up in the model they
+ * rendered rather than trusting a path from a page) and is re-validated here
+ * anyway against the project's live list, because the command in front of this
+ * is a registered one: the palette, a keybinding and another extension can all
+ * reach it with an argument nobody vetted. A stale row therefore starts nothing
+ * rather than spawning a shell in a directory the project no longer covers.
+ *
+ * `account` is the right-click half of that `+` — "…on which account?" — and is
+ * the one thing the two gestures differ in. Extracted from the handler so the
+ * picker verb lands on exactly this launch: same lane placement, same stamp,
+ * same naming, and not a second copy that drifts.
+ */
+async function newSessionInSubprojectFlow(
+  deps: AccountCommandDeps,
+  parsed: { projectId: string; dir: string; id: string },
+  account?: AccountProfile,
+): Promise<void> {
+  const project = deps.getProject(parsed.projectId);
+  if (!project) return;
+  // A NAMED LANE is re-resolved against the store: it names its own directory,
+  // which does not have to be one the project lists (see SubprojectRecord.dir),
+  // and it is what the session gets stamped with.
+  const lane = deps.getSubproject?.(parsed.id);
+  if (lane && lane.projectId === project.id) {
+    // Worktree-aware: a lane pinning a branch launches in that branch's
+    // checkout (see lanePlacement). The session keeps the LANE's name
+    // either way — the lane is the identity, the worktree is placement.
+    const placed = await lanePlacement(deps, lane);
+    await startSessionInProjectDir(
+      deps,
+      project,
+      placed.dir,
+      lane.name.trim() === '' ? baseName(lane.dir) : lane.name,
+      placed.branch === ''
+        ? `in ${project.name}`
+        : `in ${project.name}, on ${placed.branch}`,
+      { subprojectId: lane.id, account },
+    );
+    return;
+  }
+  const dir = projectDirs(project).find(
+    (d) => pathKey(d) === pathKey(parsed.dir),
+  );
+  if (dir === undefined) {
+    void vscode.window.showInformationMessage(
+      `Flock: "${project.name}" no longer covers ${parsed.dir}.`,
+    );
+    return;
+  }
+  // An IMPLICIT row needs no stamp: its directory answers on its own, and a
+  // stamp would tie the session to a row that exists only while the project
+  // has more than one directory.
+  await startSessionInProjectDir(
+    deps,
+    project,
+    dir,
+    baseName(dir),
+    `in ${project.name}`,
+    { account },
+  );
 }
 
 // ------------------------------------------------------------ worktree verbs
@@ -3979,6 +4053,33 @@ async function notifyParentOfFork(
  * way. Escape during the rename keeps the standard name; it never discards a
  * branch that is already running.
  */
+/** Codex parses /compact in its composer, not its positional launch prompt.
+ * Wait for the fork's row to bind, then use the same guarded input path as
+ * parent notes. A trust or permission prompt must remain the user's choice. */
+export async function compactCodexFork(deps: CommandDeps, childId: string): Promise<void> {
+  for (let attempt = 0; attempt < 30; attempt++) {
+    const tip = deps.tipOf(childId);
+    const record = deps.getRecord(tip);
+    if (record?.closed != null || record?.deleted === true) return;
+    const node = deps.getForest().nodes.get(tip);
+    if (node !== undefined && !node.ghost && !node.archived && node.status === 'idle') {
+      const sent = deps.sendTextToSession(tip, COMPACT_PROMPT);
+      if (sent === 'sent') return;
+      if (sent !== 'no-terminal' && sent !== 'gone') {
+        void vscode.window.showWarningMessage(
+          `Flock: the fork opened, but compaction could not start. ${sendRefusalSentence(sent, node.label)} ` +
+          'Run /compact in the new Codex session when it is ready.',
+        );
+        return;
+      }
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 1000));
+  }
+  void vscode.window.showWarningMessage(
+    'Flock: the fork opened, but was not ready to compact. Run /compact in the new Codex session when it is ready.',
+  );
+}
+
 async function forkFlow(
   deps: AccountCommandDeps,
   parentIdArg: string,
@@ -4864,7 +4965,7 @@ export async function resumeFlow(
  * steps is never clobbered by a stale copy captured at the top.
  */
 export async function configureProjectFlow(
-  deps: CommandDeps,
+  deps: AccountCommandDeps,
   projectId: string,
 ): Promise<void> {
   for (;;) {
@@ -4901,8 +5002,27 @@ export async function configureProjectFlow(
         action: 'provider',
       },
       {
+        // The CURRENT setting, not a description of the verb. A menu row that
+        // says what it does tells you nothing you could not guess from its
+        // name; one that says what the setting IS answers the question people
+        // actually open this menu with — "which account is this project on?" —
+        // without making them open the picker to find out and then cancel it.
+        // `describeRouting` is the same wording the picker itself uses, so the
+        // answer here and the marked row in there are the same sentence.
+        //
+        // A wiring with no account roster (every unit double, and any host that
+        // did not pass `accounts`) falls back to the old blurb rather than
+        // asserting a routing it cannot read.
         label: '$(account) Set AI Account…',
-        description: 'Which account this project’s new sessions launch on',
+        description:
+          deps.accounts === undefined
+            ? 'Which account this project’s new sessions launch on'
+            : project.routing === undefined
+              ? `Global default · ${describeRouting(
+                  deps.accounts.defaultRouting(),
+                  deps.accounts.accounts(),
+                )}`
+              : describeRouting(project.routing, deps.accounts.accounts()),
         action: 'account',
       },
       {
@@ -6660,8 +6780,7 @@ async function awaitSummaryWithProgress(
  * The order below is not arbitrary — every step is a refusal that has to come
  * before the one that costs something:
  *
- *   1. CODEX declines by name. The whole mechanism is one Claude CLI property;
- *      Codex would take `/compact` as ordinary user text and compact nothing.
+ *   1. CODEX gets a readable summary request: its compaction can be opaque.
  *   2. NO READER, no compaction. A wiring without `awaitCompactSummary` cannot
  *      see the answer, so it falls to the input box rather than typing
  *      `/compact` into somebody's session and then shrugging.
@@ -6688,25 +6807,7 @@ async function closeWithCompaction(
 ): Promise<void> {
   const label = labelFor(deps, sessionId);
 
-  if (sessionLaunchProvider(deps, sessionId) === 'codex') {
-    const CLOSE = 'Close Without a Summary';
-    const TYPE = 'Type a Summary…';
-    const answer = await vscode.window.showWarningMessage(
-      'Flock: this is a Codex session, and the Codex CLI has no compaction ' +
-        'command Flock can type into it.',
-      {
-        modal: true,
-        detail:
-          'Closing with a summary works by sending `/compact` and reading ' +
-          'back what the CLI writes, which only the Claude CLI does.',
-      },
-      CLOSE,
-      TYPE,
-    );
-    if (answer === CLOSE) await closeFlow(deps, sessionId);
-    else if (answer === TYPE) await closeWithTypedSummary(deps, sessionId);
-    return;
-  }
+  const codex = sessionLaunchProvider(deps, sessionId) === 'codex';
 
   if (deps.awaitCompactSummary === undefined) {
     log('close with summary: no summary reader in this wiring — asking instead');
@@ -6719,7 +6820,7 @@ async function closeWithCompaction(
   // current.
   const tip = deps.tipOf(sessionId);
   const sinceMs = Date.now();
-  const sent = deps.sendTextToSession(tip, COMPACT_PROMPT);
+  const sent = deps.sendTextToSession(tip, codex ? CODEX_SUMMARY_PROMPT : COMPACT_PROMPT);
   if (sent !== 'sent') {
     const host = hostOf(deps, tip);
     const CLOSE = 'Close Without a Summary';
@@ -6753,24 +6854,25 @@ async function closeWithCompaction(
   // above the send for the same reason — a floor slightly early is harmless,
   // a floor after the CLI's own timestamp would discard the answer.
   await deps.upsertRecord(sessionId, { summaryRequestedAt: nowIso() });
-  log('close with summary: sent /compact to', shortId(tip));
+  log('close with summary: requested summary from', shortId(tip));
 
   const raw = await awaitSummaryWithProgress(
     deps,
     sessionId,
     sinceMs,
-    `Flock: compacting "${label}" before closing it…`,
+    `Flock: ${codex ? 'summarising' : 'compacting'} "${label}" before closing it…`,
   );
 
   if (raw === undefined) {
     const ANYWAY = 'Close Anyway';
     const answer = await vscode.window.showWarningMessage(
-      `Flock: no summary came back for "${label}" — the compaction is still ` +
+      `Flock: no summary came back for "${label}" — the ${codex ? 'summary request' : 'compaction'} is still ` +
         'running, or the CLI wrote none. Nothing has been closed.',
       {
         modal: true,
-        detail:
-          'The branch has been asked to compact, so its own context is ' +
+        detail: codex
+          ? 'The summary request may still be running. Leaving the session open lets it finish; closing now ends its turn.'
+          : 'The branch has been asked to compact, so its own context is ' +
           'already squashed whether or not you close it now. Leaving it open ' +
           'lets the compaction finish; closing now ends the turn it is in.',
       },
@@ -7887,6 +7989,64 @@ async function loginAccountFlow(
   });
   terminal.show();
   log('accounts: sign-in terminal for', profile.id);
+}
+
+/**
+ * Rename an account. The LABEL moves and nothing else does.
+ *
+ * No dialog, no warning, no confirmation — deliberately, and the reason is
+ * worth stating because every other verb on this row has one. An account's
+ * identity is its `id`: that is what a session pin names, what
+ * `~/.lineage/profiles/<id>` is called, and what survives in the store as a
+ * tombstone so a reused name cannot answer an old pin with a new login. The
+ * label is the text on the row. `slugify` derives the one from the other
+ * exactly once, in `addAccountFlow`, and never again — so renaming "Magma" to
+ * "Work" cannot strand a conversation, move a credential, or change which
+ * subscription anything bills to. It is a rename in the sense the Explorer
+ * means it, and it gets the Explorer's interaction: an input box, prefilled,
+ * with the old name selected.
+ *
+ * `selfId` is passed to the validator so re-typing the same name (or changing
+ * only its capitalisation) is not refused as a collision with itself.
+ */
+async function renameAccountFlow(
+  deps: AccountCommandDeps,
+  accountId: string,
+): Promise<void> {
+  const accts = deps.accounts;
+  if (!accts) return;
+  const profile = accts.getAccount(accountId);
+  if (!profile) return;
+
+  const existing = accts.accounts();
+  const typed = await vscode.window.showInputBox({
+    title: 'Rename Account',
+    prompt: 'A name for this account — "Work", "Personal", "Client X".',
+    value: profile.label,
+    // The whole name selected, so typing replaces it — Explorer parity, and
+    // the shape `renameProjectInline` already set for this product.
+    valueSelection: [0, profile.label.length],
+    ignoreFocusOut: true,
+    validateInput: (value) => {
+      const refusal = validateAccountLabel(value, existing, accountId);
+      return refusal === '' ? undefined : refusal;
+    },
+  });
+  if (typed === undefined) return;
+  const label = typed.trim();
+  if (validateAccountLabel(label, existing, accountId) !== '') return;
+  // Nothing to write, and more importantly nothing to REPAINT: a no-op write
+  // still bumps `updatedAt`, which is the newest-wins merge key every other
+  // window resolves this record on.
+  if (label === profile.label) return;
+
+  await accts.upsertAccount(accountId, { label });
+  accts.refreshAccounts();
+  vscode.window.setStatusBarMessage(
+    `Flock: renamed ${profile.label} to ${label}.`,
+    4000,
+  );
+  log('accounts: renamed', accountId);
 }
 
 /**
@@ -9278,14 +9438,9 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
    * point of doing it here rather than typing `/compact` in the parent: the
    * parent keeps its full history, on disk and in the tree, exactly as it was.
    *
-   * CLAUDE ONLY, and it says so rather than half-doing it. The whole verb rests
-   * on one property of the Claude CLI: a positional prompt beginning with `/`
-   * is INTERPRETED as a slash command, which is what makes `/compact` an
-   * instruction rather than a message. Codex takes a positional prompt too, but
-   * as ordinary user text — so the same launch would open the branch by saying
-   * the literal words "/compact" to the model and compact nothing. A fork that
-   * silently skipped the half the user asked for is worse than a verb that
-   * declines, so a Codex session gets the plain fork offered by name instead.
+   * Claude accepts /compact as its positional opening command. Codex parses
+   * it in the composer, so its fork opens without a prompt and receives the
+   * command through guarded terminal input once ready (compactCodexFork).
    *
    * WHAT LANDS ON DISK IS STILL THE WHOLE COPY, and it is worth saying because
    * the name invites the opposite reading. The CLI writes the parent's chain
@@ -9315,15 +9470,8 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       );
       if (!parentId) return;
       if (sessionLaunchProvider(deps, parentId) === 'codex') {
-        const FORK = 'Fork Without Compacting';
-        const answer = await vscode.window.showWarningMessage(
-          'Flock: this is a Codex session, and the Codex CLI has no compaction ' +
-            'command Flock can hand it at start-up.',
-          { modal: true, detail: 'The plain fork is available and unaffected.' },
-          FORK,
-        );
-        if (answer !== FORK) return;
-        await forkFlow(deps, parentId);
+        const childId = await forkFlow(deps, parentId);
+        if (childId !== undefined) await compactCodexFork(deps, childId);
         return;
       }
       await forkFlow(deps, parentId, { prompt: COMPACT_PROMPT });
@@ -10572,48 +10720,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     async (arg?: unknown) => {
       const parsed = subprojectArgOf(arg);
       if (!parsed) return;
-      const project = deps.getProject(parsed.projectId);
-      if (!project) return;
-      // A NAMED LANE is re-resolved against the store: it names its own directory,
-      // which does not have to be one the project lists (see SubprojectRecord.dir),
-      // and it is what the session gets stamped with.
-      const lane = deps.getSubproject?.(parsed.id);
-      if (lane && lane.projectId === project.id) {
-        // Worktree-aware: a lane pinning a branch launches in that branch's
-        // checkout (see lanePlacement). The session keeps the LANE's name
-        // either way — the lane is the identity, the worktree is placement.
-        const placed = await lanePlacement(deps, lane);
-        await startSessionInProjectDir(
-          deps,
-          project,
-          placed.dir,
-          lane.name.trim() === '' ? baseName(lane.dir) : lane.name,
-          placed.branch === ''
-            ? `in ${project.name}`
-            : `in ${project.name}, on ${placed.branch}`,
-          lane.id,
-        );
-        return;
-      }
-      const dir = projectDirs(project).find(
-        (d) => pathKey(d) === pathKey(parsed.dir),
-      );
-      if (dir === undefined) {
-        void vscode.window.showInformationMessage(
-          `Flock: "${project.name}" no longer covers ${parsed.dir}.`,
-        );
-        return;
-      }
-      // An IMPLICIT row needs no stamp: its directory answers on its own, and a
-      // stamp would tie the session to a row that exists only while the project
-      // has more than one directory.
-      await startSessionInProjectDir(
-        deps,
-        project,
-        dir,
-        baseName(dir),
-        `in ${project.name}`,
-      );
+      await newSessionInSubprojectFlow(deps, parsed);
     },
   );
 
@@ -12256,6 +12363,16 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   });
 
   register(
+    COMMANDS.renameAccount,
+    'rename account',
+    async (arg?: unknown) => {
+      const profile = await targetAccount(arg, 'Rename which account?');
+      if (!profile) return;
+      await renameAccountFlow(deps, profile.id);
+    },
+  );
+
+  register(
     COMMANDS.removeAccount,
     'remove account',
     async (arg?: unknown) => {
@@ -12355,10 +12472,30 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   );
 
   // The same override from the other end: a project row, then the account.
+  //
+  // A SUBPROJECT row reaches this too — the right-click on its `+`, and its
+  // context menu — and lands on the same launch that row's left-click does,
+  // with the account chosen first. Read before the project shape, because a
+  // directory row carries its project's id and must not be mistaken for the
+  // project itself: that would start the session in the project's first
+  // directory rather than the one whose button was clicked.
   register(
     COMMANDS.newSessionFromPicker,
     'new session from account',
     async (arg?: unknown) => {
+      const sub = subprojectArgOf(arg);
+      if (sub) {
+        const project = deps.getProject(sub.projectId);
+        if (!project) return;
+        const profile = await pickAccount(
+          deps,
+          `Start a session in ${project.name} on which account?`,
+          { launchable: true },
+        );
+        if (!profile) return;
+        await newSessionInSubprojectFlow(deps, sub, profile);
+        return;
+      }
       const id =
         projectIdFromArg(arg) ??
         (await pickProject(deps, 'Start a session in which project?', {

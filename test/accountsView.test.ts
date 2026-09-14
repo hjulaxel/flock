@@ -186,6 +186,47 @@ describe('formatUsageSummary', () => {
     );
   });
 
+  it('never calls a throttled meter a broken account', () => {
+    // Report Flock's paused polling without attributing it to account activity.
+    expect(formatUsageSummary(snapshot({ error: 'rate-limited' }), NOW)).toBe(
+      'Flock usage polling paused',
+    );
+    expect(
+      formatUsageSummary(
+        snapshot({ error: 'rate-limited', retryAt: NOW + 5 * 60_000 }),
+        NOW,
+      ),
+    ).toBe('Flock usage polling paused · back in 5m');
+    expect(
+      formatUsageSummary(
+        snapshot({
+          error: 'rate-limited',
+          retryAt: NOW + 5 * 60_000,
+          signedInAs: 'a@b.c',
+        }),
+        NOW,
+      ),
+    ).toBe('a@b.c · Flock usage polling paused · back in 5m');
+    // A retryAt already behind us promises nothing — the next repaint asks
+    // again anyway, and a clock in the past is worse than no clock.
+    expect(
+      formatUsageSummary(
+        snapshot({ error: 'rate-limited', retryAt: NOW - 1000 }),
+        NOW,
+      ),
+    ).toBe('Flock usage polling paused');
+  });
+
+  it('keeps cached numbers and their pause visible together', () => {
+    expect(formatUsageSummary(snapshot({
+      fiveHour: { utilization: 17 },
+      sevenDay: { utilization: 54 },
+      error: 'rate-limited',
+      stale: true,
+      retryAt: NOW + 51 * 60_000,
+    }), NOW)).toBe('Flock usage polling paused · back in 51m · 5h 17% · week 54% (stale)');
+  });
+
   it('never calls an aged-out access token an expired sign-in', () => {
     // The account is signed in and the CLI renews the token itself on its next
     // run. Only the METER is missing, and that is all the row may say — the
@@ -718,6 +759,19 @@ describe('AccountsViewProvider tooltip — never a credential VALUE, only names'
     const tooltip = p.getTreeItem(p.getChildren()[0]).tooltip as { value: string };
     expect(tooltip.value).toContain('This sign-in has expired');
     expect(tooltip.value).toContain('Sign In to Account');
+  });
+
+  it('explains Flock’s own paused polling without blaming account activity', () => {
+    const p = new AccountsViewProvider(fakeDeps({
+      accounts: () => [profile('a')],
+      usage: () => snapshot({ error: 'rate-limited', retryAt: NOW + 5 * 60_000 }),
+    }));
+    const tooltip = p.getTreeItem(p.getChildren()[0]).tooltip as { value: string };
+    expect(tooltip.value).toContain('Flock paused usage polling after its request was rate-limited');
+    expect(tooltip.value).toContain('Refresh also respects this pause');
+    expect(tooltip.value).not.toContain('busy account');
+    expect(tooltip.value).not.toContain('rate-limiting this login');
+    expect(tooltip.value).not.toContain('Sign In to Account');
   });
 
   it('an account with no credentials points at Sign In too', () => {

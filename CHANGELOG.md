@@ -4,6 +4,179 @@ All notable changes to Flock are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Accounts can be renamed.** The label was fixed at the moment you added the
+  account, and the only way to change it was to remove the row and add it back
+  — which is a far larger operation than it looks, since a removed account's id
+  is still named by the pins of every conversation that ran on it. **Rename
+  Account…** is on the row's right-click, and `F2` on a focused account row does
+  the same thing.
+
+  It moves the label and nothing else, which is why it asks nothing before doing
+  it: the `id` is what session pins name and what `~/.lineage/profiles/<id>` is
+  called, and neither is re-derived from the label after the account exists. A
+  rename cannot strand a conversation, move a credential, or change which
+  subscription anything bills to. The name you already have is not refused as a
+  collision with itself, so fixing only its capitalisation works.
+
+- **Right-click the `+` on a project — or on one of its directories — to choose
+  the account.** Left-click still starts a session wherever the project's
+  routing says; right-click asks which account first, through the picker that
+  already offers the routed choice at the top with the reason it won. The two
+  gestures therefore agree about what would have happened and differ only in
+  whether you get to overrule it — for one session, without changing the
+  project's setting. The button's tooltip says so.
+
+  A subproject row's `+` has the same second verb, and the session it starts is
+  the one its left-click would have started — same directory, same lane, same
+  name — on the account you picked. A project's `+` moves onto its directory
+  rows the moment it has two, so a gesture that only worked on the project row
+  would have stopped working precisely when the project grew.
+
+  **New Session on Account…** is the same verb from the keyboard, now on the
+  right-click menu of a project and of each of its directory rows, beside
+  **New Session**.
+
+### Changed
+
+- **A project's AI account is visible without opening the picker to find it.**
+  It was reachable — right-click → **Settings…** → **Set AI Account…** — and
+  nowhere did it say what the setting currently *was*; you opened the picker,
+  read the marked row, and cancelled. Three things changed, and none of them
+  moves a number:
+
+  **Set AI Account…** is now on the project's right-click menu directly, one
+  level up from where it was. Its row in the **Settings…** menu shows the
+  current setting instead of a description of the verb — the account's name, or
+  `Global default · <name>` for a project that has never chosen, because a
+  project that never chose and one that chose `Auto` are not the same project.
+  And the project row's hover names it, under the directories, in the same
+  words the picker uses.
+
+### Fixed
+
+- **The `+` on a named lane starts the session in the lane.** In the Flock
+  sidebar the button handed its verb the lane's directory and not the lane's
+  id, so a session started from it belonged to no lane — filed under the
+  directory, named for the directory, and launched in the directory rather than
+  in the checkout of the branch the lane pins. The row's right-click menu got
+  this right; the button now sends what the menu sends.
+
+- **Codex rows recover after a delayed first prompt.** Session discovery now
+  reads Codex's session creation timestamp and revisits unmatched launches
+  when their transcripts appear. Waiting before typing no longer leaves a row
+  permanently disconnected from its activity, age, and session actions. Existing
+  unambiguous matches are repaired within their original account and launch
+  window; closed conversations remain closed.
+
+- **Codex session parity.** Ages, context token counts and last-exchange hovers
+  now read Codex rollouts. Long turns retain their working dot, short turns
+  between polls trigger completion notifications, and bookkeeping writes do
+  not clear a waiting-for-permission status. Codex updates continue when the
+  Claude roster is unavailable.
+- **Codex history and actions.** Fork/Resume transcript checks, import and
+  history pickers, `/rename` titles, idle cleanup and structured shell-command
+  tracking now include Codex. Fork and Compact sends `/compact` after the fork
+  becomes ready. Close with Summary asks Codex for a readable handoff and saves
+  its final answer before closing. Both input actions retain the trusted-hook
+  and permission-prompt guards.
+
+- **The usage meter sends the account's own token, not the first token it
+  finds.** Claude Code keeps every MCP server's OAuth grant in the same
+  credential document as the sign-in — under `mcpOAuth`, ahead of
+  `claudeAiOauth` — and Flock's reader took the first `accessToken` in
+  document order. On a profile that had authorised the Figma MCP server that
+  was a Figma token, and Flock sent it to Anthropic as the Bearer for every
+  usage read. The endpoint answered each one with `429` and an hour-long
+  `Retry-After`, so the row said the account could not be polled, when the
+  account was fine and the request was wrong. A profile whose MCP grants
+  happened to be empty strings fell through to the real token and worked,
+  which is why one account read and the other never did.
+
+  The access token now comes from the `claudeAiOauth` section and nowhere
+  else when that section exists, `mcpOAuth` is never entered at any depth, and
+  a document with MCP grants but no sign-in reads as `not logged in` rather
+  than sending somebody else's credential. Refresh-token evidence — the thing
+  that tells "token aged out" from "signed out" — is still gathered from the
+  whole document, foreign sections excepted, so that verdict is unchanged.
+
+  The cooldown work below stands on its own, but it was built against this
+  symptom: the 429s it was shielding the account from were caused by the
+  token Flock chose, not by how often it asked.
+
+- **Flock respects usage-request cooldowns across accounts, windows and restarts.**
+  Every usage request now passes through a shared scheduler. Requests start at
+  least one minute apart across all Claude accounts, and ordinary reads of the
+  same account are coalesced for five minutes across windows. These are Flock's
+  conservative polling budgets; the provider's exact limiting scope is unknown.
+
+  A 429 pauses all of Flock's usage requests until the full `Retry-After`
+  deadline, or an exponential fallback when no valid header is present. Valid
+  deadlines are never clamped. **Refresh Usage** respects the same pause and
+  makes one attempt. Queued accounts recheck the pause before sending, and the
+  scheduler records it under `~/.lineage/state/usage-schedule.json` before
+  releasing the next caller. If coordination fails, Flock defers the request.
+
+  Previous readings remain visible. The status says **Flock usage polling
+  paused** and the hover explains the next allowed attempt without blaming the
+  account, its session activity, or other clients.
+
+  The pause and remaining wait also appear when cached numbers are available.
+  Previously that case showed only the old numbers and `stale`, concealing the
+  reason Flock was waiting behind the hover.
+
+- **The meter remembers its last good reading, so a throttle stops meaning a
+  blank row.** Every failure in the usage reader already degraded to the last
+  good numbers rather than blanking the row — but "last good" lived only in the
+  window's memory, so it was empty in every freshly opened window. A window that
+  opened while the endpoint was throttling had nothing to degrade *to*, which is
+  how two accounts whose numbers were perfectly readable came to show nothing at
+  all. The last successful reading now goes to a small file beside `state.json`
+  (`~/.lineage/state/usage-cache.json`) and seeds the next window, so a
+  throttled row reads `5h 14% · wk 53%` instead of `meter busy`.
+
+  The file is shared, so it is **merged** on every write, per account, newest
+  reading wins. The first version of it was not, and rewrote the whole document
+  from the accounts that one window happened to know about — which silently
+  dropped every account it had not successfully read, starting with the
+  throttled one the cache exists for. Two windows did the same to each other.
+  Losing the file still costs only one network read, which is why it is its own
+  small file rather than a section of `state.json`, but "disposable" was never a
+  licence to delete somebody else's entry.
+
+  A failure now also re-reads it before settling for an empty row: another
+  window may have got a reading this one could not, and a file read once at
+  startup never learns anything its neighbours find. Only successes are written;
+  nothing older than five hours is read back (past that the five-hour figure is
+  not stale, it is wrong — the window it counted has rolled); a reading taken
+  against a different config directory is refused, because a profile that moved
+  is a different login.
+
+- **`stale` means the numbers are old, not that the last refresh failed.** A
+  reading taken thirty seconds ago was being flagged stale because a refresh
+  behind it had just been throttled — which is the flag's own documented failure
+  mode: a snapshot younger than the staleness threshold is simply the current
+  answer, and flagging it trains you to ignore the flag. Four code paths were
+  each deciding this for themselves and only one asked how old the reading
+  actually was. They now share one rule, and it is the age of the numbers.
+  The failure is not lost: it rides on the row's error state and the hover names
+  it, because it is a fact about the last attempt, not about the number beside
+  it.
+
+- **A refused usage request now says which status refused it.** An account
+  whose meter cannot be read shows `usage unavailable` — and for the one cause
+  that produces exactly those words with no account name in front of them, a
+  well-formed non-2xx from the usage endpoint, nothing was written anywhere. A
+  thrown request was logged and an unparseable body was logged, but a 403 from
+  a beta gate, a 429 from too many windows asking at once, or a 5xx returned
+  silently, so the single state a person cannot diagnose from the row was also
+  the single state the log did not mention. The status goes to the Flock output
+  channel. The body does not: an error body from this endpoint is the one place
+  a token could be echoed back.
+
 ## [0.10.0] — 2026-09-08
 
 ### Added

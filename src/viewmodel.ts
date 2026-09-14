@@ -944,6 +944,18 @@ export interface RowAction {
   id: string;
   icon: string;
   title: string;
+  /**
+   * A SECOND verb on the same button, reached by right-clicking it.
+   *
+   * The gesture every file manager already spends on "the same thing, but let
+   * me choose": left-click starts a session where the routing says, right-click
+   * asks which account first. It is opt-in per action because a button that
+   * silently has two meanings is worse than one that has one — the title is
+   * what makes it discoverable, and `webtree.ts` keeps its own allowlist of
+   * which alt ids resolve to which command, so the page naming one the model
+   * never offered reaches nothing.
+   */
+  altTitle?: string;
 }
 
 /** A small non-interactive glyph drawn immediately right of the row's LABEL —
@@ -1092,6 +1104,22 @@ export interface ViewModelInput {
    * record, which outlives a window where this never did. */
   providerFor(sessionId: string): ProviderId;
   isBoundHere(sessionId: string): boolean;
+  /**
+   * Which AI account this project's new sessions launch on, already worded —
+   * `routing.describeRouting` against the live roster, which is the same
+   * sentence the picker and the Settings menu use.
+   *
+   * In the HOVER rather than the row, and that is the project row's own rule
+   * (see its `description`): a permanent fact you set up once belongs where
+   * permanent facts live, not in the widest, most-read row in the tree. But it
+   * does have to be somewhere — "which account is this project on" had no
+   * answer anywhere in the UI, only a picker you opened and cancelled to find
+   * out.
+   *
+   * Optional, and an absent answer means the line is simply not drawn: a
+   * wiring with no account roster must not assert a routing it cannot read.
+   */
+  accountFor?(projectId: string): string | undefined;
   /** The webview's own view id, needed in the row context so `when` clauses can
    *  scope to this view (`webviewId == '<id>'`). */
   viewId: string;
@@ -1603,7 +1631,15 @@ function subprojectRow(
   // button belongs on the rows that ARE the answer — the same trade the branch
   // block made, for the same reason.
   row.actions = [
-    { id: 'newSessionInSubproject', icon: 'add', title: `New session in ${node.label}` },
+    {
+      id: 'newSessionInSubproject',
+      icon: 'add',
+      title: `New session in ${node.label}`,
+      // The same second verb the project row's `+` has, for the same reason:
+      // the routing decides the account on a left-click, and this is how you
+      // overrule it for one session without changing the project's setting.
+      altTitle: 'Right-click to choose the account',
+    },
   ];
   return row;
 }
@@ -2221,6 +2257,14 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
     // finished session three levels down has to light it — otherwise collapsing
     // a project is a way to lose the notification the dot exists to carry.
     const hasUnseen = subtreeHasUnseen(forest, descendantRootIds(projectById, el));
+    // Worded by the wiring, drawn here. Trimmed and length-checked at the seam
+    // rather than trusted: the hover is a single string and a label that
+    // arrived with a newline in it would forge a line of its own.
+    const accountText = input.accountFor?.(el.projectId);
+    const accountLine =
+      typeof accountText === 'string' && accountText.trim() !== ''
+        ? `account: ${accountText.trim().replace(/\s+/g, ' ')}`
+        : '';
     const row: ViewRow = {
       key,
       kind: 'project',
@@ -2271,7 +2315,11 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
         viewItem: projectContextValue(el),
         preventDefaultContextMenuItems: true,
       },
-      tooltip: [el.label, ...el.dirs].join('\n'),
+      tooltip: [
+        el.label,
+        ...el.dirs,
+        ...(accountLine === '' ? [] : [accountLine]),
+      ].join('\n'),
       projectId: el.projectId,
       // The chat lives on the PROJECT row and nowhere else — it is a
       // conversation about the project as a whole, so a session row offering
@@ -2328,6 +2376,9 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
           title: worktreeDefault
             ? `New session in a new worktree of ${el.label}`
             : `New session in ${el.label}`,
+          // The routing decides the account on a left-click; this is how you
+          // overrule it for one session without changing the project's setting.
+          altTitle: 'Right-click to choose the account',
         },
       ],
     };

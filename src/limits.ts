@@ -62,9 +62,8 @@
 // COST. Pull-based: nothing here polls. `readUsage` refuses to hit the network
 // twice for the same profile inside `MIN_FETCH_INTERVAL_MS`, dedupes concurrent
 // calls onto one in-flight request (a view repaint asks for every row at once),
-// and backs off exponentially after a server error. `force: true` — the manual
-// refresh command — bypasses the interval and the backoff, because a person
-// clicking Refresh is not a loop.
+// and backs off after a server error. Manual refresh bypasses cache freshness,
+// while the scheduler enforces spacing and rate-limit cooldowns for every caller.
 
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -80,6 +79,9 @@ import {
 } from './codex';
 import type { CodexIdentity, CodexRateLimits, CodexUsageReading } from './codex';
 import { logError } from './log';
+import { createUsageRequestScheduler } from './usageSchedule';
+import type { UsageRequestScheduler } from './usageSchedule';
+export { REQUEST_SPACING_MS } from './usageSchedule';
 import type {
   AccountProfile,
   DisposableLike,
@@ -132,24 +134,33 @@ export function keychainServiceFor(configDir: string | undefined): string {
   return `${KEYCHAIN_SERVICE}-${suffix}`;
 }
 
-/** Never two network reads for the same profile inside this. Sized to the
- *  cadence a human refreshes at, not to the endpoint's rate limit: the numbers
- *  move in five-hour and seven-day units, so a minute of staleness is invisible
- *  and a request per view repaint would be rude. */
-export const MIN_FETCH_INTERVAL_MS = 60_000;
-
-/** After this, `cached()` starts marking what it returns as stale. Longer than
- *  the fetch interval on purpose — a snapshot between the two is simply the
- *  current answer, and flagging it would train the user to ignore the flag. */
-export const STALE_AFTER_MS = 5 * 60_000;
-
-/** First backoff step after a server error, doubling to BACKOFF_MAX_MS. TWICE
- *  the fetch interval, because a first step at or below it would be invisible:
- *  the interval guard already refuses everything shorter, so a 60 s "backoff"
- *  would be exactly the ordinary cadence and the endpoint would keep being
- *  asked once a minute while it is down. */
+/** Ordinary polling cadence, shared across windows by the request scheduler. */
+export const MIN_FETCH_INTERVAL_MS = 5 * 60_000;
+/** A recent reading remains useful while Flock waits to refresh it. */
+export const STALE_AFTER_MS = 15 * 60_000;
 export const BACKOFF_BASE_MS = 2 * MIN_FETCH_INTERVAL_MS;
-export const BACKOFF_MAX_MS = 15 * 60_000;
+export const BACKOFF_MAX_MS = 30 * 60_000;
+
+/**
+ * How old a REMEMBERED reading may be before it is discarded unread.
+ *
+ * Five hours, because that is the length of the short window it describes: past
+ * it, `fiveHour` is not stale, it is WRONG — the window has rolled and the
+ * number belongs to a period that is over. A weekly figure ages more gracefully,
+ * but a snapshot is kept or dropped whole; half a remembered snapshot would be
+ * a third state to reason about for no benefit.
+ *
+ * This TTL is about what is safe to SHOW AT ALL, and it is the only age
+ * question the cache itself answers. Whether a reading that survives it is
+ * flagged `stale` is decided afresh by `isStale` when it is seeded — a reading
+ * another window took ninety seconds ago is the current answer, and the flag
+ * would be a lie about it. (It did once mark everything it served, which is how
+ * a row that had just refreshed came to carry `· stale`.)
+ */
+export const USAGE_CACHE_TTL_MS = 5 * 60 * 60_000;
+
+/** The remembered-readings file, beside `state.json` under `~/.lineage/state`. */
+export const USAGE_CACHE_FILE_NAME = 'usage-cache.json';
 
 /** The HTTP request budget. The accounts view awaits this. */
 export const FETCH_TIMEOUT_MS = 10_000;
@@ -189,6 +200,11 @@ export interface HttpResponseLike {
   status: number;
   ok?: boolean;
   text(): Promise<string>;
+  /** Only ever read for `Retry-After`, and only on a 429. Optional and
+   *  structural like the rest of this shape: a test fake is `{ status, text }`
+   *  and stays that way, and a response object without headers simply means
+   *  the throttle has no stated end. */
+  headers?: { get(name: string): string | null } | undefined;
 }
 
 export interface HttpRequestInit {
@@ -220,6 +236,56 @@ export type ReadFileLike = (file: string) => Promise<string | null>;
 export type CodexUsageLike = (sessionsDir: string) => Promise<CodexUsageReading | null>;
 
 /**
+ * A place to REMEMBER the last good reading across windows and restarts.
+ *
+ * THE BUG THIS EXISTS FOR. Every failure in this file already degrades to the
+ * last good numbers rather than blanking the row — `settleFailure` has done
+ * that from the beginning. But "the last good numbers" lived only in this
+ * process's memory, so they were empty in every freshly opened window, and a
+ * throttle met before the first success meant a row with nothing on it at all.
+ * On a machine where the endpoint throttles routinely that is most of the time,
+ * which is how an account whose numbers are perfectly readable came to show
+ * nothing for an entire evening.
+ *
+ * Successful readings are merged across windows; scheduling lives separately.
+ * Losing a reading does not remove the shared request cooldown. That is why it is its own small file rather than a
+ * section of `state.json`, whose newest-wins merge discipline exists for
+ * editorial facts that must survive being written by two windows at once.
+ *
+ * `save` is deliberately fire-and-forget: a meter must never make a repaint
+ * wait on a disk write, and a cache that fails to persist is a cache that
+ * misses, not an error anybody needs to hear about.
+ */
+export interface UsageCacheStore {
+  load(): Promise<ReadonlyMap<string, CachedUsage> | null>;
+  /**
+   * Read the file AGAIN, ignoring whatever the first load remembered.
+   *
+   * `load` is memoised — it runs once per window, at startup — which is right
+   * for the common path and wrong for the two cases that matter most:
+   *
+   *   1. ANOTHER WINDOW got a reading this one cannot. The whole value of a
+   *      shared file is that a success anywhere is a success everywhere, and a
+   *      cache read once at startup never learns anything its neighbours find.
+   *   2. Somebody put a reading there by hand while this window was running.
+   *
+   * Called only when a refresh has failed AND this window has no numbers of its
+   * own to fall back on — the one moment where re-reading a small file is
+   * obviously worth it. Optional, so a test double need not implement it.
+   */
+  reload?(): Promise<ReadonlyMap<string, CachedUsage> | null>;
+  save(id: string, entry: CachedUsage): void;
+}
+
+export interface CachedUsage {
+  /** What the reading was taken against. A profile whose config directory moved
+   *  is a different login and its remembered numbers belong to the old one —
+   *  the same rule the in-memory entry applies, for the same reason. */
+  configDir: string;
+  snapshot: UsageSnapshot;
+}
+
+/**
  * Everything this module would otherwise reach for directly. Mirrors the house
  * pattern (git.ts's `ProbeOptions.run`, tmux.ts's `resolveTmuxSpawn`): real
  * defaults, so production code constructs it with `new LimitsService()`, and a
@@ -230,6 +296,13 @@ export interface LimitsDeps {
   exec?: ExecLike;
   readFile?: ReadFileLike;
   codexUsage?: CodexUsageLike;
+  /** Where the last good reading is remembered across windows and restarts.
+   *  Absent means "do not remember", which is how this file behaved before. */
+  cache?: UsageCacheStore;
+  /** Shared admission and cooldown state; production supplies a file-backed scheduler. */
+  scheduler?: UsageRequestScheduler;
+  /** Test seam for request spacing. */
+  sleep?: (ms: number) => Promise<void>;
   /** `process.platform`. Gates the keychain tier. */
   platform?: string;
   now?: () => number;
@@ -241,7 +314,7 @@ export interface LimitsDeps {
 }
 
 export interface ReadUsageOptions {
-  /** Bypass the min-interval guard AND the backoff. The manual refresh verb. */
+  /** Request fresh numbers, while still respecting request spacing and cooldowns. */
   force?: boolean;
 }
 
@@ -372,6 +445,259 @@ export function parseResetAt(v: unknown): number | undefined {
     return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
   }
   return undefined;
+}
+
+/** Retry-After is a minimum wait. Valid seconds and HTTP dates are never
+ * shortened to a local ceiling; cooldowns are timestamps, not long timers. */
+export function retryAfterMs(
+  headers: { get(name: string): string | null } | undefined,
+  now: number,
+): number | undefined {
+  if (headers === undefined || typeof headers.get !== 'function') return undefined;
+  let raw: string | null = null;
+  try {
+    raw = headers.get('retry-after');
+  } catch {
+    return undefined;
+  }
+  if (typeof raw !== 'string' || raw.trim() === '') return undefined;
+  const text = raw.trim();
+
+  // Seconds first: the spelling this endpoint actually uses, and the only one
+  // that cannot be confused with anything else.
+  if (/^\d+$/.test(text)) {
+    const ms = Number(text) * 1000;
+    if (!Number.isFinite(ms) || ms <= 0) return undefined;
+    return ms;
+  }
+
+  // Do not let Date.parse reinterpret a malformed numeric delay as a date.
+  if (!/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), /i.test(text)) return undefined;
+  const at = Date.parse(text);
+  if (!Number.isFinite(at)) return undefined;
+  const ms = at - (Number.isFinite(now) ? now : Date.now());
+  if (ms <= 0) return undefined;
+  return ms;
+}
+
+// ------------------------------------------------------- remembered readings
+
+/** The on-disk shape. Versioned so a future change can be ignored rather than
+ *  guessed at — an unknown version reads as an empty cache, which costs one
+ *  network read and nothing else. */
+const USAGE_CACHE_VERSION = 1;
+
+/** Bounds on what is read back. A cache file is ours, but it is a file on a
+ *  disk and a corrupt one must not be able to turn a repaint into anything
+ *  expensive — or, worse, put numbers on a row that nobody measured. */
+const USAGE_CACHE_MAX_ACCOUNTS = 64;
+
+/** One window, validated. Anything unrecognisable is dropped rather than
+ *  coerced: a meter is only allowed to show numbers a provider actually said,
+ *  and that rule does not relax because the number came from our own file. */
+function readCachedWindow(v: unknown): UsageWindow | undefined {
+  if (!isPlainObject(v)) return undefined;
+  const util = finiteNumber(v['utilization']);
+  if (util === undefined || util < 0 || util > 100) return undefined;
+  const out: UsageWindow = { utilization: util };
+  const resets = finiteNumber(v['resetsAt']);
+  if (resets !== undefined && resets > 0) out.resetsAt = resets;
+  const minutes = finiteNumber(v['minutes']);
+  if (minutes !== undefined && minutes > 0) out.minutes = minutes;
+  return out;
+}
+
+/**
+ * Pure. The cache file's text as entries, or null when there is nothing usable
+ * in it. Exported for the test lane — it takes no credentials and touches no
+ * disk.
+ *
+ * Only SUCCESSFUL readings are ever written, so anything here carrying an
+ * `error` is a file somebody edited; it is dropped. What survives is marked
+ * stale here as the CONSERVATIVE default — it was measured in another process
+ * at another time. `seed` then re-decides it against `isStale` before any row
+ * sees it, which is where that judgement belongs: one rule, applied once, at
+ * the seam where a snapshot becomes something a person reads.
+ */
+export function parseUsageCache(
+  text: string | null,
+  now: number,
+): Map<string, CachedUsage> | null {
+  const root = parseJsonObject(text);
+  if (root === undefined) return null;
+  if (finiteNumber(root['version']) !== USAGE_CACHE_VERSION) return null;
+  const accounts = root['accounts'];
+  if (!isPlainObject(accounts)) return null;
+
+  const out = new Map<string, CachedUsage>();
+  for (const [id, raw] of Object.entries(accounts)) {
+    if (out.size >= USAGE_CACHE_MAX_ACCOUNTS) break;
+    if (!isAccountIdish(id) || !isPlainObject(raw)) continue;
+    const configDir = typeof raw['configDir'] === 'string' ? raw['configDir'] : '';
+    const snap = raw['snapshot'];
+    if (!isPlainObject(snap)) continue;
+    if (snap['error'] !== undefined) continue; // only successes are written
+    const fetchedAt = finiteNumber(snap['fetchedAt']);
+    if (fetchedAt === undefined || fetchedAt <= 0) continue;
+    // Older than the window it describes: not stale, wrong.
+    if (Number.isFinite(now) && now - fetchedAt > USAGE_CACHE_TTL_MS) continue;
+
+    const snapshot: UsageSnapshot = { fetchedAt, stale: true };
+    const five = readCachedWindow(snap['fiveHour']);
+    if (five !== undefined) snapshot.fiveHour = five;
+    const week = readCachedWindow(snap['sevenDay']);
+    if (week !== undefined) snapshot.sevenDay = week;
+    const opus = readCachedWindow(snap['sevenDayOpus']);
+    if (opus !== undefined) snapshot.sevenDayOpus = opus;
+    // A remembered snapshot with no windows in it is not worth remembering: it
+    // would seed the row with the same nothing it already shows.
+    if (
+      snapshot.fiveHour === undefined &&
+      snapshot.sevenDay === undefined &&
+      snapshot.sevenDayOpus === undefined
+    ) {
+      continue;
+    }
+    if (typeof snap['signedInAs'] === 'string') snapshot.signedInAs = snap['signedInAs'];
+    if (typeof snap['plan'] === 'string') snapshot.plan = snap['plan'];
+    const observed = finiteNumber(snap['observedAt']);
+    if (observed !== undefined && observed > 0) snapshot.observedAt = observed;
+    out.set(id, { configDir, snapshot });
+  }
+  return out;
+}
+
+/** The id shape, kept local so this module does not import accounts.ts — that
+ *  would drag the view layer's dependencies into the one file that has to stay
+ *  node-only. Deliberately loose: this is a map key, not a capability, and the
+ *  only thing it must exclude is a key that could not be an account id at all. */
+const ACCOUNT_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
+
+function isAccountIdish(v: unknown): v is string {
+  return typeof v === 'string' && ACCOUNT_ID_RE.test(v);
+}
+
+/**
+ * The real store: one small JSON file, read once and written behind a debounce.
+ *
+ * Never throws and never rejects — every failure is a cache miss. The write is
+ * temp-file-then-rename in the same directory, the same discipline state.ts
+ * uses, so a window killed mid-write leaves the previous file intact rather
+ * than a truncated one.
+ */
+export function createUsageCache(filePath: string): UsageCacheStore {
+  const entries = new Map<string, CachedUsage>();
+  let loaded: Promise<ReadonlyMap<string, CachedUsage> | null> | null = null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let dirty = false;
+
+  /**
+   * Write our entries WITHOUT destroying anybody else's.
+   *
+   * THE BUG THIS EXISTS FOR, and it was in the first version of this file: the
+   * write rebuilt the whole document from the accounts THIS window happened to
+   * know about. Every account it had not successfully read — one that has been
+   * throttled all evening, say, which is precisely the account the cache is for
+   * — was dropped on the next write. A hand-seeded entry survived seven minutes
+   * before the next repaint erased it.
+   *
+   * Two windows do the same to each other, which is the more important half:
+   * each loads at startup, learns different accounts, and the later writer
+   * silently deletes what the earlier one knew. "A cache, not a record, so it
+   * is never merged" was wrong — the file is SHARED, and shared state that is
+   * rewritten wholesale is state that gets lost.
+   *
+   * So: re-read, merge per account (newer `fetchedAt` wins), write. The entries
+   * we merged in are kept in memory too, so a window that has been running for
+   * hours does not have to re-learn them on every flush.
+   */
+  const flush = (): void => {
+    timer = undefined;
+    if (!dirty) return;
+    dirty = false;
+    void (async (): Promise<void> => {
+      const tmp = `${filePath}.${String(process.pid)}.tmp`;
+      try {
+        // What is there NOW, not what was there when this window started.
+        let onDisk: Map<string, CachedUsage> | null = null;
+        try {
+          onDisk = parseUsageCache(await fsp.readFile(filePath, 'utf-8'), Date.now());
+        } catch {
+          onDisk = null;
+        }
+        if (onDisk !== null) {
+          for (const [id, entry] of onDisk) {
+            const ours = entries.get(id);
+            // Ours only wins when it is actually newer. A window that has been
+            // idle must not push its stale reading over a fresher one.
+            if (ours === undefined || ours.snapshot.fetchedAt < entry.snapshot.fetchedAt) {
+              entries.set(id, entry);
+            }
+          }
+        }
+        const payload: Record<string, unknown> = {};
+        for (const [id, entry] of entries) {
+          // `stale` is a JUDGEMENT, not a measurement, and it does not belong
+          // in a file. It arrives here only on the merge path — parseUsageCache
+          // marks what it reads as the conservative default, and an entry this
+          // window never refreshed is written straight back out carrying it —
+          // so the file ends up storing one window's opinion about age instead
+          // of the reading it took. Harmless today, because `seed` re-decides
+          // with isStale before a row ever sees it, and exactly the kind of
+          // derived state that stops being harmless the moment something
+          // believes it. What is stored is `fetchedAt`; the flag is derived
+          // from it, every time, at the one seam that draws a row.
+          const { stale: _dropped, ...measured } = entry.snapshot;
+          payload[id] = { configDir: entry.configDir, snapshot: measured };
+        }
+        const text = JSON.stringify({ version: USAGE_CACHE_VERSION, accounts: payload });
+        await fsp.mkdir(path.dirname(filePath), { recursive: true });
+        await fsp.writeFile(tmp, text, { encoding: 'utf-8', mode: 0o600 });
+        await fsp.rename(tmp, filePath);
+      } catch {
+        // A cache that cannot be written is a cache that misses. Not worth a
+        // line in the log on every repaint of a read-only home directory.
+        try {
+          await fsp.unlink(tmp);
+        } catch {
+          /* nothing to clean up */
+        }
+      }
+    })();
+  };
+
+  return {
+    reload(): Promise<ReadonlyMap<string, CachedUsage> | null> {
+      loaded = null;
+      return this.load();
+    },
+    load(): Promise<ReadonlyMap<string, CachedUsage> | null> {
+      loaded ??= (async (): Promise<ReadonlyMap<string, CachedUsage> | null> => {
+        let text: string | null = null;
+        try {
+          text = await fsp.readFile(filePath, 'utf-8');
+        } catch {
+          return null;
+        }
+        const parsed = parseUsageCache(text, Date.now());
+        if (parsed === null) return null;
+        for (const [id, entry] of parsed) entries.set(id, entry);
+        return parsed;
+      })();
+      return loaded;
+    },
+    save(id: string, entry: CachedUsage): void {
+      if (!isAccountIdish(id)) return;
+      entries.set(id, entry);
+      dirty = true;
+      // Coalesced: several accounts settle within milliseconds of each other on
+      // a repaint, and that is one file, once.
+      if (timer !== undefined) return;
+      timer = setTimeout(flush, 1_000);
+      // Never hold the host open for a cache write.
+      timer.unref?.();
+    },
+  };
 }
 
 // --------------------------------------------------------------- body parsing
@@ -744,6 +1070,11 @@ export function formatUsageSummary(
     typeof snapshot.signedInAs === 'string' && snapshot.signedInAs.trim() !== ''
       ? snapshot.signedInAs.trim()
       : '';
+  const paused = snapshot.error === 'rate-limited' || snapshot.error === 'polling-paused';
+  const back = paused ? resetInLabel(snapshot.retryAt, now) : '';
+  const pause = paused
+    ? 'Flock usage polling paused' + (back === '' ? '' : ` → ${back}`)
+    : '';
   if (parts.length === 0) {
     switch (snapshot.error) {
       case 'no-credentials':
@@ -761,6 +1092,10 @@ export function formatUsageSummary(
         // profile renews it without asking. The meter is what is missing, and
         // that is all this says.
         return who === '' ? 'usage n/a' : `${who} · usage n/a`;
+      case 'polling-paused':
+      case 'rate-limited': {
+        return who === '' ? pause : `${who} · ${pause}`;
+      }
       case 'http':
       case 'parse':
         return 'usage unavailable';
@@ -782,7 +1117,9 @@ export function formatUsageSummary(
   const day = reset === undefined ? '' : weekdayFor(reset);
   if (day !== '') line += ` → ${day}`;
   if (snapshot.stale === true) line += ' · stale';
-  return line;
+  // A remembered reading must not hide the reason it cannot be refreshed.
+  // Lead with the pause so a narrow sidebar still shows the wait.
+  return pause === '' ? line : `${pause} · ${line}`;
 }
 
 // ------------------------------------------------------------- credentials
@@ -799,13 +1136,35 @@ export function formatUsageSummary(
  */
 type CredentialResult =
   | { kind: 'ok'; token: string; refreshable: boolean }
-  | { kind: 'missing' }
+  | { kind: 'missing'; why?: CredentialWhy }
   /** Lapsed access token and NO refresh token anywhere in the document: the
    *  sign-in really is over, and only the user can fix it. */
-  | { kind: 'expired' }
+  | { kind: 'expired'; why?: CredentialWhy }
   /** Lapsed (or absent) access token WITH a refresh token: signed in, nothing
    *  to fix, and no point spending a round trip on a header that will 401. */
-  | { kind: 'stale' };
+  | { kind: 'stale'; why?: CredentialWhy };
+
+/**
+ * WHICH fact produced a non-ok verdict, for the log and for nothing else.
+ *
+ * The credential tiers used to be the one part of this file that failed
+ * silently: an HTTP failure names its status and an unusable body says so, but
+ * every credential verdict — "not signed in", "sign-in expired", "usage n/a" —
+ * reached the row as three words with no way to tell which of several quite
+ * different situations produced them. That is exactly the gap that made a live
+ * account reading `usage n/a` unfalsifiable from the outside.
+ *
+ * None of these carry a token, a path's contents, or any part of the blob.
+ */
+type CredentialWhy =
+  /** Nothing to parse: no file, and the keychain returned nothing. */
+  | 'no-document'
+  /** A document that would not parse as JSON. */
+  | 'unparseable'
+  /** Parsed, but carries no access token under any known spelling. */
+  | 'no-access-token'
+  /** Parsed, has an access token, and its `expiresAt` is in the past. */
+  | 'lapsed';
 
 /** Squashed key spellings (`normKey` folds `refresh_token` onto
  *  `refreshtoken`), so one entry covers every casing and separator a CLI has
@@ -813,6 +1172,13 @@ type CredentialResult =
 const ACCESS_TOKEN_KEYS: readonly string[] = ['accesstoken'];
 const REFRESH_TOKEN_KEYS: readonly string[] = ['refreshtoken'];
 const EXPIRES_AT_KEYS: readonly string[] = ['expiresat'];
+/** The section of the document that is Claude's own sign-in. */
+const CLAUDE_OAUTH_SECTION_KEYS: readonly string[] = ['claudeaioauth'];
+/** Sections that hold OTHER services' grants. Claude Code keeps every MCP
+ *  server's OAuth tokens in the same document as the login, under `mcpOAuth`,
+ *  and that section sits FIRST once it exists. Nothing in it is ever a token
+ *  for Anthropic, so the walk never enters it. */
+const FOREIGN_SECTION_KEYS: readonly string[] = ['mcpoauth'];
 
 /** The first raw value under any of `keys`, matched on the squashed key. */
 function rawUnder(obj: Record<string, unknown>, keys: readonly string[]): unknown {
@@ -858,44 +1224,66 @@ interface CredentialFields {
  * The fields a credentials document carries, found by a bounded walk rather
  * than at one hardcoded path.
  *
- * `claudeAiOauth.accessToken` is where Claude Code puts them and the walk finds
- * that first, because it is first in the file. The walk exists for the other
- * spellings: a token nested one level deeper, or — the one that matters — a
- * refresh token that is NOT a sibling of the access token. "No refreshToken
- * under this exact key" is the whole evidence behind telling a user their
- * sign-in expired, and that verdict must not rest on the shape of a file
- * another program owns. Bounded by the same depth and node budget the usage
- * scan uses: a credentials file is a few hundred bytes, and a strange one must
- * not turn a repaint into a tree traversal.
+ * `claudeAiOauth.accessToken` is where Claude Code puts them, and when that
+ * section exists it is the ONLY section read. The first version of this walk
+ * took the first `accessToken` anywhere in the document, on the belief that
+ * the login section came first in the file. It does not once an MCP server
+ * has been authorised: the CLI stores every server's grant in the same
+ * document under `mcpOAuth`, ahead of the login, and on a profile where one
+ * of those grants was live the walk picked up a Figma token and sent it to
+ * Anthropic as the Bearer for the usage read. The endpoint answered every
+ * such request with a 429 and an hour-long Retry-After, for that one profile
+ * only — the other profile's MCP tokens happened to be empty strings — and
+ * the row read as an account that could not be polled, which is what the
+ * cooldown rounds were then built against. So: when the login section exists,
+ * the access token comes from inside it and nowhere else; a document without
+ * one is walked for the other spellings; and `mcpOAuth` is skipped at any
+ * depth in both cases, because nothing in it is ever a token for Anthropic.
+ *
+ * The walk exists for the other spellings: a token nested one level deeper,
+ * or — the one that matters — a refresh token that is NOT a sibling of the
+ * access token. "No refreshToken under this exact key" is the whole evidence
+ * behind telling a user their sign-in expired, and that verdict must not rest
+ * on the shape of a file another program owns — so refresh-token evidence is
+ * still taken from the whole document (foreign sections excepted), even when
+ * the access token is confined to the login section. Bounded by the same
+ * depth and node budget the usage scan uses: a credentials file is a few
+ * hundred bytes, and a strange one must not turn a repaint into a tree
+ * traversal.
  */
 function scanCredential(root: unknown): CredentialFields {
   let token = '';
   let expiresAt: number | undefined;
   let refreshable = false;
   let budget = SCAN_NODE_BUDGET;
+  const hasLogin = isPlainObject(root) && isPlainObject(rawUnder(root, CLAUDE_OAUTH_SECTION_KEYS));
 
-  const visit = (value: unknown, depth: number): void => {
+  const visit = (value: unknown, depth: number, inLogin: boolean): void => {
     if (budget <= 0 || depth > SCAN_MAX_DEPTH) return;
     budget -= 1;
     if (Array.isArray(value)) {
-      for (const item of value) visit(item, depth + 1);
+      for (const item of value) visit(item, depth + 1, inLogin);
       return;
     }
     if (!isPlainObject(value)) return;
     for (const [key, child] of Object.entries(value)) {
       const squashed = normKey(key);
+      if (FOREIGN_SECTION_KEYS.includes(squashed)) continue;
       const text = typeof child === 'string' ? child.trim() : '';
-      if (text !== '' && ACCESS_TOKEN_KEYS.includes(squashed) && token === '') {
+      if (
+        text !== '' && ACCESS_TOKEN_KEYS.includes(squashed) && token === '' &&
+        (inLogin || !hasLogin)
+      ) {
         token = text;
         // The expiry that belongs to THIS token, not the first one in the file.
         expiresAt = parseResetAt(rawUnder(value, EXPIRES_AT_KEYS));
       }
       if (text !== '' && REFRESH_TOKEN_KEYS.includes(squashed)) refreshable = true;
-      visit(child, depth + 1);
+      visit(child, depth + 1, inLogin || (depth === 0 && CLAUDE_OAUTH_SECTION_KEYS.includes(squashed)));
     }
   };
 
-  visit(root, 0);
+  visit(root, 0, false);
   return expiresAt === undefined ? { token, refreshable } : { token, expiresAt, refreshable };
 }
 
@@ -905,8 +1293,13 @@ function readCredentialBlob(text: string | null, now: number): CredentialResult 
   const root = parseJsonObject(text);
   // Unreadable is 'missing', never 'expired': a file we could not parse is a
   // file that said nothing, and "your sign-in expired" is a claim that needs
-  // evidence.
-  if (root === undefined) return { kind: 'missing' };
+  // evidence. The two shades are still distinguished for the LOG — "there was
+  // nothing there" and "there was something there and it was not JSON" send a
+  // reader to completely different places.
+  if (root === undefined) {
+    const had = typeof text === 'string' && text.trim() !== '';
+    return { kind: 'missing', why: had ? 'unparseable' : 'no-document' };
+  }
 
   const { token, expiresAt, refreshable } = scanCredential(root);
   if (token === '') {
@@ -914,7 +1307,9 @@ function readCredentialBlob(text: string | null, now: number): CredentialResult 
     // cached token has been spent or cleared — the CLI mints a new one on its
     // next run. Calling that "not signed in" is the same lie in a different
     // place.
-    return refreshable ? { kind: 'stale' } : { kind: 'missing' };
+    return refreshable
+      ? { kind: 'stale', why: 'no-access-token' }
+      : { kind: 'missing', why: 'no-access-token' };
   }
 
   // An expiry in the past means the CLI has not refreshed yet. Sending it would
@@ -923,7 +1318,9 @@ function readCredentialBlob(text: string | null, now: number): CredentialResult 
   // token on a live login and the CLI renews it unprompted; without one, the
   // sign-in is genuinely over and only the user can fix it.
   if (expiresAt !== undefined && expiresAt <= now) {
-    return refreshable ? { kind: 'stale' } : { kind: 'expired' };
+    return refreshable
+      ? { kind: 'stale', why: 'lapsed' }
+      : { kind: 'expired', why: 'lapsed' };
   }
 
   return { kind: 'ok', token, refreshable };
@@ -1045,12 +1442,40 @@ interface CacheEntry {
   inflight?: Promise<UsageSnapshot | null>;
 }
 
+/** Does this snapshot actually carry a number a row could draw? */
+function hasWindows(s: UsageSnapshot): boolean {
+  return (
+    s.fiveHour !== undefined || s.sevenDay !== undefined || s.sevenDayOpus !== undefined
+  );
+}
+
 function cloneWindow(win: UsageWindow | undefined): UsageWindow | undefined {
   if (win === undefined) return undefined;
   const out: UsageWindow = { utilization: win.utilization };
   if (win.resetsAt !== undefined) out.resetsAt = win.resetsAt;
   if (win.minutes !== undefined) out.minutes = win.minutes;
   return out;
+}
+
+/**
+ * Are these numbers old enough to warn about?
+ *
+ * ONE rule, in one place, because there were two and they disagreed. `cached()`
+ * has always asked how old the reading actually is (STALE_AFTER_MS); the
+ * failure paths asked a different question — "did the most recent ATTEMPT
+ * fail?" — and flagged a thirty-second-old reading as stale because a refresh
+ * behind it had just been throttled.
+ *
+ * That is the flag's own stated failure mode: "a snapshot between the two is
+ * simply the current answer, and flagging it would train the user to ignore
+ * the flag." A number measured two minutes ago IS the current answer, whatever
+ * happened since. The failure is not lost — it rides on `error`, and the row's
+ * hover names it — but it is a fact about the LAST ATTEMPT, not about the
+ * numbers on the row.
+ */
+function isStale(fetchedAt: number, now: number): boolean {
+  if (!Number.isFinite(fetchedAt) || fetchedAt <= 0) return true;
+  return now - fetchedAt > STALE_AFTER_MS;
 }
 
 function cloneSnapshot(snapshot: UsageSnapshot): UsageSnapshot {
@@ -1064,6 +1489,8 @@ function cloneSnapshot(snapshot: UsageSnapshot): UsageSnapshot {
   if (snapshot.stale === true) out.stale = true;
   if (snapshot.error !== undefined) out.error = snapshot.error;
   if (snapshot.plan !== undefined) out.plan = snapshot.plan;
+  if (snapshot.signedInAs !== undefined) out.signedInAs = snapshot.signedInAs;
+  if (snapshot.retryAt !== undefined) out.retryAt = snapshot.retryAt;
   if (snapshot.observedAt !== undefined) out.observedAt = snapshot.observedAt;
   return out;
 }
@@ -1091,6 +1518,8 @@ export class LimitsService implements LimitsReader, DisposableLike {
   private readonly exec: ExecLike;
   private readonly readFile: ReadFileLike;
   private readonly codexUsage: CodexUsageLike;
+  private readonly cache: UsageCacheStore | undefined;
+  private readonly scheduler: UsageRequestScheduler;
   private readonly platform: string;
   private readonly clock: () => number;
   private readonly homeDir: string;
@@ -1107,8 +1536,15 @@ export class LimitsService implements LimitsReader, DisposableLike {
     this.exec = deps.exec ?? realExec;
     this.readFile = deps.readFile ?? realReadFile;
     this.codexUsage = deps.codexUsage ?? realCodexUsage;
+    // No default. A service with no cache behaves exactly as this file did
+    // before one existed — which is what every unit double wants, and what a
+    // host that does not want a file on disk gets.
+    this.cache = deps.cache;
     this.platform = deps.platform ?? process.platform;
     this.clock = deps.now ?? Date.now;
+    this.scheduler = deps.scheduler ?? createUsageRequestScheduler(undefined, {
+      now: this.clock, sleep: deps.sleep,
+    });
     this.homeDir = deps.homeDir ?? safeHomedir();
     this.minIntervalMs =
       typeof deps.minIntervalMs === 'number' && deps.minIntervalMs >= 0
@@ -1145,22 +1581,15 @@ export class LimitsService implements LimitsReader, DisposableLike {
         this.entries.delete(profile.id);
         entry = undefined;
       }
+      const needsSeed = entry === undefined;
       if (entry === undefined) {
         entry = { configDir, snapshot: null, lastAttemptAt: 0, nextAttemptAt: 0, backoffMs: 0 };
         this.entries.set(profile.id, entry);
       }
-
-      // One request per profile, however many rows asked for it.
-      if (entry.inflight !== undefined) return entry.inflight;
-
-      const force = options.force === true;
-      const now = this.clock();
-      if (!force && entry.snapshot !== null) {
-        if (now - entry.lastAttemptAt < this.minIntervalMs) return entry.snapshot;
-        if (entry.nextAttemptAt > now) return entry.snapshot;
-      }
-
-      const run = this.refresh(profile, entry);
+      // Include disk seeding and merging in the in-flight operation. A second
+      // caller must not start a fetch while the first is still loading its seed.
+      if (entry.inflight !== undefined) return await entry.inflight;
+      const run = this.readEntry(profile, entry, options.force === true, needsSeed);
       entry.inflight = run;
       try {
         return await run;
@@ -1172,6 +1601,39 @@ export class LimitsService implements LimitsReader, DisposableLike {
       logError('limits: readUsage failed', err);
       return null;
     }
+  }
+
+  private async readEntry(
+    profile: AccountProfile,
+    entry: CacheEntry,
+    force: boolean,
+    needsSeed: boolean,
+  ): Promise<UsageSnapshot | null> {
+    if (needsSeed) await this.seed(profile, entry, entry.configDir);
+    if (this.disposed) return null;
+    const now = this.clock();
+    if (!force && entry.snapshot !== null) {
+      if (now - entry.lastAttemptAt < this.minIntervalMs || entry.nextAttemptAt > now) {
+        return this.cached(profile);
+      }
+    }
+    const result = await this.refresh(profile, entry, force);
+    if (result !== null && result.error !== undefined && !hasWindows(result)) {
+      // Another window may have obtained a reading during this attempt.
+      await this.seed(profile, entry, entry.configDir, true);
+      if (entry.good !== undefined) {
+        const merged = cloneSnapshot(entry.good);
+        if (isStale(merged.fetchedAt, this.clock())) merged.stale = true;
+        else delete merged.stale;
+        merged.error = result.error;
+        if (result.retryAt !== undefined) merged.retryAt = result.retryAt;
+        if (result.signedInAs !== undefined) merged.signedInAs = result.signedInAs;
+        entry.snapshot = merged;
+        this.emit();
+        return merged;
+      }
+    }
+    return result;
   }
 
   /** The last answer for this profile without going anywhere, for render paths
@@ -1254,6 +1716,7 @@ export class LimitsService implements LimitsReader, DisposableLike {
   private async refresh(
     profile: AccountProfile,
     entry: CacheEntry,
+    force = false,
   ): Promise<UsageSnapshot | null> {
     if (profile.provider === 'codex') return this.refreshCodex(profile, entry);
     const before = signature(entry.snapshot);
@@ -1275,27 +1738,57 @@ export class LimitsService implements LimitsReader, DisposableLike {
           false,
         );
       } else {
-        const res = await this.request(cred.token);
-        if (res.kind !== 'ok') {
-          // A 401 on a token the file said was still good is the same fact the
-          // expiry check reads, arriving from the other side: the token is dead.
-          // It is only a SIGN-IN problem when there is no refresh token to mint
-          // another one from — otherwise the CLI fixes it on its next run and
-          // telling the user their login expired would send them to `/login`
-          // for nothing.
-          const error =
-            res.kind === 'expired' && cred.refreshable ? 'token-stale' : res.kind;
-          result = this.settleFailure(entry, error, res.kind === 'http');
-        } else {
-          const parsed = parseUsageBody(res.text, this.clock());
-          if (parsed === null) {
-            logError(
-              'limits: unrecognised usage payload',
-              new Error(`account ${profile.id}`),
-            );
-            result = this.settleFailure(entry, 'parse', true);
+        // Directory identity dedupes aliases without persisting credentials.
+        const account = createHash('sha256').update(path.resolve(entry.configDir)).digest('hex');
+        const scheduled = await this.scheduler.run(account, {
+          force, minIntervalMs: this.minIntervalMs, cancelled: () => this.disposed,
+        }, async () => {
+          const value = await this.request(cred.token, profile.id);
+          return {
+            value, rateLimited: value.kind === 'rate-limited',
+            ...(value.kind === 'rate-limited' ? { retryAfterMs: value.retryAfterMs } : {}),
+          };
+        });
+        if (scheduled.kind === 'cancelled') return null;
+        if (scheduled.kind !== 'sent') {
+          await this.seed(profile, entry, entry.configDir, true);
+          if (scheduled.kind === 'cached' && entry.good !== undefined) {
+            result = entry.good;
+            entry.snapshot = result;
           } else {
-            result = this.settleSuccess(entry, parsed);
+            result = this.settlePause(entry, scheduled.retryAt,
+              scheduled.kind === 'paused' && scheduled.rateLimited
+                ? 'rate-limited' : 'polling-paused');
+          }
+        } else {
+          const res = scheduled.value;
+          if (res.kind !== 'ok') {
+            // A 401 on a token the file said was still good is the same fact the
+            // expiry check reads, arriving from the other side: the token is dead.
+            // It is only a SIGN-IN problem when there is no refresh token to mint
+            // another one from — otherwise the CLI fixes it on its next run and
+            // telling the user their login expired would send them to `/login`
+            // for nothing.
+            const error =
+              res.kind === 'expired' && cred.refreshable ? 'token-stale' : res.kind;
+            // A throttle backs off like an http failure — it is the one failure
+            // where backing off is the entire point — and carries the wait the
+            // server stated, which overrides the guessed ladder.
+            result =
+              res.kind === 'rate-limited'
+                ? this.settlePause(entry, scheduled.retryAt!, 'rate-limited')
+                : this.settleFailure(entry, error, res.kind === 'http');
+          } else {
+            const parsed = parseUsageBody(res.text, this.clock());
+            if (parsed === null) {
+              logError(
+                'limits: unrecognised usage payload',
+                new Error(`account ${profile.id}`),
+              );
+              result = this.settleFailure(entry, 'parse', true);
+            } else {
+              result = this.settleSuccess(entry, parsed, profile.id);
+            }
           }
         }
       }
@@ -1349,6 +1842,7 @@ export class LimitsService implements LimitsReader, DisposableLike {
         result = this.settleSuccess(
           entry,
           buildCodexSnapshot(reading, identity, this.clock()),
+          profile.id,
         );
       }
       // Identity rides on failure too, as it does for Claude: a login whose
@@ -1365,12 +1859,83 @@ export class LimitsService implements LimitsReader, DisposableLike {
     return result;
   }
 
-  private settleSuccess(entry: CacheEntry, snapshot: UsageSnapshot): UsageSnapshot {
+  private settlePause(
+    entry: CacheEntry,
+    retryAt: number,
+    error: 'rate-limited' | 'polling-paused',
+  ): UsageSnapshot {
+    const snapshot = this.settleFailure(entry, error, false);
+    entry.nextAttemptAt = retryAt;
+    snapshot.retryAt = retryAt;
+    return snapshot;
+  }
+
+  private settleSuccess(
+    entry: CacheEntry,
+    snapshot: UsageSnapshot,
+    profileId?: string,
+  ): UsageSnapshot {
     entry.good = snapshot;
     entry.snapshot = snapshot;
     entry.backoffMs = 0;
     entry.nextAttemptAt = 0;
+    // Remembered for the next window, and for the next throttle. Only
+    // successes are ever written — a cache of failures would be a way to make
+    // a row lie about numbers nobody measured.
+    if (profileId !== undefined) {
+      try {
+        this.cache?.save(profileId, { configDir: entry.configDir, snapshot });
+      } catch (err) {
+        logError('limits: usage cache write failed', err);
+      }
+    }
     return snapshot;
+  }
+
+  /**
+   * Fill a brand-new entry from the remembered readings, when there are any.
+   *
+   * The seeded snapshot becomes both `good` (what a failure degrades to) and
+   * `snapshot` (what `cached()` serves before anything has been fetched), so a
+   * freshly opened window shows the last numbers it knew instead of a blank row
+   * while its first request is in flight — or refused.
+   *
+   * Guarded on the config directory for the same reason the in-memory entry is:
+   * a profile that moved is a different login, and its old numbers are somebody
+   * else's. Never throws; a cache that will not load is a cache that misses.
+   */
+  private async seed(
+    profile: AccountProfile,
+    entry: CacheEntry,
+    configDir: string,
+    /** Re-read the file rather than trusting what startup remembered. Used
+     *  after a failure, when another window's success — or a hand-written
+     *  entry — is the only thing that could put numbers on this row. */
+    fresh = false,
+  ): Promise<void> {
+    if (this.cache === undefined) return;
+    let all: ReadonlyMap<string, CachedUsage> | null = null;
+    try {
+      all =
+        fresh && this.cache.reload !== undefined
+          ? await this.cache.reload()
+          : await this.cache.load();
+    } catch (err) {
+      logError('limits: usage cache read failed', err);
+      return;
+    }
+    const remembered = all?.get(profile.id);
+    if (remembered === undefined) return;
+    if (remembered.configDir !== configDir) return;
+    // Out of the cache, but that says nothing about its AGE: a reading another
+    // window took ninety seconds ago is the current answer, and calling it
+    // stale is the same over-eager flag isStale exists to stop. Old ones are
+    // still marked, and anything past USAGE_CACHE_TTL_MS never gets this far.
+    const snapshot = cloneSnapshot(remembered.snapshot);
+    if (isStale(snapshot.fetchedAt, this.clock())) snapshot.stale = true;
+    else delete snapshot.stale;
+    entry.good = snapshot;
+    entry.snapshot = snapshot;
   }
 
   /**
@@ -1387,14 +1952,18 @@ export class LimitsService implements LimitsReader, DisposableLike {
     const snapshot: UsageSnapshot =
       good === undefined ? { fetchedAt: this.clock(), error } : cloneSnapshot(good);
     if (good !== undefined) {
-      snapshot.stale = true;
+      // Stale is about the NUMBERS' age, never about whether the attempt behind
+      // them failed — see isStale.
+      if (isStale(good.fetchedAt, this.clock())) snapshot.stale = true;
+      else delete snapshot.stale;
       snapshot.error = error;
     }
     entry.snapshot = snapshot;
     if (backoff) {
-      entry.backoffMs =
+      const guessed =
         entry.backoffMs <= 0 ? BACKOFF_BASE_MS : Math.min(entry.backoffMs * 2, BACKOFF_MAX_MS);
-      entry.nextAttemptAt = this.clock() + entry.backoffMs;
+      entry.backoffMs = guessed;
+      entry.nextAttemptAt = this.clock() + guessed;
     } else {
       entry.backoffMs = 0;
       entry.nextAttemptAt = 0;
@@ -1409,19 +1978,58 @@ export class LimitsService implements LimitsReader, DisposableLike {
   private async resolveCredential(profile: AccountProfile): Promise<CredentialResult> {
     const now = this.clock();
     const file = credentialsPathFor(profile, this.homeDir);
+    let tier = 'none';
+    let result: CredentialResult = { kind: 'missing', why: 'no-document' };
     if (file !== '') {
-      const fromFile = readCredentialBlob(await this.readFile(file), now);
-      if (fromFile.kind !== 'missing') return fromFile;
+      tier = 'credentials file';
+      result = readCredentialBlob(await this.readFile(file), now);
+      if (result.kind !== 'missing') {
+        this.logCredential(profile, tier, result);
+        return result;
+      }
     }
-    if (this.platform !== 'darwin') return { kind: 'missing' };
-    const configured =
-      typeof profile.configDir === 'string' ? profile.configDir.trim() : '';
-    const out = await this.exec(
-      'security',
-      ['find-generic-password', '-s', keychainServiceFor(configured || undefined), '-w'],
-      this.execTimeoutMs,
+    if (this.platform === 'darwin') {
+      const configured =
+        typeof profile.configDir === 'string' ? profile.configDir.trim() : '';
+      const service = keychainServiceFor(configured || undefined);
+      tier = `keychain ${service}`;
+      const out = await this.exec(
+        'security',
+        ['find-generic-password', '-s', service, '-w'],
+        this.execTimeoutMs,
+      );
+      result = readCredentialBlob(out, now);
+    }
+    this.logCredential(profile, tier, result);
+    return result;
+  }
+
+  /**
+   * One line naming WHICH tier answered and WHY it was not usable — the
+   * credential half of the diagnosis the HTTP path already writes.
+   *
+   * A success logs nothing: the happy path runs on every repaint of the row and
+   * a log that narrates it is a log nobody reads. Failures are what a person
+   * is looking for, and every one of them used to arrive at the row as three
+   * words ("usage n/a") with no way to tell a keychain the editor cannot read
+   * from a token the CLI has not renewed yet.
+   *
+   * NOTHING SECRET GOES IN. The tier is a path or a keychain SERVICE NAME
+   * (a public identifier — it is a hash of the config directory), and `why` is
+   * one of four fixed words about the document's SHAPE. The token, the blob and
+   * any part of either are never touched.
+   */
+  private logCredential(
+    profile: AccountProfile,
+    tier: string,
+    result: CredentialResult,
+  ): void {
+    if (result.kind === 'ok') return;
+    const why = result.why === undefined ? '' : `, ${result.why}`;
+    logError(
+      'limits: no usable credential',
+      new Error(`account ${profile.id} — ${result.kind} from ${tier}${why}`),
     );
-    return readCredentialBlob(out, now);
   }
 
   /** The identity file for a profile: `<configDir>/.claude.json`, or for the
@@ -1457,7 +2065,18 @@ export class LimitsService implements LimitsReader, DisposableLike {
    *  token (401) and everything else. */
   private async request(
     token: string,
-  ): Promise<{ kind: 'ok'; text: string } | { kind: 'expired' | 'http' }> {
+    /** For the LOG only, and it earns its place: a machine with two accounts
+     *  throttled at once produced two indistinguishable lines in the same
+     *  second, and "which of them is still locked out" was unanswerable from
+     *  them. An account id, never anything from the credential. */
+    profileId: string,
+  ): Promise<
+    | { kind: 'ok'; text: string }
+    | { kind: 'expired' }
+    | { kind: 'http' }
+    | { kind: 'rate-limited'; retryAfterMs?: number }
+  > {
+    // Admission has completed; the HTTP timeout starts only when sending.
     const signal = timeoutSignal(this.fetchTimeoutMs);
     const init: HttpRequestInit = {
       method: 'GET',
@@ -1476,14 +2095,55 @@ export class LimitsService implements LimitsReader, DisposableLike {
       // an expired token, and telling someone to log in again when their login
       // is fine is worse than saying nothing.
       if (status === 401) return { kind: 'expired' };
+      // A refusal of Flock's usage request says nothing about account capacity.
+      if (status === 429) {
+        const after = retryAfterMs(res.headers, this.clock());
+        // Keep the server's exact header in the log. The scheduler decides
+        // the actual wait, which may be longer because of fallback backoff.
+        let raw: string | null = null;
+        try {
+          raw = res.headers?.get('retry-after') ?? null;
+        } catch {
+          raw = null;
+        }
+        const honoured =
+          after === undefined ? '' : `, minimum wait ${String(Math.round(after / 1000))}s`;
+        logError(
+          'limits: usage request throttled',
+          new Error(
+            `account ${profileId} — ` +
+              (raw === null
+                ? 'HTTP 429, no retry-after (falling back to the guessed ladder)'
+                : `HTTP 429, retry-after: ${raw}${honoured}`),
+          ),
+        );
+        return after === undefined
+          ? { kind: 'rate-limited' }
+          : { kind: 'rate-limited', retryAfterMs: after };
+      }
       const ok = res.ok ?? (status >= 200 && status < 300);
-      if (!ok) return { kind: 'http' };
+      if (!ok) {
+        // THE ONE FAILURE THAT USED TO LEAVE NO TRACE. A throw is logged below
+        // and an unusable body is logged by the caller, but a perfectly
+        // well-formed non-2xx — 403 from a beta gate, 429 from too many
+        // windows asking at once, a 5xx — returned silently, and the row it
+        // produces says only "usage unavailable". So the single state a person
+        // cannot diagnose from the row was also the single state the log did
+        // not mention. The STATUS is the whole diagnosis and it is not a
+        // secret; the body is not read, because an error body from this
+        // endpoint is the one place a token could be echoed back.
+        logError(
+          'limits: usage request refused',
+          new Error(`account ${profileId} — HTTP ${String(status)}`),
+        );
+        return { kind: 'http' };
+      }
       const text = await res.text();
       return { kind: 'ok', text: typeof text === 'string' ? text : '' };
     } catch (err) {
       // Network errors name the host at worst; the token lives in a header and
       // never appears in one of these.
-      logError('limits: usage request failed', err);
+      logError(`limits: usage request failed for ${profileId}`, err);
       return { kind: 'http' };
     }
   }

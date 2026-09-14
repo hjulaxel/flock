@@ -81,11 +81,15 @@ chats, and much more.
   as a Claude one — and, with **Install Codex Hooks…**, the same instant
   updates: the amber dot while it works, the red dot the moment a turn ends,
   and a waiting mark when Codex asks for permission. Without hooks the row
-  still gets busy and idle, one poll late, from the rollout itself. Two
-  differences remain: Codex has no start-time naming flag, so those tabs wear
-  Flock's own title, and **Fork and Compact** and **Close with Summary** offer
-  the plain verb instead — both rest on typing `/compact` and reading back what
-  the Claude CLI writes. If the row cannot find your CLI (common with a node
+  still gets busy and idle from the rollout, including long turns and turns
+  completed between polls. Ages use the last user prompt; token counts,
+  history, import, idle cleanup and the Shells view also read Codex's files.
+  **Fork and Compact** opens the fork and sends `/compact` when it is ready.
+  **Close with Summary** asks Codex for a readable handoff summary and keeps
+  its final answer before closing. Actions that type into an existing Codex
+  session require installed, trusted Codex hooks so an approval prompt can be
+  recognised. Codex tabs use Flock's title; `/rename` names are read from
+  Codex's session index. If the row cannot find your CLI (common with a node
   version manager, whose PATH VS Code often does not inherit), set
   `lineage.codexBinary`.
 

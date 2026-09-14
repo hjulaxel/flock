@@ -1175,8 +1175,14 @@
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'action';
-      btn.title = action.title;
-      btn.setAttribute('aria-label', action.title);
+      // The alt verb is announced in the TITLE or it does not exist: a button
+      // with two meanings and one label is a button whose second meaning
+      // nobody finds. Same string to the screen reader, for the same reason.
+      const title = action.altTitle
+        ? action.title + ' · ' + action.altTitle
+        : action.title;
+      btn.title = title;
+      btn.setAttribute('aria-label', title);
 
       const glyph = document.createElement('span');
       glyph.className = 'action-glyph';
@@ -1198,6 +1204,37 @@
       btn.addEventListener('mousedown', (e) => {
         e.stopPropagation();
       });
+
+      if (action.altTitle) {
+        // A right-click on the BUTTON is not a right-click on the row. Without
+        // both of these it is: the row's own contextmenu handler would move the
+        // selection and the workbench would open the project's menu — the
+        // gesture would appear to do nothing except open the wrong thing.
+        //
+        // `data-vscode-context` is the second half of that. The attribute is
+        // INHERITED from the nearest ancestor that carries one, and every row
+        // carries the project's — so blanking `webviewSection`/`viewItem` here
+        // is what keeps Flock's own project entries off this button, exactly
+        // the way the rename box overrides them (see beginRename). Keeping
+        // `preventDefaultContextMenuItems: true` keeps the workbench's stock
+        // Copy/Reload off it too, which leaves the button with no native menu
+        // at all — which is right, because its menu is the account picker the
+        // extension opens.
+        btn.setAttribute(
+          'data-vscode-context',
+          JSON.stringify({
+            webviewSection: 'rowAction',
+            viewItem: '',
+            preventDefaultContextMenuItems: true,
+          }),
+        );
+        btn.addEventListener('contextmenu', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (editing) return;
+          post('actionAlt', { key: row.key, action: action.id });
+        });
+      }
 
       box.appendChild(btn);
     }
