@@ -6,6 +6,8 @@ All notable changes to Flock are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-09-14
+
 ### Added
 
 - **Accounts can be renamed.** The label was fixed at the moment you added the
