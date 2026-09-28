@@ -175,6 +175,7 @@ import {
 import { repairResumeLeaf } from './resumeLeaf';
 import {
   TOUCH_COALESCE_MS,
+  gracePoolCapFrom,
   idleCloseDecisions,
   lastEngagementMs,
   reconcileTmuxDecisions,
@@ -618,6 +619,10 @@ export async function activate(
     const v = cfg().get<number>(CONFIG_KEYS.sessionDetachGraceMinutes);
     return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 10;
   };
+  /** The grace pool's cap — `lineage.session.maxDetached`, parsed by the
+   *  same pure function the tests pin. */
+  const maxDetached = (): number =>
+    gracePoolCapFrom(cfg().get<unknown>(CONFIG_KEYS.sessionMaxDetached));
   /** The reload-detection window, in seconds — see
    *  CONFIG_KEYS.sessionReloadGraceSeconds for why window close measures
    *  rather than kills. Clamped to a minute: anything longer stops being a
@@ -5504,6 +5509,44 @@ export async function activate(
     log(`lifecycle: ${why} — ${shortId(sessionId)} is archived (level 2)`);
   };
 
+  /**
+   * SAY IT when the pool cap archives something. Grace expiry is the timer
+   * the user set; an eviction is Flock choosing a victim because a NEWER
+   * session was opened, and it used to happen in silence — under
+   * `onlyActiveSessions` the row simply vanished, which read as sessions
+   * "randomly closing". One message per sweep tick, naming what went, with
+   * the two ways out: reopen it, or raise the cap.
+   */
+  const announceEvictions = (ids: readonly string[], cap: number): void => {
+    const labels = ids.map(
+      (id) => `"${forest.nodes.get(id)?.label ?? shortId(id)}"`,
+    );
+    const what =
+      labels.length === 1 ? labels[0] : `${labels.length} sessions (${labels.join(', ')})`;
+    const REOPEN = labels.length === 1 ? 'Reopen' : 'Reopen All';
+    const SETTING = 'Change Limit';
+    void vscode.window
+      .showInformationMessage(
+        `Flock archived ${what}: more than ${cap} hidden sessions were running.`,
+        REOPEN,
+        SETTING,
+      )
+      .then((choice) => {
+        if (choice === REOPEN) {
+          void (async () => {
+            for (const id of ids) {
+              await vscode.commands.executeCommand(COMMANDS.resumeSession, id);
+            }
+          })();
+        } else if (choice === SETTING) {
+          void vscode.commands.executeCommand(
+            'workbench.action.openSettings',
+            `${CONFIG_SECTION}.${CONFIG_KEYS.sessionMaxDetached}`,
+          );
+        }
+      });
+  };
+
   const sweepSessionLifecycle = (): void => {
     try {
       // Same guard as the chat sweep: a switch owns the tabs while it runs.
@@ -5587,9 +5630,11 @@ export async function activate(
         });
       }
 
+      const cap = maxDetached();
       const plan = idleCloseDecisions({
         now,
         closeAfterMinutes: sessionCloseAfterMinutes(),
+        gracePoolCap: cap,
         sessions: facts,
       });
 
@@ -5612,8 +5657,9 @@ export async function activate(
         void endDetached(id, 'grace expired');
       }
       for (const id of plan.graceEvict) {
-        void endDetached(id, 'grace pool over cap (oldest idle)');
+        void endDetached(id, `grace pool over cap of ${cap} (oldest idle)`);
       }
+      if (plan.graceEvict.length > 0) announceEvictions(plan.graceEvict, cap);
       for (const id of plan.markCloseAfterTurn) {
         void store.upsert(chainIndex.tipOf(id), { closeAfterTurn: true });
         log(`lifecycle: ${shortId(id)} is busy — closing after this turn`);

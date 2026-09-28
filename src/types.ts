@@ -1720,9 +1720,14 @@ export const CONFIG_KEYS = {
    *  minutes; 0 closes immediately. The one sanctioned detached-running
    *  state, and it always renders — the tree shows a countdown row. At the
    *  deadline: idle → closed to level 2; busy → close-after-turn. The pool is
-   *  capped (idleClose.GRACE_POOL_CAP = 8); overflow closes oldest-idle
-   *  first. */
+   *  capped (`session.maxDetached`); overflow closes oldest-idle first. */
   sessionDetachGraceMinutes: 'session.detachGraceMinutes',
+  /** How many sessions may run detached at once, machine-wide — the grace
+   *  pool's cap. Overflow closes the oldest idle member to level 2 and says
+   *  so. Default idleClose.GRACE_POOL_CAP (24), clamped to [1, 200] by
+   *  idleClose.gracePoolCapFrom. Solo mode detaches every tab but the front
+   *  one, so this is effectively "how many sessions can I keep open". */
+  sessionMaxDetached: 'session.maxDetached',
   /** How long a session may keep running after the window that owned it went
    *  away, in SECONDS. Not a park and not a reprieve — a measurement. VS Code
    *  reports a window RELOAD and a window CLOSE with the same terminal exit
@@ -3252,7 +3257,7 @@ export interface EditorialRecord {
    *  ends it to level 2 (or, mid-turn, marks it `closeAfterTurn`). Written by
    *  the detach sweep next to `tmux`; cleared (`null`) together with it when a
    *  re-attach settles the claim. The pool of graced sessions is capped
-   *  (idleClose.GRACE_POOL_CAP); overflow closes oldest-idle first. */
+   *  (`lineage.session.maxDetached`); overflow closes oldest-idle first. */
   graceUntil?: string | null;
   /** THE KEEP-AWAKE PIN: this session is exempt from every automatic close —
    *  the idle timer, grace expiry, grace-pool eviction. For long autonomous

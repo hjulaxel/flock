@@ -71,7 +71,7 @@ else, so change the words there and rerun the script rather than editing here.
 
 <!-- generated:settings:start -->
 
-Flock contributes **45 settings**. **16** of them are switches that ship off, and **19** are tagged *advanced* — paths, timings, diagnostics and previews, the rows `@tag:advanced` finds in the Settings editor. Advanced rows are marked below and sit last in their category.
+Flock contributes **46 settings**. **16** of them are switches that ship off, and **19** are tagged *advanced* — paths, timings, diagnostics and previews, the rows `@tag:advanced` finds in the Settings editor. Advanced rows are marked below and sit last in their category.
 
 ### ▷ Sessions
 
@@ -79,6 +79,7 @@ Flock contributes **45 settings**. **16** of them are switches that ship off, an
 | --- | --- | --- |
 | `lineage.terminalLocation` | `"editor"` | **Where a session opens.** An editor tab, the bottom panel, or a window of its own. Values: `editor` — Editor tab; `panel` — Terminal panel; `newWindow` — Own window. |
 | `lineage.soloSession` | `false` | **One session tab at a time.** Focusing a session parks the others: hidden if tmux-wrapped, closed and resumable if bare. Off, because it moves tabs you laid out yourself. |
+| `lineage.session.maxDetached` | `24` | **How many hidden sessions may keep running.** Solo mode and project switches hide tabs without ending them. Past this number the longest-idle one is archived, and Flock tells you. Each one uses about 200 MB. |
 | `lineage.launch.mode` | `"flock"` | **Who opens a conversation.** In the Claude Code extension Flock does not own the process: no tmux parking, no Close with Summary, no account pinning. A fork always opens in Flock's own terminal. Values: `flock` — Flock's own terminal; `claudeExtension` — Claude Code extension. |
 | `lineage.tmux` | `"auto"` | **Keep sessions alive in tmux.** Switching away hides a session instead of closing it, and it comes back live. Needs tmux on PATH; never on Windows. Values: `auto` — Use tmux when installed; `off` — Never use tmux. |
 | `lineage.exitToShell` | `true` | **Leave a shell after `/exit`.** The tab stays open at a prompt, ready for `claude --resume`. Needs `lineage.tmux`; takes effect once every current session has ended. |
@@ -150,7 +151,7 @@ Flock contributes **45 settings**. **16** of them are switches that ship off, an
 | --- | --- | --- |
 | `lineage.session.closeAfterMinutes` | `4320` | **Close idle session tabs after this many minutes.** 4320 is three days. The conversation stays as a resumable row; a busy session waits for its turn, and the tab in front and **Keep Awake** sessions are never touched. `0` turns it off. |
 | `lineage.chat.autoCloseMinutes` | `1440` | Advanced — **Close idle project chats after this many minutes.** 1440 is one day. **Chat History…** reopens one. `0` turns it off. |
-| `lineage.session.detachGraceMinutes` | `10` | Advanced — **How long a hidden session keeps running.** Then it settles to an archived row. At most 8 run detached at once. `0` ends it within a minute. |
+| `lineage.session.detachGraceMinutes` | `10` | Advanced — **How long a hidden session keeps running.** Then it settles to an archived row. `0` ends it within a minute. |
 | `lineage.session.reloadGraceSeconds` | `45` | Advanced — **How long a session outlives its window.** A reload and a close look the same, so Flock waits this long for the window to come back. Keep it low. |
 | `lineage.busyStaleMinutes` | `5` | Advanced — **When a silent busy session counts as idle.** The CLI sometimes leaves a status stuck at busy; a transcript quiet this long is drawn idle. |
 
@@ -305,6 +306,10 @@ lives in `package.json` and nowhere else. `lineage.mode` has
 #### `lineage.soloSession`
 
 Keep at most **one** Claude session tab open in this window. Opening or focusing a session parks every other session tab: a tmux-wrapped one is DETACHED (the tab vanishes, the conversation keeps running, hidden), a bare one is closed and comes back with `--resume` when you click its row — a busy or waiting bare session is spared and keeps its tab. The open session's tab is pinned, so it sits at the left of its group and survives *Close Others*. Workspace switches restore only the session you were last using instead of the whole set. Off by default: this parks tabs you laid out yourself, which is a strong opinion — turn it on if many open sessions are eating memory or making switches slow.
+
+#### `lineage.session.maxDetached`
+
+How many sessions may run detached at once, across every window — **24** by default, between 1 and 200. Solo mode hides every tab but the one in front without ending it, so in solo mode this is how many sessions you can keep open. When one more is hidden, the session idle the longest is archived to a row one click resumes, and Flock shows a message naming it with **Reopen** and **Change Limit**. A busy session is never archived for this; it closes after its turn instead. A **Keep Awake** session is never archived either, but it still uses a slot. Each detached session is a live `claude` process with its MCP servers, about 200 MB.
 
 #### `lineage.launch.mode`
 
@@ -484,7 +489,7 @@ A session's tab closes on its own after this many minutes without use — **4320
 
 #### `lineage.session.detachGraceMinutes`
 
-When a workspace switch (or solo mode) closes a tmux-wrapped session's tab, the process keeps running detached for this many minutes so switching back reattaches instantly. Its row stays in the tree and its hover says how long is left. At the deadline an idle session is closed to an archived row; a busy one closes after its turn ends. At most 8 sessions run detached at once; overflow closes the oldest idle one first. `0` disables the grace — the tab still closes instantly, and the process is ended by the next sweep within a minute.
+When a workspace switch (or solo mode) closes a tmux-wrapped session's tab, the process keeps running detached for this many minutes so switching back reattaches instantly. Its row stays in the tree and its hover says how long is left. At the deadline an idle session is closed to an archived row; a busy one closes after its turn ends. How many may run detached at once is `lineage.session.maxDetached`. `0` disables the grace — the tab still closes instantly, and the process is ended by the next sweep within a minute.
 
 #### `lineage.session.reloadGraceSeconds`
 

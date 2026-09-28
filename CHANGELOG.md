@@ -6,6 +6,24 @@ All notable changes to Flock are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`lineage.session.maxDetached` sets how many hidden sessions may keep
+  running.** Solo mode and project switches hide tabs without ending them, so
+  with solo mode on, this is how many sessions you can keep open. It defaults
+  to 24 and sits under **▷ Sessions**, next to **Solo Session**. Each hidden
+  session uses about 200 MB.
+
+### Fixed
+
+- **Sessions no longer close once more than 8 are hidden.** At most 8 hidden
+  sessions could run at once, and you could not change that. Hiding a ninth
+  closed whichever one had been idle longest, even one you opened that
+  morning. With **Only running sessions** on, its row also disappeared, so
+  sessions seemed to close at random. The limit is now the setting above, and
+  when Flock does close a session to stay under it, a message names the
+  session and offers **Reopen** and **Change Limit**.
+
 ## [0.12.0] — 2026-09-14
 
 ### Added
