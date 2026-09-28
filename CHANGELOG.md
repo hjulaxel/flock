@@ -6,6 +6,16 @@ All notable changes to Flock are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Codex accounts show when their usage comes back.** Codex business and
+  prolite plans have only a weekly window, so the account row said
+  `wk 95% → Sun` and never what time on Sunday. When the weekly reset is the
+  one that decides, meaning the account has no five-hour window or its week is
+  full, the row now names the moment, as in `wk 95% → Sun 2:09 AM`. Once the
+  reset is less than a day away, the row counts it down, as in `→ 5h 20m`. The
+  hover gives the day and time for any reset a day or more out.
+
 ## [0.14.0] — 2026-09-29
 
 ### Added

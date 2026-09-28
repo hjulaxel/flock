@@ -64,6 +64,7 @@ import {
   retryAfterMs,
   supportsUsage,
   weekdayFor,
+  clockFor,
 } from '../src/limits';
 import type {
   CachedUsage,
@@ -396,6 +397,54 @@ describe('formatUsageSummary', () => {
         now,
       ),
     ).toBe('5h 62%');
+  });
+
+  // The weekly-only Codex plans (business, prolite) have no five-hour window,
+  // so "→ Sun" was the only reset the row gave and it never said when on Sunday.
+  it('a weekly-only account names the moment its week resets', () => {
+    const now = Date.parse('2026-09-14T10:32:18.000Z');
+    const at = Date.parse('2026-09-20T00:09:21.000Z');
+    expect(
+      formatUsageSummary(snap({ sevenDay: { utilization: 95, resetsAt: at, minutes: 10080 } }), now),
+    ).toBe(`wk 95% → ${weekdayFor(at)} ${clockFor(at)}`);
+  });
+
+  it('a weekly reset under a day away, when it decides, is the time left', () => {
+    const now = Date.parse('2026-09-19T20:00:00.000Z');
+    const at = now + (5 * 60 + 20) * 60_000;
+    expect(formatUsageSummary(snap({ sevenDay: { utilization: 95, resetsAt: at } }), now)).toBe(
+      'wk 95% → 5h 20m',
+    );
+  });
+
+  it('a FULL week decides even beside a five-hour window; an open one keeps the weekday', () => {
+    const now = Date.parse('2026-09-14T10:00:00.000Z');
+    const five = now + 60 * 60_000;
+    const at = Date.parse('2026-09-19T14:41:15.000Z');
+    expect(
+      formatUsageSummary(
+        snap({
+          fiveHour: { utilization: 10, resetsAt: five },
+          sevenDay: { utilization: 100, resetsAt: at },
+        }),
+        now,
+      ),
+    ).toBe(`5h 10% → 1h · wk 100% → ${weekdayFor(at)} ${clockFor(at)}`);
+    expect(
+      formatUsageSummary(
+        snap({
+          fiveHour: { utilization: 10, resetsAt: five },
+          sevenDay: { utilization: 16, resetsAt: at },
+        }),
+        now,
+      ),
+    ).toBe(`5h 10% → 1h · wk 16% → ${weekdayFor(at)}`);
+  });
+
+  it('clockFor: a local clock time, or nothing for an unusable stamp', () => {
+    expect(clockFor(Date.parse('2026-09-20T00:09:21.000Z'))).toMatch(/\d{1,2}[:.]\d{2}/);
+    expect(clockFor(Number.NaN)).toBe('');
+    expect(clockFor(0)).toBe('');
   });
 
   it('resetInLabel: minutes under the hour, exact hours, hours-and-minutes, floor at 1m', () => {

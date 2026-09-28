@@ -508,6 +508,26 @@ export function untilLabel(resetsAt: number | undefined, now: number): string {
   return `in ${String(days)}d`;
 }
 
+/** "Sat 16:41" — the local weekday and clock time of a reset, for the hover,
+ *  where "in 5d" alone rounds away most of a day. '' when unusable. */
+export function resetMomentLabel(resetsAt: number | undefined): string {
+  if (typeof resetsAt !== 'number' || !Number.isFinite(resetsAt) || resetsAt <= 0) return '';
+  const when = new Date(resetsAt);
+  try {
+    const day = when.toLocaleDateString(undefined, { weekday: 'short' }).trim();
+    const clock = when
+      .toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+      .trim();
+    if (day !== '' && clock !== '') return `${day} ${clock}`;
+  } catch {
+    // Small-ICU builds throw on some option combinations. Fall through.
+  }
+  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const hh = String(when.getHours()).padStart(2, '0');
+  const mm = String(when.getMinutes()).padStart(2, '0');
+  return `${days[when.getDay()] ?? ''} ${hh}:${mm}`.trim();
+}
+
 /**
  * The row's one-line meter: `5h 42% · week 18%`, or a reason there is none.
  *
@@ -867,8 +887,15 @@ export class AccountsViewProvider implements vscode.TreeDataProvider<AccountRow>
         const p = pct(win);
         if (p === undefined || win === undefined) return;
         const until = untilLabel(win.resetsAt, now);
+        // A day or more out, "in 5d" rounds away most of a day; the moment
+        // itself goes first. Under a day, the duration says it exactly.
+        const far =
+          until !== '' && (win.resetsAt ?? 0) - now >= 24 * 3_600_000
+            ? resetMomentLabel(win.resetsAt)
+            : '';
+        const when = until === '' ? '' : far === '' ? until : `${far}, ${until}`;
         rows.push(
-          `${windowName(win, name)}: ${String(p)}%${until === '' ? '' : ` (resets ${until})`}`,
+          `${windowName(win, name)}: ${String(p)}%${when === '' ? '' : ` (resets ${when})`}`,
         );
       };
       line('Five-hour window', snapshot?.fiveHour);

@@ -40,6 +40,7 @@ import {
   accountContextValue,
   accountIdOf,
   formatUsageSummary,
+  resetMomentLabel,
   untilLabel,
   usageSummaryOf,
 } from '../src/accountsView';
@@ -839,6 +840,34 @@ describe('AccountsViewProvider tooltip — never a credential VALUE, only names'
     expect(tooltip.value).toContain('Five-hour window: 12%');
     expect(tooltip.value).toContain('Weekly: 34%');
     expect(tooltip.value).not.toContain('Weekly (Opus)');
+  });
+
+  it('a reset a day or more out names its moment; one under a day keeps the duration', () => {
+    const now = Date.now();
+    const weekly = now + (3 * 24 + 2) * 3_600_000;
+    const p = new AccountsViewProvider(
+      fakeDeps({
+        accounts: () => [profile('cx', { provider: 'codex' })],
+        usage: () =>
+          snapshot({
+            fiveHour: { utilization: 12, resetsAt: now + 130 * 60_000 + 20_000 },
+            sevenDay: { utilization: 95, resetsAt: weekly },
+          }),
+      }),
+    );
+    const tooltip = p.getTreeItem(p.getChildren()[0]).tooltip as { value: string };
+    expect(tooltip.value).toContain('Five-hour window: 12% (resets in 2h 10m)');
+    expect(tooltip.value).toContain(`Weekly: 95% (resets ${resetMomentLabel(weekly)}, in 3d)`);
+  });
+
+  it('resetMomentLabel: the local weekday and clock time, or nothing', () => {
+    const at = Date.parse('2026-09-20T00:09:21.000Z');
+    const when = new Date(at);
+    expect(resetMomentLabel(at)).toContain(when.toLocaleDateString(undefined, { weekday: 'short' }));
+    expect(resetMomentLabel(at)).toMatch(/\d{1,2}[:.]\d{2}/);
+    expect(resetMomentLabel(undefined)).toBe('');
+    expect(resetMomentLabel(Number.NaN)).toBe('');
+    expect(resetMomentLabel(0)).toBe('');
   });
 
   it('falls back to the plain label (a string) if building the markdown throws', () => {
