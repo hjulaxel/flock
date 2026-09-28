@@ -1814,6 +1814,14 @@
             "order": 2,
             "markdownDescription": "**One session tab at a time.** Focusing a session parks the others: hidden if tmux-wrapped, closed and resumable if bare. Off, because it moves tabs you laid out yourself."
           },
+          "lineage.session.maxDetached": {
+            "type": "number",
+            "default": 24,
+            "minimum": 1,
+            "maximum": 200,
+            "order": 3,
+            "markdownDescription": "**How many hidden sessions may keep running.** Solo mode and project switches hide tabs without ending them. Past this number the longest-idle one is archived, and Flock tells you. Each one uses about 200 MB."
+          },
           "lineage.launch.mode": {
             "type": "string",
             "enum": [
@@ -1829,7 +1837,7 @@
               "The Claude Code extension's panel. Needs that extension."
             ],
             "default": "flock",
-            "order": 3,
+            "order": 4,
             "markdownDescription": "**Who opens a conversation.** In the Claude Code extension Flock does not own the process: no tmux parking, no Close with Summary, no account pinning. A fork always opens in Flock's own terminal."
           },
           "lineage.tmux": {
@@ -1847,13 +1855,13 @@
               "Bare `claude` processes. Switches close and resume them."
             ],
             "default": "auto",
-            "order": 4,
+            "order": 5,
             "markdownDescription": "**Keep sessions alive in tmux.** Switching away hides a session instead of closing it, and it comes back live. Needs tmux on PATH; never on Windows."
           },
           "lineage.exitToShell": {
             "type": "boolean",
             "default": true,
-            "order": 5,
+            "order": 6,
             "markdownDescription": "**Leave a shell after `/exit`.** The tab stays open at a prompt, ready for `claude --resume`. Needs `#lineage.tmux#`; takes effect once every current session has ended."
           },
           "lineage.sessionSwitching": {
@@ -1871,7 +1879,7 @@
               "Leave the Claude Code extension's own agent list alone."
             ],
             "default": "flock",
-            "order": 6,
+            "order": 7,
             "markdownDescription": "**Where you switch conversations.** With the tree as the switcher, the current conversation's row stays selected and `alt+left` over the Claude Code extension jumps to it.",
             "tags": [
               "advanced"
@@ -2264,7 +2272,7 @@
             "default": 10,
             "minimum": 0,
             "order": 3,
-            "markdownDescription": "**How long a hidden session keeps running.** Then it settles to an archived row. At most 8 run detached at once. `0` ends it within a minute.",
+            "markdownDescription": "**How long a hidden session keeps running.** Then it settles to an archived row. `0` ends it within a minute.",
             "tags": [
               "advanced"
             ]

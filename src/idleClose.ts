@@ -66,14 +66,38 @@ import { sessionIdOfTmuxName } from './tmux';
 import type { SessionStatus } from './types';
 
 /**
- * Cap on the detach-grace pool — how many sessions may run detached at once,
- * machine-wide. A constant rather than a setting, deliberately: the cap is
- * the safety property (bounded memory for hidden processes), and a knob would
- * be an invitation to re-create the unbounded state the branch exists to
- * remove. Sized like MAX_AUTO_RESUME (workspaces.ts), and for the same
- * reason: each entry is a live claude process with ~8 MCP children.
+ * Default cap on the detach-grace pool — how many sessions may run detached
+ * at once, machine-wide. `lineage.session.maxDetached` overrides it.
+ *
+ * It was a hard-coded 8, on the theory that a knob invites the unbounded
+ * pool back. That theory met solo mode: solo detaches EVERY tab but the one
+ * in front, so the pool is simply the user's working set, and a cap of 8
+ * meant the tenth session opened today silently killed one opened this
+ * morning (the row then vanished under `onlyActiveSessions`). The cap is
+ * still the safety property — it stays finite and every member still renders
+ * a countdown row — but its size is the user's call. Measured 2026-09-29: a
+ * claude process with its MCP children is ~200 MB, so 24 is ~5 GB.
  */
-export const GRACE_POOL_CAP = 8;
+export const GRACE_POOL_CAP = 24;
+
+/** Bounds for the setting: at least one slot, and an upper bound so a typo
+ *  cannot turn the cap into "unbounded" by another name. */
+export const GRACE_POOL_CAP_MIN = 1;
+export const GRACE_POOL_CAP_MAX = 200;
+
+/**
+ * The effective pool cap from the raw setting value. Anything that is not a
+ * finite number falls back to the default; a number is floored and clamped
+ * into [GRACE_POOL_CAP_MIN, GRACE_POOL_CAP_MAX]. Pure, so the one place that
+ * reads the setting and the tests agree on what "5.7" or "-3" means.
+ */
+export function gracePoolCapFrom(raw: unknown): number {
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return GRACE_POOL_CAP;
+  return Math.min(
+    GRACE_POOL_CAP_MAX,
+    Math.max(GRACE_POOL_CAP_MIN, Math.floor(raw)),
+  );
+}
 
 /**
  * How stale a session's `touchedAt` must be before another touch is written.

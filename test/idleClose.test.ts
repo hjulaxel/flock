@@ -11,6 +11,9 @@ import { describe, expect, it } from 'vitest';
 
 import {
   GRACE_POOL_CAP,
+  GRACE_POOL_CAP_MAX,
+  GRACE_POOL_CAP_MIN,
+  gracePoolCapFrom,
   TOUCH_COALESCE_MS,
   idleCloseDecisions,
   lastEngagementMs,
@@ -171,8 +174,31 @@ describe('idleCloseDecisions: the grace pool cap', () => {
       ...over,
     });
 
-  it('ships with the cap the incident demanded', () => {
-    expect(GRACE_POOL_CAP).toBe(8);
+  it('defaults to a working set larger than a solo-mode day', () => {
+    // Solo mode detaches every tab but the front one, so the pool IS the
+    // working set. At 8 the tenth session of the day killed the first.
+    expect(GRACE_POOL_CAP).toBe(24);
+  });
+
+  it('the default cap evicts nothing below 24 detached sessions', () => {
+    const pool = Array.from({ length: GRACE_POOL_CAP }, (_, i) =>
+      inGrace(`s${i}`, i + 1),
+    );
+    expect(decide(pool).graceEvict).toEqual([]);
+    const plan = decide([...pool, inGrace('oldest', 999)]);
+    expect(plan.graceEvict).toEqual(['oldest']);
+  });
+
+  it('reads the setting: floored, clamped, and a non-number is the default', () => {
+    expect(gracePoolCapFrom(40)).toBe(40);
+    expect(gracePoolCapFrom(5.7)).toBe(5);
+    expect(gracePoolCapFrom(0)).toBe(GRACE_POOL_CAP_MIN);
+    expect(gracePoolCapFrom(-3)).toBe(GRACE_POOL_CAP_MIN);
+    expect(gracePoolCapFrom(1e9)).toBe(GRACE_POOL_CAP_MAX);
+    expect(gracePoolCapFrom(Number.POSITIVE_INFINITY)).toBe(GRACE_POOL_CAP);
+    expect(gracePoolCapFrom(Number.NaN)).toBe(GRACE_POOL_CAP);
+    expect(gracePoolCapFrom(undefined)).toBe(GRACE_POOL_CAP);
+    expect(gracePoolCapFrom('12')).toBe(GRACE_POOL_CAP);
   });
 
   it('overflow evicts oldest-idle first, exactly down to the cap', () => {
