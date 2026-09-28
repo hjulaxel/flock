@@ -6,6 +6,8 @@ All notable changes to Flock are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-09-29
+
 ### Added
 
 - **`lineage.session.maxDetached` sets how many hidden sessions may keep
