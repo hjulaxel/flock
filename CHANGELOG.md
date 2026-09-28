@@ -6,6 +6,8 @@ All notable changes to Flock are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.14.1] — 2026-09-29
+
 ### Fixed
 
 - **Codex accounts show when their usage comes back.** Codex business and
