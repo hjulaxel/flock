@@ -428,6 +428,26 @@ export function weekdayFor(epochMs: number): string {
 }
 
 /**
+ * The local clock time of a reset — "16:41", or "4:41 PM" where the reader's
+ * locale says so — or '' when the timestamp is unusable. Paired with
+ * `weekdayFor` when a weekly reset is the one that decides when the account
+ * can work again: "Sat" alone leaves a whole day unanswered.
+ */
+export function clockFor(epochMs: number): string {
+  if (!Number.isFinite(epochMs) || epochMs <= 0) return '';
+  const when = new Date(epochMs);
+  try {
+    const label = when.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+    if (typeof label === 'string' && label.trim() !== '') return label.trim();
+  } catch {
+    // Small-ICU builds; same fallback as weekdayFor.
+  }
+  const hh = String(when.getHours()).padStart(2, '0');
+  const mm = String(when.getMinutes()).padStart(2, '0');
+  return `${hh}:${mm}`;
+}
+
+/**
  * Epoch ms from whatever the payload spells a timestamp as: an ISO string,
  * epoch seconds, or epoch ms. The seconds/ms split is by magnitude — anything
  * below 1e12 is seconds, which stays true until the year 33658 and is wrong
@@ -978,6 +998,29 @@ function weeklyReset(snapshot: UsageSnapshot): number | undefined {
 }
 
 /**
+ * What the weekly arrow says. Normally the weekday alone: the five-hour arrow
+ * already answers "when can I work here again", and the weekly one only has to
+ * say which day the week turns over.
+ *
+ * But when the WEEKLY reset is the answer — the account has no five-hour
+ * window at all (every weekly-only Codex plan: business, prolite), or the
+ * weekly window is full, so the five-hour reset frees nothing — the day alone
+ * leaves the question open. Then it names the moment: the time left when it is
+ * under a day, the weekday and clock time otherwise.
+ */
+function weeklyResetLabel(snapshot: UsageSnapshot, reset: number, now: number): string {
+  const weekly = snapshot.sevenDay ?? snapshot.sevenDayOpus;
+  const decides =
+    snapshot.fiveHour === undefined ||
+    (weekly !== undefined && clampPercent(weekly.utilization) >= 100);
+  if (!decides || !Number.isFinite(now) || reset <= now) return weekdayFor(reset);
+  if (reset - now < 24 * 3_600_000) return resetInLabel(reset, now);
+  const day = weekdayFor(reset);
+  const clock = clockFor(reset);
+  return clock === '' ? day : `${day} ${clock}`;
+}
+
+/**
  * How long until a window rolls over — "1h 20m", "45m" — or '' when the
  * timestamp is absent, unreadable, or already behind us. A duration rather
  * than a clock time because the five-hour window is the one this decorates,
@@ -1014,6 +1057,10 @@ export function resetInLabel(
  *                             minutes to go and 90% with four hours to go are
  *                             opposite answers to "start another session
  *                             here?" — same rule the weekly arrow follows.
+ *   "wk 95% → Sun 02:09"      a weekly-only account (Codex business,
+ *                             prolite) or a full week: the weekly reset is
+ *                             when work resumes, so it names the moment —
+ *                             "→ 5h 20m" once it is under a day away
  *   "5h 62% · wk 41% · stale" the same, served from a cache we no longer trust
  *   "a@b.c · usage unavailable"  signed in (identity file says so) but the
  *                             credential could not be read — the state that
@@ -1114,7 +1161,7 @@ export function formatUsageSummary(
 
   let line = parts.join(' · ');
   const reset = weeklyReset(snapshot);
-  const day = reset === undefined ? '' : weekdayFor(reset);
+  const day = reset === undefined ? '' : weeklyResetLabel(snapshot, reset, now);
   if (day !== '') line += ` → ${day}`;
   if (snapshot.stale === true) line += ' · stale';
   // A remembered reading must not hide the reason it cannot be refreshed.
