@@ -150,6 +150,7 @@ import {
   codexRowIds,
   matchPendingCodexLaunches,
   matchRolloutForHunt,
+  currentRollout,
   codexSessionsDir,
   readCodexSessionNames,
   findCodexBinary,
@@ -1424,11 +1425,8 @@ export async function activate(
   const codexCompletions = new CodexCompletionTracker();
   context.subscriptions.push(statsCache, codexStatsCache, codexCompletions);
   const codexReadingFor = (id: string) => {
-    for (const alias of chainAliases(id)) {
-      const file = codexArchived().find((s) => s.sessionId === alias)?.transcriptPath;
-      if (file !== undefined) return codexStatsCache.get(file);
-    }
-    return undefined;
+    const file = currentRollout(chainAliases(id), codexArchived())?.transcriptPath;
+    return file === undefined ? undefined : codexStatsCache.get(file);
   };
 
   /**

@@ -23,6 +23,13 @@ All notable changes to Flock are recorded here. The format follows
   in one folder are watching at once, gives the file to the one started most
   recently before it.
 
+- **A Codex row's dot and age follow the conversation file being written
+  now.** A Codex conversation that has been relaunched owns several files,
+  and the row read the oldest of them. Its age then showed when that first
+  file ended, and the dot moved only on hook events. If a turn ended without a
+  hook reporting it, or Codex hooks were off, the dot kept the old file's
+  status. The row now reads the file started last.
+
 ## [0.14.1] — 2026-09-29
 
 ### Fixed

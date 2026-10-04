@@ -32,6 +32,7 @@ import {
   matchPendingCodexLaunches,
   codexRolloutOwner,
   matchRolloutForHunt,
+  currentRollout,
   readRolloutMeta,
   scanRollouts,
   sessionIdOfRollout,
@@ -934,5 +935,30 @@ describe('codexRowIds: one row per CONVERSATION, not per id', () => {
         facts({ sessionId: GEN_2, windowStamped: true, updatedAtMs: 1 }),
       ]),
     ).toEqual([GEN_2]);
+  });
+});
+
+describe('currentRollout: the file a conversation is writing now', () => {
+  // The chain from 2026-10-02/05: a reopen's meta-only file first, an old
+  // finished turn after it, then tonight's relaunch.
+  const old0 = { sessionId: '01a0feda-0cb5-7180-9d0f-068086577871', startedAt: 1, endedAt: 50 };
+  const old1 = { sessionId: '01a0feda-4c2f-7e10-9767-9e4911fca942', startedAt: 2, endedAt: 40 };
+  const now = { sessionId: '01a1091d-ac71-7583-8d7a-d88f6e03ece2', startedAt: 9, endedAt: 30 };
+  const aliases = [ID_A, old0.sessionId, old1.sessionId, now.sessionId];
+
+  it('picks the generation started last, wherever it sits in the chain', () => {
+    expect(currentRollout(aliases, [old0, old1, now])?.sessionId).toBe(now.sessionId);
+    expect(currentRollout([...aliases].reverse(), [now, old1, old0])?.sessionId).toBe(now.sessionId);
+  });
+
+  it('ignores files outside the conversation, and answers undefined when it owns none', () => {
+    expect(currentRollout([old0.sessionId], [old0, now])?.sessionId).toBe(old0.sessionId);
+    expect(currentRollout([ID_A], [old0, now])).toBeUndefined();
+  });
+
+  it('breaks a start-time tie, or a missing start, by the newer write', () => {
+    const a = { sessionId: ID_A, endedAt: 1 };
+    const b = { sessionId: ID_B, endedAt: 2 };
+    expect(currentRollout([ID_A, ID_B], [a, b])?.sessionId).toBe(ID_B);
   });
 });

@@ -839,6 +839,33 @@ export function matchRolloutForHunt(
   return null;
 }
 
+/**
+ * The rollout a conversation is writing NOW: of the files its generations own,
+ * the one started last, then the one written last.
+ *
+ * A conversation can own several rollouts (a relaunch opens a new one), and
+ * only the newest is being written. Taking the first alias that had a file
+ * read the OLDEST, so the row's age and its tail status came from a turn that
+ * ended long ago, and only the hook marks moved the dot. A turn whose end no
+ * hook reported, or a machine with Codex hooks off, left the dot wherever the
+ * old file had it.
+ */
+export function currentRollout<T extends { sessionId: string; startedAt?: number; endedAt: number }>(
+  aliases: readonly string[],
+  sessions: readonly T[],
+): T | undefined {
+  const wanted = new Set(aliases);
+  let best: T | undefined;
+  for (const s of sessions) {
+    if (!wanted.has(s.sessionId)) continue;
+    if (best === undefined) { best = s; continue; }
+    const sa = s.startedAt ?? -Infinity;
+    const ba = best.startedAt ?? -Infinity;
+    if (sa > ba || (sa === ba && s.endedAt > best.endedAt)) best = s;
+  }
+  return best;
+}
+
 export interface PendingCodexLaunch {
   sessionId: string;
   cwd: string;
