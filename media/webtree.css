@@ -846,10 +846,10 @@ body {
  * account for a slot most rows do not carry.
  *
  * The strip is packed from the right edge, so its x is set by whatever sits to
- * its RIGHT: the row's 6px padding plus the dot's slot, and nothing else. That
- * is why the dot's slot is held open on a project row whether the dot is lit or
- * not (see .row.project .badge.none below) — it is the whole of the arithmetic
- * that keeps every project's chat button in the same column. */
+ * its RIGHT: the row's 6px padding plus the dot's slot, and nothing else. The
+ * slot collapses when the dot is out, so the `+` sits against the edge on a
+ * quiet heading and one dot's width further in on a heading with something
+ * unseen — deliberately (see the note above .badge.running). */
 .actions {
   display: inline-flex;
   align-items: center;
@@ -861,6 +861,15 @@ body {
 
 .row:hover .actions,
 .row.focused .actions {
+  visibility: visible;
+}
+
+/* The `+` is drawn at rest (RowAction.pinned). `visibility` is inherited but
+ * overridable per child, which is the whole trick: the strip stays hidden and
+ * keeps its width, and the one button inside it opts back in. It is the
+ * rightmost button, so the hover-only ones appear to its LEFT and nothing it
+ * sits beside moves when the pointer arrives. */
+.action.pinned {
   visibility: visible;
 }
 
@@ -939,32 +948,11 @@ body {
   margin-left: 0;
 }
 
-/* Project rows are the exception: they keep the slot whether their rolled-up
- * dot is lit or not. Everything to the LEFT of the dot is pushed by the dot's
- * width, and a project row is the one row that carries a button there — so a
- * collapsing slot would sit the chat button 16px further left on a project with
- * nothing unseen than on a project with something unseen, and would slide it
- * sideways under the pointer the moment that roll-up lit or cleared. A button
- * that moves is a button you miss.
- *
- * Only project rows. Session rows keep the collapse, which is what lets an idle
- * session's age sit flush against the right edge, and a folder row has neither
- * a roll-up dot nor a button to line up — reserving 16px there would be 16px of
- * nothing.
- *
- * Specificity (0,3,0) on purpose: it has to beat .badge.idle/.badge.none (0,2,0)
- * above on weight rather than on where it happens to sit in the file. */
-.row.project .badge.idle,
-.row.project .badge.none,
-/* A subproject row carries no dot of its own (see viewmodel.subprojectRow), so
- * its badge box is always the empty one — held open to the same width as the
- * project's above it, or the two headings' right edges would not line up. */
-.row.subproject .badge.idle,
-.row.subproject .badge.none {
-  flex-basis: 8px;
-  width: 8px;
-  margin-left: 8px;
-}
+/* Project and subproject rows collapse the slot like every other row. A lit dot
+ * takes its 16px at the right edge and pushes the `+` and the rest of the strip
+ * left by that much: the dot is the thing to read, and it reads best where every
+ * other row's dot is — in the column against the edge — rather than inboard of
+ * a button that was holding the edge for itself. */
 
 .badge.running {
   background: var(--lineage-running, var(--vscode-charts-yellow));
@@ -1353,9 +1341,8 @@ body {
  *
  * Specificity (0,2,0) beats the .desc/.badge/.actions base rules (0,1,0) on
  * weight, so none of this depends on where in the file it sits. It draws with
- * .badge.idle (0,2,0) and loses to the root-row slot rule (0,3,0) — neither
- * matters, because both of those set width and margin, and a box that is
- * `display: none` has neither. */
+ * .badge.idle (0,2,0) — which does not matter, because that one sets width and
+ * margin, and a box that is `display: none` has neither. */
 .row.renaming .desc,
 .row.renaming .badge,
 .row.renaming .marks,
@@ -1457,4 +1444,58 @@ body {
 
 .empty button.secondary:hover {
   background: var(--vscode-button-secondaryHoverBackground);
+}
+
+/* The `+`'s right-click: which account to start on, hung off the button
+ * (webtree.js openAccountMenu). Drawn in the workbench's own menu colours so it
+ * reads as a context menu, which is what the gesture asked for. */
+.account-menu {
+  position: fixed;
+  z-index: 100;
+  min-width: 160px;
+  max-width: calc(100vw - 8px);
+  padding: 4px 0;
+  color: var(--vscode-menu-foreground, var(--vscode-foreground));
+  background: var(--vscode-menu-background, var(--vscode-editorWidget-background));
+  border: 1px solid var(--vscode-menu-border, var(--vscode-widget-border, transparent));
+  border-radius: 5px;
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
+}
+
+.account-menu-heading {
+  padding: 2px 10px 4px;
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.account-item {
+  all: unset;
+  box-sizing: border-box;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.account-item:hover,
+.account-item:focus {
+  color: var(--vscode-menu-selectionForeground, inherit);
+  background: var(--vscode-menu-selectionBackground, var(--vscode-list-activeSelectionBackground));
+  outline: none;
+}
+
+.account-default,
+.account-desc {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.account-desc {
+  margin-left: auto;
+  padding-left: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }

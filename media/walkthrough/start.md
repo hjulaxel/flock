@@ -22,5 +22,5 @@ should open** — editor tabs, one pinned tab at a time, the terminal panel, a
 window of their own, or the Claude Code extension. Answer it then, or any time
 later from the gear: **Choose Where Sessions Open…**. The other question of the
 same kind — **what a window is** — is asked the first time a session from
-another project has to open in its own window, and lives in the gear as
+another project has to open in its own window, and is in the same place as
 **Choose Window Model…**.

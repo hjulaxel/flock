@@ -99,11 +99,11 @@ chats, and much more.
   it they close and resume from transcript. Unsaved editors are never touched.
 
 - **Orchestration verbs.** New, fork, **fork and compact**, rename in place,
-  close, **close with summary**. New Project, new session and fork are one click
-  at the top of the sidebar, and the last two ask no question: `+` starts a
-  session in the project you are working in, and fork branches off the
-  conversation you are looking at. A gear beside them holds the housekeeping and
-  the closed-sessions filter.
+  close, **close with summary**. New Project and fork are one click at the top
+  of the sidebar, and fork asks no question: it branches off the conversation
+  you are looking at. Every project row has a `+` that starts a session there.
+  Right-click the `+` to choose the account. A gear beside them holds the
+  housekeeping, the hooks and the settings.
 
 - **Ask Claude itself.** With the opt-in in-session verbs installed, "fork this
   session" — or "do three forks here" — typed to Claude runs the same fork the
@@ -288,8 +288,7 @@ Once it is on, `lineage.git.branchDisplay` picks how a session says which
 worktree it is in: `inline` — the default — writes the branch on a line under the
 session, and `color` tints the session's name and uses the branch rows as the key
 (what shipped). Either way the branch rows themselves stay **shut until you ask
-for them**, with **Show Branches** on the project's right-click or the git-branch
-button on its row.
+for them**, with **Show Branches** on the project's right-click.
 
 If you were running 0.1.1 and had these rows, Flock offers them back once on the
 first launch after the upgrade, rather than letting them vanish on you. It only

@@ -60,7 +60,8 @@ const deprecationOf = (p) => p.deprecationMessage ?? p.markdownDeprecationMessag
 const row = (key, p) => {
   const deprecated = deprecationOf(p);
   const parts = [];
-  if (isAdvanced(p)) parts.push('Advanced —');
+  // No prefix for advanced rows: the description itself opens with the
+  // `Advanced` label the Settings editor shows, so the table carries it too.
   parts.push(p.markdownDescription ?? p.description ?? '');
   if (Array.isArray(p.enum)) {
     const values = p.enum.map((value, at) => {

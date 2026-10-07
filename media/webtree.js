@@ -1174,7 +1174,7 @@
     for (const action of row.actions || []) {
       const btn = document.createElement('button');
       btn.type = 'button';
-      btn.className = 'action';
+      btn.className = action.pinned ? 'action pinned' : 'action';
       // The alt verb is announced in the TITLE or it does not exist: a button
       // with two meanings and one label is a button whose second meaning
       // nobody finds. Same string to the screen reader, for the same reason.
@@ -1232,6 +1232,13 @@
           e.preventDefault();
           e.stopPropagation();
           if (editing) return;
+          // Where the menu will hang, measured NOW: the answer arrives after a
+          // round trip, and a model post in between rebuilds this button.
+          altAnchor = {
+            key: row.key,
+            action: action.id,
+            rect: btn.getBoundingClientRect(),
+          };
           post('actionAlt', { key: row.key, action: action.id });
         });
       }
@@ -1935,8 +1942,146 @@
 
   // ------------------------------------------------------------- extension → us
 
+  /** The button a right-click last asked for a menu from — see renderActions. */
+  let altAnchor = null;
+  /** The open account menu, if any: { el, close }. */
+  let accountMenu = null;
+
+  function closeAccountMenu(refocus) {
+    if (!accountMenu) return;
+    const open = accountMenu;
+    accountMenu = null;
+    open.close();
+    if (refocus) root.focus();
+  }
+
+  /**
+   * The `+`'s right-click: which account to start the session on, drawn as a
+   * small menu hanging off the button rather than as a quick pick at the top
+   * of the window. The choices are the extension's (launchAccountChoices) and
+   * the pick goes back as an account id it re-checks — this only paints.
+   */
+  function openAccountMenu(msg) {
+    closeAccountMenu(false);
+    const anchor = altAnchor;
+    altAnchor = null;
+    if (!anchor || anchor.key !== msg.key || anchor.action !== msg.action) return;
+    const accounts = Array.isArray(msg.accounts) ? msg.accounts : [];
+    if (accounts.length === 0) return;
+
+    const menu = document.createElement('div');
+    menu.className = 'account-menu';
+    menu.setAttribute('role', 'menu');
+    const heading = document.createElement('div');
+    heading.className = 'account-menu-heading';
+    heading.textContent = 'Start on account';
+    menu.appendChild(heading);
+
+    const items = [];
+    for (const account of accounts) {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'account-item';
+      item.setAttribute('role', 'menuitem');
+      const label = document.createElement('span');
+      label.className = 'account-label';
+      label.textContent = String(account.label || account.id);
+      item.appendChild(label);
+      if (account.isDefault) {
+        const star = document.createElement('span');
+        star.className = 'account-default';
+        star.textContent = 'default';
+        item.appendChild(star);
+      }
+      if (account.description) {
+        const desc = document.createElement('span');
+        desc.className = 'account-desc';
+        desc.textContent = String(account.description);
+        item.appendChild(desc);
+      }
+      item.title = [account.label, account.description].filter(Boolean).join(' · ');
+      item.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        closeAccountMenu(true);
+        post('actionAccount', {
+          key: msg.key,
+          action: msg.action,
+          accountId: account.id,
+        });
+      });
+      items.push(item);
+      menu.appendChild(item);
+    }
+
+    menu.addEventListener('keydown', (e) => {
+      const at = items.indexOf(document.activeElement);
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeAccountMenu(true);
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        items[(at + 1) % items.length].focus();
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        items[(at - 1 + items.length) % items.length].focus();
+      } else if (e.key === 'Tab') {
+        e.preventDefault();
+      }
+    });
+    menu.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+    });
+
+    document.body.appendChild(menu);
+    // Right-aligned under the button, flipped above it when there is no room
+    // below, and clamped inside the view either way.
+    const r = anchor.rect;
+    const w = menu.offsetWidth;
+    const h = menu.offsetHeight;
+    const vw = document.documentElement.clientWidth;
+    const vh = document.documentElement.clientHeight;
+    const left = Math.max(4, Math.min(r.right - w, vw - w - 4));
+    let top = r.bottom + 2;
+    if (top + h > vh - 4) top = Math.max(4, r.top - h - 2);
+    menu.style.left = left + 'px';
+    menu.style.top = top + 'px';
+
+    // Capture phase: the row buttons stop their mousedown from bubbling, and
+    // pressing one of them must still close this.
+    const dismiss = (e) => {
+      if (e && e.target instanceof Node && menu.contains(e.target)) return;
+      closeAccountMenu(false);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') closeAccountMenu(true);
+    };
+    document.addEventListener('mousedown', dismiss, true);
+    window.addEventListener('blur', dismiss);
+    window.addEventListener('resize', dismiss);
+    window.addEventListener('scroll', dismiss, true);
+    document.addEventListener('keydown', onKey);
+    accountMenu = {
+      el: menu,
+      close() {
+        document.removeEventListener('mousedown', dismiss, true);
+        window.removeEventListener('blur', dismiss);
+        window.removeEventListener('resize', dismiss);
+        window.removeEventListener('scroll', dismiss, true);
+        document.removeEventListener('keydown', onKey);
+        menu.remove();
+      },
+    };
+    if (items[0]) items[0].focus();
+  }
+
   window.addEventListener('message', (event) => {
     const msg = event.data || {};
+    if (msg.type === 'accountMenu') {
+      openAccountMenu(msg);
+      return;
+    }
     if (msg.type === 'model') {
       rows = Array.isArray(msg.rows) ? msg.rows : [];
       filtered = msg.filtered === true;

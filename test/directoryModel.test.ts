@@ -632,13 +632,9 @@ describe('the rows the directory model draws', () => {
       'subproject:app',
       'subproject:api',
     ]);
-    // And the way in is on the project row, marked with a branch rather than a
-    // chevron, naming what is behind it.
-    expect(rows[0].actions?.[0]).toEqual({
-      id: 'unfoldBranches',
-      icon: 'git-branch',
-      title: 'Show 12 branches',
-    });
+    // And the way in is the project row's right-click menu (Show Branches) —
+    // no button on the row itself.
+    expect(rows[0].actions?.map((a) => a.id)).toEqual(['chat', 'newSession']);
   });
 
   it('is the old tree with the preview off', () => {

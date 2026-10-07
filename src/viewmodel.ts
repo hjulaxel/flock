@@ -956,6 +956,10 @@ export interface RowAction {
    * never offered reaches nothing.
    */
   altTitle?: string;
+  /** Drawn at rest, not only on hover. The `+` is: it is the one thing
+   *  anybody does on a heading, and a button you have to find by pointing at
+   *  the row first is a button that has to be remembered. */
+  pinned?: boolean;
 }
 
 /** A small non-interactive glyph drawn immediately right of the row's LABEL —
@@ -1535,12 +1539,11 @@ function branchRow(
  * for no other reason than to hold rows, and one that held nothing would not be
  * worth drawing.
  *
- * It carries no status dot of its own. The project's dot already rolls up
- * everything underneath it (see pushProject), and a second dot one level in would
- * say the same thing twice in the same column — the eye reads a column of dots as
- * a list of things wanting attention, and a container repeating its children's
- * mark is how that column stops meaning anything. Attention still travels: the
- * hover says so, and the sessions themselves are one click away.
+ * It carries the attention dot for the sessions in its directory, and the
+ * project above it gives its own up while it is open (see pushProject) — so the
+ * mark sits on the nearest heading that owns the session instead of the
+ * outermost one, and is never drawn twice in the same column. Shut the project
+ * and the roll-up moves back onto it, because then it is the only row left.
  */
 /**
  * A subproject row's context tokens.
@@ -1568,7 +1571,7 @@ function subprojectRow(
   el: ProjectGroupNode,
   node: SubprojectNode,
   viewId: string,
-  place: { depth: number; indent: number; expanded: boolean },
+  place: { depth: number; indent: number; expanded: boolean; hasUnseen?: boolean },
 ): ViewRow {
   const count = node.rootIds.length;
   const row: ViewRow = {
@@ -1639,8 +1642,14 @@ function subprojectRow(
       // the routing decides the account on a left-click, and this is how you
       // overrule it for one session without changing the project's setting.
       altTitle: 'Right-click to choose the account',
+      pinned: true,
     },
   ];
+  if (place.hasUnseen === true) {
+    row.badge = STATUS_DOT;
+    row.badgeKind = 'done';
+    row.tooltip += '\ncontains a finished session you have not looked at';
+  }
   return row;
 }
 
@@ -2228,21 +2237,6 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
     // branches", and each block below applies it to whatever branches it has.
     const blockFolded = grouped ? el.branchesShown === false : el.branchesShown !== true;
     const folded = active && blockFolded;
-    // How many branches the fold's own button stands for. The project's list
-    // when it has one, its directories' lists summed when the directory model
-    // moved them there — the button says "Show 6 branches" either way, and a
-    // count that only knew about one of the two shapes would say nothing at all
-    // on exactly the projects this feature is for.
-    const dirBranchCount = subprojects.reduce(
-      (n, node) => n + (node.branches ?? []).length,
-      0,
-    );
-    // Whether there is a BLOCK to fold at all, in either shape. The toggle is
-    // drawn off this, so a split project under the directory model gets one too.
-    const hasBlock =
-      input.branchBlock !== false &&
-      (active || (dirModel && dirBranchCount >= BRANCH_CHIPS_MIN));
-    const foldCount = active ? chips.length : dirBranchCount;
     // Always expandable, even empty: collapsing an empty project would hide the
     // only affordance it has, and an expandable row with nothing under it reads
     // correctly as "nothing running here yet".
@@ -2256,7 +2250,17 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
     // parent is the only thing on screen standing for its subprojects, so a
     // finished session three levels down has to light it — otherwise collapsing
     // a project is a way to lose the notification the dot exists to carry.
-    const hasUnseen = subtreeHasUnseen(forest, descendantRootIds(projectById, el));
+    //
+    // EXCEPT where the project is open AND split into directory rows. Then
+    // every session sits under one of those rows, each on screen, and the dot
+    // moves down to the row that owns the session (see subprojectRow) — the
+    // project's own dot would be a second mark for the same session, one row
+    // further from it. Child projects carry their own roll-up, so an open
+    // split project has nothing left that only it can stand for.
+    const hasUnseen =
+      expanded && split
+        ? false
+        : subtreeHasUnseen(forest, descendantRootIds(projectById, el));
     // Worded by the wiring, drawn here. Trimmed and length-checked at the seam
     // rather than trusted: the hover is a single string and a label that
     // arrived with a newline in it would forge a line of its own.
@@ -2340,31 +2344,11 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
       // the title says which, on every row, before it is clicked. A guess you
       // can read is not a guess.
       //
-      // The FOLD sits leftmost, before both, because it is the only one that
-      // acts on the rows below rather than creating something new.
-      //
-      // A BRANCH GLYPH, not a chevron. A chevron is the tree's own word for
-      // "this row opens", and it is already spoken twice on this row — by the
-      // twisty at its left, which opens the project. A third one, pointing the
-      // same way and opening something else, says only "more of the same is
-      // below"; the git-branch mark says WHAT is below, which is the one thing
-      // the button has to answer before it is worth a slot.
-      //
-      // The same glyph in both positions, deliberately. The state is the block
-      // itself — rows on screen or not — and a button that changed shape to
-      // report a fact already occupying six rows would be the third mark for it.
+      // NO FOLD BUTTON. The branch block's Show/Hide lives on the row's
+      // right-click menu (Show Branches / Hide Branches), which is where every
+      // other statement about the rows below already is; a third glyph on the
+      // widest row in the tree cost more than the toggle it saved.
       actions: [
-        ...(hasBlock
-          ? [
-              {
-                id: blockFolded ? 'unfoldBranches' : 'foldBranches',
-                icon: 'git-branch',
-                title: blockFolded
-                  ? `Show ${foldCount} branch${foldCount === 1 ? '' : 'es'}`
-                  : 'Hide branches',
-              },
-            ]
-          : []),
         // "New chat", because that is what the button does every time. A label
         // that just said "Chat" described a place you went back to, which is
         // exactly the behaviour that changed — and the old chats are one
@@ -2379,6 +2363,7 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
           // The routing decides the account on a left-click; this is how you
           // overrule it for one session without changing the project's setting.
           altTitle: 'Right-click to choose the account',
+          pinned: true,
         },
       ],
     };
@@ -2588,6 +2573,7 @@ export function buildViewModel(input: ViewModelInput): ViewRow[] {
             depth: level + 1,
             indent: level + 1,
             expanded: open,
+            hasUnseen: subtreeHasUnseen(forest, node.rootIds),
           }),
         );
         if (!open) continue;

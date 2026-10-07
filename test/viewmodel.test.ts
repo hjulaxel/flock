@@ -783,6 +783,8 @@ describe('buildViewModel: row content', () => {
         // of its own because the strip is a contract and an alt verb that
         // appeared on the wrong button would be invisible otherwise.
         altTitle: 'Right-click to choose the account',
+        // Drawn at rest: the `+` is the one button that is not hover-only.
+        pinned: true,
       },
     ]);
   });
@@ -1837,47 +1839,20 @@ describe('buildViewModel: branch rows', () => {
       sessionRowKey(A),
       sessionRowKey(B),
     ]);
-    // Folded, the toggle offers the way back and names what is behind it.
-    const fold = rows[0].actions?.find((x) => x.id === 'unfoldBranches');
-    expect(fold?.icon).toBe('git-branch');
-    expect(fold?.title).toContain('2');
+    // The way back is the row's right-click menu now, not a button on it.
+    expect(rows[0].actions?.map((x) => x.id)).toEqual(['chat', 'newSession']);
   });
 
-  it('offers the fold toggle only where there is a block to fold', () => {
-    expect(rowsFor([MAIN, FEAT])[0].actions?.map((x) => x.id)).toEqual([
-      'foldBranches',
-      'chat',
-      'newSession',
-    ]);
-    // Below the threshold there is no block, so no toggle.
-    expect(rowsFor([MAIN])[0].actions?.map((x) => x.id)).toEqual([
-      'chat',
-      'newSession',
-    ]);
-  });
-
-  it('marks the fold with a BRANCH glyph, in both positions and both modes', () => {
-    // Not a chevron. The row's own twisty is already a chevron and already means
-    // "this opens" — a second one says "more below" where this has to say WHAT
-    // is below. The same glyph open and shut, because the state is the block
-    // itself: six rows on screen, or none.
-    for (const display of ['color', 'inline'] as const) {
-      const open = rowsFor([MAIN, FEAT], {}, { branchDisplay: display });
-      const shut = rowsFor(
-        [MAIN, FEAT],
-        { branchesShown: false },
-        { branchDisplay: display },
-      );
-      expect(open[0].actions?.[0]).toEqual({
-        id: 'foldBranches',
-        icon: 'git-branch',
-        title: 'Hide branches',
-      });
-      expect(shut[0].actions?.[0]).toEqual({
-        id: 'unfoldBranches',
-        icon: 'git-branch',
-        title: 'Show 2 branches',
-      });
+  it('puts no fold button on the project row, block or not', () => {
+    // Show/Hide Branches lives on the row's right-click menu; the strip is the
+    // chat and the `+`, whatever the branches are doing.
+    for (const branches of [[MAIN, FEAT], [MAIN]]) {
+      for (const display of ['color', 'inline'] as const) {
+        for (const shown of [true, false]) {
+          const rows = rowsFor(branches, { branchesShown: shown }, { branchDisplay: display });
+          expect(rows[0].actions?.map((x) => x.id)).toEqual(['chat', 'newSession']);
+        }
+      }
     }
   });
 
