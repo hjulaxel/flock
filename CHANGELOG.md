@@ -6,6 +6,8 @@ All notable changes to Flock are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-10-07
+
 ### Changed
 
 - **The active-sessions filter is a button on the top bar again**, between New
