@@ -640,12 +640,12 @@ describe('manifest: the view title contributions', () => {
 
   // The row is narrow, and the workbench overflows a toolbar it cannot fit into
   // an ellipsis — which would swallow the gear, since the gear is last. Five
-  // buttons is what fits: the bell, New Project, `+`, fork and the gear.
+  // buttons is what fits: the bell, New Project, the active-only filter, fork
+  // and the gear.
   //
-  // New Project came back onto the row and the active-only FILTER left to make
-  // room for it. The filter is already in the gear menu, labelled with the
-  // direction it goes, where New Project had no home but the menu — and starting
-  // a project is a thing you do before you can do anything else.
+  // The filter took the slot the `+` left when starting a session moved onto
+  // the project rows. Its icon is the only place the setting shows, which is
+  // why it belongs on the row rather than in the gear.
   it('keeps the row down to five buttons', () => {
     for (const viewId of [SESSIONS, INLINE]) {
       // Count SLOTS, not entries: the bell and the filter each contribute two
@@ -682,8 +682,6 @@ describe('manifest: the view title contributions', () => {
       'lineage.recommendedSetup',
       'lineage.chooseWindowModel',
       'lineage.chooseSurface',
-      'lineage.showOnlyActiveSessions',
-      'lineage.showAllSessions',
       'lineage.restoreSession',
       'lineage.importSessions',
       'lineage.deleteStale',
@@ -699,20 +697,33 @@ describe('manifest: the view title contributions', () => {
     }
   });
 
-  // New Project is ON the row, second from the left, and the active-only filter
-  // is not — see the five-button note above for the trade. Open a Closed
-  // Project… stays in the gear menu: it is the rarer of the two by a long way,
-  // and the row has no sixth slot.
-  it('puts New Project on the row and keeps the filter in the menu', () => {
+  // New Project and the active-only filter are both ON the row. Open a Closed
+  // Project… stays in the gear menu: it is the rarer of the two project verbs
+  // by a long way, and the row has no sixth slot.
+  it('puts New Project and the filter on the row', () => {
     for (const viewId of [SESSIONS, INLINE]) {
       const entries = titleEntriesFor(viewId);
       const ids = entries.map((e) => e.command);
       expect(ids, viewId).toContain('lineage.newProject');
       expect(ids, viewId).not.toContain('lineage.reopenProject');
-      expect(ids, viewId).not.toContain('lineage.showOnlyActiveSessions');
-      expect(ids, viewId).not.toContain('lineage.showAllSessions');
-      // Second from the left: after the bell, before the `+`. Starting a project
-      // comes before starting a session in one.
+      // The two halves of the switch share one slot and take turns on the
+      // context key, so exactly one of them is drawn.
+      const filter = entries.filter(
+        (e) =>
+          e.command === 'lineage.showOnlyActiveSessions' ||
+          e.command === 'lineage.showAllSessions',
+      );
+      expect(filter, viewId).toHaveLength(2);
+      for (const e of filter) expect(e.group, viewId).toBe('navigation@2');
+      expect(
+        filter.find((e) => e.command === 'lineage.showAllSessions')?.when,
+        viewId,
+      ).toContain(' && lineage.onlyActive');
+      expect(
+        filter.find((e) => e.command === 'lineage.showOnlyActiveSessions')?.when,
+        viewId,
+      ).toContain('!lineage.onlyActive');
+      // Second from the left: after the bell, before the filter.
       const placed = entries.find((e) => e.command === 'lineage.newProject');
       expect(placed?.group, viewId).toBe('navigation@1');
     }

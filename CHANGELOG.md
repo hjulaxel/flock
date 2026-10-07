@@ -6,6 +6,12 @@ All notable changes to Flock are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **The active-sessions filter is a button on the top bar again**, between New
+  Project and fork, and no longer in the gear menu. Its icon is filled while
+  closed sessions are hidden, so you can see at a glance which way it is set.
+
 ## [0.16.0] — 2026-10-07
 
 ### Changed

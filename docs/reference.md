@@ -1351,13 +1351,14 @@ message or a branch listing is the ordinary case.
 
 ### The top bar
 
-Four buttons, left to right — on the **SESSIONS** row, or on the **FLOCK** row
+Five buttons, left to right — on the **SESSIONS** row, or on the **FLOCK** row
 itself if you turn the Accounts section off (see the note below):
 
 | Button | What it does |
 | --- | --- |
 | **bell** | The notifications list. Fills in when something is unread. |
 | **New Project** | A new project. |
+| **filter** | Shows only active sessions, or closed ones too. The icon is filled while closed sessions are hidden. |
 | **fork** | A branch off the conversation you are looking at — see below, and [Forking and context](forking-and-context.md) for what the branch inherits. |
 | **gear** | Everything else: session housekeeping, projects, hooks, settings. |
 
@@ -1377,9 +1378,7 @@ evidence is singular. It disappears while the tree is empty.
 
 The **gear** opens one short menu:
 
-- **Sessions.** The active-sessions filter, labelled with the way it goes
-  (**Show All Sessions** or **Show Only Active Sessions**), **Restore Archived
-  Session…**, **Import Previous Sessions…** and **Archive Stale Sessions…**.
+- **Sessions.** **Restore Archived Session…**, **Import Previous Sessions…** and **Archive Stale Sessions…**.
 - **Projects.** **New Project…** and **Open Project…**, which lists the closed
   projects.
 - **Hooks…**, **Settings…** and **Refresh.**
