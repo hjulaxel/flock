@@ -6,6 +6,8 @@ All notable changes to Flock are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-10-07
+
 ### Changed
 
 - **The gear menu is shorter.** It now has only the session housekeeping (the
