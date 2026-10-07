@@ -348,6 +348,7 @@ import {
   defaultSessionTitle,
   forkForAgent,
   hasForkableRow,
+  launchAccountChoices,
   notificationItems,
   registerCommands,
   tabTitleFrom,
@@ -3307,9 +3308,15 @@ export async function activate(
         // whether a session is live, hosted elsewhere, or closed.
         await vscode.commands.executeCommand(COMMANDS.focusSession, sessionId);
       },
-      runCommand: async (command, arg) => {
-        await vscode.commands.executeCommand(COMMANDS[command], arg);
+      runCommand: async (command, arg, arg2) => {
+        if (arg2 === undefined) {
+          await vscode.commands.executeCommand(COMMANDS[command], arg);
+        } else {
+          await vscode.commands.executeCommand(COMMANDS[command], arg, arg2);
+        }
       },
+      // Read lazily: the account store is wired further down activate().
+      launchAccounts: () => launchAccountChoices(accountDeps),
     },
     context.extensionUri,
   );

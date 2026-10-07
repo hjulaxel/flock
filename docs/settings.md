@@ -5,7 +5,7 @@ was named Lineage before 0.1.0, and renaming settings keys would silently
 discard everyone's existing configuration.
 
 The place to change them is VS Code's own Settings editor: **Flock: Open
-Settings** (also **Flock Settings…** at the top of the gear menu) opens it
+Settings** (also **Settings…** in the gear menu) opens it
 filtered to Flock, where the settings sit in nine groups, each behind a symbol
 so the table of contents can be scanned rather than read — and the table of
 contents follows you: as you scroll the list, the group you are in is the one
@@ -83,7 +83,7 @@ Flock contributes **46 settings**. **16** of them are switches that ship off, an
 | `lineage.launch.mode` | `"flock"` | **Who opens a conversation.** In the Claude Code extension Flock does not own the process: no tmux parking, no Close with Summary, no account pinning. A fork always opens in Flock's own terminal. Values: `flock` — Flock's own terminal; `claudeExtension` — Claude Code extension. |
 | `lineage.tmux` | `"auto"` | **Keep sessions alive in tmux.** Switching away hides a session instead of closing it, and it comes back live. Needs tmux on PATH; never on Windows. Values: `auto` — Use tmux when installed; `off` — Never use tmux. |
 | `lineage.exitToShell` | `true` | **Leave a shell after `/exit`.** The tab stays open at a prompt, ready for `claude --resume`. Needs `lineage.tmux`; takes effect once every current session has ended. |
-| `lineage.sessionSwitching` | `"flock"` | Advanced — **Where you switch conversations.** With the tree as the switcher, the current conversation's row stays selected and `alt+left` over the Claude Code extension jumps to it. Values: `flock` — Flock's tree; `claude` — Claude Code's agent list. |
+| `lineage.sessionSwitching` | `"flock"` | `Advanced` **Where you switch conversations.** With the tree as the switcher, the current conversation's row stays selected and `alt+left` over the Claude Code extension jumps to it. Values: `flock` — Flock's tree; `claude` — Claude Code's agent list. |
 
 ### ⋔ Forking and closing
 
@@ -98,9 +98,9 @@ Flock contributes **46 settings**. **16** of them are switches that ship off, an
 | --- | --- | --- |
 | `lineage.mode` | `"folder"` | **What a window is.** One folder per project, Flock only, or one window that follows you. **Flock: Choose Window Model…** shows what each costs. Values: `folder` — One folder per project; `root` — Root (Flock only); `project` — Auto-switch. |
 | `lineage.workspaces.enabled` (deprecated) | `true` | **Workspace switcher in the status bar.** Scopes the window to one project. The notice above says what replaced it. Deprecated: Superseded by `lineage.mode`, and still honoured: while this is `false` and the mode is `project`, this window resolves to the **Root** (Flock only) model — which is what that pair has always actually meant. Set `lineage.mode` to the model you want, or run **Flock: Choose Window Model…**, which writes both; then this key can go. |
-| `lineage.workspaces.resumeSessions` | `true` | Advanced — **Resume parked sessions on a switch.** Up to 8 per switch. Off, nothing is parked. |
-| `lineage.explorer.followProject` | `true` | Advanced — **The Explorer follows the session.** Auto-switch only. The window must be a Flock workspace: one reload, automatic when no folder is open, otherwise **Flock: Follow the Session I Am In**. |
-| `lineage.explorer.scope` | `"directory"` | Advanced — **How much of the project the Explorer shows.** Auto-switch only, with `lineage.explorer.followProject` on. Values: `directory` — The directory you are in; `project` — Every project directory. |
+| `lineage.workspaces.resumeSessions` | `true` | `Advanced` **Resume parked sessions on a switch.** Up to 8 per switch. Off, nothing is parked. |
+| `lineage.explorer.followProject` | `true` | `Advanced` **The Explorer follows the session.** Auto-switch only. The window must be a Flock workspace: one reload, automatic when no folder is open, otherwise **Flock: Follow the Session I Am In**. |
+| `lineage.explorer.scope` | `"directory"` | `Advanced` **How much of the project the Explorer shows.** Auto-switch only, with `lineage.explorer.followProject` on. Values: `directory` — The directory you are in; `project` — Every project directory. |
 
 ### ◫ Sidebar
 
@@ -112,9 +112,9 @@ Flock contributes **46 settings**. **16** of them are switches that ship off, an
 | `lineage.showTokens` | `false` | **Token count on each row.** The context the last turn ran with, as `/context` reports it. |
 | `lineage.accounts.section` | `true` | **Accounts section.** One row per subscription: plan, usage, and which one new sessions use. The usage meter calls Anthropic's usage endpoint with the account's own token. Off moves the sidebar's buttons up onto the FLOCK header. |
 | `lineage.shells.section` | `true` | **Shells section.** The commands your sessions are running right now, with a clock on each. Every live session on this machine is covered, not only this window's. |
-| `lineage.viewStyle` | `"inline"` | Advanced — **How the Sessions view is drawn.** Takes effect on the next reload. Values: `inline` — Inline (rename on the row); `native` — Native tree. |
-| `lineage.showArchived` | `false` | Advanced — **Every closed session on disk**, even ones this tree never knew. Not the archive: that is **Archived Sessions…** on the project row. |
-| `lineage.showPhantomRows` | `false` | Advanced — **Debug: roster rows that are not sessions.** Exited entries and warm spares. They cannot be focused or resumed. |
+| `lineage.viewStyle` | `"inline"` | `Advanced` **How the Sessions view is drawn.** Takes effect on the next reload. Values: `inline` — Inline (rename on the row); `native` — Native tree. |
+| `lineage.showArchived` | `false` | `Advanced` **Every closed session on disk**, even ones this tree never knew. Not the archive: that is **Archived Sessions…** on the project row. |
+| `lineage.showPhantomRows` | `false` | `Advanced` **Debug: roster rows that are not sessions.** Exited entries and warm spares. They cannot be focused or resumed. |
 
 ### ◉ Notifications
 
@@ -123,7 +123,7 @@ Flock contributes **46 settings**. **16** of them are switches that ship off, an
 | `lineage.notifications.enabled` | `true` | **Green dot and bell for finished turns**, until you look at the session. Right-click a session to mute it. |
 | `lineage.notifications.popup` | `false` | **Also pop up a toast** with a Focus button. Off: the dots and the bell already say it. |
 | `lineage.accounts.offerSwitchAtLimit` | `false` | **Offer another account at the limit.** One notification when a session's five-hour window runs out, naming the account with the most room. Off: it interrupts. |
-| `lineage.runningBadge` | `false` | Advanced — **Running count on the Flock icon.** Off: it changes every few seconds, and the tree already says it. |
+| `lineage.runningBadge` | `false` | `Advanced` **Running count on the Flock icon.** Off: it changes every few seconds, and the tree already says it. |
 
 ### ▣ Worktrees
 
@@ -131,7 +131,7 @@ Flock contributes **46 settings**. **16** of them are switches that ship off, an
 | --- | --- | --- |
 | `lineage.git.newSessionInWorktree` | `true` | **New sessions get their own worktree.** `+` on a project runs `git worktree add -b` on a branch named after the session. Off, `+` starts in the project directory. |
 | `lineage.git.branchPrefix` | `""` | **Prefix for minted branch names.** `axel/` gives `axel/flock-3`. Names you type yourself get no prefix. |
-| `lineage.git.worktreePath` | `"../${repo}-${branch}"` | Advanced — **Where new worktrees go.** `${repo}` and `${branch}` are filled in; a relative path sits beside the main worktree, so the default gives `~/code/app-feat-x`. Must contain `${branch}`. |
+| `lineage.git.worktreePath` | `"../${repo}-${branch}"` | `Advanced` **Where new worktrees go.** `${repo}` and `${branch}` are filled in; a relative path sits beside the main worktree, so the default gives `~/code/app-feat-x`. Must contain `${branch}`. |
 
 ### ⎇ Branches
 
@@ -140,20 +140,20 @@ Flock contributes **46 settings**. **16** of them are switches that ship off, an
 | `lineage.git.branches` | `false` | **Branch rows.** A project's branches as rows, with the worktree verbs, the colours and the pull-request chip. Off: it is a lot of rows. |
 | `lineage.git.branchDisplay` | `"inline"` | **How a session shows its worktree.** Needs `lineage.git.branches`. Values: `inline` — Branch under the session; `color` — Colour by branch. |
 | `lineage.git.pullRequests` | `false` | **Pull request on each branch row.** Reaches the network through your own signed-in `gh`: `gh pr list`, at most every five minutes per repository. Flock never reads the `gh` token. |
-| `lineage.git.sessionBranchDetail` | `"standard"` | Advanced — **How much the branch line says.** Inline display only. The pull request needs `lineage.git.pullRequests`. Values: `standard` — Branch and local state; `detailed` — Also the pull request. |
-| `lineage.groupSessionsByBranch` | `false` | Advanced — **Nest sessions under their branch.** Each branch row becomes a container with its own `+`. Projects with two or more worktrees only. |
-| `lineage.branchColors` | `[]` | Advanced — **Colours for the branch chips**, in order. Hex or theme colour ids; empty uses the Source Control Graph's colours. Colour mode only. |
-| `lineage.preview.directoryModel` | `false` | Advanced — **Preview: branch rows per directory.** Every local branch, under the directory that is its repository, the idle ones folded into one **Branches (N)** row. Needs `lineage.git.branches`; inline view only. |
+| `lineage.git.sessionBranchDetail` | `"standard"` | `Advanced` **How much the branch line says.** Inline display only. The pull request needs `lineage.git.pullRequests`. Values: `standard` — Branch and local state; `detailed` — Also the pull request. |
+| `lineage.groupSessionsByBranch` | `false` | `Advanced` **Nest sessions under their branch.** Each branch row becomes a container with its own `+`. Projects with two or more worktrees only. |
+| `lineage.branchColors` | `[]` | `Advanced` **Colours for the branch chips**, in order. Hex or theme colour ids; empty uses the Source Control Graph's colours. Colour mode only. |
+| `lineage.preview.directoryModel` | `false` | `Advanced` **Preview: branch rows per directory.** Every local branch, under the directory that is its repository, the idle ones folded into one **Branches (N)** row. Needs `lineage.git.branches`; inline view only. |
 
 ### ◷ Timers
 
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `lineage.session.closeAfterMinutes` | `4320` | **Close idle session tabs after this many minutes.** 4320 is three days. The conversation stays as a resumable row; a busy session waits for its turn, and the tab in front and **Keep Awake** sessions are never touched. `0` turns it off. |
-| `lineage.chat.autoCloseMinutes` | `1440` | Advanced — **Close idle project chats after this many minutes.** 1440 is one day. **Chat History…** reopens one. `0` turns it off. |
-| `lineage.session.detachGraceMinutes` | `10` | Advanced — **How long a hidden session keeps running.** Then it settles to an archived row. `0` ends it within a minute. |
-| `lineage.session.reloadGraceSeconds` | `45` | Advanced — **How long a session outlives its window.** A reload and a close look the same, so Flock waits this long for the window to come back. Keep it low. |
-| `lineage.busyStaleMinutes` | `5` | Advanced — **When a silent busy session counts as idle.** The CLI sometimes leaves a status stuck at busy; a transcript quiet this long is drawn idle. |
+| `lineage.chat.autoCloseMinutes` | `1440` | `Advanced` **Close idle project chats after this many minutes.** 1440 is one day. **Chat History…** reopens one. `0` turns it off. |
+| `lineage.session.detachGraceMinutes` | `10` | `Advanced` **How long a hidden session keeps running.** Then it settles to an archived row. `0` ends it within a minute. |
+| `lineage.session.reloadGraceSeconds` | `45` | `Advanced` **How long a session outlives its window.** A reload and a close look the same, so Flock waits this long for the window to come back. Keep it low. |
+| `lineage.busyStaleMinutes` | `5` | `Advanced` **When a silent busy session counts as idle.** The CLI sometimes leaves a status stuck at busy; a transcript quiet this long is drawn idle. |
 
 ### ⌁ Hooks and CLI
 
@@ -161,8 +161,8 @@ Flock contributes **46 settings**. **16** of them are switches that ship off, an
 | --- | --- | --- |
 | `lineage.hooks.enabled` | `false` | **Read the hook event stream.** Instant updates instead of the three-second poll. The install verbs turn this on; this is the switch that makes Flock read them. |
 | `lineage.verbs.enabled` | `false` | **Let Claude fork from inside a session.** "Fork this session" writes a request into `~/.lineage/requests`; this switch makes Flock act on it. Nothing leaves your machine. |
-| `lineage.claudeBinary` | `""` | Advanced — **Path to the `claude` CLI.** Empty searches PATH. |
-| `lineage.codexBinary` | `""` | Advanced — **Path to the `codex` CLI.** Empty searches PATH and the usual install roots. Set it if VS Code does not inherit your node version manager. |
+| `lineage.claudeBinary` | `""` | `Advanced` **Path to the `claude` CLI.** Empty searches PATH. |
+| `lineage.codexBinary` | `""` | `Advanced` **Path to the `codex` CLI.** Empty searches PATH and the usual install roots. Set it if VS Code does not inherit your node version manager. |
 
 <!-- generated:settings:end -->
 

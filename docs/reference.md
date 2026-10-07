@@ -240,10 +240,9 @@ become twenty-four rows' worth.
 
 **The branch rows are shut until you ask for them**, in both modes and on every
 project — a repository with six checkouts is not six rows before its first
-session. The way in is **Show Branches** on the project's or the directory's
-right-click, or the git-branch button on the project row itself, and the answer
-is remembered per project as `branchesShown`, a record only that verb writes. (A chevron there would have been the row's second one,
-saying "this opens" where the mark has to say *what* opens.) The one exception is
+session. To show them, right-click the project or directory row and choose
+**Show Branches**. Flock remembers the answer per project as `branchesShown`,
+and only that command changes it. The one exception is
 `lineage.groupSessionsByBranch`, where the branch rows are what the sessions hang
 off, so folding them by default would undo the setting.
 
@@ -634,7 +633,15 @@ you — green is what everything else on screen uses to mean "nothing to do here
 It rolls up onto the project row, so a collapsed project still shows there is
 something to come back to — and the roll-up asks exactly the question the rows
 below it do, so a project dot always has a lit row under it: a session that is
-closed, or busy again, or muted, lights nothing.
+closed, or busy again, or muted, lights nothing. On a project split into
+directory rows, opening the project moves the dot down onto the directory row
+that holds the session, and the project row stops showing it. Close the project
+and the dot moves back up.
+
+On a project or directory row the dot sits against the right edge and pushes the
+`+` one dot's width to the left. The `+` is always shown. The chat button beside
+it appears when you hover the row. Right-click the `+` to choose which account
+the session starts on. The menu opens next to the button.
 
 The numeric badge on the view container counts something else: how many
 sessions are **running on this machine** — open tabs plus any session still
@@ -659,8 +666,9 @@ finishing cannot leave a mark on the row for good. Themeable as
 
 The **bell** — leftmost in the view title — lists the latest finished sessions,
 unseen above a divider, then history, each with its project and how long ago it
-finished. Clicking an entry focuses the session and marks it read; *Mark All
-Notifications as Read* is in the gear menu, and a command of its own.
+finished. Clicking an entry focuses the session and marks it read. To mark
+every entry read, click the check-all button in the list's title bar. It is
+also a palette command, **Mark All Notifications as Read**.
 
 Each row carries an **×** that takes it off the list without going near the
 session. That is per *finish*, not per session: the next turn that session
@@ -1343,22 +1351,20 @@ message or a branch listing is the ordinary case.
 
 ### The top bar
 
-Five buttons, left to right — on the **SESSIONS** row, or on the **FLOCK** row
+Four buttons, left to right — on the **SESSIONS** row, or on the **FLOCK** row
 itself if you turn the Accounts section off (see the note below):
 
 | Button | What it does |
 | --- | --- |
 | **bell** | The notifications list. Fills in when something is unread. |
-| **+** | A new session, asking nothing. See [Naming](#naming) for where it lands. |
+| **New Project** | A new project. |
 | **fork** | A branch off the conversation you are looking at — see below, and [Forking and context](forking-and-context.md) for what the branch inherits. |
-| **filter** | Show only running sessions, or closed ones too. |
-| **gear** | Everything else: projects, hooks, housekeeping, the Accounts section. |
+| **gear** | Everything else: session housekeeping, projects, hooks, settings. |
 
-Five and not eight, deliberately. A toolbar the workbench cannot fit collapses
-into an overflow `...`, taking the buttons at the end with it — and the gear is at
-the end, so a crowded row would hide the very menu that exists to replace that
-ellipsis. **New Project…** and the closed-projects list moved into the gear menu
-for that reason: they are the two you reach for least.
+The top bar has no new-session button. Each project row has its own `+`, and
+**Flock: New Claude Session** is in the palette. The bar is kept short because
+VS Code moves buttons that do not fit into an overflow `...`, and the gear is
+the last button.
 
 The **fork** button is handed no row, so it works out which conversation it is
 about: the session whose terminal is the active one in this window, else the live
@@ -1369,32 +1375,37 @@ from the palette. Forking the wrong thread leaves you a branch of a conversation
 you were not in, sitting next to the one you meant, so it guesses only where the
 evidence is singular. It disappears while the tree is empty.
 
-The **gear** opens a menu that starts with setup and holds everything that used
-to be behind the `...`. First **Flock Settings…**, which opens VS Code's own
-Settings editor filtered to Flock — there is no settings page of Flock's own; the
-editor draws the settings in nine groups, each behind a symbol (Sessions,
-Forking and closing, Window, Sidebar, Notifications, Worktrees, Branches,
-Timers, Hooks and CLI), in the order they are worth reading, with the advanced
-rows last in each; every row opens with its name in bold and says what it does
-in a line, or two sentences where it has to, and
-[the long version](settings.md#the-long-version) of the ones with more to say
-is in the settings page. Then **Status…**: what this machine
-has and what this window is on — is tmux installed and on, are the hooks (and,
-where there is a Codex to hook, the Codex hooks) and the in-session verbs
-installed, which `claude` and `codex` were found and where, which window model
-this is, where sessions open — as read-only rows, each of which runs
-the verb that changes it when picked (the install, the picker, the setting).
-Then **Recommended Setup…**, **Choose Window Model…**, **Choose Where Sessions
-Open…** — the two taste questions, each entry naming the answer this window has
-today — and **Open Advanced Settings**, which is the same editor narrowed to the
-rows tagged *advanced*: paths, timings, diagnostics, previews. Below that group:
-the active-sessions
-filter, **Show Closed Projects and Hidden Folders…**, **Mark All Notifications
-as Read**, **Restore Archived Session…**, **Archive Stale Sessions…**, **New
-Project…**, the closed-projects list, the Accounts and Shells section switches,
-the hooks pair, and **Refresh**. Each toggle is labelled with the direction it
-goes — you get *Hide Accounts Section* when the section is showing, never both —
-which is why it is built when it opens rather than declared in the manifest.
+The **gear** opens one short menu:
+
+- **Sessions.** The active-sessions filter, labelled with the way it goes
+  (**Show All Sessions** or **Show Only Active Sessions**), **Restore Archived
+  Session…**, **Import Previous Sessions…** and **Archive Stale Sessions…**.
+- **Projects.** **New Project…** and **Open Project…**, which lists the closed
+  projects.
+- **Hooks…**, **Settings…** and **Refresh.**
+- **Setup.** **Recommended Setup…**, **Choose Window Model…** and **Choose
+  Where Sessions Open…**. The last two say which answer this window uses today.
+
+**Hooks…** opens a second list with the installs: session hooks, Codex hooks
+(only when Codex is installed) and the in-session verbs. Each one is offered in
+the direction it can go, so you see *Install* or *Remove*, never both. The
+**Hooks…** entry itself says what is installed now.
+
+**Settings…** opens VS Code's own Settings editor, filtered to Flock. Flock has
+no settings page of its own. The editor shows the settings in nine groups
+(Sessions, Forking and closing, Window, Sidebar, Notifications, Worktrees,
+Branches, Timers, Hooks and CLI). The advanced settings are last in each group,
+and each one's description starts with an `Advanced` label.
+Everything that is a setting is changed there, including the branch display and
+the Accounts and Shells sections.
+[The long version](settings.md#the-long-version) covers the settings that need
+more explanation.
+
+A few verbs are in the Command Palette only: **Flock: Status…** (what this
+machine has and what this window uses — tmux, the hooks, the CLIs, the window
+model — with each row running the verb that changes it), **Flock: Show Hidden
+Folders…**, and **Flock: Open Advanced Settings** (the Settings editor narrowed
+to the settings tagged *advanced*).
 
 > Where the buttons sit, and why it is a choice. VS Code has no menu id for a view
 > container's title bar — there is `view/title` and no `viewsContainer/title` — so

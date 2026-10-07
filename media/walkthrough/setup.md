@@ -44,7 +44,7 @@ receipt afterwards tells you how to undo each thing you accepted.
 **What a window is** — one folder per project, Flock only, or auto-switch — and
 **where sessions open** — one pinned tab, editor tabs, the terminal panel, a
 window of their own, or the Claude Code extension — are taste, and nobody can
-answer them before they have lived with the default. Both live in the gear at
+answer them before they have lived with the default. Both are in the gear at
 the top of the sidebar, as **Choose Window Model…** and **Choose Where Sessions
 Open…**, each naming your current answer. Flock offers each one once, at the
 moment it becomes real: the first time a session from another project has to

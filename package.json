@@ -757,11 +757,6 @@
           "group": "navigation@0"
         },
         {
-          "command": "lineage.newSession",
-          "when": "view == lineageSessions",
-          "group": "navigation@2"
-        },
-        {
           "command": "lineage.forkActiveSession",
           "when": "view == lineageSessions && lineage.hasForkable",
           "group": "navigation@3"
@@ -770,11 +765,6 @@
           "command": "lineage.settingsMenu",
           "when": "view == lineageSessions",
           "group": "navigation@4"
-        },
-        {
-          "command": "lineage.newSession",
-          "when": "view == lineageSessionsInline",
-          "group": "navigation@2"
         },
         {
           "command": "lineage.forkActiveSession",
@@ -1880,7 +1870,7 @@
             ],
             "default": "flock",
             "order": 7,
-            "markdownDescription": "**Where you switch conversations.** With the tree as the switcher, the current conversation's row stays selected and `alt+left` over the Claude Code extension jumps to it.",
+            "markdownDescription": "`Advanced` **Where you switch conversations.** With the tree as the switcher, the current conversation's row stays selected and `alt+left` over the Claude Code extension jumps to it.",
             "tags": [
               "advanced"
             ]
@@ -1959,7 +1949,7 @@
             "type": "boolean",
             "default": true,
             "order": 3,
-            "markdownDescription": "**Resume parked sessions on a switch.** Up to 8 per switch. Off, nothing is parked.",
+            "markdownDescription": "`Advanced` **Resume parked sessions on a switch.** Up to 8 per switch. Off, nothing is parked.",
             "tags": [
               "advanced"
             ]
@@ -1968,7 +1958,7 @@
             "type": "boolean",
             "default": true,
             "order": 4,
-            "markdownDescription": "**The Explorer follows the session.** Auto-switch only. The window must be a Flock workspace: one reload, automatic when no folder is open, otherwise **Flock: Follow the Session I Am In**.",
+            "markdownDescription": "`Advanced` **The Explorer follows the session.** Auto-switch only. The window must be a Flock workspace: one reload, automatic when no folder is open, otherwise **Flock: Follow the Session I Am In**.",
             "tags": [
               "advanced"
             ]
@@ -1989,7 +1979,7 @@
             ],
             "default": "directory",
             "order": 5,
-            "markdownDescription": "**How much of the project the Explorer shows.** Auto-switch only, with `#lineage.explorer.followProject#` on.",
+            "markdownDescription": "`Advanced` **How much of the project the Explorer shows.** Auto-switch only, with `#lineage.explorer.followProject#` on.",
             "tags": [
               "advanced"
             ]
@@ -2070,7 +2060,7 @@
             ],
             "default": "inline",
             "order": 7,
-            "markdownDescription": "**How the Sessions view is drawn.** Takes effect on the next reload.",
+            "markdownDescription": "`Advanced` **How the Sessions view is drawn.** Takes effect on the next reload.",
             "tags": [
               "advanced"
             ]
@@ -2079,7 +2069,7 @@
             "type": "boolean",
             "default": false,
             "order": 8,
-            "markdownDescription": "**Every closed session on disk**, even ones this tree never knew. Not the archive: that is **Archived Sessions…** on the project row.",
+            "markdownDescription": "`Advanced` **Every closed session on disk**, even ones this tree never knew. Not the archive: that is **Archived Sessions…** on the project row.",
             "tags": [
               "advanced"
             ]
@@ -2088,7 +2078,7 @@
             "type": "boolean",
             "default": false,
             "order": 9,
-            "markdownDescription": "**Debug: roster rows that are not sessions.** Exited entries and warm spares. They cannot be focused or resumed.",
+            "markdownDescription": "`Advanced` **Debug: roster rows that are not sessions.** Exited entries and warm spares. They cannot be focused or resumed.",
             "tags": [
               "advanced"
             ]
@@ -2121,7 +2111,7 @@
             "type": "boolean",
             "default": false,
             "order": 4,
-            "markdownDescription": "**Running count on the Flock icon.** Off: it changes every few seconds, and the tree already says it.",
+            "markdownDescription": "`Advanced` **Running count on the Flock icon.** Off: it changes every few seconds, and the tree already says it.",
             "tags": [
               "advanced"
             ]
@@ -2148,7 +2138,7 @@
             "type": "string",
             "default": "../${repo}-${branch}",
             "order": 3,
-            "markdownDescription": "**Where new worktrees go.** `${repo}` and `${branch}` are filled in; a relative path sits beside the main worktree, so the default gives `~/code/app-feat-x`. Must contain `${branch}`.",
+            "markdownDescription": "`Advanced` **Where new worktrees go.** `${repo}` and `${branch}` are filled in; a relative path sits beside the main worktree, so the default gives `~/code/app-feat-x`. Must contain `${branch}`.",
             "tags": [
               "advanced"
             ]
@@ -2208,7 +2198,7 @@
             ],
             "default": "standard",
             "order": 4,
-            "markdownDescription": "**How much the branch line says.** Inline display only. The pull request needs `#lineage.git.pullRequests#`.",
+            "markdownDescription": "`Advanced` **How much the branch line says.** Inline display only. The pull request needs `#lineage.git.pullRequests#`.",
             "tags": [
               "advanced"
             ]
@@ -2217,7 +2207,7 @@
             "type": "boolean",
             "default": false,
             "order": 5,
-            "markdownDescription": "**Nest sessions under their branch.** Each branch row becomes a container with its own `+`. Projects with two or more worktrees only.",
+            "markdownDescription": "`Advanced` **Nest sessions under their branch.** Each branch row becomes a container with its own `+`. Projects with two or more worktrees only.",
             "tags": [
               "advanced"
             ]
@@ -2229,7 +2219,7 @@
               "type": "string"
             },
             "order": 6,
-            "markdownDescription": "**Colours for the branch chips**, in order. Hex or theme colour ids; empty uses the Source Control Graph's colours. Colour mode only.",
+            "markdownDescription": "`Advanced` **Colours for the branch chips**, in order. Hex or theme colour ids; empty uses the Source Control Graph's colours. Colour mode only.",
             "tags": [
               "advanced"
             ]
@@ -2238,7 +2228,7 @@
             "type": "boolean",
             "default": false,
             "order": 7,
-            "markdownDescription": "**Preview: branch rows per directory.** Every local branch, under the directory that is its repository, the idle ones folded into one **Branches (N)** row. Needs `#lineage.git.branches#`; inline view only.",
+            "markdownDescription": "`Advanced` **Preview: branch rows per directory.** Every local branch, under the directory that is its repository, the idle ones folded into one **Branches (N)** row. Needs `#lineage.git.branches#`; inline view only.",
             "tags": [
               "preview",
               "advanced"
@@ -2262,7 +2252,7 @@
             "default": 1440,
             "minimum": 0,
             "order": 2,
-            "markdownDescription": "**Close idle project chats after this many minutes.** 1440 is one day. **Chat History…** reopens one. `0` turns it off.",
+            "markdownDescription": "`Advanced` **Close idle project chats after this many minutes.** 1440 is one day. **Chat History…** reopens one. `0` turns it off.",
             "tags": [
               "advanced"
             ]
@@ -2272,7 +2262,7 @@
             "default": 10,
             "minimum": 0,
             "order": 3,
-            "markdownDescription": "**How long a hidden session keeps running.** Then it settles to an archived row. `0` ends it within a minute.",
+            "markdownDescription": "`Advanced` **How long a hidden session keeps running.** Then it settles to an archived row. `0` ends it within a minute.",
             "tags": [
               "advanced"
             ]
@@ -2283,7 +2273,7 @@
             "minimum": 0,
             "maximum": 60,
             "order": 4,
-            "markdownDescription": "**How long a session outlives its window.** A reload and a close look the same, so Flock waits this long for the window to come back. Keep it low.",
+            "markdownDescription": "`Advanced` **How long a session outlives its window.** A reload and a close look the same, so Flock waits this long for the window to come back. Keep it low.",
             "tags": [
               "advanced"
             ]
@@ -2293,7 +2283,7 @@
             "default": 5,
             "minimum": 1,
             "order": 5,
-            "markdownDescription": "**When a silent busy session counts as idle.** The CLI sometimes leaves a status stuck at busy; a transcript quiet this long is drawn idle.",
+            "markdownDescription": "`Advanced` **When a silent busy session counts as idle.** The CLI sometimes leaves a status stuck at busy; a transcript quiet this long is drawn idle.",
             "tags": [
               "advanced"
             ]
@@ -2320,7 +2310,7 @@
             "type": "string",
             "default": "",
             "order": 3,
-            "markdownDescription": "**Path to the `claude` CLI.** Empty searches PATH.",
+            "markdownDescription": "`Advanced` **Path to the `claude` CLI.** Empty searches PATH.",
             "tags": [
               "advanced"
             ]
@@ -2329,7 +2319,7 @@
             "type": "string",
             "default": "",
             "order": 4,
-            "markdownDescription": "**Path to the `codex` CLI.** Empty searches PATH and the usual install roots. Set it if VS Code does not inherit your node version manager.",
+            "markdownDescription": "`Advanced` **Path to the `codex` CLI.** Empty searches PATH and the usual install roots. Set it if VS Code does not inherit your node version manager.",
             "tags": [
               "advanced"
             ]

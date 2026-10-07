@@ -124,7 +124,8 @@ describe('the settings editor: categories', () => {
   it('starts every description with a bold name and keeps it short', () => {
     const lengths: number[] = [];
     for (const [key, p] of Object.entries(contributedSettings())) {
-      const text = p.markdownDescription ?? '';
+      // The `Advanced` label, where there is one, comes before the name.
+      const text = (p.markdownDescription ?? '').replace(/^`Advanced` /, '');
       expect(text, `${key} has a markdownDescription`).not.toBe('');
       expect(text.startsWith('**'), `${key} opens with a bold name`).toBe(true);
       expect(text.length, `${key} is ${text.length} characters`).toBeLessThanOrEqual(300);
@@ -192,6 +193,16 @@ describe('the settings editor: tags', () => {
       .map(([key]) => key)
       .sort();
     expect(online).toEqual(['lineage.accounts.section', 'lineage.git.pullRequests'].sort());
+  });
+
+  // The tag is invisible in the Settings editor, so the description carries
+  // the label a reader actually sees — first, so it is the start of the line.
+  it('opens every advanced row with a visible Advanced label, and no other row', () => {
+    for (const [key, p] of Object.entries(contributedSettings())) {
+      const text = (p as { markdownDescription?: string }).markdownDescription ?? '';
+      const labelled = text.startsWith('`Advanced` ');
+      expect(labelled, key).toBe(ADVANCED.includes(key));
+    }
   });
 
   // Within a category the visible rows come first, so a reader can stop at

@@ -800,10 +800,13 @@ describe('buildViewModel: directory subproject rows', () => {
     expect(out[1].canDrag).toBe(false);
   });
 
-  it('carries no status dot — the project row rolls that up', () => {
+  it('carries the dot for its own sessions while the project is open', () => {
     // A LIVE unseen-done session, not an archived one. An archived row draws
     // no dot of its own (statusTone is 'closed'), so it must not roll one up
     // either — see viewmodel.subtreeHasUnseen, where the two used to disagree.
+    //
+    // Open and split, the dot moves from the project down to the directory
+    // row that owns the session, and only that one.
     const out = buildViewModel(
       input(
         forestOf([
@@ -813,9 +816,23 @@ describe('buildViewModel: directory subproject rows', () => {
         { projects: [split()] },
       ),
     );
+    expect(out[0].badgeKind).toBeUndefined();
+    const owner = out.find((r) => r.kind === 'subproject' && r.cwd === '/code/app');
+    const other = out.find((r) => r.kind === 'subproject' && r.cwd !== '/code/app');
+    expect(owner?.badgeKind).toBe('done');
+    expect(other?.badgeKind).toBeUndefined();
+  });
+
+  it('gives the dot back to the project when the project is shut', () => {
+    const out = buildViewModel(
+      input(
+        forestOf([node(A, { status: 'idle', unseen: true }), node(B)]),
+        { projects: [split()] },
+        { collapsed: new Set([projectRowKey('app')]) },
+      ),
+    );
+    expect(out).toHaveLength(1);
     expect(out[0].badgeKind).toBe('done');
-    expect(out[1].badge).toBeUndefined();
-    expect(out[1].badgeKind).toBeUndefined();
   });
 
   it('and an ARCHIVED unseen session rolls nothing up at all', () => {

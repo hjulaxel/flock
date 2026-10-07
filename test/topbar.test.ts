@@ -679,25 +679,20 @@ describe('manifest: the view title contributions', () => {
     const declared = new Set(pkg.contributes.commands.map((c) => c.command));
     for (const id of [
       'lineage.openSettings',
-      'lineage.showStatus',
       'lineage.recommendedSetup',
       'lineage.chooseWindowModel',
       'lineage.chooseSurface',
-      'lineage.openAdvancedSettings',
       'lineage.showOnlyActiveSessions',
       'lineage.showAllSessions',
-      'lineage.showHidden',
-      'lineage.markAllNotificationsRead',
       'lineage.restoreSession',
+      'lineage.importSessions',
       'lineage.deleteStale',
       'lineage.newProject',
       'lineage.reopenProject',
-      'lineage.showAccountsSection',
-      'lineage.hideAccountsSection',
-      'lineage.showShellsSection',
-      'lineage.hideShellsSection',
       'lineage.installHooks',
       'lineage.removeHooks',
+      'lineage.installAgentVerbs',
+      'lineage.removeAgentVerbs',
       'lineage.refresh',
     ]) {
       expect(declared.has(id), id).toBe(true);

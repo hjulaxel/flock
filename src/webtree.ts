@@ -149,12 +149,6 @@ const ROW_GLYPH_FILES: Record<string, string> = {
 const PROJECT_ROW_ACTIONS: Record<string, keyof typeof COMMANDS | undefined> = {
   chat: 'chatInProject',
   newSession: 'newSessionInProject',
-  // Two ids for one toggle, not one id that flips: a contributed icon
-  // cannot change at runtime, so the row emits whichever half currently
-  // applies and each half has its own glyph — the same shape the bell and the
-  // active-only filter already use.
-  foldBranches: 'foldBranches',
-  unfoldBranches: 'unfoldBranches',
 };
 
 /** A row action's SECOND verb — what right-clicking the button runs, against
@@ -371,7 +365,21 @@ export interface WebtreeDeps extends TreeDeps {
   /** Run a command id from COMMANDS (the welcome button, the row actions).
    *  `arg` is the same shape the native menus pass, so the handlers'
    *  existing argument extractors work unchanged. */
-  runCommand(command: keyof typeof COMMANDS, arg?: unknown): Promise<void>;
+  runCommand(
+    command: keyof typeof COMMANDS,
+    arg?: unknown,
+    arg2?: unknown,
+  ): Promise<void>;
+  /** The accounts a session can start on, for the `+`'s right-click menu drawn
+   *  in the page beside the button. Optional: unwired, or empty, the
+   *  right-click falls back to the quick pick at the top of the window — which
+   *  is also the path that explains why nothing can be offered. */
+  launchAccounts?(): readonly {
+    id: string;
+    label: string;
+    description: string;
+    isDefault: boolean;
+  }[];
 }
 
 interface ClientMessage {
@@ -396,6 +404,10 @@ interface ClientMessage {
    *  user's own selection out of a box they are typing in — nothing is read off
    *  the model or the disk to fill it. */
   text?: unknown;
+  /** The account picked off the `+`'s inline menu, on an 'actionAccount'. An
+   *  id the extension itself offered — re-checked against the launchable set
+   *  before anything starts. */
+  accountId?: unknown;
 }
 
 function nonce(): string {
@@ -1577,20 +1589,37 @@ ${branchPaletteCss()}  }
           // resolves through the same lookup its left-click does, so the
           // directory a right-click starts in is the one whose button it was.
           // The picker verb reads the subproject shape before the project one.
-          if (String(msg.action) === 'newSessionInSubproject') {
-            const target = this.subprojectTargetFor(msg.key);
-            if (!target) return;
-            await this.deps.runCommand('newSessionFromPicker', target);
+          //
+          // THE MENU OPENS BESIDE THE BUTTON when the accounts can be listed:
+          // the page is handed the choices and draws them where the pointer
+          // is, and the pick comes back as 'actionAccount'. A quick pick at the
+          // top of the window was a long way from the row that asked.
+          const target = this.altTargetFor(msg.key, msg.action);
+          if (!target) return;
+          const choices = this.safe('launchAccounts', () => this.deps.launchAccounts?.(), []) ?? [];
+          if (choices.length > 0 && this.view) {
+            await this.view.webview.postMessage({
+              type: 'accountMenu',
+              key: msg.key,
+              action: String(msg.action),
+              accounts: choices,
+            });
             return;
           }
-          const command = PROJECT_ROW_ALT_ACTIONS[String(msg.action)];
-          if (command === undefined) return;
-          const projectId = projectIdFromKey(msg.key);
-          if (!projectId) return;
-          await this.deps.runCommand(command, {
-            type: 'project',
-            projectId,
-          });
+          await this.deps.runCommand(target.command, target.arg);
+          return;
+        }
+
+        case 'actionAccount': {
+          // The inline menu's pick. Same gate as 'actionAlt' — the row key and
+          // action id are resolved here, never trusted as a target — and the
+          // account must be one this side would offer right now.
+          const target = this.altTargetFor(msg.key, msg.action);
+          if (!target) return;
+          const accountId = typeof msg.accountId === 'string' ? msg.accountId : '';
+          const offered = this.safe('launchAccounts', () => this.deps.launchAccounts?.(), []) ?? [];
+          if (!offered.some((a) => a.id === accountId)) return;
+          await this.deps.runCommand(target.command, target.arg, accountId);
           return;
         }
 
@@ -1621,6 +1650,27 @@ ${branchPaletteCss()}  }
     } catch (err) {
       logError('webtree.onMessage', err);
     }
+  }
+
+  /** What a row action's right-click runs, resolved from the ROW KEY and the
+   *  allowlisted action id — the page never names a command or a target. */
+  private altTargetFor(
+    key: unknown,
+    action: unknown,
+  ): { command: keyof typeof COMMANDS; arg: unknown } | undefined {
+    // A SUBPROJECT row's `+` has the same second verb — the picker — and
+    // resolves through the same lookup its left-click does, so the directory a
+    // right-click starts in is the one whose button it was. The picker verb
+    // reads the subproject shape before the project one.
+    if (String(action) === 'newSessionInSubproject') {
+      const target = this.subprojectTargetFor(key);
+      return target ? { command: 'newSessionFromPicker', arg: target } : undefined;
+    }
+    const command = PROJECT_ROW_ALT_ACTIONS[String(action)];
+    if (command === undefined) return undefined;
+    const projectId = projectIdFromKey(key);
+    if (!projectId) return undefined;
+    return { command, arg: { type: 'project', projectId } };
   }
 
   /**

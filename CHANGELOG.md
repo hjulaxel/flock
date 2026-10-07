@@ -6,6 +6,39 @@ All notable changes to Flock are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **The gear menu is shorter.** It now has only the session housekeeping (the
+  active-sessions filter, **Restore Archived Session…**, **Import Previous
+  Sessions…**, **Archive Stale Sessions…**), **New Project…** and **Open
+  Project…**, **Hooks…**, **Settings…** and **Refresh**, and the setup
+  questions at the bottom (**Recommended Setup…**, **Choose Window Model…**,
+  **Choose Where Sessions Open…**). **Hooks…** opens a list of the installs. **Settings…** opens the
+  Settings editor, which is where the branch display and the Accounts and
+  Shells sections are changed now. **Status…**, **Show Hidden Folders…** and
+  **Open Advanced Settings** are in the Command Palette.
+- **Mark all as read is in the notifications list's title bar.** It is a
+  check-all button there instead of the last row in the list. It is no longer
+  in the gear menu.
+- **The top bar has no new-session button.** Use the `+` on a project row, or
+  **Flock: New Claude Session** in the palette.
+- **The project row's `+` is always shown, at the right edge.** A red dot pushes
+  it to the left instead of sitting in a space kept free for it. The chat
+  button still appears on hover.
+- **Right-clicking a `+` opens the account menu next to the button**, not at
+  the top of the window.
+- **An open project that is split into directories shows the red dot on the
+  directory row** that holds the unread session, not on the project row.
+  Close the project and the dot moves back up to the project row.
+
+- **Advanced settings are labelled in the Settings editor.** Each one's
+  description now starts with `Advanced`. They are still last in their group.
+
+### Removed
+
+- **The Show/Hide branches button on project rows.** Use **Show Branches** and
+  **Hide Branches** on the row's right-click menu.
+
 ## [0.14.1] — 2026-09-29
 
 ### Fixed

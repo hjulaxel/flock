@@ -668,6 +668,88 @@ describe('LineageWebtreeProvider row actions (via the "action" message)', () => 
     });
     expect(calls.runCommand).toEqual([]);
   });
+
+  // THE MENU BESIDE THE BUTTON. With accounts to list, the right-click hands
+  // them to the page instead of opening a quick pick at the top of the window,
+  // and the pick comes back as 'actionAccount'.
+  describe('the inline account menu', () => {
+    const ACCOUNTS = [
+      { id: 'work', label: 'Work', description: 'Claude', isDefault: true },
+      { id: 'personal', label: 'Personal', description: 'Claude', isDefault: false },
+    ];
+
+    function withAccounts() {
+      const forest = forestOf([node(ROOT, { cwd: '/proj' })]);
+      const { deps, calls } = makeDeps(forest, {
+        projects: () => [project('p1', 'P1', '/proj')],
+      });
+      const runs: unknown[][] = [];
+      deps.runCommand = async (...args: unknown[]) => {
+        runs.push(args);
+      };
+      deps.launchAccounts = () => ACCOUNTS;
+      const provider = new LineageWebtreeProvider(deps, EXT_URI);
+      const priv = internals(provider);
+      const posted: unknown[] = [];
+      priv.view = fakeView({
+        postMessage: async (msg) => {
+          posted.push(msg);
+          return true;
+        },
+      });
+      return { calls, priv, posted, runs };
+    }
+
+    it('posts the accounts to the page and runs nothing yet', async () => {
+      const { priv, posted, runs } = withAccounts();
+      await priv.onMessage({ type: 'actionAlt', key: 'project:p1', action: 'newSession' });
+      expect(runs).toEqual([]);
+      expect(posted).toEqual([
+        { type: 'accountMenu', key: 'project:p1', action: 'newSession', accounts: ACCOUNTS },
+      ]);
+    });
+
+    it('still refuses an alt action with no verb, accounts or not', async () => {
+      const { priv, posted } = withAccounts();
+      await priv.onMessage({ type: 'actionAlt', key: 'project:p1', action: 'chat' });
+      expect(posted).toEqual([]);
+    });
+
+    it('starts the session on the picked account', async () => {
+      const { priv, runs } = withAccounts();
+      await priv.onMessage({
+        type: 'actionAccount',
+        key: 'project:p1',
+        action: 'newSession',
+        accountId: 'personal',
+      });
+      expect(runs).toEqual([
+        ['newSessionFromPicker', { type: 'project', projectId: 'p1' }, 'personal'],
+      ]);
+    });
+
+    it('refuses an account it did not offer', async () => {
+      const { priv, runs } = withAccounts();
+      await priv.onMessage({
+        type: 'actionAccount',
+        key: 'project:p1',
+        action: 'newSession',
+        accountId: 'someone-else',
+      });
+      expect(runs).toEqual([]);
+    });
+
+    it('falls back to the quick pick when there is nothing to list', async () => {
+      const { priv, posted, runs } = withAccounts();
+      // Re-wire to an empty list — the quick pick is the path that says why.
+      (priv as unknown as { deps: { launchAccounts: () => unknown[] } }).deps.launchAccounts = () => [];
+      await priv.onMessage({ type: 'actionAlt', key: 'project:p1', action: 'newSession' });
+      expect(posted).toEqual([]);
+      expect(runs).toEqual([
+        ['newSessionFromPicker', { type: 'project', projectId: 'p1' }],
+      ]);
+    });
+  });
 });
 
 // ------------------------------------------------------------------ beginRename

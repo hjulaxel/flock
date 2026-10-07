@@ -7647,6 +7647,39 @@ function refuseUnlaunchable(profile: AccountProfile): boolean {
 /** `launchable` restricts the list to accounts a session can actually run on.
  *  Off for the verbs that manage the LIST (sign in, remove, reorder), which
  *  apply to every account this extension knows about. */
+/** One account the `+`'s right-click menu offers. */
+export interface LaunchAccountChoice {
+  id: string;
+  label: string;
+  description: string;
+  isDefault: boolean;
+}
+
+/**
+ * The accounts a session can be started on, worded exactly as pickAccount
+ * words them — the sidebar's inline menu (the `+`'s right-click) draws these
+ * next to the button instead of opening a quick pick at the top of the window,
+ * and the two must not disagree about what is offered or what it is called.
+ * Empty when there are no accounts or none can launch; the caller then falls
+ * back to the quick pick, which is what explains why.
+ */
+export function launchAccountChoices(
+  accts: AccountDeps | undefined,
+): LaunchAccountChoice[] {
+  if (!accts) return [];
+  const fallback = accts.defaultRouting();
+  const defaultId = fallback?.kind === 'account' ? fallback.id : undefined;
+  return accts
+    .accounts()
+    .filter(canHostSession)
+    .map((p) => ({
+      id: p.id,
+      label: p.label,
+      description: accountPickDescription(accts, p),
+      isDefault: p.id === defaultId,
+    }));
+}
+
 async function pickAccount(
   deps: AccountCommandDeps,
   placeHolder: string,
@@ -11208,16 +11241,30 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       pushSeparator('seen');
       picks.push(...seenOnes.map(rowOf));
     }
-    if (unseen.length > 0) {
-      pushSeparator('');
-      picks.push({
-        label: '$(check-all) Mark all as read',
-        description: `${unseen.length} unseen`,
-        sessionId: MARK_ALL_SENTINEL,
-        markAll: true,
-      });
-    }
+    // No "Mark all as read" ROW: it lives in the popup's header now (see
+    // markAllButton), where it is not one more line to read past on the way to
+    // the sessions. The fallback popup, which has no header buttons, still
+    // carries it as its last row — see showNotificationsSimple.
     return picks;
+  };
+
+  /** The header's "Mark all as read", or undefined with nothing unseen or on a
+   *  host with no ThemeIcon. A quick input's title buttons are icons with a
+   *  tooltip — VS Code draws no text there — so the check-all glyph is the
+   *  label and the tooltip carries the words and the count. */
+  const markAllButton = (
+    unseenCount: number,
+  ): vscode.QuickInputButton | undefined => {
+    if (unseenCount === 0) return undefined;
+    try {
+      if (typeof vscode.ThemeIcon !== 'function') return undefined;
+      return {
+        iconPath: new vscode.ThemeIcon('check-all'),
+        tooltip: `Mark all as read (${unseenCount} unseen)`,
+      };
+    } catch {
+      return undefined;
+    }
   };
 
   /** The × on a bell row, or undefined on a host with no ThemeIcon (the unit
@@ -11261,6 +11308,18 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     picks: NotificationPick[],
     unseenCount: number,
   ): Promise<void> => {
+    // No header to put the button in on this path, so the verb stays a row.
+    if (unseenCount > 0) {
+      picks = [
+        ...picks,
+        {
+          label: '$(check-all) Mark all as read',
+          description: `${unseenCount} unseen`,
+          sessionId: MARK_ALL_SENTINEL,
+          markAll: true,
+        },
+      ];
+    }
     const chosen = await vscode.window.showQuickPick(picks, {
       title: 'Finished sessions',
       placeHolder:
@@ -11329,6 +11388,11 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     quickPick.matchOnDetail = true;
     // NO `ignoreFocusOut`, DELIBERATELY — see the note on showNotificationsSimple.
     quickPick.items = picks;
+    const setHeader = (unseen: number): void => {
+      const button = markAllButton(unseen);
+      quickPick.buttons = button === undefined ? [] : [button];
+    };
+    setHeader(unseenCount);
 
     // Resolves when the popup is finished with, whichever way it ended. The
     // verb that follows an accepted row (focus the session, possibly switching
@@ -11343,6 +11407,25 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         settled = true;
         resolve();
       };
+
+      // The header's only button is Mark all as read. Run in place, and the
+      // popup stays open on the same rows, now all seen — the same "keep
+      // clearing" stance the × takes.
+      quickPick.onDidTriggerButton?.(() => {
+        void (async () => {
+          try {
+            await vscode.commands.executeCommand(
+              COMMANDS.markAllNotificationsRead,
+            );
+            const left = readItems();
+            quickPick.items = notificationPicks(left, Date.now());
+            quickPick.placeholder = 'Everything has been seen';
+            setHeader(left.filter((i) => i.unseen).length);
+          } catch (err) {
+            logError('command show notifications (mark all)', err);
+          }
+        })();
+      });
 
       quickPick.onDidTriggerItemButton((event) => {
         const id = event.item?.sessionId;
@@ -11361,6 +11444,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
             // on clearing rows — which is the whole reason the × exists rather
             // than a "dismiss which one?" second menu.
             quickPick.items = notificationPicks(left, Date.now());
+            setHeader(left.filter((i) => i.unseen).length);
           } catch (err) {
             logError('command show notifications (dismiss)', err);
           }
@@ -11709,155 +11793,75 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   // the bell being one row lower is a smaller loss than a list of subscriptions
   // that is no longer on screen — so this switch is offered, not taken.
   //
-  // Both halves live in the gear menu, which is the point: this hides a list, and
-  // it has to be as easy to find as it was to lose. Nothing about accounts stops
-  // working — the ten verbs stay registered, routing and pinning are untouched —
-  // so the wording says "section", never "accounts".
+  // Both halves are in the palette, and the setting itself is in the Settings
+  // editor the gear's Settings… opens — the gear no longer mirrors it as a
+  // toggle. Nothing about accounts stops working — the ten verbs stay
+  // registered, routing and pinning are untouched — so the wording says
+  // "section", never "accounts".
   //
   // Shells is the third view and carries the identical pair on
-  // `lineage.shells.section`. For a release it did not: Accounts had a gear
-  // entry and Shells only settings.json, for two sections that cost the same
-  // row. The gear groups the two pairs as "Sections" so they read as one choice.
+  // `lineage.shells.section`.
 
   /**
    * The gear: everything the view title used to keep behind its `...`.
    *
    * See COMMANDS.settingsMenu for why this is a command opening a quick pick
    * rather than a contributed submenu. The consequence worth stating here is that
-   * the ORDER and the GROUPING below are this function's, not the manifest's —
-   * the `1_hooks` / `2_manage` / `3_accounts` sections the items used to carry
-   * survive as the separators, so the menu reads the way the old overflow did.
+   * the ORDER and the GROUPING below are this function's, not the manifest's.
+   *
+   * SHORT ON PURPOSE. It holds the verbs a person opens the gear to DO — the
+   * session housekeeping, the two project doors, the setup questions, Refresh —
+   * plus Hooks…, a second list of the installs, and Settings…, which is the
+   * Settings editor itself. Anything that is a setting is changed there, not
+   * mirrored here as a toggle. The flat menu this replaced put twenty-odd rows
+   * in seven groups in front of somebody who came to restore one session.
+   *
+   * Status…, Show Hidden Folders…, Open Advanced Settings and the section and
+   * branch-display switches left the gear; they stay in the palette.
    *
    * Every entry delegates to the command that already implements it. Nothing is
-   * reimplemented here, which is the only reason a second surface onto ten verbs
-   * cannot drift from the palette's.
+   * reimplemented here, which is the only reason a second surface onto these
+   * verbs cannot drift from the palette's.
    */
   register(COMMANDS.settingsMenu, 'settings menu', async () => {
     // Absent state means offer both halves of each pair: a menu that cannot read
     // which way a toggle goes must not guess, because the wrong label on a
     // toggle is worse than two entries.
     const state = safeCall('menuState', () => deps.menuState?.());
-    const hooksKnown = state !== undefined;
+
+    type GearItem = vscode.QuickPickItem & {
+      command?: string;
+      /** A door to the second level rather than a verb. */
+      submenu?: 'hooks';
+    };
 
     // The separator kind is read defensively: this module runs against a
     // unit-test double of the vscode API, and a host without it should get a flat
     // menu rather than an exception.
     const separator = vscode.QuickPickItemKind?.Separator;
-    const items: (vscode.QuickPickItem & { command?: string })[] = [];
-    const group = (label: string): void => {
+    const grouper = (items: GearItem[]) => (label: string): void => {
       if (separator !== undefined) items.push({ label, kind: separator });
     };
 
-    // FIRST, above the housekeeping, because it is the entry a person opens
-    // this menu not knowing they wanted: the two installs below are also in
-    // here as bare verbs, and a bare verb only helps somebody who already knows
-    // what it does. This one says why before it asks.
-    group('Setup');
-    // THE SETTINGS PAGE IS THE BUILT-IN EDITOR, filtered to Flock — its
-    // categories, order and tags are the manifest's — and this is its door.
-    // Top of the menu, above the checklist: the person who opens a gear is
-    // usually looking for a setting, and the checklist is for the person who
-    // does not yet know which.
-    items.push({
-      label: '$(settings-gear) Flock Settings...',
-      description: 'Every setting, by category, in the Settings editor',
-      command: COMMANDS.openSettings,
-    });
-    // The facts a settings page is opened to check — tmux, the two installs,
-    // the CLIs, the window model, where sessions open — with the verb that
-    // changes each one a pick away. Read-only until picked.
-    items.push({
-      label: '$(pulse) Status...',
-      description: 'tmux, hooks, verbs, the CLIs, and what this window is on',
-      command: COMMANDS.showStatus,
-    });
-    items.push({
-      label: '$(checklist) Recommended Setup...',
-      description: 'What to turn on, and why — you tick what you want',
-      command: COMMANDS.recommendedSetup,
-    });
-    // NAMES THE MODEL THIS WINDOW IS ON, rather than listing the three.
-    // Which one you are in decides whether opening a session moves this
-    // window, opens another, or does neither — so a person reaching this menu
-    // is usually asking "which am I on?", and a static list of all three
-    // answers a question they did not have. Read through `windowModelChoices`,
-    // the same function the picker itself uses, so the sentence here and the
-    // “(current)” mark one click later can never disagree; if the world is
-    // unavailable — the wiring is optional, and every unit double omits it —
-    // it falls back to naming the three, which is what it always said.
-    const modelNow = safeCall('menuWindowModel', () => deps.windowModel?.());
-    items.push({
-      label: '$(window) Choose Window Model...',
-      description:
-        modelNow === undefined
-          ? 'One folder per project, Flock only, or auto-switch'
-          : `Currently “${modelNow}” — change it`,
-      command: COMMANDS.chooseWindowModel,
-    });
-    // The other taste question, on the same terms: names where sessions open
-    // TODAY, through `surfaceChoices` — the function the picker itself uses —
-    // and falls back to listing the places when the wiring cannot say.
-    const surfaceNow = safeCall('menuSurface', () => deps.surface?.());
-    items.push({
-      label: '$(layout) Choose Where Sessions Open...',
-      description:
-        surfaceNow === undefined
-          ? 'One pinned tab, editor tabs, the Claude Code extension, the panel, or their own window'
-          : `Currently “${surfaceNow}” — change it`,
-      command: COMMANDS.chooseSurface,
-    });
-    // LAST in the group, and plainly named: the rows the manifest tags
-    // `advanced` — paths, timings, diagnostics, previews — are the ones a
-    // first-time reader is meant to be able to skip, so their door sits below
-    // everything a first-time reader is meant to find.
-    items.push({
-      label: '$(settings) Open Advanced Settings',
-      description: 'Paths, timings, diagnostics and previews',
-      command: COMMANDS.openAdvancedSettings,
-    });
+    const top: GearItem[] = [];
+    const group = grouper(top);
 
     group('Sessions');
-    if (state === undefined || !state.onlyActive) {
-      items.push({
-        label: '$(filter) Show Only Active Sessions',
-        description: 'Hide every session that has stopped',
-        command: COMMANDS.showOnlyActiveSessions,
-      });
-    }
     if (state === undefined || state.onlyActive) {
-      items.push({
+      top.push({
         label: '$(filter-filled) Show All Sessions',
         description: 'Closed rows come back',
         command: COMMANDS.showAllSessions,
       });
     }
-    // `!== 'inline'` rather than `=== 'color'`: the field is optional, and an
-    // older wiring that does not report it should offer the inline half — which
-    // this spelling does, while still offering only the other half once a wiring
-    // says inline.
-    if (state === undefined || state.branchDisplay !== 'inline') {
-      items.push({
-        label: '$(git-branch) Show Branch Under Session',
-        description: 'A second line per session — which worktree it is running in',
-        command: COMMANDS.branchDisplayInline,
+    if (state === undefined || !state.onlyActive) {
+      top.push({
+        label: '$(filter) Show Only Active Sessions',
+        description: 'Hide every session that has stopped',
+        command: COMMANDS.showOnlyActiveSessions,
       });
     }
-    if (state === undefined || state.branchDisplay === 'inline') {
-      items.push({
-        label: '$(symbol-color) Colour Sessions by Branch',
-        description: 'Back to one line per session, with the branch rows as the key',
-        command: COMMANDS.branchDisplayColor,
-      });
-    }
-    items.push(
-      {
-        label: '$(eye) Show Hidden Folders...',
-        command: COMMANDS.showHidden,
-      },
-      {
-        label: '$(bell-slash) Mark All Notifications Read',
-        command: COMMANDS.markAllNotificationsRead,
-      },
+    top.push(
       {
         label: '$(history) Restore Archived Session...',
         command: COMMANDS.restoreSession,
@@ -11874,48 +11878,115 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     );
 
     group('Projects');
-    items.push(
+    top.push(
       {
         label: '$(new-folder) New Project...',
         command: COMMANDS.newProject,
       },
       {
-        label: '$(folder-opened) Open a Closed Project...',
+        // "Open", not "Open a Closed": a project you can open from here is one
+        // that is not in the sidebar, and the picker behind it says so.
+        label: '$(folder-opened) Open Project...',
         command: COMMANDS.reopenProject,
       },
     );
 
-    group('Sections');
-    if (state === undefined || !state.accountsSection) {
-      items.push({
-        label: '$(account) Show Accounts Section',
-        description: 'A second section in the sidebar, below the sessions',
-        command: COMMANDS.showAccountsSection,
-      });
-    }
-    if (state === undefined || state.accountsSection) {
-      items.push({
-        label: '$(account) Hide Accounts Section',
-        description: "Moves Flock's buttons up onto the FLOCK row",
-        command: COMMANDS.hideAccountsSection,
-      });
-    }
-    if (state === undefined || !state.shellsSection) {
-      items.push({
-        label: '$(terminal) Show Shells Section',
-        description: 'One row per command your sessions are running',
-        command: COMMANDS.showShellsSection,
-      });
-    }
-    if (state === undefined || state.shellsSection) {
-      items.push({
-        label: '$(terminal) Hide Shells Section',
-        description: 'The list goes; what your sessions run does not change',
-        command: COMMANDS.hideShellsSection,
-      });
-    }
+    group('');
+    top.push(
+      {
+        label: '$(plug) Hooks...',
+        description: hooksSummary(state),
+        submenu: 'hooks',
+      },
+      {
+        // STRAIGHT TO THE SETTINGS EDITOR, filtered to Flock — every setting,
+        // the advanced ones last in each group. Everything that is a setting
+        // (branch display, the Accounts and Shells sections, paths, timings)
+        // is edited there rather than mirrored here as a toggle.
+        label: '$(settings-gear) Settings...',
+        description: 'Every Flock setting, in the Settings editor',
+        command: COMMANDS.openSettings,
+      },
+      {
+        label: '$(sync) Refresh',
+        command: COMMANDS.refresh,
+      },
+    );
 
-    group('Hooks');
+    // THE TWO TASTE QUESTIONS AND THE CHECKLIST, at the bottom. Each
+    // picker entry names the answer this window has today, read through the
+    // picker's own function, so the sentence here and the “(current)” mark one
+    // click later can never disagree; an unwired world falls back to listing
+    // the choices.
+    group('Setup');
+    top.push({
+      label: '$(checklist) Recommended Setup...',
+      description: 'What to turn on, and why — you tick what you want',
+      command: COMMANDS.recommendedSetup,
+    });
+    const modelNow = safeCall('menuWindowModel', () => deps.windowModel?.());
+    top.push({
+      label: '$(window) Choose Window Model...',
+      description:
+        modelNow === undefined
+          ? 'One folder per project, Flock only, or auto-switch'
+          : `Currently “${modelNow}” — change it`,
+      command: COMMANDS.chooseWindowModel,
+    });
+    const surfaceNow = safeCall('menuSurface', () => deps.surface?.());
+    top.push({
+      label: '$(layout) Choose Where Sessions Open...',
+      description:
+        surfaceNow === undefined
+          ? 'One pinned tab, editor tabs, the Claude Code extension, the panel, or their own window'
+          : `Currently “${surfaceNow}” — change it`,
+      command: COMMANDS.chooseSurface,
+    });
+
+    const pick = async (
+      items: GearItem[],
+      placeHolder: string,
+    ): Promise<GearItem | undefined> =>
+      vscode.window.showQuickPick(items, { title: 'Flock', placeHolder });
+
+    let chosen = await pick(top, 'Sessions, projects and settings');
+    if (chosen?.submenu === 'hooks') {
+      chosen = await pick(hooksItems(state, grouper), 'Install or remove what Flock adds to the CLIs');
+    }
+    // A separator cannot be picked, so `command` is only ever absent on a host
+    // whose quick pick returns something this function did not put in.
+    if (!chosen?.command) return;
+    try {
+      await vscode.commands.executeCommand(chosen.command);
+    } catch (err) {
+      logError('commands.settingsMenu', err);
+    }
+  });
+
+  /** What the Hooks… door says without being opened: which of the installs are
+   *  in, or nothing when the wiring cannot tell. */
+  function hooksSummary(
+    state: ReturnType<NonNullable<CommandDeps['menuState']>> | undefined,
+  ): string | undefined {
+    if (state === undefined) return 'Session hooks and in-session verbs';
+    const on = [
+      state.hooksInstalled ? 'session hooks' : '',
+      state.codexHooksInstalled === true ? 'Codex hooks' : '',
+      state.verbsInstalled === true ? 'verbs' : '',
+    ].filter((s) => s !== '');
+    return on.length === 0 ? 'Nothing installed' : `Installed: ${on.join(', ')}`;
+  }
+
+  /** The second level behind Hooks…: the three installs, each offered the one
+   *  way it can go. */
+  function hooksItems(
+    state: ReturnType<NonNullable<CommandDeps['menuState']>> | undefined,
+    grouper: (items: (vscode.QuickPickItem & { command?: string })[]) => (label: string) => void,
+  ): (vscode.QuickPickItem & { command?: string })[] {
+    const hooksKnown = state !== undefined;
+    const items: (vscode.QuickPickItem & { command?: string })[] = [];
+    const group = grouper(items);
+    group('Session Hooks');
     if (!hooksKnown || state?.hooksInstalled === false) {
       items.push({
         label: '$(plug) Install Session Hooks',
@@ -11965,26 +12036,8 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         command: COMMANDS.removeAgentVerbs,
       });
     }
-
-    group('');
-    items.push({
-      label: '$(sync) Refresh',
-      command: COMMANDS.refresh,
-    });
-
-    const chosen = await vscode.window.showQuickPick(items, {
-      title: 'Flock',
-      placeHolder: 'Settings and housekeeping',
-    });
-    // A separator cannot be picked, so `command` is only ever absent on a host
-    // whose quick pick returns something this function did not put in.
-    if (!chosen?.command) return;
-    try {
-      await vscode.commands.executeCommand(chosen.command);
-    } catch (err) {
-      logError('commands.settingsMenu', err);
-    }
-  });
+    return items;
+  }
 
   register(COMMANDS.showAccountsSection, 'show the accounts section', async () => {
     await deps.setAccountsSection(true);
@@ -12479,15 +12532,25 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   // directory row carries its project's id and must not be mistaken for the
   // project itself: that would start the session in the project's first
   // directory rather than the one whose button was clicked.
+  //
+  // A second argument names the account outright — the sidebar's inline menu
+  // has already asked — and skips the picker. Re-checked against the
+  // launchable set rather than trusted, so a stale menu cannot start a session
+  // on an account that has since been removed or cannot host one.
   register(
     COMMANDS.newSessionFromPicker,
     'new session from account',
-    async (arg?: unknown) => {
+    async (arg?: unknown, accountArg?: unknown) => {
+      const preset = (): AccountProfile | undefined => {
+        if (typeof accountArg !== 'string' || accountArg === '') return undefined;
+        const profile = deps.accounts?.getAccount(accountArg);
+        return profile !== undefined && canHostSession(profile) ? profile : undefined;
+      };
       const sub = subprojectArgOf(arg);
       if (sub) {
         const project = deps.getProject(sub.projectId);
         if (!project) return;
-        const profile = await pickAccount(
+        const profile = preset() ?? await pickAccount(
           deps,
           `Start a session in ${project.name} on which account?`,
           { launchable: true },
@@ -12504,7 +12567,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       if (!id) return;
       const project = deps.getProject(id);
       if (!project) return;
-      const profile = await pickAccount(
+      const profile = preset() ?? await pickAccount(
         deps,
         `Start a session in ${project.name} on which account?`,
         { launchable: true },
