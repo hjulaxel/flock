@@ -757,6 +757,26 @@
           "group": "navigation@0"
         },
         {
+          "command": "lineage.showOnlyActiveSessions",
+          "when": "view == lineageSessions && !lineage.onlyActive",
+          "group": "navigation@2"
+        },
+        {
+          "command": "lineage.showAllSessions",
+          "when": "view == lineageSessions && lineage.onlyActive",
+          "group": "navigation@2"
+        },
+        {
+          "command": "lineage.showOnlyActiveSessions",
+          "when": "view == lineageSessionsInline && !lineage.onlyActive",
+          "group": "navigation@2"
+        },
+        {
+          "command": "lineage.showAllSessions",
+          "when": "view == lineageSessionsInline && lineage.onlyActive",
+          "group": "navigation@2"
+        },
+        {
           "command": "lineage.forkActiveSession",
           "when": "view == lineageSessions && lineage.hasForkable",
           "group": "navigation@3"

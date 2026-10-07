@@ -9687,7 +9687,6 @@ describe('the gear menu', () => {
   it('opens on the short first screen, in the order the design reads', async () => {
     const { offered } = await openGear(known());
     expect(offered).toEqual([
-      'Show Only Active Sessions',
       'Restore Archived Session...',
       'Import Previous Sessions...',
       'Archive Stale Sessions...',
@@ -9702,10 +9701,13 @@ describe('the gear menu', () => {
     ]);
   });
 
-  it('labels the session filter with the way it goes', async () => {
-    const filtered = await openGear(known({ onlyActive: true }));
-    expect(filtered.offered[0]).toBe('Show All Sessions');
-    expect(filtered.offered).not.toContain('Show Only Active Sessions');
+  // The active-only filter is a title-row button now, either way it is set.
+  it('leaves the session filter to the title row', async () => {
+    for (const onlyActive of [true, false]) {
+      const { offered } = await openGear(known({ onlyActive }));
+      expect(offered).not.toContain('Show All Sessions');
+      expect(offered).not.toContain('Show Only Active Sessions');
+    }
   });
 
   it('runs a first-screen verb directly', async () => {

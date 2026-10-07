@@ -11846,21 +11846,9 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     const top: GearItem[] = [];
     const group = grouper(top);
 
+    // The active-only filter is not here: it is a button on the title row,
+    // where its icon says which way it is set.
     group('Sessions');
-    if (state === undefined || state.onlyActive) {
-      top.push({
-        label: '$(filter-filled) Show All Sessions',
-        description: 'Closed rows come back',
-        command: COMMANDS.showAllSessions,
-      });
-    }
-    if (state === undefined || !state.onlyActive) {
-      top.push({
-        label: '$(filter) Show Only Active Sessions',
-        description: 'Hide every session that has stopped',
-        command: COMMANDS.showOnlyActiveSessions,
-      });
-    }
     top.push(
       {
         label: '$(history) Restore Archived Session...',
