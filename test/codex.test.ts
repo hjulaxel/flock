@@ -30,6 +30,9 @@ import {
   codexFallbackBinDirs,
   matchRollout,
   matchPendingCodexLaunches,
+  codexRolloutOwner,
+  matchRolloutForHunt,
+  currentRollout,
   readRolloutMeta,
   scanRollouts,
   sessionIdOfRollout,
@@ -500,6 +503,56 @@ describe('delayed Codex launch recovery', () => {
   });
 });
 
+describe('two hunts in one folder: the newest spawn owns the rollout', () => {
+  const T = Date.parse('2026-10-02T23:01:39Z');
+  const dir = '/profiles/magma/sessions';
+  const cwd = '/code/basalt';
+  // The 2026-10-02 incident: 5f911dd2 was reopened at 23:01:39 (its hunt ran
+  // for thirty seconds), 7407f447 started at 23:01:52, and its rollout was
+  // born at 23:01:54.
+  const reopened = { sessionId: ID_A, cwd, spawnedAt: T, sessionsDir: dir };
+  const fresh = { sessionId: ID_B, cwd, spawnedAt: T + 13_000, sessionsDir: dir };
+  const ROLLOUT = '01a0feda-4c2f-7e10-9767-9e4911fca942';
+  const rollout: RolloutMeta = { sessionId: ROLLOUT, cwd,
+    path: `${dir}/2026/10/03/rollout-${ROLLOUT}.jsonl`,
+    startedAt: T + 15_000, endedAt: T + 15_000, bytes: 1, originator: 'codex-tui' };
+  const opts = { windowMs: 30_000 };
+
+  it('codexRolloutOwner picks the launch spawned last before the file', () => {
+    expect(codexRolloutOwner([reopened, fresh], rollout)).toBe(ID_B);
+    expect(codexRolloutOwner([reopened], rollout)).toBe(ID_A);
+  });
+
+  it('a launch spawned AFTER the file, or in another folder or store, cannot own it', () => {
+    expect(codexRolloutOwner([reopened, { ...fresh, spawnedAt: T + 20_000 }], rollout)).toBe(ID_A);
+    expect(codexRolloutOwner([reopened, { ...fresh, cwd: '/code/other' }], rollout)).toBe(ID_A);
+    expect(codexRolloutOwner([reopened, { ...fresh, sessionsDir: '/profiles/personal/sessions' }], rollout))
+      .toBe(ID_A);
+  });
+
+  it('replays the incident: the older hunt passes the file over, the new launch takes it', () => {
+    const hunts = [reopened, fresh];
+    expect(matchRolloutForHunt([rollout], reopened, hunts, opts)).toBeNull();
+    expect(matchRolloutForHunt([rollout], fresh, hunts, opts)?.sessionId).toBe(ROLLOUT);
+  });
+
+  it('a passed-over file does not hide a later one this hunt does own', () => {
+    // A launch with no cwd (window-scoped) matches any folder, so the other
+    // folder's file comes first and has to be passed over to reach its own.
+    const anywhere = { sessionId: ID_A, spawnedAt: T, sessionsDir: dir };
+    const elsewhere = { sessionId: ID_B, cwd: '/code/other', spawnedAt: T + 1_000, sessionsDir: dir };
+    const theirs: RolloutMeta = { ...rollout, sessionId: '01a0feda-0cb5-7180-9d0f-068086577871',
+      cwd: '/code/other', path: `${dir}/2026/10/03/rollout-theirs.jsonl`, startedAt: T + 2_000 };
+    const mine: RolloutMeta = { ...rollout, startedAt: T + 3_000 };
+    expect(matchRolloutForHunt([theirs, mine], anywhere, [anywhere, elsewhere], opts)?.sessionId)
+      .toBe(ROLLOUT);
+  });
+
+  it('once the newer hunt has ended, the file is the older hunt’s to take again', () => {
+    expect(matchRolloutForHunt([rollout], reopened, [reopened], opts)?.sessionId).toBe(ROLLOUT);
+  });
+});
+
 describe('store paths', () => {
   it('codexSessionsDir and codexAuthPath hang off the given home', () => {
     expect(codexSessionsDir('/tmp/ch')).toBe(path.join('/tmp/ch', 'sessions'));
@@ -882,5 +935,30 @@ describe('codexRowIds: one row per CONVERSATION, not per id', () => {
         facts({ sessionId: GEN_2, windowStamped: true, updatedAtMs: 1 }),
       ]),
     ).toEqual([GEN_2]);
+  });
+});
+
+describe('currentRollout: the file a conversation is writing now', () => {
+  // The chain from 2026-10-02/05: a reopen's meta-only file first, an old
+  // finished turn after it, then tonight's relaunch.
+  const old0 = { sessionId: '01a0feda-0cb5-7180-9d0f-068086577871', startedAt: 1, endedAt: 50 };
+  const old1 = { sessionId: '01a0feda-4c2f-7e10-9767-9e4911fca942', startedAt: 2, endedAt: 40 };
+  const now = { sessionId: '01a1091d-ac71-7583-8d7a-d88f6e03ece2', startedAt: 9, endedAt: 30 };
+  const aliases = [ID_A, old0.sessionId, old1.sessionId, now.sessionId];
+
+  it('picks the generation started last, wherever it sits in the chain', () => {
+    expect(currentRollout(aliases, [old0, old1, now])?.sessionId).toBe(now.sessionId);
+    expect(currentRollout([...aliases].reverse(), [now, old1, old0])?.sessionId).toBe(now.sessionId);
+  });
+
+  it('ignores files outside the conversation, and answers undefined when it owns none', () => {
+    expect(currentRollout([old0.sessionId], [old0, now])?.sessionId).toBe(old0.sessionId);
+    expect(currentRollout([ID_A], [old0, now])).toBeUndefined();
+  });
+
+  it('breaks a start-time tie, or a missing start, by the newer write', () => {
+    const a = { sessionId: ID_A, endedAt: 1 };
+    const b = { sessionId: ID_B, endedAt: 2 };
+    expect(currentRollout([ID_A, ID_B], [a, b])?.sessionId).toBe(ID_B);
   });
 });

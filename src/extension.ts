@@ -108,6 +108,7 @@ import {
   respawnTmuxPane,
   sessionIdOfTmuxName,
   tmuxAdvice,
+  tmuxSessionName,
   tmuxInstallHint,
 } from './tmux';
 import {
@@ -148,13 +149,15 @@ import {
 import {
   codexRowIds,
   matchPendingCodexLaunches,
+  matchRolloutForHunt,
+  currentRollout,
   codexSessionsDir,
   readCodexSessionNames,
   findCodexBinary,
   matchRollout,
   scanRollouts,
 } from './codex';
-import type { CodexRowFacts, RolloutMeta, PendingCodexLaunch } from './codex';
+import type { CodexHunt, CodexRowFacts, RolloutMeta, PendingCodexLaunch } from './codex';
 import { CodexCompletionTracker, CodexTranscriptCache, readFirstCodexPrompt } from './codexTranscript';
 import { CodexHooksManager } from './codexHooks';
 import { searchRoots } from './relocate';
@@ -758,6 +761,14 @@ export async function activate(
   };
   const tmuxSpawn = (): TmuxSpawn | null =>
     resolveTmuxSpawn(cfg().get<string>(CONFIG_KEYS.tmux), tmuxConfPath);
+  /** Is this wrap running right now? False when launches are not wrapped, and
+   *  when tmux cannot answer — that keeps the launch's rollout hunt on, which
+   *  is the behaviour from before the question was asked. */
+  const codexWrapIsAlive = async (name: string): Promise<boolean> => {
+    const binary = tmuxSpawn()?.binary;
+    if (binary === undefined) return false;
+    return (await listTmuxSessions(binary)).includes(name);
+  };
 
   // One-time nudges about the detach tier. The decision is `tmuxAdvice` in
   // src/tmux.ts, pure and tested; this only supplies the world and acts on the
@@ -1415,11 +1426,8 @@ export async function activate(
   const codexCompletions = new CodexCompletionTracker();
   context.subscriptions.push(statsCache, codexStatsCache, codexCompletions);
   const codexReadingFor = (id: string) => {
-    for (const alias of chainAliases(id)) {
-      const file = codexArchived().find((s) => s.sessionId === alias)?.transcriptPath;
-      if (file !== undefined) return codexStatsCache.get(file);
-    }
-    return undefined;
+    const file = currentRollout(chainAliases(id), codexArchived())?.transcriptPath;
+    return file === undefined ? undefined : codexStatsCache.get(file);
   };
 
   /**
@@ -6752,6 +6760,12 @@ export async function activate(
       // rollout older than this, and a reading taken after the terminal came
       // up would be later than the header stamp of the very file it is looking
       // for.
+      // A Codex launch whose tmux wrap is still alive only ATTACHES to it: no
+      // codex process starts, so no rollout will be written for it. Asked
+      // before the launch, because afterwards the session exists either way.
+      const attachesLiveCodex =
+        launchOpts.provider === 'codex' &&
+        (await codexWrapIsAlive(launchOpts.tmuxName ?? tmuxSessionName(opts.sessionId)));
       const spawnedAt = Date.now();
       const binding = await registry.launch(launchOpts);
       // The second tab in a window is the moment the surface question becomes
@@ -6809,7 +6823,16 @@ export async function activate(
         // a future `resume` might) writes one, and the watcher re-keys onto it.
         // Exempting resumes would get the first case right by luck and the
         // second wrong for good.
-        adoptCodexSession(opts.sessionId, launchOpts, spawnedAt);
+        //
+        // Except a reattach to a live wrap (attachesLiveCodex). It starts no
+        // process, and its hunt is not harmless: for thirty seconds it would
+        // take the rollout of any NEW session started in the same folder,
+        // since nothing of its own will ever arrive to fill the window.
+        if (attachesLiveCodex) {
+          log('codex: reattached', shortId(opts.sessionId), 'to its running wrap — no rollout to look for');
+        } else {
+          adoptCodexSession(opts.sessionId, launchOpts, spawnedAt);
+        }
       }
       return binding;
     },
@@ -8257,6 +8280,11 @@ export async function activate(
    * simply does not get its archived twin. That is a worse row, not a wrong
    * one, which is the correct direction to fail in.
    */
+  /** Every launch still looking for its rollout, by provisional id. Shared so
+   *  that two hunts in one folder settle a file between them by
+   *  codexRolloutOwner instead of by whichever polls first. */
+  const codexHunts = new Map<string, CodexHunt>();
+
   const adoptCodexSession = (
     provisionalId: string,
     opts: LaunchOptions,
@@ -8266,13 +8294,38 @@ export async function activate(
       opts.env?.[CODEX_HOME_ENV] ?? undefined,
     );
     const deadline = spawnedAt + CODEX_ADOPT_WINDOW_MS;
+    const hunt: CodexHunt = {
+      sessionId: provisionalId,
+      spawnedAt,
+      sessionsDir,
+      ...(typeof opts.cwd === 'string' && opts.cwd !== '' ? { cwd: opts.cwd } : {}),
+    };
+    // A second launch of the same row (a reopen inside the window) replaces
+    // this hunt; the older one sees that and stops.
+    codexHunts.set(provisionalId, hunt);
+    const finish = (): void => {
+      if (codexHunts.get(provisionalId) === hunt) codexHunts.delete(provisionalId);
+    };
 
     const attempt = (): void => {
+      if (codexHunts.get(provisionalId) !== hunt) return;
       if (Date.now() > deadline) {
+        finish();
         log(
           'codex: no rollout matched the launch of',
           shortId(provisionalId),
           '— the row keeps its provisional id',
+        );
+        return;
+      }
+      // A closed tab has no process left to write a rollout. Hunting on would
+      // only hand this closed row the next session started in the folder.
+      if (!registry.isBoundHere(provisionalId)) {
+        finish();
+        log(
+          'codex: stopped looking for the rollout of',
+          shortId(provisionalId),
+          '— its tab is closed',
         );
         return;
       }
@@ -8284,16 +8337,11 @@ export async function activate(
         for (const [id, rec] of Object.entries(store.all())) {
           if (rec?.provider === 'codex' && id !== provisionalId) taken.add(id);
         }
-        hit = matchRollout(
+        hit = matchRolloutForHunt(
           scanRollouts({ sessionsDirs: [sessionsDir], maxAgeDays: 1 }),
-          {
-            spawnedAt,
-            taken,
-            windowMs: CODEX_ADOPT_WINDOW_MS,
-            ...(typeof opts.cwd === 'string' && opts.cwd !== ''
-              ? { cwd: opts.cwd }
-              : {}),
-          },
+          hunt,
+          [...codexHunts.values()],
+          { taken, windowMs: CODEX_ADOPT_WINDOW_MS },
         );
       } catch (err) {
         logError('extension.adoptCodexSession', err);
@@ -8306,6 +8354,7 @@ export async function activate(
         return;
       }
 
+      finish();
       const realId = hit.sessionId;
       log(
         'codex: adopting',

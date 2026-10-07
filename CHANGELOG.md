@@ -12,6 +12,30 @@ All notable changes to Flock are recorded here. The format follows
   Project and fork, and no longer in the gear menu. Its icon is filled while
   closed sessions are hidden, so you can see at a glance which way it is set.
 
+### Fixed
+
+- **Reopening a Codex session no longer takes the next session's
+  conversation.** Codex picks its own session id, so after every Codex launch
+  Flock watched the folder for thirty seconds and claimed the first new
+  conversation file to appear. A reopen did this too, and a reopen that only
+  reconnects to a running session starts no process, so the first file to
+  appear was always someone else's. On 2026-10-02 a session was reopened, then
+  closed, and a new one was started ten seconds later; the closed row took the
+  new session's conversation. The new row was left with no transcript, so
+  resuming it found nothing, and closing one row could act on the other.
+
+  Flock now skips the watch when a reopen reconnects to a session that is
+  still running, stops watching when the tab is closed, and when two launches
+  in one folder are watching at once, gives the file to the one started most
+  recently before it.
+
+- **A Codex row's dot and age follow the conversation file being written
+  now.** A Codex conversation that has been relaunched owns several files,
+  and the row read the oldest of them. Its age then showed when that first
+  file ended, and the dot moved only on hook events. If a turn ended without a
+  hook reporting it, or Codex hooks were off, the dot kept the old file's
+  status. The row now reads the file started last.
+
 ## [0.16.0] — 2026-10-07
 
 ### Changed

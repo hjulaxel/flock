@@ -771,6 +771,101 @@ export function matchRollout(
   return best;
 }
 
+/** One launch still looking for its rollout (see adoptCodexSession). */
+export interface CodexHunt {
+  sessionId: string;
+  cwd?: string;
+  spawnedAt: number;
+  sessionsDir: string;
+}
+
+/**
+ * Which of the hunts still running owns this rollout: the one whose spawn came
+ * LAST before the file was born, among those that could have produced it
+ * (same store, same directory).
+ *
+ * Every hunt alone would accept any unclaimed rollout in its window, so two
+ * launches in one folder inside thirty seconds both qualify, and the first to
+ * poll took the file. That is how a reopen that started no process at all took
+ * the next new session's conversation. The newest spawn is the honest owner: a
+ * rollout is written by the process started most recently before it.
+ */
+export function codexRolloutOwner(
+  hunts: readonly CodexHunt[],
+  meta: RolloutMeta,
+): string | undefined {
+  const startedAt = meta.startedAt;
+  if (typeof startedAt !== 'number' || !Number.isFinite(startedAt)) return undefined;
+  const file = normalizeDir(meta.path);
+  const got = normalizeDir(meta.cwd);
+  let owner: CodexHunt | undefined;
+  for (const hunt of hunts) {
+    const root = normalizeDir(hunt.sessionsDir);
+    if (root === undefined || file === undefined || !file.startsWith(root + '/')) continue;
+    const want = normalizeDir(hunt.cwd);
+    if (want !== undefined && want !== got) continue;
+    // The same second of clock slack matchRollout allows.
+    if (hunt.spawnedAt - 1000 > startedAt) continue;
+    if (owner === undefined || hunt.spawnedAt > owner.spawnedAt) owner = hunt;
+  }
+  return owner?.sessionId;
+}
+
+/**
+ * matchRollout for one hunt among several: a candidate another running hunt
+ * owns (codexRolloutOwner) is passed over, and the next one is tried. Asked
+ * afresh on every poll, so a rollout yielded to a hunt that then ends is
+ * available again.
+ */
+export function matchRolloutForHunt(
+  candidates: readonly RolloutMeta[],
+  me: CodexHunt,
+  hunts: readonly CodexHunt[],
+  opts: Omit<MatchRolloutOptions, 'cwd' | 'spawnedAt'>,
+): RolloutMeta | null {
+  const taken = new Set(opts.taken ?? []);
+  for (let i = 0; i <= candidates.length; i++) {
+    const hit = matchRollout(candidates, {
+      ...opts,
+      taken,
+      spawnedAt: me.spawnedAt,
+      ...(me.cwd !== undefined ? { cwd: me.cwd } : {}),
+    });
+    if (hit === null) return null;
+    const owner = codexRolloutOwner(hunts, hit);
+    if (owner === undefined || owner === me.sessionId) return hit;
+    taken.add(hit.sessionId);
+  }
+  return null;
+}
+
+/**
+ * The rollout a conversation is writing NOW: of the files its generations own,
+ * the one started last, then the one written last.
+ *
+ * A conversation can own several rollouts (a relaunch opens a new one), and
+ * only the newest is being written. Taking the first alias that had a file
+ * read the OLDEST, so the row's age and its tail status came from a turn that
+ * ended long ago, and only the hook marks moved the dot. A turn whose end no
+ * hook reported, or a machine with Codex hooks off, left the dot wherever the
+ * old file had it.
+ */
+export function currentRollout<T extends { sessionId: string; startedAt?: number; endedAt: number }>(
+  aliases: readonly string[],
+  sessions: readonly T[],
+): T | undefined {
+  const wanted = new Set(aliases);
+  let best: T | undefined;
+  for (const s of sessions) {
+    if (!wanted.has(s.sessionId)) continue;
+    if (best === undefined) { best = s; continue; }
+    const sa = s.startedAt ?? -Infinity;
+    const ba = best.startedAt ?? -Infinity;
+    if (sa > ba || (sa === ba && s.endedAt > best.endedAt)) best = s;
+  }
+  return best;
+}
+
 export interface PendingCodexLaunch {
   sessionId: string;
   cwd: string;
