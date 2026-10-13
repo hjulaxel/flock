@@ -6,6 +6,8 @@ All notable changes to Flock are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-10-14
+
 ### Added
 
 - **Sessions run on the Antigravity CLI, so you can use Gemini in Flock.**
