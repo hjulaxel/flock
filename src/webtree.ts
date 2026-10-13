@@ -726,6 +726,9 @@ export class LineageWebtreeProvider implements vscode.WebviewViewProvider {
       grouping: this.grouping(forest),
       collapsed: this.collapsed,
       providerFor: (id) => this.deps.providerFor(id),
+      ...(this.deps.sessionCli === undefined
+        ? {}
+        : { sessionCli: (id: string) => this.deps.sessionCli?.(id) }),
       isBoundHere: (id) => this.deps.isBoundHere(id),
       // Optional all the way down: an unwired dep leaves every row 'hosted',
       // which is the sidebar as it looked before ownership existed.

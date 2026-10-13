@@ -1229,6 +1229,9 @@ export function migrateState(raw: unknown): LineageState {
   const codexHook = sanitizeHookState(working.codexHookInstall);
   if (codexHook) out.codexHookInstall = codexHook;
   else delete out.codexHookInstall;
+  const agyHook = sanitizeHookState(working.antigravityHookInstall);
+  if (agyHook) out.antigravityHookInstall = agyHook;
+  else delete out.antigravityHookInstall;
 
   out.version = STATE_SCHEMA_VERSION;
   return out as unknown as LineageState;
@@ -1504,6 +1507,9 @@ export function mergeStates(
   const codexHook = newerHookState(disk.codexHookInstall, mem.codexHookInstall);
   if (codexHook) out.codexHookInstall = codexHook;
   else delete out.codexHookInstall;
+  const agyHook = newerHookState(disk.antigravityHookInstall, mem.antigravityHookInstall);
+  if (agyHook) out.antigravityHookInstall = agyHook;
+  else delete out.antigravityHookInstall;
 
   out.version = STATE_SCHEMA_VERSION;
   return out as unknown as LineageState;
@@ -1775,6 +1781,12 @@ export class StateStore implements DisposableLike {
   getCodexHookState(): HookInstallState {
     const c = this.memory.codexHookInstall;
     return c ? { ...c } : { installed: false };
+  }
+
+  /** The Antigravity hooks' install record, under its own key. */
+  getAntigravityHookState(): HookInstallState {
+    const a = this.memory.antigravityHookInstall;
+    return a ? { ...a } : { installed: false };
   }
 
   /** Every project, name-sorted. Hidden ones are INCLUDED — the tree filters,
@@ -2481,6 +2493,13 @@ export class StateStore implements DisposableLike {
     const clean = sanitizeHookState(s) ?? { installed: false };
     return this.enqueue((state, stamp) => {
       state.codexHookInstall = { ...clean, updatedAt: stamp };
+    });
+  }
+
+  setAntigravityHookState(s: HookInstallState): Promise<void> {
+    const clean = sanitizeHookState(s) ?? { installed: false };
+    return this.enqueue((state, stamp) => {
+      state.antigravityHookInstall = { ...clean, updatedAt: stamp };
     });
   }
 

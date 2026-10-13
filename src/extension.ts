@@ -244,6 +244,18 @@ import {
   readTailStats,
   readTranscriptTail,
 } from './usage';
+import {
+  antigravityStatusOf,
+  findAntigravityBinary,
+  antigravityTranscriptOf as agyTranscriptFile,
+  isCliEvent as isAntigravityCliEvent,
+  listAntigravityHistory,
+  parseAntigravitySummaryReply,
+  planAntigravityId,
+  readAntigravityStats,
+  readFirstAntigravityPrompt,
+} from './antigravity';
+import { AntigravityHooksManager } from './antigravityHooks';
 import type { TranscriptStats } from './usage';
 // Close with Summary's read half: the pure parser that says which record in a
 // transcript is the compaction summary Flock just asked for. The wiring below
@@ -285,6 +297,7 @@ import {
   restoreEnvFor,
   seedDefaultProfiles,
   switchMovesNothing,
+  cliOfProvider,
 } from './accounts';
 // The byte half of an account switch: a conversation's transcript is portable
 // between config directories, and this is what moves it. Pure filesystem work,
@@ -721,6 +734,10 @@ export async function activate(
     findClaudeBinary(cfg().get<string>(CONFIG_KEYS.claudeBinary));
   const codexBin = (): string | null =>
     findCodexBinary(cfg().get<string>(CONFIG_KEYS.codexBinary));
+  /** The `agy` executable (lineage.antigravityBinary, then PATH and
+   *  ~/.local/bin). Same one-call contract as codexBin. */
+  const antigravityBin = (): string | null =>
+    findAntigravityBinary(cfg().get<string>(CONFIG_KEYS.antigravityBinary));
 
   const terminalLocation = (): TerminalLocationPref => {
     const v = cfg().get<string>(CONFIG_KEYS.terminalLocation);
@@ -1318,11 +1335,36 @@ export async function activate(
     return codexArchiveCache;
   };
 
-  /** One transcript lookup for verbs, history and lifecycle reads on either CLI. */
+  /** The ids in one archive list, as a set, rebuilt only when the scan hands
+   *  back a new array: this is asked for every row on every rebuild. */
+  const idSets = new WeakMap<readonly ArchivedSession[], Set<string>>();
+  const idsOf = (list: readonly ArchivedSession[]): Set<string> => {
+    let ids = idSets.get(list);
+    if (ids === undefined) {
+      ids = new Set(list.map((s) => s.sessionId));
+      idSets.set(list, ids);
+    }
+    return ids;
+  };
+  /** Every archived conversation from every CLI's store, one list. Just the
+   *  three sources concatenated; the readers behind each are cached. */
+  const archivedSessions = (): ArchivedSession[] => [
+    ...archiveIndexer.current(),
+    ...codexArchived(),
+    ...antigravityArchived(),
+  ];
+
+  /** One transcript lookup for verbs, history and lifecycle reads on any CLI. */
   const sessionTranscriptFile = (sessionId: string): string | null => {
     for (const id of chainAliases(sessionId)) {
       const codex = codexArchived().find((s) => s.sessionId === id);
       if (codex !== undefined) return codex.transcriptPath;
+      // Only for an id agy's own store lists: a stat per Claude alias on
+      // every lookup would be a filesystem call for nothing.
+      if (idsOf(antigravityArchived()).has(id) || store.get(id)?.provider === 'antigravity') {
+        const agy = antigravityTranscriptOf(id);
+        if (agy !== null) return agy;
+      }
       const file = transcriptFile(id, { extraProjectsDirs: profileProjectsDirs() });
       if (file !== null) return file;
     }
@@ -1345,12 +1387,56 @@ export async function activate(
    * Claude conversation in it, and each resume would hand `codex` a session id
    * it has never seen.
    */
+  // ------------------------------------------------- antigravity history
+  //
+  // agy's conversations, as archived rows: `~/.gemini/antigravity-cli/brain/
+  // <id>/…/transcript.jsonl` (src/antigravity.ts). Throttled like the Codex
+  // scan, because it runs on the roster cadence; one readdir and one stat per
+  // conversation, and nothing at all on a machine without agy.
+  let antigravityArchiveCache: ArchivedSession[] = [];
+  let lastAntigravityScan = 0;
+  const antigravityArchived = (): ArchivedSession[] => {
+    const now = Date.now();
+    if (lastAntigravityScan !== 0 && now - lastAntigravityScan < ARCHIVE_RESCAN_MIN_MS) {
+      return antigravityArchiveCache;
+    }
+    lastAntigravityScan = now;
+    try {
+      antigravityArchiveCache = listAntigravityHistory(os.homedir());
+    } catch (err) {
+      logError('extension.antigravityArchived', err);
+    }
+    return antigravityArchiveCache;
+  };
+  const antigravityTranscriptOf = (id: string): string | null =>
+    agyTranscriptFile(id, os.homedir());
+  /** Tail stats per transcript, re-read only when the file's stat moved: a
+   *  live row asks on every poll. */
+  const antigravityStatsCache = new Map<string, { key: string; stats: TranscriptStats }>();
+  const antigravityStatsOf = (file: string): TranscriptStats => {
+    let key = '';
+    try {
+      const st = fsSync.statSync(file);
+      key = `${String(st.mtimeMs)}:${String(st.size)}`;
+    } catch {
+      return {};
+    }
+    const hit = antigravityStatsCache.get(file);
+    if (hit !== undefined && hit.key === key) return hit.stats;
+    const stats = readAntigravityStats(file);
+    antigravityStatsCache.set(file, { key, stats });
+    return stats;
+  };
+
   const sessionProviderFor = (id: string): ProviderId | undefined => {
     try {
-      if (store.get(id)?.provider === 'codex') return 'codex';
-      return codexArchived().some((s) => s.sessionId === id)
-        ? 'codex'
-        : undefined;
+      const recorded = store.get(id)?.provider;
+      if (recorded === 'codex' || recorded === 'antigravity') return recorded;
+      if (idsOf(codexArchived()).has(id)) return 'codex';
+      // An agy conversation Flock did not launch has no record; which store
+      // its transcript sits in is the only thing that knows.
+      if (idsOf(antigravityArchived()).has(id)) return 'antigravity';
+      return undefined;
     } catch (err) {
       logError('extension.sessionProviderFor', err);
       return undefined;
@@ -1411,7 +1497,7 @@ export async function activate(
     // record, or `showArchived` is on — so the setting means the same thing
     // whichever CLI wrote the history.
     return keptArchived(
-      [...archiveIndexer.current(), ...codexArchived()],
+      archivedSessions(),
       liveIds,
       { showArchived, keepIds },
     );
@@ -1475,6 +1561,14 @@ export async function activate(
       activityMtimes.set(tip, reading?.mtimeMs ?? s.endedAt);
       if (reading !== undefined) out.set(tip, reading.stats);
     }
+    for (const s of antigravityArchived()) {
+      const tip = chainIndex.tipOf(s.sessionId);
+      if (!wanted.has(s.sessionId) && !wanted.has(tip)) continue;
+      if (out.has(tip) && s.sessionId !== tip) continue;
+      const stats = antigravityStatsOf(s.transcriptPath);
+      activityMtimes.set(tip, stats.lastRecordAt ?? s.endedAt);
+      out.set(tip, stats);
+    }
     statsCache.prune(wanted);
     codexStatsCache.prune(codexFiles);
     return { tailStats: out, activityMtimes };
@@ -1508,16 +1602,24 @@ export async function activate(
   let factsIndex: {
     from: readonly ArchivedSession[];
     codexFrom: readonly ArchivedSession[];
+    agyFrom: readonly ArchivedSession[];
     byId: Map<string, ArchivedSession>;
   } | null = null;
   const transcriptFacts = (sessionId: string): TranscriptFacts => {
     const all = archiveIndexer.current();
     const codex = codexArchived();
-    if (factsIndex === null || factsIndex.from !== all || factsIndex.codexFrom !== codex) {
+    const agy = antigravityArchived();
+    if (
+      factsIndex === null ||
+      factsIndex.from !== all ||
+      factsIndex.codexFrom !== codex ||
+      factsIndex.agyFrom !== agy
+    ) {
       factsIndex = {
         from: all,
         codexFrom: codex,
-        byId: new Map([...all, ...codex].map((s) => [s.sessionId, s] as const)),
+        agyFrom: agy,
+        byId: new Map([...all, ...codex, ...agy].map((s) => [s.sessionId, s] as const)),
       };
     }
     const entry = factsIndex.byId.get(sessionId);
@@ -1545,9 +1647,12 @@ export async function activate(
     }
     let prompt: string | undefined;
     try {
-      prompt = sessionProviderFor(sessionId) === 'codex'
+      const cli = sessionProviderFor(sessionId);
+      prompt = cli === 'codex'
         ? readFirstCodexPrompt(entry.transcriptPath)
-        : readFirstPrompt(entry.transcriptPath);
+        : cli === 'antigravity'
+          ? readFirstAntigravityPrompt(entry.transcriptPath)
+          : readFirstPrompt(entry.transcriptPath);
     } catch (err) {
       // readFirstPrompt swallows its own io errors; this is the belt to that
       // brace, because a picker must never fail to open over a bad file.
@@ -2062,6 +2167,7 @@ export async function activate(
   const registry = new TerminalRegistry({
     claudeBinary: () => claudeBin(),
     codexBinary: () => codexBin(),
+    antigravityBinary: () => antigravityBin(),
     terminalLocation,
     tmux: tmuxSpawn,
     // Claude's REAL pid inside a wrapped session (the terminal's own pid is
@@ -3001,7 +3107,8 @@ export async function activate(
     // the project fallback, because it is evidence rather than inheritance:
     // this session really is a Codex one, whatever the project it sits in is
     // set to.
-    if (sessionProviderFor(sessionId) === 'codex') return 'codex';
+    const fromStore = sessionProviderFor(sessionId);
+    if (fromStore !== undefined) return fromStore;
     const cwd = forest.nodes.get(sessionId)?.cwd ?? record?.cwd;
     // Through claimantOf, so the glyph is decided by the same ownership rule
     // that decided the ROW the session is filed under — including worktree
@@ -3160,6 +3267,10 @@ export async function activate(
     // directory now, so a project row no longer drags and neither view resolves
     // the drop.
     providerFor,
+    // Which CLI wrote each conversation, from its record or the store its
+    // transcript is in, never from the project: it decides which verbs a row
+    // gets (Move to Account… is Claude's alone). See ViewModelInput.sessionCli.
+    sessionCli: (id) => cliOfProvider(sessionProviderFor(id) ?? 'claude'),
     mediaPath,
     // Dropping a session onto a project row teaches the project the directory
     // that session runs in — membership is derived from cwd, so there is
@@ -3356,6 +3467,19 @@ export async function activate(
     at: number;
   }
   const codexActivity = new Map<string, CodexActivityMark>();
+  /** The same for Antigravity, from its own hook events (antigravityStatusOf).
+   *  agy never says waiting, so a mark is busy or idle. */
+  const antigravityActivity = new Map<string, { status: 'busy' | 'idle'; at: number }>();
+  /** The newest mark across the conversation's generations, because a row
+   *  keyed on Flock's launch id is the same conversation agy named later. */
+  const antigravityStatusFor = (id: string): string | undefined => {
+    let mark: { status: 'busy' | 'idle'; at: number } | undefined;
+    for (const alias of chainAliases(id)) {
+      const m = antigravityActivity.get(alias);
+      if (m && (mark === undefined || m.at > mark.at)) mark = m;
+    }
+    return mark?.status;
+  };
 
   // The Codex half (src/codexHooks.ts): entries merged into every Codex
   // home's hooks.json — the machine's own and one per Codex account with its
@@ -3402,6 +3526,23 @@ export async function activate(
     return codexBin() !== null;
   };
 
+  // The Antigravity half (src/antigravityHooks.ts): a plugin folder at
+  // ~/.gemini/config/plugins/flock. Same events file, same watcher.
+  const antigravityHooksManager = new AntigravityHooksManager({
+    getStored: () => store.getAntigravityHookState(),
+    setStored: (s) => store.setAntigravityHookState(s),
+  });
+  context.subscriptions.push(antigravityHooksManager);
+  try {
+    await antigravityHooksManager.selfHeal();
+  } catch (err) {
+    logError('extension.antigravityHooks.selfHeal', err);
+  }
+  /** Is there an agy to hook? Never on win32: the hook is a /bin/sh line and
+   *  an agy hook entry cannot name a shell. */
+  const antigravityHooksAvailable = (): boolean =>
+    process.platform !== 'win32' && antigravityBin() !== null;
+
   /**
    * Can a CODEX session's permission prompt reach Flock at all?
    *
@@ -3437,6 +3578,78 @@ export async function activate(
     }
   };
 
+  /**
+   * agy names its own conversation and its first hook reports it, carrying the
+   * LINEAGE_NODE_ID the launch stamped: `nodeId` is the id Flock bound the tab
+   * under, `realId` the conversation agy opened in it. planAntigravityId says
+   * whether that is an ADOPTION (a fresh launch: the row moves, as the Codex
+   * settle moves one) or a FORK (`/fork` inside agy: a child row with a parent
+   * edge, and the tab follows it).
+   *
+   * `antigravityBound` remembers which id each launch's tab is on now. A
+   * reload forgets it, and the chain tip stands in.
+   */
+  const antigravityBound = new Map<string, string>();
+  const adoptAntigravityId = (nodeId: string, realId: string): void => {
+    const launch = store.get(nodeId);
+    const chain = store.getChains().find((c) => c.members.includes(nodeId));
+    const current =
+      antigravityBound.get(nodeId) ?? chain?.members[chain.members.length - 1] ?? nodeId;
+    const plan = planAntigravityId({
+      launchProvider: launch?.provider,
+      nodeId,
+      current,
+      realId,
+      currentHasTranscript: antigravityTranscriptOf(current) !== null,
+    });
+    if (plan.kind === 'none' || launch === undefined) return;
+    antigravityBound.set(nodeId, realId);
+    const from = store.get(current) ?? launch;
+    const patch: Record<string, unknown> = { provider: 'antigravity', launchedByUs: true };
+    if (typeof from.cwd === 'string' && from.cwd !== '') patch.cwd = from.cwd;
+    if (plan.kind === 'fork') {
+      patch.parentId = plan.parent;
+      patch.parentSource = 'minted';
+    }
+    // An ADOPTION is the same row under its real name, so everything the user
+    // did to it before the first hook (closed it, parked it, read it) moves
+    // with it, as the Codex recovery carries it. A fork is a new row.
+    if (plan.kind === 'adopt') {
+      for (const key of ['title', 'closed', 'graceUntil', 'stowedBySwitch', 'touchedAt', 'doneAt', 'seenAt'] as const) {
+        const value = from[key];
+        if (value !== undefined && value !== null) patch[key] = value;
+      }
+    }
+    void store.upsert(realId, patch);
+    if (from.profileId !== undefined) void store.setSessionProfile(realId, from.profileId);
+    const lane = store.getSessionSubproject(current);
+    if (lane !== undefined) void store.setSessionSubproject(realId, lane);
+    if (plan.kind === 'adopt') void store.appendChainMember(current, realId);
+    // Rebind whichever id this window's tab is actually under. After a reload
+    // a revived terminal is re-associated under its env stamp (the launch id),
+    // not the chain tip, so `current` is not always the bound one.
+    const bound = [current, nodeId, ...(chain?.members ?? [])].find((id) =>
+      registry.isBoundHere(id),
+    );
+    if (bound === undefined) return; // the tab is in another window, or gone
+    registry.rebind(bound, realId);
+    // Hand the liveness over, as the Codex settle does: the old id keeps no
+    // window stamp, and a tmux claim moves with the process.
+    const handover: Record<string, unknown> = { boundWindowId: null };
+    if (typeof from.tmux === 'string' && from.tmux !== '') {
+      void store.upsert(realId, { tmux: from.tmux });
+      handover.tmux = null;
+    }
+    void store.upsert(bound, handover);
+    log(
+      `antigravity: ${plan.kind === 'fork' ? 'fork' : 'adopting'}`,
+      shortId(realId),
+      plan.kind === 'fork' ? 'from' : 'for the launch bound as',
+      shortId(current),
+    );
+    refreshNow();
+  };
+
   const hookEventSink = (e: HookEvent): void => {
     if (e.sessionId) resolver.invalidate(e.sessionId);
     // Re-key. The hook inherited LINEAGE_NODE_ID from a terminal WE
@@ -3450,7 +3663,20 @@ export async function activate(
     // Exception: `source: 'fork'` is a NEW BRANCH, not a re-key. Chaining
     // it would collapse the parent into its own fork — the parent edge comes
     // from the daemon roster (or the transcript marker) instead.
-    if (
+    //
+    // Antigravity takes its own path: agy names its conversation in its first
+    // hook, and a `/fork` changes the id under the same LINEAGE_NODE_ID with no
+    // `source` to say so. adoptAntigravityId tells the two apart.
+    const agy = e.cli === 'antigravity';
+    if (agy) {
+      if (e.sessionId && e.nodeId && isAntigravityCliEvent(e)) {
+        try {
+          adoptAntigravityId(e.nodeId, e.sessionId);
+        } catch (err) {
+          logError('extension.adoptAntigravityId', err);
+        }
+      }
+    } else if (
       e.sessionId &&
       e.nodeId &&
       e.nodeId !== e.sessionId &&
@@ -3458,12 +3684,23 @@ export async function activate(
     ) {
       void store.appendChainMember(e.nodeId, e.sessionId);
     }
+    // ---- antigravity status --------------------------------------------
+    if (agy && e.sessionId) {
+      const mark = antigravityStatusOf(e);
+      if (mark !== undefined) {
+        antigravityActivity.set(e.sessionId, { status: mark.status === 'idle' ? 'idle' : 'busy', at: mark.at });
+        pokeNow();
+      }
+    }
     // Stop is the turn ending, right now — the poll transition would say
     // the same thing up to one poll interval later. (`Notification` is claude
     // asking for the user, same urgency; `PermissionRequest` is Codex asking,
     // the same thing under the other CLI's name.)
     if (
       e.sessionId &&
+      // An agy Stop with work still pending is not the turn ending, and an
+      // event from the Antigravity app is not one of ours.
+      (agy ? antigravityStatusOf(e)?.status === 'idle' : true) &&
       (e.event === 'Stop' ||
         e.event === 'Notification' ||
         (e.cli === 'codex' && e.event === 'PermissionRequest'))
@@ -3556,7 +3793,8 @@ export async function activate(
       if (
         boolCfg(CONFIG_KEYS.hooksEnabled, false) &&
         (hooksManager.getState().installed ||
-          codexHooksManager.getState().installed)
+          codexHooksManager.getState().installed ||
+          antigravityHooksManager.getState().installed)
       ) {
         hooksManager.startWatcher(hookEventSink);
       } else {
@@ -4205,6 +4443,7 @@ export async function activate(
       const seeds = seedDefaultProfiles(live, {
         hasCodexAuth,
         hasCodexBinary,
+        hasAntigravityBinary: antigravityBin() !== null,
         tombstonedIds,
       });
       for (const seed of seeds) {
@@ -4315,7 +4554,9 @@ export async function activate(
       // From the SESSION's own record, never from the pinned account — see
       // commands.sessionLaunchProvider for why the two are allowed to differ
       // and why the conversation wins when they do.
-      const provider = store.get(sessionId)?.provider === 'codex' ? 'codex' : undefined;
+      const recorded = store.get(sessionId)?.provider;
+      const provider =
+        recorded === 'codex' || recorded === 'antigravity' ? recorded : undefined;
       return {
         env: envForProfile(profile),
         profileId: profile.id,
@@ -4877,6 +5118,7 @@ export async function activate(
     },
     claudeBinary: () => claudeBin(),
     codexBinary: () => codexBin(),
+    antigravityBinary: () => antigravityBin(),
     mediaPath,
     refreshAccounts: () => accountsViewController?.refresh(),
     // The limits module's own wording, so the meter reads identically wherever
@@ -4926,7 +5168,7 @@ export async function activate(
    */
   const shellSessions = (): ShellSessionInfo[] => {
     const paths = new Map<string, string>();
-    for (const s of [...archiveIndexer.current(), ...codexArchived()]) {
+    for (const s of archivedSessions()) {
       paths.set(s.sessionId, s.transcriptPath);
     }
     const out: ShellSessionInfo[] = [];
@@ -5024,7 +5266,7 @@ export async function activate(
     now: number,
   ): AccountProfile[] => {
     const offer = offerSwitch({
-      cli: sessionProviderFor(sessionId) === 'codex' ? 'codex' : 'claude',
+      cli: cliOfProvider(sessionProviderFor(sessionId) ?? 'claude'),
       from,
       profiles: store.getAccounts(),
     });
@@ -5045,7 +5287,7 @@ export async function activate(
     from: AccountProfile | null,
     now: number,
   ): AccountProfile[] => {
-    const cli = sessionProviderFor(sessionId) === 'codex' ? 'codex' : 'claude';
+    const cli = cliOfProvider(sessionProviderFor(sessionId) ?? 'claude');
     const rank = (p: AccountProfile): number =>
       rankUsage(usageCache.get(p), now) === 'open' ? 0 : 1;
     return store
@@ -5492,9 +5734,12 @@ export async function activate(
     for (const id of aliases) {
       const file = sessionTranscriptFile(id);
       if (file === null) continue;
-      const at = sessionProviderFor(id) === 'codex'
+      const cli = sessionProviderFor(id);
+      const at = cli === 'codex'
         ? codexStatsCache.get(file)?.stats.lastRecordAt
-        : readTailStats(file).lastRecordAt;
+        : cli === 'antigravity'
+          ? antigravityStatsOf(file).lastRecordAt
+          : readTailStats(file).lastRecordAt;
       if (at !== undefined && (!Number.isFinite(best) || at > best)) best = at;
     }
     return best;
@@ -6756,6 +7001,40 @@ export async function activate(
           launchOpts = { ...launchOpts, subprojectId: parentLane };
         }
       }
+      // ANTIGRAVITY, before the spawn. A resume reuses an id the row already
+      // had, so the status marks of its last process are cleared: an old
+      // fully-idle Stop must not let Flock type into the new one while it is
+      // still starting. A resume needs a conversation agy actually wrote: a
+      // launch whose first hook never arrived is keyed on Flock's own id,
+      // which agy does not know. And without hooks the row never learns which
+      // conversation it is, so the install is offered.
+      if (launchOpts.provider === 'antigravity') {
+        for (const alias of chainAliases(opts.sessionId)) antigravityActivity.delete(alias);
+        if (
+          typeof launchOpts.resumeId === 'string' &&
+          launchOpts.resumeId !== '' &&
+          antigravityTranscriptOf(launchOpts.resumeId) === null
+        ) {
+          void vscode.window.showWarningMessage(
+            'Flock: this Antigravity session has no conversation to resume. Its hooks never ' +
+              'reported one, so agy never saved it under this row. Start a new session instead.',
+          );
+          return null;
+        }
+        if (antigravityHooksManager.getState().installed !== true && antigravityHooksAvailable()) {
+          const INSTALL = 'Install Antigravity Hooks';
+          void vscode.window
+            .showInformationMessage(
+              'Flock: without its hooks an Antigravity row has no status and cannot be resumed from Flock.',
+              INSTALL,
+            )
+            .then((choice) => {
+              if (choice === INSTALL) {
+                void vscode.commands.executeCommand(COMMANDS.installAntigravityHooks);
+              }
+            });
+        }
+      }
       // Read BEFORE the spawn, not after: adoptCodexSession rejects any
       // rollout older than this, and a reading taken after the terminal came
       // up would be later than the header stamp of the very file it is looking
@@ -6809,6 +7088,14 @@ export async function activate(
       // account, which can be re-pinned, or from the project, which is a glyph
       // heuristic. Claude launches write nothing: absent already means claude,
       // and stamping every row would make the field's presence meaningless.
+      if (binding && launchOpts.provider === 'antigravity') {
+        // agy names its own conversation: the row is keyed on this launch id
+        // until its first hook reports the real one (adoptAntigravityId).
+        void store.upsert(opts.sessionId, {
+          provider: 'antigravity',
+          ...(typeof launchOpts.cwd === 'string' && launchOpts.cwd !== '' ? { cwd: launchOpts.cwd } : {}),
+        });
+      }
       if (binding && launchOpts.provider === 'codex') {
         void store.upsert(opts.sessionId, { provider: 'codex' });
         // Codex mints its own session id, so the binding above is under a
@@ -7054,9 +7341,17 @@ export async function activate(
       const verdict = mayTypeInto({
         status,
         row: entry !== undefined,
-        rosterOk: provider === 'codex' || lastFetchOk,
+        // Codex and Antigravity rows are Flock's own, not the Claude roster's,
+        // so a failed roster fetch says nothing about them.
+        rosterOk: provider === 'codex' || provider === 'antigravity' || lastFetchOk,
         ...(provider !== undefined ? { provider } : {}),
-        promptsVisible: provider === 'codex' ? codexPromptsVisible() : true,
+        promptsVisible:
+          provider === 'codex'
+            ? codexPromptsVisible()
+            : provider === 'antigravity'
+              ? antigravityHooksManager.getState().installed === true &&
+                boolCfg(CONFIG_KEYS.hooksEnabled, false)
+              : true,
       });
       if (verdict !== 'ok') {
         log(
@@ -7163,6 +7458,17 @@ export async function activate(
       return state;
     },
     getCodexHookState: () => codexHooksManager.getState(),
+    installAntigravityHooks: async () => {
+      const state = await antigravityHooksManager.install();
+      syncHookWatcher();
+      return state;
+    },
+    removeAntigravityHooks: async () => {
+      const state = await antigravityHooksManager.remove();
+      syncHookWatcher();
+      return state;
+    },
+    getAntigravityHookState: () => antigravityHooksManager.getState(),
     setHooksEnabled: async (enabled) => {
       try {
         await cfg().update(
@@ -7336,7 +7642,7 @@ export async function activate(
     unlistedSessions: () =>
       unlistedPool({
         entries: lastEntries,
-        archived: [...archiveIndexer.current(), ...codexArchived()],
+        archived: archivedSessions(),
         records: store.all(),
         tipOf: (id) => chainIndex.tipOf(id),
         shownIds: new Set(forest.nodes.keys()),
@@ -7389,9 +7695,12 @@ export async function activate(
           if (file === null) continue;
           try {
             const text = readTranscriptTail(file, SUMMARY_TAIL_MAX_BYTES);
-            const found = sessionProviderFor(id) === 'codex'
+            const cli = sessionProviderFor(id);
+            const found = cli === 'codex'
               ? parseCodexSummaryReply(text, sinceMs)
-              : parseCompactSummary(text, sinceMs);
+              : cli === 'antigravity'
+                ? parseAntigravitySummaryReply(text, sinceMs)
+                : parseCompactSummary(text, sinceMs);
             if (found !== undefined) return found;
           } catch (err) {
             // A transcript that vanished or is being rewritten under us is a
@@ -7583,6 +7892,8 @@ export async function activate(
         verbsAvailable: true,
         codexHooksInstalled: store.getCodexHookState().installed === true,
         codexHooksAvailable: codexHooksAvailable(),
+        antigravityHooksInstalled: store.getAntigravityHookState().installed === true,
+        antigravityHooksAvailable: antigravityHooksAvailable(),
         // CLOSED projects count. Somebody who put their last project away has
         // met the concept, and "make your first project" would be wrong.
         hasProjects: store.getProjects().some((p) => p.deleted !== true),
@@ -7652,6 +7963,9 @@ export async function activate(
       codex: codexBin(),
       codexConfigured:
         (cfg().get<string>(CONFIG_KEYS.codexBinary) ?? '').trim() !== '',
+      antigravity: antigravityBin(),
+      antigravityConfigured:
+        (cfg().get<string>(CONFIG_KEYS.antigravityBinary) ?? '').trim() !== '',
     }),
 
     // What the gear menu labels itself with. Read here, together, at the moment
@@ -7686,6 +8000,8 @@ export async function activate(
       verbsInstalled: store.getVerbsState().installed === true,
       codexHooksInstalled: store.getCodexHookState().installed === true,
       codexHooksAvailable: codexHooksAvailable(),
+      antigravityHooksInstalled: store.getAntigravityHookState().installed === true,
+      antigravityHooksAvailable: antigravityHooksAvailable(),
       onlyActive: boolCfg(CONFIG_KEYS.onlyActiveSessions, false),
       accountsSection: boolCfg(CONFIG_KEYS.accountsSection, true),
       shellsSection: boolCfg(CONFIG_KEYS.shellsSection, true),
@@ -7842,8 +8158,8 @@ export async function activate(
         title,
         env: envForProfile(l.profile),
         profileId: l.profile.id,
-        ...(l.profile.provider === 'codex'
-          ? { provider: 'codex' as const }
+        ...(l.profile.provider === 'codex' || l.profile.provider === 'antigravity'
+          ? { provider: l.profile.provider }
           : {}),
       });
       if (!binding) return 'failed';
@@ -8122,13 +8438,28 @@ export async function activate(
   // A Codex session that is NOT live by this test is not lost — the rollout
   // index gives it an archived row, exactly as a closed Claude session gets
   // one from its transcript.
-  const codexLiveEntries = (): RosterEntry[] => {
+  //
+  // ANTIGRAVITY ROWS ARE BUILT HERE TOO, by the same function. An agy launch is
+  // bound under Flock's id and re-keyed by a chain edge when its first hook
+  // names the conversation (adoptAntigravityId), which is the same shape a
+  // Codex conversation has, so the same per-conversation reduction is right
+  // for it. Only the three lookups differ: where a row's name, last activity
+  // and status come from.
+  interface LiveLookups {
+    meta(id: string): { label?: string; startedAt?: number } | undefined;
+    lastActivityAt(id: string): number | undefined;
+    status(id: string): string | undefined;
+  }
+  const liveEntriesFor = (
+    provider: 'codex' | 'antigravity',
+    look: LiveLookups,
+  ): RosterEntry[] => {
     const out: RosterEntry[] = [];
     let records: Record<string, EditorialRecord>;
     try {
       records = store.all();
     } catch (err) {
-      logError('extension.codexLiveEntries', err);
+      logError(`extension.liveEntries.${provider}`, err);
       return out;
     }
     // ONE ROW PER CONVERSATION, decided by codex.codexRowIds. The grouping key
@@ -8149,12 +8480,12 @@ export async function activate(
         }
       }
     } catch (err) {
-      logError('extension.codexLiveEntries.chains', err);
+      logError(`extension.liveEntries.${provider}.chains`, err);
     }
 
     const facts: CodexRowFacts[] = [];
     for (const [id, rec] of Object.entries(records)) {
-      if (!rec || rec.provider !== 'codex') continue;
+      if (!rec || rec.provider !== provider) continue;
       if (!isSessionId(id)) continue;
       facts.push({
         sessionId: id,
@@ -8172,18 +8503,36 @@ export async function activate(
       const rec = records[id];
       const entry: RosterEntry = { sessionId: id, kind: 'interactive' };
       if (typeof rec?.cwd === 'string' && rec.cwd !== '') entry.cwd = rec.cwd;
-      const meta = codexArchived().find((s) => s.sessionId === id);
+      const meta = look.meta(id);
       if (meta?.label !== undefined) entry.name = meta.label;
       const startedAt = meta?.startedAt ?? Date.parse(rec?.createdAt ?? '');
       if (Number.isFinite(startedAt)) entry.startedAt = startedAt;
-      const reading = codexReadingFor(id);
-      if (reading !== undefined) entry.lastActivityAt = reading.stats.lastRecordAt ?? reading.mtimeMs;
-      const status = codexStatusFor(id);
+      const lastActivityAt = look.lastActivityAt(id);
+      if (lastActivityAt !== undefined) entry.lastActivityAt = lastActivityAt;
+      const status = look.status(id);
       if (status !== undefined) entry.status = status;
       out.push(entry);
     }
     return out;
   };
+  const codexLiveEntries = (): RosterEntry[] =>
+    liveEntriesFor('codex', {
+      meta: (id) => codexArchived().find((s) => s.sessionId === id),
+      lastActivityAt: (id) => {
+        const reading = codexReadingFor(id);
+        return reading === undefined ? undefined : (reading.stats.lastRecordAt ?? reading.mtimeMs);
+      },
+      status: (id) => codexStatusFor(id),
+    });
+  const antigravityLiveEntries = (): RosterEntry[] =>
+    liveEntriesFor('antigravity', {
+      meta: (id) => antigravityArchived().find((s) => s.sessionId === id),
+      lastActivityAt: (id) => {
+        const file = antigravityTranscriptOf(id);
+        return file === null ? undefined : antigravityStatsOf(file).lastRecordAt;
+      },
+      status: (id) => antigravityStatusFor(id),
+    });
 
   // ------------------------------------------------- codex status
   //
@@ -8249,7 +8598,7 @@ export async function activate(
    *  the fetch somehow already carries wins, so the merge can never double a
    *  row. */
   const withCodexRows = (entries: RosterEntry[]): RosterEntry[] => {
-    const extra = codexLiveEntries();
+    const extra = [...codexLiveEntries(), ...antigravityLiveEntries()];
     if (extra.length === 0) return entries;
     const seen = new Set(entries.map((e) => e.sessionId));
     return [...entries, ...extra.filter((e) => !seen.has(e.sessionId))];
@@ -8476,9 +8825,12 @@ export async function activate(
       log('roster: fetch failed —', rawResult.error ?? 'unknown error');
       // Codex is observed independently of `claude agents`. Keep the last
       // Claude rows through a failed fetch, while Codex continues updating.
-      const entries = withCodexRows(lastEntries.filter(
-        (entry) => sessionProviderFor(entry.sessionId) !== 'codex',
-      ));
+      // Antigravity rows likewise: they are Flock's own, so the stale copies
+      // are dropped and the fresh ones merged back in.
+      const entries = withCodexRows(lastEntries.filter((entry) => {
+        const p = sessionProviderFor(entry.sessionId);
+        return p !== 'codex' && p !== 'antigravity';
+      }));
       if (entries.length > 0 || haveRoster) {
         lastEntries = entries;
         haveRoster = true;

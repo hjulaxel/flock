@@ -84,6 +84,7 @@ import type {
 } from './types';
 import { isEnvVarName } from './accounts';
 import { ENV_VERB_TOKEN, adoptVerbToken, ensureVerbToken } from './agentVerbs';
+import { buildAntigravityArgs } from './antigravity';
 import { buildCodexArgs } from './codex';
 import { missingCwdMessage } from './projects';
 import { shimLaunch } from './shim';
@@ -161,6 +162,9 @@ const MISSING_BINARY_MESSAGE =
 const MISSING_CODEX_BINARY_MESSAGE =
   'Codex CLI not found — set lineage.codexBinary to the full path of your ' +
   'codex executable.';
+const MISSING_ANTIGRAVITY_BINARY_MESSAGE =
+  'Antigravity CLI not found — set lineage.antigravityBinary to the full path ' +
+  'of your agy executable.';
 const RESTRICTED_MESSAGE =
   'Flock cannot start a Claude session here: VS Code blocks terminals in ' +
   'Restricted Mode. Trust this workspace and try again.';
@@ -461,6 +465,33 @@ function stampOfTerminal(
   return (env as Record<string, unknown>)[key] ?? null;
 }
 
+/** Which CLI a launch runs, and the few facts the launcher needs about it.
+ *  One table so the three CLIs are read the same way at every launch, rather
+ *  than one ternary per fact. `generic` (an API-key Claude launch) and an
+ *  absent provider are Claude. */
+export function launchCliOf(provider: ProviderId | undefined): {
+  cli: 'claude' | 'codex' | 'antigravity';
+  /** What a person calls it, for "Could not start …". */
+  label: string;
+  tab: string;
+  missing: string;
+  args: (opts: LaunchOptions) => string[];
+} {
+  if (provider === 'codex') {
+    return { cli: 'codex', label: 'Codex', tab: 'codex', missing: MISSING_CODEX_BINARY_MESSAGE, args: buildCodexArgs };
+  }
+  if (provider === 'antigravity') {
+    return {
+      cli: 'antigravity',
+      label: 'Antigravity',
+      tab: 'agy',
+      missing: MISSING_ANTIGRAVITY_BINARY_MESSAGE,
+      args: buildAntigravityArgs,
+    };
+  }
+  return { cli: 'claude', label: 'Claude', tab: 'claude', missing: MISSING_BINARY_MESSAGE, args: buildShellArgs };
+}
+
 /** Default terminal name for a session: the CLI that is running in it, then
  *  the short id. Provider-aware because the tab is the one place a user reads
  *  what a terminal IS, and every Codex tab calling itself `claude` would be a
@@ -469,7 +500,7 @@ export function defaultTerminalName(
   sessionId: string,
   provider?: ProviderId,
 ): string {
-  return `${provider === 'codex' ? 'codex' : 'claude'} · ${shortId(sessionId)}`;
+  return `${launchCliOf(provider).tab} · ${shortId(sessionId)}`;
 }
 
 /**
@@ -757,12 +788,15 @@ export class TerminalRegistry implements DisposableLike {
     // can start: everything below this point is binary-agnostic, so the whole
     // difference between the two providers is this pair of lookups plus the
     // argv builder they select.
-    const isCodex = opts.provider === 'codex';
-    const binary = isCodex
-      ? (this.deps.codexBinary?.() ?? null)
-      : this.deps.claudeBinary();
+    const launchCli = launchCliOf(opts.provider);
+    const binary =
+      launchCli.cli === 'codex'
+        ? (this.deps.codexBinary?.() ?? null)
+        : launchCli.cli === 'antigravity'
+          ? (this.deps.antigravityBinary?.() ?? null)
+          : this.deps.claudeBinary();
     if (!binary) {
-      showError(isCodex ? MISSING_CODEX_BINARY_MESSAGE : MISSING_BINARY_MESSAGE);
+      showError(launchCli.missing);
       return null;
     }
 
@@ -844,7 +878,7 @@ export class TerminalRegistry implements DisposableLike {
     // this launch verb unchanged to RE-ATTACH a still-running session.
     const tmux = this.tmuxSpawnOf();
     let shellPath = binary;
-    let shellArgs = isCodex ? buildCodexArgs(opts) : buildShellArgs(opts);
+    let shellArgs = launchCli.args(opts);
     let tmuxName: string | undefined;
     if (tmux) {
       const recordedName =
@@ -921,7 +955,7 @@ export class TerminalRegistry implements DisposableLike {
       this.claiming.delete(sessionId);
       logError('terminals.launch', err);
       showError(
-        `Could not start ${isCodex ? 'Codex' : 'Claude'}: ${
+        `Could not start ${launchCli.label}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );

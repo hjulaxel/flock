@@ -312,7 +312,7 @@ export function shortId(sessionId: string): string {
 // actual glyph. Nominative use — identifying which tool a session runs — is
 // what the marks are for; see the README's trademark note.
 
-export type ProviderId = 'claude' | 'codex' | 'gemini' | 'generic';
+export type ProviderId = 'claude' | 'codex' | 'gemini' | 'antigravity' | 'generic';
 
 export interface ProviderInfo {
   id: ProviderId;
@@ -349,6 +349,16 @@ export const PROVIDERS: Record<ProviderId, ProviderInfo> = {
     iconFile: 'gemini.svg',
     fallbackIcon: 'star-full',
   },
+  /** Google's Antigravity CLI (`agy`), which replaced the Gemini CLI for
+   *  consumer accounts on 2026-06-18. It wears the GEMINI mark: Simple Icons
+   *  has no Antigravity one, and Gemini is what people run it for. The
+   *  `gemini` row above stays as the id a project could always declare. */
+  antigravity: {
+    id: 'antigravity',
+    label: 'Antigravity',
+    iconFile: 'gemini.svg',
+    fallbackIcon: 'rocket',
+  },
   generic: {
     id: 'generic',
     label: 'Other',
@@ -361,6 +371,7 @@ export const PROVIDER_IDS: readonly ProviderId[] = [
   'claude',
   'codex',
   'gemini',
+  'antigravity',
   'generic',
 ];
 
@@ -1133,6 +1144,10 @@ export const COMMANDS = {
    *  (`lineage.hooks.enabled`), same events file. See src/codexHooks.ts. */
   installCodexHooks: 'lineage.installCodexHooks',
   removeCodexHooks: 'lineage.removeCodexHooks',
+  /** The Antigravity pair: a plugin folder at ~/.gemini/config/plugins/flock.
+   *  Same reader gate, same events file. See src/antigravityHooks.ts. */
+  installAntigravityHooks: 'lineage.installAntigravityHooks',
+  removeAntigravityHooks: 'lineage.removeAntigravityHooks',
   /** The in-session verbs: a skill plus a tiny CLI that let the user say
    *  "fork this session" TO CLAUDE, which then asks a Flock window to run the
    *  same forkFlow the sidebar button runs. Install/remove mirror the hooks
@@ -1621,6 +1636,9 @@ export const CONFIG_KEYS = {
    *  lives under whichever node version is active (see codex.findCodexBinary),
    *  which an extension host frequently does not inherit. */
   codexBinary: 'codexBinary',
+  /** The Antigravity CLI (`agy`). Its installer puts it in `~/.local/bin`,
+   *  which an extension host started from the Dock may not have on PATH. */
+  antigravityBinary: 'antigravityBinary',
   /** Detach tier: 'auto' (wrap launches in the private tmux server when tmux
    *  is on PATH) or 'off'. */
   tmux: 'tmux',
@@ -2248,6 +2266,9 @@ export interface RecommendedWorld {
    *  reason; absent reads as not installed, which only matters when the step
    *  is available. */
   readonly codexHooksInstalled?: boolean;
+  /** The same pair for Antigravity. Absent reads as false. */
+  readonly antigravityHooksAvailable?: boolean;
+  readonly antigravityHooksInstalled?: boolean;
   /** The retired `lineage.workspaces.autoSwitch`, raw — undefined when the
    *  settings file never had it, which is nearly everyone. The third input to
    *  `resolveMode`: a `false` folds a `project` window to Root exactly as
@@ -2984,6 +3005,8 @@ export type ContextToken =
    *  the verb, never a Claude row being denied it. */
   | 'claude'
   | 'codex'
+  | 'gemini'
+  | 'antigravity'
   /** This session runs DETACHED under the grace countdown
    *  (SessionNode.graceDeadlineAt): its tab is gone, its process is alive so
    *  re-attach is instant, and the sweep will end it at the deadline. A THIRD
@@ -3461,6 +3484,9 @@ export interface LineageState {
    *  installing one must never claim the other. `pluginDir` here names the
    *  `hooks.json` Flock merged its entries into, not a directory. */
   codexHookInstall?: HookInstallState;
+  /** The Antigravity hook install record (antigravityHooks.ts), its own key
+   *  for the same reason. `pluginDir` is the plugin folder. */
+  antigravityHookInstall?: HookInstallState;
   /** v8. The dispatch queue, keyed by entry id — intents to start a session,
    *  parked until an account is worth it (src/dispatch.ts). Optional for the
    *  reason `accounts` is: hand-built literals predate it, and migrateState
@@ -3491,9 +3517,9 @@ export interface HookEvent {
    *  absent field reads as `claude`. Null only for a line whose wrapper is
    *  missing altogether (the flat v2 shape), where nothing can be said. The
    *  consumer that needs it is liveness: "Codex hooks are proven live" is a
-   *  fact about Codex events specifically, and the two CLIs share one events
-   *  file. */
-  cli: 'claude' | 'codex' | null;
+   *  fact about Codex events specifically, and every CLI shares one events
+   *  file. `antigravity` is stamped by hooks.antigravityHookCommand. */
+  cli: 'claude' | 'codex' | 'antigravity' | null;
   raw: unknown;
 }
 
@@ -3664,7 +3690,7 @@ export interface TreeDeps {
    *  for why the PROJECT's provider must never be that rule. The return type is
    *  left loose here for the same reason `hostOf`'s is: types.ts may not import
    *  a module that imports it back. Optional; absent reads as 'claude'. */
-  sessionCli?(sessionId: string): 'claude' | 'codex' | 'gemini' | undefined;
+  sessionCli?(sessionId: string): 'claude' | 'codex' | 'gemini' | 'antigravity' | undefined;
   /** RETIRED: `reparent`. Dropping a session onto another re-parented it, and
    *  dropping one onto a folder row detached it to a root — so a fork could be
    *  dragged out of the tree it branched from and an unrelated conversation
@@ -3866,6 +3892,9 @@ export interface TerminalDeps {
    *  as before and refuses Codex ones with the same "CLI not found" sentence a
    *  missing binary earns. */
   codexBinary?(): string | null;
+  /** The `agy` executable, for an Antigravity launch. Absent or null refuses
+   *  the launch with the "CLI not found" sentence. */
+  antigravityBinary?(): string | null;
   /** Where a launched terminal goes. Absent = 'editor'. */
   terminalLocation?(): TerminalLocationPref;
   /** Detach tier (src/tmux.ts): how to wrap a launch in the private tmux
@@ -4529,6 +4558,9 @@ export interface CommandDeps {
   installCodexHooks?(): Promise<HookInstallState>;
   removeCodexHooks?(): Promise<HookInstallState>;
   getCodexHookState?(): HookInstallState;
+  installAntigravityHooks?(): Promise<HookInstallState>;
+  removeAntigravityHooks?(): Promise<HookInstallState>;
+  getAntigravityHookState?(): HookInstallState;
   // in-session verbs (G) — all four OPTIONAL, unlike the hooks quartet, so no
   // existing unit double has to learn them: a wiring without them has the two
   // commands registered and refusing, never half-performing.
@@ -4928,6 +4960,9 @@ export interface CommandDeps {
      *  Codex hook entries: a verb that can only report "no Codex here" is
      *  worse than no verb. */
     codexHooksAvailable?: boolean;
+    /** The same pair for Antigravity. */
+    antigravityHooksInstalled?: boolean;
+    antigravityHooksAvailable?: boolean;
   };
   // ---- multi-select -------------------------------------------------------
   /** The session ids selected in whichever view is on screen, top to bottom, or

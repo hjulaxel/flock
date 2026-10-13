@@ -93,8 +93,9 @@ export const MAX_RECORDED_SUMMARY_CHARS = 1000;
 const SUMMARY_PREAMBLE_PREFIX =
   'This session is being continued from a previous conversation';
 
-/** Codex's remote compaction can be opaque. Ask the running session for the
- * human-readable conclusion that Close with Summary promises to preserve. */
+/** Codex's remote compaction can be opaque, and Antigravity keeps no summary
+ * Flock can read, so both are asked in words for the human-readable
+ * conclusion that Close with Summary promises to preserve. */
 export const CODEX_SUMMARY_PROMPT =
   '[Flock] This session is about to be closed. Reply with a concise handoff ' +
   'summary of the work completed, decisions made, validation, and anything ' +

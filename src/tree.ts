@@ -345,7 +345,7 @@ export class LineageTreeProvider
       () => this.deps.sessionCli?.(sessionId),
       undefined,
     );
-    return cli === 'codex' ? 'codex' : 'claude';
+    return cli ?? 'claude';
   }
 
   private groupingFor(forest: SessionForest): GroupingResult {

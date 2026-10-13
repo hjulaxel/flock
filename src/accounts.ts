@@ -95,7 +95,10 @@ export const CONFIG_DIR_ENV: Readonly<Partial<Record<ProviderId, string>>> = {
  *
  * `generic` is IN the list because it makes no isolation claim at all — it is
  * the API-key profile, a Claude launch authenticated by an environment
- * variable, whose configDir `envForProfile` already ignores. `gemini` is OUT,
+ * variable, whose configDir `envForProfile` already ignores. `antigravity` is
+ * IN: Flock execs `agy` for it (src/antigravity.ts), and it has no
+ * CONFIG_DIR_ENV entry, so its account is the machine's own login and claims
+ * no isolation it cannot give. `gemini` is OUT,
  * unchanged and for the original reason: this extension does not launch that
  * CLI, and no `CONFIG_DIR_ENV` entry exists to isolate it if it did. Its rows
  * still exist, still sign in from their own verb and still carry their meters;
@@ -104,6 +107,7 @@ export const CONFIG_DIR_ENV: Readonly<Partial<Record<ProviderId, string>>> = {
 export const SESSION_PROVIDERS: readonly ProviderId[] = [
   'claude',
   'codex',
+  'antigravity',
   'generic',
 ];
 
@@ -125,6 +129,18 @@ export function canHostSession(
 }
 
 /**
+ * May AUTO pick this account? Only where Flock can see the account's usage:
+ * Auto ranks accounts by their windows, and an account with no meter reads as
+ * the best kind ("idle"), so a meterless one would win every Auto launch.
+ * Antigravity has no meter, so it is used only when chosen: the account, its
+ * provider, or a pin. Without this, installing agy would move new Claude work
+ * onto Gemini.
+ */
+export function pickedByAuto(profile: AccountProfile): boolean {
+  return profile.provider !== 'antigravity';
+}
+
+/**
  * The CLI an account's sessions actually run, which is NOT the same question as
  * its provider.
  *
@@ -135,17 +151,21 @@ export function canHostSession(
  * is concerned. That interchangeability is the whole reason this function
  * exists — see `switchRefusal`.
  */
-export type SessionCli = 'claude' | 'codex' | 'gemini';
+export type SessionCli = 'claude' | 'codex' | 'gemini' | 'antigravity';
 
 export function cliOfProfile(
   profile: AccountProfile | null | undefined,
 ): SessionCli {
-  const provider = isProviderId(profile?.provider)
-    ? profile.provider
-    : DEFAULT_PROVIDER;
-  if (provider === 'codex') return 'codex';
-  if (provider === 'gemini') return 'gemini';
-  return 'claude';
+  return cliOfProvider(
+    isProviderId(profile?.provider) ? profile.provider : DEFAULT_PROVIDER,
+  );
+}
+
+/** The same answer from a bare provider id, for a session that knows its
+ *  provider from its record rather than from an account. `generic` is a
+ *  Claude launch, so it is `claude`; everything else is itself. */
+export function cliOfProvider(provider: ProviderId): SessionCli {
+  return provider === 'generic' ? 'claude' : provider;
 }
 
 /** Why a conversation may not be moved to a given account. `null` = it may. */
@@ -781,6 +801,7 @@ export function moveDown(
  *  run recognises its own work even if the user renamed the labels. */
 export const DEFAULT_CLAUDE_PROFILE_ID = 'claude-default';
 export const DEFAULT_CODEX_PROFILE_ID = 'codex-default';
+export const DEFAULT_ANTIGRAVITY_PROFILE_ID = 'antigravity-default';
 
 export interface SeedOptions {
   /** Does `~/.codex/auth.json` exist? Checked by the CALLER — this module never
@@ -797,6 +818,10 @@ export interface SeedOptions {
    *  command by other means. Optional; absent reads as false, which is what
    *  every caller written before the binary was consulted meant. */
   hasCodexBinary?: boolean;
+  /** Is `agy` on this machine? An Antigravity account is the machine's login,
+   *  so the binary alone is reason enough to seed one. Optional; absent reads
+   *  as false. */
+  hasAntigravityBinary?: boolean;
   /** Epoch ms for the createdAt/updatedAt stamps. Injectable so a test can
    *  assert on them; defaults to now. */
   now?: number;
@@ -877,6 +902,9 @@ export function seedDefaultProfiles(
   seed(DEFAULT_CLAUDE_PROFILE_ID, 'claude', 'Claude — default');
   if (opts?.hasCodexAuth === true || opts?.hasCodexBinary === true) {
     seed(DEFAULT_CODEX_PROFILE_ID, 'codex', 'Codex — default');
+  }
+  if (opts?.hasAntigravityBinary === true) {
+    seed(DEFAULT_ANTIGRAVITY_PROFILE_ID, 'antigravity', 'Antigravity — default');
   }
   return out;
 }

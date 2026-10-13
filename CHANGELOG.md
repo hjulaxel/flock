@@ -6,6 +6,41 @@ All notable changes to Flock are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Sessions run on the Antigravity CLI, so you can use Gemini in Flock.**
+  Google replaced the Gemini CLI with Antigravity (`agy`) for consumer
+  accounts on 2026-06-18. With `agy` installed, an **Antigravity** account
+  appears on its own, and its sessions get tree rows, resume, history and
+  Close with Summary. agy picks its own conversation id; its first hook
+  reports it, so the row is matched exactly.
+- **Antigravity hooks.** **Install Antigravity Hooks…** adds a plugin folder at
+  `~/.gemini/config/plugins/flock`; **Remove Antigravity Hooks** deletes it.
+  They give a row busy and idle, and record the conversation id, folder and
+  model, never your prompts or replies. Not on Windows yet.
+- **Fork on an Antigravity row types `/fork`** into the session when it is
+  idle. agy forks inside the session, so the tab follows the child.
+
+### Changed
+
+- **Add Account is shorter.** One panel with each kind's name and logo, then a
+  name, prefilled. The directory question is one or two sentences.
+- **A Codex or Antigravity row no longer offers Move to Account…**, which only
+  moves Claude conversations.
+
+### Fixed
+
+- **Removing the Claude hooks no longer turns off Codex's instant updates.**
+  The shared event reader stays on while another CLI's hooks are installed.
+
+### Known limits
+
+- **An Antigravity row never shows "waiting".** agy writes nothing that tells a
+  permission prompt apart from a slow command, so Flock types into an
+  Antigravity session only when it is idle.
+- **No name, system prompt, or Fork and Compact for Antigravity.** agy has no
+  launch flags for them.
+
 ## [0.18.0] — 2026-10-07
 
 ### Changed

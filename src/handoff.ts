@@ -90,6 +90,7 @@ export const CLI_DISPLAY_NAME: Readonly<Record<SessionCli, string>> = {
   claude: 'Claude Code',
   codex: 'the Codex CLI',
   gemini: 'the Gemini CLI',
+  antigravity: 'the Antigravity CLI',
 };
 
 /** Everything the brief is composed from. All of it is display-grade metadata
@@ -141,6 +142,12 @@ const TRANSCRIPT_SHAPE: Readonly<Record<SessionCli, readonly string[]>> = {
     '"user_message" and "agent_message" carry the same text more compactly.',
   ],
   gemini: [],
+  // Measured on agy 1.3.4 (src/antigravity.ts, STORAGE).
+  antigravity: [
+    'Layout: an Antigravity transcript, one step per line. "type" is',
+    '"USER_INPUT" (the words are inside <USER_REQUEST>) or "PLANNER_RESPONSE"',
+    '(the reply is in "content"); other types are tool steps.',
+  ],
 };
 
 /** Ceiling for the composed brief, same figure as MAX_AGENT_PROMPT_CHARS and

@@ -197,6 +197,32 @@ try {
     };
   }
 
+  // A PASSING SUITE IS NOT ENOUGH. Flock catches what goes wrong inside a
+  // rebuild and logs it, so a tree that throws on every pass still lets every
+  // command settle: on 2026-10-13 a self-calling `allArchived` overflowed the
+  // stack on each rebuild and this suite passed. Any `[error]` line Flock
+  // wrote is a failure.
+  if (verdict.ok) {
+    let errors = [];
+    try {
+      errors = fs
+        .readFileSync(logFile, 'utf8')
+        .split('\n')
+        .filter((l) => l.includes('[error]'))
+        // An empty home has no Claude login, so the meter has no credential.
+        // That is the isolation working, not a bug.
+        .filter((l) => !l.includes('limits: no usable credential'));
+    } catch {
+      // No log: the suite already proved activation, and nothing was logged.
+    }
+    if (errors.length > 0) {
+      verdict = {
+        ok: false,
+        message: `Flock logged ${String(errors.length)} error(s):\n${errors.slice(0, 12).join('\n')}`,
+      };
+    }
+  }
+
   // Let a well-behaved editor leave on its own, then insist.
   const quitBy = Date.now() + QUIT_GRACE_MS;
   while (!exited && Date.now() < quitBy) await sleep(POLL_MS);

@@ -115,6 +115,8 @@ describe('recommendedPlan: what is offered', () => {
         hooksInstalled: false,
         codexHooksAvailable: true,
         codexHooksInstalled: false,
+        antigravityHooksAvailable: true,
+        antigravityHooksInstalled: false,
         verbsInstalled: false,
         hasProjects: false,
         unlistedCount: 3,
@@ -122,6 +124,22 @@ describe('recommendedPlan: what is offered', () => {
       }),
     );
     expect(order).toEqual([...RECOMMENDED_STEP_IDS]);
+  });
+
+  it('offers the Antigravity hooks only where there is an agy to hook, and reports them done once installed', () => {
+    const none = recommendedPlan(settled);
+    expect(none.steps.map((s) => s.id)).not.toContain('antigravityHooks');
+    expect(none.done).not.toContain('antigravityHooks');
+    const offered = recommendedPlan(world({ antigravityHooksAvailable: true }));
+    const step = offered.steps.find((s) => s.id === 'antigravityHooks');
+    expect(step?.recommended).toBe(true);
+    expect(step?.writes).toContain('plugins/flock');
+    expect(step?.undo).toContain('Remove Antigravity Hooks');
+    const done = recommendedPlan(
+      world({ antigravityHooksAvailable: true, antigravityHooksInstalled: true }),
+    );
+    expect(done.steps.map((s) => s.id)).not.toContain('antigravityHooks');
+    expect(done.done).toContain('antigravityHooks');
   });
 
   it('offers the Codex hooks only where there is a Codex to hook, and reports them done once installed', () => {
@@ -286,6 +304,8 @@ describe('recommendedPlan: what it may never touch', () => {
         hooksInstalled: false,
         codexHooksAvailable: true,
         codexHooksInstalled: false,
+        antigravityHooksAvailable: true,
+        antigravityHooksInstalled: false,
         verbsInstalled: false,
         hasProjects: false,
         unlistedCount: 5,
@@ -302,6 +322,7 @@ describe('recommendedPlan: what it may never touch', () => {
       const imperative: RecommendedStepId[] = [
         'hooks',
         'codexHooks',
+        'antigravityHooks',
         'verbs',
         'project',
         'import',
@@ -329,6 +350,7 @@ describe('the two taste questions are verbs, not checklist steps', () => {
       'import',
       'hooks',
       'codexHooks',
+      'antigravityHooks',
       'verbs',
       'worktrees',
     ]);
