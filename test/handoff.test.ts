@@ -76,10 +76,8 @@ describe('handoffRefusal', () => {
     expect(handoffRefusal(CLAUDE, CODEX, true, 'claude')).toBe(null);
   });
 
-  it('same-cli outranks cannot-host: a gemini target fails on hosting, not CLI', () => {
-    // Different CLI (claude → gemini), so the durable same-cli test passes it
-    // through, and the capability test is what refuses.
-    expect(handoffRefusal(CLAUDE, GEMINI, true)).toBe('cannot-host');
+  it('a conversation can continue on Antigravity (stored as gemini): a different CLI that hosts', () => {
+    expect(handoffRefusal(CLAUDE, GEMINI, true)).toBe(null);
   });
 
   it('the fork rule verbatim: no transcript yet, no handoff', () => {

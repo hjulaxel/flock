@@ -727,7 +727,7 @@ export function sessionContextValue(
   // WHICH CLI, on every row that has a transcript to have been written by one.
   // Withheld from a ghost for the reason the provider glyph is: an inferred
   // ancestor has no file on disk, so either answer would be invented.
-  if (!node.ghost) tokens.push(cli === 'codex' ? 'codex' : 'claude');
+  if (!node.ghost) tokens.push(cli ?? 'claude');
 
   if (node.source === 'minted') tokens.push('ours');
   if (boundHere) tokens.push('bound');
@@ -1712,7 +1712,7 @@ function safeSessionCli(
   sessionId: string,
 ): SessionCli {
   try {
-    return input.sessionCli?.(sessionId) === 'codex' ? 'codex' : 'claude';
+    return input.sessionCli?.(sessionId) ?? 'claude';
   } catch {
     return 'claude';
   }

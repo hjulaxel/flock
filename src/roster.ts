@@ -310,6 +310,17 @@ export function mayTypeInto(target: TypeTarget): 'ok' | TypeRefusal {
   if (target.provider === 'codex' && target.promptsVisible !== true) {
     return 'blind';
   }
+  // Antigravity never says `waiting`: a permission prompt looks like a slow
+  // command (src/antigravity.ts). So only a row whose hooks are installed and
+  // whose last word was a fully idle `Stop` is known to be at its input; any
+  // other state may be a trust, permission or onboarding dialog that Enter
+  // would answer.
+  if (
+    target.provider === 'gemini' &&
+    (target.promptsVisible !== true || target.status !== 'idle')
+  ) {
+    return 'blind';
+  }
   return 'ok';
 }
 

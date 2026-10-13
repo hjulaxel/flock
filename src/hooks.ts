@@ -224,6 +224,49 @@ export const CODEX_HOOK_COMMAND =
   'printf "{\\"lineage_node_id\\":\\"%s\\",\\"cli\\":\\"codex\\",\\"payload\\":%s}\\n" ' +
   '"${LINEAGE_NODE_ID:-}" "$p" >> "$HOME/.lineage/events.ndjson"\'';
 
+/**
+ * The same append again for the ANTIGRAVITY CLI (`agy`), one command per
+ * event, with `"cli":"antigravity"` and the event's own name in the wrapper.
+ *
+ * A SEPARATE STRING from HOOK_COMMAND and CODEX_HOOK_COMMAND on purpose: each
+ * is written into a different user-owned file and versioned on its own, so
+ * changing one must not silently change entries the user already accepted for
+ * another (see src/antigravityHooks.ts, ANTIGRAVITY_HOOKS_VERSION).
+ *
+ * WHY THE EVENT NAME IS IN THE COMMAND. agy's payload is camelCase and never
+ * names its own event: `{conversationId, workspacePaths, transcriptPath,
+ * artifactDirectoryPath, modelName, ...}`, with nothing like Claude's
+ * `hook_event_name` (observed, agy 1.3.4). So the plugin registers a different
+ * command under each event, and the command says which one it is.
+ * `parseEventLine` reads the wrapper's `event` when the payload has no name,
+ * and `conversationId` / `transcriptPath` when it has no `session_id` /
+ * `transcript_path`. The name is interpolated into the shell text, so only the
+ * fixed event names in ANTIGRAVITY_HOOK_EVENTS may reach it, and the function
+ * refuses anything else.
+ *
+ * IT PRINTS NOTHING, and that matters more here than for any other CLI. agy
+ * reads a hook's stdout as its decision, and a PreToolUse hook that printed
+ * `{}` DENIED the tool call ("The execution of the command was denied by the
+ * pre-tool hook", observed on agy 1.3.4). The printf below goes to the events
+ * file with `>>`, so stdout stays empty, and empty stdout is no opinion.
+ *
+ * Still ONE write(2) and the same `umask 077`, for the reasons HOOK_COMMAND's
+ * note gives. `LINEAGE_NODE_ID` reaches the hook because agy hands its own
+ * environment to hook processes (observed: TMUX_PANE and the launching shell's
+ * variables are all there), and it is how a conversation agy named itself is
+ * tied back to the tab Flock launched it in.
+ */
+export function antigravityHookCommand(event: string): string {
+  if (!/^[A-Za-z]+$/.test(event)) {
+    throw new Error(`not an Antigravity hook event: ${JSON.stringify(event)}`);
+  }
+  return (
+    '/bin/sh -c \'umask 077; mkdir -p "$HOME/.lineage"; p=$(cat); [ -n "$p" ] || p=null; ' +
+    `printf "{\\"lineage_node_id\\":\\"%s\\",\\"cli\\":\\"antigravity\\",\\"event\\":\\"${event}\\",\\"payload\\":%s}\\n" ` +
+    '"${LINEAGE_NODE_ID:-}" "$p" >> "$HOME/.lineage/events.ndjson"\''
+  );
+}
+
 /** The hook events we listen for. Every one is a pure accelerator.
  *  UserPromptSubmit (v3) is the freshness beat: it fires on every prompt, so
  *  a conversation whose id churned is re-keyed within one user action, which is
@@ -298,15 +341,21 @@ export function parseEventLine(line: string): HookEvent | null {
     nodeId = isSessionId(nid) ? nid : null;
     const payload = parsed['payload'];
     body = isRecord(payload) ? payload : {};
-    // The wrapper's `cli` is written by CODEX_HOOK_COMMAND and by nothing
-    // else; the Claude plugin's command predates the field. So absent means
-    // claude, and only the flat v2 shape (no wrapper at all) says nothing.
-    cli = parsed['cli'] === 'codex' ? 'codex' : 'claude';
+    // The wrapper's `cli` is written by CODEX_HOOK_COMMAND and
+    // antigravityHookCommand; the Claude plugin's command predates the field.
+    // So absent means claude, and only the flat v2 shape (no wrapper at all)
+    // says nothing.
+    const stamped = parsed['cli'];
+    cli = stamped === 'codex' || stamped === 'antigravity' ? stamped : 'claude';
   }
 
-  const name = body['hook_event_name'];
-  const sid = body['session_id'];
-  const tp = body['transcript_path'];
+  // agy's payload is camelCase and does not name its event, so its wrapper
+  // carries the name (see antigravityHookCommand). The snake_case spellings
+  // win where both exist: they are what every other CLI writes.
+  const stampedEvent = 'lineage_node_id' in parsed ? parsed['event'] : undefined;
+  const name = body['hook_event_name'] ?? stampedEvent;
+  const sid = body['session_id'] ?? body['conversationId'];
+  const tp = body['transcript_path'] ?? body['transcriptPath'];
   // SessionStart carries `source`: 'startup' | 'resume' | 'clear' |
   // 'compact' | 'fork'. 'fork' is the one consumers must see — a node-id
   // mismatch on a fork is a new BRANCH, never a re-key.

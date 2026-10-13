@@ -38,6 +38,10 @@ export interface CliBinaries {
   /** Whether `lineage.codexBinary` is set at all — with no Codex account, the
    *  one other reason the codex row is worth a line. */
   readonly codexConfigured: boolean;
+  /** The `agy` probe and whether `lineage.antigravityBinary` is set. Optional:
+   *  absent draws no agy row. */
+  readonly antigravity?: string | null;
+  readonly antigravityConfigured?: boolean;
 }
 
 export interface StatusInput {
@@ -48,6 +52,8 @@ export interface StatusInput {
   /** Any account on the Codex provider. Read off the accounts manager the
    *  window already has; never a probe. */
   readonly hasCodexAccount: boolean;
+  /** Any account on the Antigravity provider. Optional; absent reads false. */
+  readonly hasAntigravityAccount?: boolean;
 }
 
 /** What picking a row does. Every arm names an EXISTING flow — a contributed
@@ -69,9 +75,11 @@ export type StatusFactId =
   | 'tmux'
   | 'hooks'
   | 'codexHooks'
+  | 'antigravityHooks'
   | 'verbs'
   | 'claude'
   | 'codex'
+  | 'gemini'
   | 'windowModel'
   | 'surface';
 
@@ -189,6 +197,30 @@ export function statusFacts(input: StatusInput): StatusFact[] {
     );
   }
 
+  // The Antigravity pair, on the same gate. For agy the hooks are the only
+  // status a row has, so the `next` line says what is lost.
+  if (world.antigravityHooksAvailable === true) {
+    facts.push(
+      world.antigravityHooksInstalled === true
+        ? {
+            id: 'antigravityHooks',
+            icon: 'plug',
+            label: 'Antigravity hooks',
+            value: 'installed',
+            next: 'Remove them — an Antigravity row goes back to having no status',
+            action: { kind: 'command', command: COMMANDS.removeAntigravityHooks },
+          }
+        : {
+            id: 'antigravityHooks',
+            icon: 'plug',
+            label: 'Antigravity hooks',
+            value: 'not installed',
+            next: 'Install them — they are the only status an Antigravity row has',
+            action: { kind: 'command', command: COMMANDS.installAntigravityHooks },
+          },
+    );
+  }
+
   // A wiring without the verbs manager has nothing to install and nothing to
   // report — the same silence `recommendedPlan` keeps for it.
   if (world.verbsAvailable) {
@@ -239,6 +271,20 @@ export function statusFacts(input: StatusInput): StatusFact[] {
         value: cli.codex === null ? `not found — set ${codexKey}` : `found at ${cli.codex}`,
         next: `Open ${codexKey}`,
         action: { kind: 'openSetting', key: codexKey },
+      });
+    }
+    if (
+      cli.antigravity !== undefined &&
+      (input.hasAntigravityAccount === true || cli.antigravityConfigured === true)
+    ) {
+      const agyKey = fullKey(CONFIG_KEYS.antigravityBinary);
+      facts.push({
+        id: 'gemini',
+        icon: 'terminal',
+        label: 'agy CLI',
+        value: cli.antigravity === null ? `not found — set ${agyKey}` : `found at ${cli.antigravity}`,
+        next: `Open ${agyKey}`,
+        action: { kind: 'openSetting', key: agyKey },
       });
     }
   }

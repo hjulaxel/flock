@@ -64,7 +64,7 @@ import type {
   UsageSnapshot,
   UsageWindow,
 } from './types';
-import { canHostSession, sortProfiles } from './accounts';
+import { canHostSession, pickedByAuto, sortProfiles } from './accounts';
 
 /** What the resolver hands back: the account to launch on, and a short line
  *  saying why — shown next to the picker, so the user can see the rule work
@@ -348,6 +348,10 @@ export function resolveRouting(
         );
         continue;
       }
+    } else {
+      // AUTO: never an account whose usage Flock cannot see (pickedByAuto).
+      candidates = ordered.filter(pickedByAuto);
+      if (candidates.length === 0) continue;
     }
     const best = pickBest(candidates, ordered, usage, now);
     if (!best) continue; // unreachable with a non-empty candidate list
@@ -360,7 +364,10 @@ export function resolveRouting(
   // Every tier failed while accounts exist: only possible if the roster is
   // somehow unusable. Fall back to the first account in the user's own order,
   // which is the least surprising thing a list can hand back.
-  return { profile: ordered[0], reason: join(notes, 'first in your list') };
+  return {
+    profile: ordered.find(pickedByAuto) ?? ordered[0],
+    reason: join(notes, 'first in your list'),
+  };
 }
 
 function join(notes: readonly string[], tail: string): string {

@@ -71,7 +71,7 @@ else, so change the words there and rerun the script rather than editing here.
 
 <!-- generated:settings:start -->
 
-Flock contributes **46 settings**. **16** of them are switches that ship off, and **19** are tagged *advanced* — paths, timings, diagnostics and previews, the rows `@tag:advanced` finds in the Settings editor. Advanced rows are marked below and sit last in their category.
+Flock contributes **47 settings**. **16** of them are switches that ship off, and **20** are tagged *advanced* — paths, timings, diagnostics and previews, the rows `@tag:advanced` finds in the Settings editor. Advanced rows are marked below and sit last in their category.
 
 ### ▷ Sessions
 
@@ -163,6 +163,7 @@ Flock contributes **46 settings**. **16** of them are switches that ship off, an
 | `lineage.verbs.enabled` | `false` | **Let Claude fork from inside a session.** "Fork this session" writes a request into `~/.lineage/requests`; this switch makes Flock act on it. Nothing leaves your machine. |
 | `lineage.claudeBinary` | `""` | `Advanced` **Path to the `claude` CLI.** Empty searches PATH. |
 | `lineage.codexBinary` | `""` | `Advanced` **Path to the `codex` CLI.** Empty searches PATH and the usual install roots. Set it if VS Code does not inherit your node version manager. |
+| `lineage.antigravityBinary` | `""` | `Advanced` **Path to the `agy` CLI** (Antigravity). Empty searches PATH and `~/.local/bin`, where its installer puts it. |
 
 <!-- generated:settings:end -->
 

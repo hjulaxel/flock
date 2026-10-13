@@ -229,11 +229,11 @@ describe('resolveRouting: provider tier', () => {
     expect(result.profile?.id).toBe('k1');
   });
 
-  it('a provider whose CLI Flock does not launch degrades — never a Gemini account', () => {
+  it('the Antigravity tier (stored as gemini) picks an Antigravity account', () => {
     const withGemini = [...profiles, profile('g1', { provider: 'gemini', order: 9 })];
     const result = resolveRouting({ kind: 'provider', provider: 'gemini' }, undefined, withGemini, NO_USAGE, NOW);
-    expect(result.profile?.id).toBe('c1'); // fell through to auto
-    expect(result.reason).toContain('Gemini accounts cannot run sessions');
+    expect(result.profile?.id).toBe('g1');
+    expect(result.reason).not.toContain('cannot run sessions');
   });
 
   it('the Codex tier no longer degrades — it picks a Codex account', () => {
@@ -407,27 +407,13 @@ describe('resolveRouting: never picks an account no session can run on', () => {
     expect(result.reason).not.toContain('cannot run sessions');
   });
 
-  it('an account tier naming a Gemini account degrades and names the PROVIDER, not "gone"', () => {
+  it('an account tier naming an Antigravity account is honoured, even though Auto would pass it over', () => {
     const profiles = [
       profile('gem', { provider: 'gemini', order: 0 }),
       profile('cl', { provider: 'claude', order: 1 }),
     ];
-    const result = resolveRouting({ kind: 'account', id: 'gem' }, undefined, profiles, NO_USAGE, NOW);
-    expect(result.profile?.id).toBe('cl');
-    expect(result.reason).toContain('Gemini accounts cannot run sessions');
-    expect(result.reason).not.toContain('gone');
-  });
-
-  it('a roster of nothing BUT unlaunchable accounts resolves to null, not to the first row', () => {
-    const profiles = [
-      profile('gem', { provider: 'gemini', order: 0 }),
-      profile('gem2', { provider: 'gemini', order: 1 }),
-    ];
-    const result = resolveRouting(undefined, undefined, profiles, NO_USAGE, NOW);
-    // null = launch with no environment at all, i.e. the machine's own login —
-    // the only place such a launch can actually work.
-    expect(result.profile).toBeNull();
-    expect(result.reason).toBe('no account can run a session');
+    expect(resolveRouting({ kind: 'account', id: 'gem' }, undefined, profiles, NO_USAGE, NOW).profile?.id).toBe('gem');
+    expect(resolveRouting(undefined, undefined, profiles, NO_USAGE, NOW).profile?.id).toBe('cl');
   });
 });
 
@@ -500,12 +486,8 @@ describe('pinnedLaunchProfile', () => {
     expect(pinnedLaunchProfile('cx', profiles)?.id).toBe('cx');
   });
 
-  it('a pin left behind on an account no session can run on resolves to null', () => {
-    // Nothing launches the Gemini CLI, so an empty env — the machine's own
-    // login — is the only place such a resume can actually work.
-    expect(pinnedLaunchProfile('gem', profiles)).toBeNull();
-    // …while the pin itself still reads as that account, which is what the
-    // view and describeRouting render.
+  it('a pin on an Antigravity account resumes on it', () => {
+    expect(pinnedLaunchProfile('gem', profiles)?.id).toBe('gem');
     expect(pinnedProfile('gem', profiles)?.id).toBe('gem');
   });
 

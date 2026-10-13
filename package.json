@@ -384,6 +384,16 @@
         "category": "Flock"
       },
       {
+        "command": "lineage.installAntigravityHooks",
+        "title": "Install Antigravity Hooks...",
+        "category": "Flock"
+      },
+      {
+        "command": "lineage.removeAntigravityHooks",
+        "title": "Remove Antigravity Hooks",
+        "category": "Flock"
+      },
+      {
         "command": "lineage.installAgentVerbs",
         "title": "Install In-Session Verbs...",
         "category": "Flock"
@@ -2340,6 +2350,15 @@
             "default": "",
             "order": 4,
             "markdownDescription": "`Advanced` **Path to the `codex` CLI.** Empty searches PATH and the usual install roots. Set it if VS Code does not inherit your node version manager.",
+            "tags": [
+              "advanced"
+            ]
+          },
+          "lineage.antigravityBinary": {
+            "type": "string",
+            "default": "",
+            "order": 5,
+            "markdownDescription": "`Advanced` **Path to the `agy` CLI** (Antigravity). Empty searches PATH and `~/.local/bin`, where its installer puts it.",
             "tags": [
               "advanced"
             ]

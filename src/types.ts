@@ -343,11 +343,19 @@ export const PROVIDERS: Record<ProviderId, ProviderInfo> = {
     iconFileDark: 'codex-dark.svg',
     fallbackIcon: 'circuit-board',
   },
+  /** GOOGLE'S ANTIGRAVITY CLI (`agy`), which replaced the Gemini CLI for
+   *  consumer accounts on 2026-06-18. Its sessions and accounts are STORED
+   *  under the id `gemini`, which every Flock since 0.1.0 knows: an older
+   *  Flock sharing ~/.lineage keeps a `gemini` record as it is and never
+   *  starts a session on it, where an unknown id would be rewritten to
+   *  `claude` on its next save. The label and the mark say Antigravity, which
+   *  is what runs. The mark is Google's own (antigravity.google/favicon.svg),
+   *  the glyph without its round favicon background. */
   gemini: {
     id: 'gemini',
-    label: 'Gemini',
-    iconFile: 'gemini.svg',
-    fallbackIcon: 'star-full',
+    label: 'Antigravity',
+    iconFile: 'antigravity.svg',
+    fallbackIcon: 'rocket',
   },
   generic: {
     id: 'generic',
@@ -1133,6 +1141,10 @@ export const COMMANDS = {
    *  (`lineage.hooks.enabled`), same events file. See src/codexHooks.ts. */
   installCodexHooks: 'lineage.installCodexHooks',
   removeCodexHooks: 'lineage.removeCodexHooks',
+  /** The Antigravity pair: a plugin folder at ~/.gemini/config/plugins/flock.
+   *  Same reader gate, same events file. See src/antigravityHooks.ts. */
+  installAntigravityHooks: 'lineage.installAntigravityHooks',
+  removeAntigravityHooks: 'lineage.removeAntigravityHooks',
   /** The in-session verbs: a skill plus a tiny CLI that let the user say
    *  "fork this session" TO CLAUDE, which then asks a Flock window to run the
    *  same forkFlow the sidebar button runs. Install/remove mirror the hooks
@@ -1621,6 +1633,9 @@ export const CONFIG_KEYS = {
    *  lives under whichever node version is active (see codex.findCodexBinary),
    *  which an extension host frequently does not inherit. */
   codexBinary: 'codexBinary',
+  /** The Antigravity CLI (`agy`). Its installer puts it in `~/.local/bin`,
+   *  which an extension host started from the Dock may not have on PATH. */
+  antigravityBinary: 'antigravityBinary',
   /** Detach tier: 'auto' (wrap launches in the private tmux server when tmux
    *  is on PATH) or 'off'. */
   tmux: 'tmux',
@@ -2248,6 +2263,9 @@ export interface RecommendedWorld {
    *  reason; absent reads as not installed, which only matters when the step
    *  is available. */
   readonly codexHooksInstalled?: boolean;
+  /** The same pair for Antigravity. Absent reads as false. */
+  readonly antigravityHooksAvailable?: boolean;
+  readonly antigravityHooksInstalled?: boolean;
   /** The retired `lineage.workspaces.autoSwitch`, raw — undefined when the
    *  settings file never had it, which is nearly everyone. The third input to
    *  `resolveMode`: a `false` folds a `project` window to Root exactly as
@@ -2984,6 +3002,7 @@ export type ContextToken =
    *  the verb, never a Claude row being denied it. */
   | 'claude'
   | 'codex'
+  | 'gemini'
   /** This session runs DETACHED under the grace countdown
    *  (SessionNode.graceDeadlineAt): its tab is gone, its process is alive so
    *  re-attach is instant, and the sweep will end it at the deadline. A THIRD
@@ -3461,6 +3480,9 @@ export interface LineageState {
    *  installing one must never claim the other. `pluginDir` here names the
    *  `hooks.json` Flock merged its entries into, not a directory. */
   codexHookInstall?: HookInstallState;
+  /** The Antigravity hook install record (antigravityHooks.ts), its own key
+   *  for the same reason. `pluginDir` is the plugin folder. */
+  antigravityHookInstall?: HookInstallState;
   /** v8. The dispatch queue, keyed by entry id — intents to start a session,
    *  parked until an account is worth it (src/dispatch.ts). Optional for the
    *  reason `accounts` is: hand-built literals predate it, and migrateState
@@ -3491,9 +3513,9 @@ export interface HookEvent {
    *  absent field reads as `claude`. Null only for a line whose wrapper is
    *  missing altogether (the flat v2 shape), where nothing can be said. The
    *  consumer that needs it is liveness: "Codex hooks are proven live" is a
-   *  fact about Codex events specifically, and the two CLIs share one events
-   *  file. */
-  cli: 'claude' | 'codex' | null;
+   *  fact about Codex events specifically, and every CLI shares one events
+   *  file. `antigravity` is stamped by hooks.antigravityHookCommand. */
+  cli: 'claude' | 'codex' | 'antigravity' | null;
   raw: unknown;
 }
 
@@ -3866,6 +3888,9 @@ export interface TerminalDeps {
    *  as before and refuses Codex ones with the same "CLI not found" sentence a
    *  missing binary earns. */
   codexBinary?(): string | null;
+  /** The `agy` executable, for an Antigravity launch. Absent or null refuses
+   *  the launch with the "CLI not found" sentence. */
+  antigravityBinary?(): string | null;
   /** Where a launched terminal goes. Absent = 'editor'. */
   terminalLocation?(): TerminalLocationPref;
   /** Detach tier (src/tmux.ts): how to wrap a launch in the private tmux
@@ -4529,6 +4554,9 @@ export interface CommandDeps {
   installCodexHooks?(): Promise<HookInstallState>;
   removeCodexHooks?(): Promise<HookInstallState>;
   getCodexHookState?(): HookInstallState;
+  installAntigravityHooks?(): Promise<HookInstallState>;
+  removeAntigravityHooks?(): Promise<HookInstallState>;
+  getAntigravityHookState?(): HookInstallState;
   // in-session verbs (G) — all four OPTIONAL, unlike the hooks quartet, so no
   // existing unit double has to learn them: a wiring without them has the two
   // commands registered and refusing, never half-performing.
@@ -4928,6 +4956,9 @@ export interface CommandDeps {
      *  Codex hook entries: a verb that can only report "no Codex here" is
      *  worse than no verb. */
     codexHooksAvailable?: boolean;
+    /** The same pair for Antigravity. */
+    antigravityHooksInstalled?: boolean;
+    antigravityHooksAvailable?: boolean;
   };
   // ---- multi-select -------------------------------------------------------
   /** The session ids selected in whichever view is on screen, top to bottom, or

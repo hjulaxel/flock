@@ -47,7 +47,7 @@ import type {
   RoutingChoice,
   UsageSnapshot,
 } from './types';
-import { canHostSession } from './accounts';
+import { canHostSession, pickedByAuto } from './accounts';
 import { resolveRouting } from './routing';
 
 // ------------------------------------------------------------------- entry
@@ -227,7 +227,8 @@ function candidatesFor(
       (p) => providerOf(p) === choice.provider && canHostSession(p),
     );
   }
-  return live.filter((p) => canHostSession(p));
+  // Auto never dispatches onto an account whose usage it cannot see.
+  return live.filter((p) => canHostSession(p) && pickedByAuto(p));
 }
 
 /** What a hold on a full window says. Reset time is appended by the caller,

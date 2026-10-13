@@ -68,6 +68,7 @@ export const RECOMMENDED_STEP_IDS = [
   'import',
   'hooks',
   'codexHooks',
+  'antigravityHooks',
   'verbs',
   'worktrees',
 ] as const;
@@ -261,6 +262,30 @@ export function recommendedPlan(world: RecommendedWorld): RecommendedPlan {
         'when it asks for permission — which nothing else reports for Codex.',
       writes: 'one entry per event into ~/.codex/hooks.json — merged, never replaced',
       undo: 'Flock: Remove Codex Hooks',
+      recommended: true,
+      settings: [],
+    });
+  }
+
+  // ---- instant updates, Antigravity ---------------------------------------
+  //
+  // The Codex step's gate and shape. For agy the hooks are the only status a
+  // row has, and the only way a new session's row learns which conversation
+  // it is.
+  if (world.antigravityHooksAvailable !== true) {
+    // Nothing said in either direction.
+  } else if (world.antigravityHooksInstalled === true) {
+    done.push('antigravityHooks');
+  } else {
+    steps.push({
+      id: 'antigravityHooks',
+      title: 'Status for Antigravity (hooks)',
+      why:
+        'Without hooks an Antigravity row has no status and does not know ' +
+        'which conversation it is. With them it shows busy and idle, and ' +
+        'Flock can close it with a summary.',
+      writes: 'a plugin folder at ~/.gemini/config/plugins/flock',
+      undo: 'Flock: Remove Antigravity Hooks',
       recommended: true,
       settings: [],
     });

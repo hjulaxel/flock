@@ -1138,7 +1138,7 @@ pty it did not create, write to a transcript another process is holding, send
 keystrokes to a terminal it does not own, or close one. Terminals Flock does not
 own are also left alone by workspace switching.
 
-### Codex, Gemini and other CLIs
+### Codex, Antigravity and other CLIs
 
 Claude session rows come from the Claude CLI's own registry (`claude agents
 --json`). Codex rows come from Flock's own records plus the Codex CLI's
@@ -1186,6 +1186,26 @@ Gemini and `generic` rows still exist so a **project** can declare what it runs
 directory; Gemini is not yet somewhere a session starts. The `generic` row is
 the API-key profile: a Claude launch authenticated by an environment variable,
 with no plan windows to meter.
+
+
+### Antigravity
+
+An Antigravity row runs Google's `agy`, which replaced the Gemini CLI for
+consumer accounts. It wears Google's Antigravity mark. Its accounts and
+sessions are stored under the provider id `gemini`, which every Flock since
+0.1.0 knows, so an older Flock sharing `~/.lineage` leaves them alone.
+
+| Fact | Antigravity row |
+| --- | --- |
+| Binary | `agy` on PATH, then `~/.local/bin`; `lineage.antigravityBinary` overrides |
+| Account | the machine's own agy login (keyring); no config directory |
+| New session | `agy --add-dir=… --prompt-interactive=…`; agy picks the id, and the first hook reports it |
+| Resume | `agy --conversation <id>` |
+| Fork | Fork types `/fork` into an idle session; the tab follows the child |
+| Busy / idle | hooks only: `PreInvocation` busy, `Stop` fully idle → idle |
+| Waiting for you | never shown |
+| History | `~/.gemini/antigravity-cli/brain/<id>/…/transcript.jsonl` |
+| Hooks | a plugin folder, `~/.gemini/config/plugins/flock`; the only place agy loads hooks before its folder-trust prompt |
 
 ## Close and archive
 

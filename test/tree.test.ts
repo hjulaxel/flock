@@ -1081,7 +1081,7 @@ describe('provider icons', () => {
 
     const icon = p.getTreeItem(ref(A)).iconPath as unknown as Uri;
     expect(icon.scheme).toBe('file');
-    expect(icon.path).toBe('/ext/media/providers/gemini.svg');
+    expect(icon.path).toBe('/ext/media/providers/antigravity.svg');
   });
 
   it('falls back to a codicon when no media path is available', () => {

@@ -63,6 +63,7 @@ import {
   MAX_DISPATCH_PROMPT_CHARS,
   MAX_PROJECT_NAME_LEN,
   PROVIDERS,
+  PROVIDER_MEDIA_DIR,
   PROVIDER_IDS,
   WRAP_PROMPT,
   isSessionId,
@@ -2100,6 +2101,13 @@ async function applyRecommendedStep(
       await deps.setHooksEnabled(true);
       return true;
     }
+    case 'antigravityHooks': {
+      if (!deps.installAntigravityHooks) return false;
+      const state = await deps.installAntigravityHooks();
+      if (state.installed !== true) return false;
+      await deps.setHooksEnabled(true);
+      return true;
+    }
     case 'verbs': {
       if (!deps.installAgentVerbs) return false;
       const state = await deps.installAgentVerbs();
@@ -4090,6 +4098,20 @@ async function forkFlow(
   // the id, a /clear, a compaction), and forking the id as-clicked is exactly
   // the fork-an-older-version bug the tip lookup exists to prevent.
   const clickedId = deps.tipOf(parentIdArg);
+  // agy has no launch flag that forks, so a fork Flock launched would be a new,
+  // unrelated conversation dressed as a child. Its own `/fork` is typed into
+  // the session instead (only when the keystroke guard allows it); the next
+  // turn's hook names the child and extension.ts records the parent edge.
+  if (sessionLaunchProvider(deps, clickedId) === 'gemini') {
+    const label = labelFor(deps, clickedId);
+    const sent = deps.sendTextToSession(clickedId, '/fork');
+    void vscode.window.showInformationMessage(
+      sent === 'sent'
+        ? `Flock: asked "${label}" to fork. The child row appears after its next turn, and the tab follows it.`
+        : `Flock: type /fork in "${label}" to fork it. Antigravity forks inside the session.`,
+    );
+    return undefined;
+  }
   // Claude writes a transcript lazily; there is nothing to resume until it has.
   // An unstarted BRANCH is the exception, and the common one — see
   // forkableAncestor: what it is showing on screen is its parent's transcript,
@@ -4848,7 +4870,7 @@ export async function resumeFlow(
   if (
     started &&
     detached === undefined &&
-    routed.provider !== 'codex' &&
+    ownCliOf(routed.provider) === undefined &&
     (routed.env === undefined || Object.keys(routed.env).length === 0)
   ) {
     let handedTo: { label: string } | null = null;
@@ -6807,7 +6829,9 @@ async function closeWithCompaction(
 ): Promise<void> {
   const label = labelFor(deps, sessionId);
 
-  const codex = sessionLaunchProvider(deps, sessionId) === 'codex';
+  const cli = sessionLaunchProvider(deps, sessionId);
+  /** Asked in words (Codex, Antigravity) rather than compacted (Claude). */
+  const worded = cli !== undefined;
 
   if (deps.awaitCompactSummary === undefined) {
     log('close with summary: no summary reader in this wiring — asking instead');
@@ -6820,7 +6844,12 @@ async function closeWithCompaction(
   // current.
   const tip = deps.tipOf(sessionId);
   const sinceMs = Date.now();
-  const sent = deps.sendTextToSession(tip, codex ? CODEX_SUMMARY_PROMPT : COMPACT_PROMPT);
+  // Claude compacts and Flock reads the compaction summary back; Codex and
+  // Antigravity keep no readable summary, so they are asked in words.
+  const sent = deps.sendTextToSession(
+    tip,
+    worded ? CODEX_SUMMARY_PROMPT : COMPACT_PROMPT,
+  );
   if (sent !== 'sent') {
     const host = hostOf(deps, tip);
     const CLOSE = 'Close Without a Summary';
@@ -6860,17 +6889,17 @@ async function closeWithCompaction(
     deps,
     sessionId,
     sinceMs,
-    `Flock: ${codex ? 'summarising' : 'compacting'} "${label}" before closing it…`,
+    `Flock: ${worded ? 'summarising' : 'compacting'} "${label}" before closing it…`,
   );
 
   if (raw === undefined) {
     const ANYWAY = 'Close Anyway';
     const answer = await vscode.window.showWarningMessage(
-      `Flock: no summary came back for "${label}" — the ${codex ? 'summary request' : 'compaction'} is still ` +
+      `Flock: no summary came back for "${label}" — the ${worded ? 'summary request' : 'compaction'} is still ` +
         'running, or the CLI wrote none. Nothing has been closed.',
       {
         modal: true,
-        detail: codex
+        detail: worded
           ? 'The summary request may still be running. Leaving the session open lets it finish; closing now ends its turn.'
           : 'The branch has been asked to compact, so its own context is ' +
           'already squashed whether or not you close it now. Leaving it open ' +
@@ -7059,7 +7088,15 @@ interface RoutedLaunch {
  * made before Codex sessions existed.
  */
 function launchProviderOf(profile: AccountProfile): ProviderId | undefined {
-  return profile.provider === 'codex' ? 'codex' : undefined;
+  return ownCliOf(profile.provider);
+}
+
+/** The provider ids that launch a CLI other than `claude`, as themselves;
+ *  everything else (claude, generic, unknown) as undefined, which is what
+ *  every launch path here means by Claude. One function, so a third CLI is
+ *  one line here and not one ternary per verb. */
+function ownCliOf(provider: unknown): 'codex' | 'gemini' | undefined {
+  return provider === 'codex' || provider === 'gemini' ? provider : undefined;
 }
 
 /** The LaunchOptions fragment. Spread, so an empty resolution adds no keys at
@@ -7188,15 +7225,16 @@ function routeNewSession(
 function sessionLaunchProvider(
   deps: AccountCommandDeps,
   sessionId: string,
-): ProviderId | undefined {
+): 'codex' | 'gemini' | undefined {
   try {
-    if (deps.getRecord(sessionId)?.provider === 'codex') return 'codex';
+    const recorded = ownCliOf(deps.getRecord(sessionId)?.provider);
+    if (recorded !== undefined) return recorded;
     // The second source covers the conversation Flock never launched: a Codex
     // session started in a terminal has no record at all, so the only thing
     // that knows which CLI owns it is which STORE its transcript sits in —
     // and that is a question only the wiring, which holds both indexes, can
     // answer. Optional so every unit double keeps working without it.
-    return deps.sessionProvider?.(sessionId) === 'codex' ? 'codex' : undefined;
+    return ownCliOf(deps.sessionProvider?.(sessionId));
   } catch (err) {
     logError('commands.sessionLaunchProvider', err);
     return undefined;
@@ -7741,40 +7779,45 @@ async function addAccountFlow(deps: AccountCommandDeps): Promise<void> {
     provider: ProviderId;
     apiKey?: boolean;
   }
+  // Names and marks only: what each kind of account does is in the docs, and
+  // the one thing a person must know before choosing (a new config directory)
+  // is said in the step after this, where it applies.
+  const markOf = (id: ProviderId): vscode.QuickPickItem['iconPath'] => {
+    const info = PROVIDERS[id];
+    const light = accts.mediaPath(`${PROVIDER_MEDIA_DIR}/${info.iconFile}`);
+    if (light === undefined) return new vscode.ThemeIcon(info.fallbackIcon);
+    const dark =
+      info.iconFileDark === undefined
+        ? undefined
+        : accts.mediaPath(`${PROVIDER_MEDIA_DIR}/${info.iconFileDark}`);
+    return dark === undefined
+      ? vscode.Uri.file(light)
+      : { light: vscode.Uri.file(light), dark: vscode.Uri.file(dark) };
+  };
   const providerPicks: ProviderPick[] = [
+    { label: 'Claude', iconPath: markOf('claude'), provider: 'claude' },
+    { label: 'Codex / OpenAI', iconPath: markOf('codex'), provider: 'codex' },
+    { label: 'Antigravity', description: 'Gemini', iconPath: markOf('gemini'), provider: 'gemini' },
     {
-      label: '$(sparkle) Claude',
-      description: 'A Claude subscription (Pro, Max, Team)',
-      detail:
-        'Gets its own config directory, so signing in here does not sign you ' +
-        'out anywhere else. One sign-in, once.',
-      provider: 'claude',
-    },
-    {
-      label: '$(circuit-board) Codex / OpenAI',
-      description: 'A ChatGPT / Codex subscription',
-      detail: 'Same, via CODEX_HOME.',
-      provider: 'codex',
-    },
-    {
-      label: '$(key) API key…',
-      description: 'Authenticate with an environment variable instead',
-      detail:
-        'For an API key rather than a subscription login. Billed per token.',
+      label: 'API key',
+      iconPath: new vscode.ThemeIcon('key'),
       provider: 'generic',
       apiKey: true,
     },
   ];
   const provider = await vscode.window.showQuickPick(providerPicks, {
-    placeHolder: 'What kind of account?',
+    title: 'Add Account',
+    placeHolder: 'Which kind?',
     ignoreFocusOut: true,
   });
   if (!provider) return;
 
   const existing = accts.accounts();
+  const suggested = provider.apiKey === true ? 'API key' : PROVIDERS[provider.provider].label;
   const label = await vscode.window.showInputBox({
-    title: 'New Account',
-    prompt: 'A name for this account — "Work", "Personal", "Client X".',
+    title: 'Add Account',
+    prompt: 'A name for it, like "Work" or "Personal".',
+    ...(validateAccountLabel(suggested, existing) === '' ? { value: suggested } : {}),
     ignoreFocusOut: true,
     validateInput: (value) => {
       const refusal = validateAccountLabel(value, existing);
@@ -7796,8 +7839,14 @@ async function addAccountFlow(deps: AccountCommandDeps): Promise<void> {
 
   let configDir: string | undefined;
   let extraEnv: Record<string, string> | undefined;
+  // agy keeps its login in the OS keyring and has no variable that moves its
+  // config, so there is no directory to make: its account is this machine's
+  // login, and saying otherwise would claim an isolation it does not have.
+  const machineLogin = provider.provider === 'gemini';
 
-  if (provider.apiKey === true) {
+  if (machineLogin) {
+    // Nothing to ask and nothing to create.
+  } else if (provider.apiKey === true) {
     // Two things the user has to be told BEFORE typing a key, because both are
     // irreversible in the way that matters: where it is stored, and what it
     // does to the bill.
@@ -7866,17 +7915,9 @@ async function addAccountFlow(deps: AccountCommandDeps): Promise<void> {
       {
         modal: true,
         detail: codex
-          ? 'Its login is separate: signing in here signs nothing else out. ' +
-            'Nothing is copied into the directory — not from ~/.codex and ' +
-            'not from ~/.claude.json — so the first codex session there ' +
-            'starts as on a fresh install: sign in once, and add a ' +
-            'config.toml if you want one.'
-          : 'Its login is separate: signing in here signs nothing else out. ' +
-            'From ~/.claude.json it inherits the onboarding flags, the theme ' +
-            'and your MCP server definitions, including any keys in their env. ' +
-            'They are copied once and not refreshed automatically — ' +
-            '"Refresh Account Config from Default Login..." on the account row ' +
-            'copies them again.',
+          ? 'Its own login. Nothing is copied in, so its first session starts like a fresh install.'
+          : 'Its own login. It copies the onboarding flags, theme and MCP server definitions from ~/.claude.json, including any keys in their env. ' +
+            'They are not refreshed automatically; use Refresh Account Config from Default Login… on the row.',
       },
       CREATE,
     );
@@ -7906,6 +7947,25 @@ async function addAccountFlow(deps: AccountCommandDeps): Promise<void> {
     vscode.window.setStatusBarMessage(`Flock: added "${name}".`, 4000);
     return;
   }
+  if (machineLogin) {
+    // Its hooks are the only status an Antigravity row has, and the only way
+    // a new session learns which conversation it is, so they are offered here,
+    // where the account is made, rather than left to be found in a menu.
+    if (deps.getAntigravityHookState?.().installed === true) {
+      vscode.window.setStatusBarMessage(
+        `Flock: added "${name}". It uses this machine's agy sign-in.`,
+        6000,
+      );
+      return;
+    }
+    const INSTALL = 'Install Hooks';
+    const choice = await vscode.window.showInformationMessage(
+      `Flock: added "${name}". Install the Antigravity hooks so its sessions show status?`,
+      INSTALL,
+    );
+    if (choice === INSTALL) await vscode.commands.executeCommand(COMMANDS.installAntigravityHooks);
+    return;
+  }
   const SIGN_IN = 'Sign In Now';
   const choice = await vscode.window.showInformationMessage(
     `Flock: added "${name}". It has no login of its own yet — sign in ` +
@@ -7919,7 +7979,13 @@ async function addAccountFlow(deps: AccountCommandDeps): Promise<void> {
  *  terminal starts the binary with. `/login` is a slash command the Claude CLI
  *  takes as its opening turn, the same trick "Fork and Compact" uses to hand
  *  it one at start-up; Codex has a real subcommand. */
-const SIGN_IN_ARG = { claude: '/login', codex: 'login' } as const;
+const SIGN_IN_ARGS = {
+  claude: ['/login'],
+  codex: ['login'],
+  // agy (stored as `gemini`) has no login subcommand: run bare, it signs in
+  // when it has to.
+  gemini: [],
+} as const;
 
 /**
  * Pure. How the sign-in terminal starts: THE CLI AS THE TERMINAL'S OWN
@@ -7937,12 +8003,12 @@ const SIGN_IN_ARG = { claude: '/login', codex: 'login' } as const;
  * be pinned from a Mac.
  */
 export function signInLaunch(
-  provider: keyof typeof SIGN_IN_ARG,
+  provider: keyof typeof SIGN_IN_ARGS,
   binary: string,
   platform: string,
   comSpec: string | undefined,
 ): SpawnableLaunch {
-  return shimLaunch(binary, [SIGN_IN_ARG[provider]], platform, comSpec);
+  return shimLaunch(binary, [...SIGN_IN_ARGS[provider]], platform, comSpec);
 }
 
 /**
@@ -8003,6 +8069,16 @@ async function loginAccountFlow(
       return;
     }
     launch = signInLaunch('codex', binary, process.platform, process.env['ComSpec']);
+  } else if (profile.provider === 'gemini') {
+    const binary = accts.antigravityBinary?.() ?? null;
+    if (!binary) {
+      void vscode.window.showErrorMessage(
+        'Antigravity CLI not found — set lineage.antigravityBinary to the full ' +
+          'path of your agy executable.',
+      );
+      return;
+    }
+    launch = signInLaunch('gemini', binary, process.platform, process.env['ComSpec']);
   } else {
     void vscode.window.showInformationMessage(
       `Flock: Flock does not know how to sign "${profile.label}" in — ` +
@@ -8459,8 +8535,7 @@ async function switchAccountFlow(
   // transcript. A pin is a claim a user can change with another verb; the CLI
   // that wrote the bytes is a fact about the bytes, and it is the bytes this
   // verb moves.
-  const conversationCli =
-    sessionLaunchProvider(deps, sessionId) === 'codex' ? 'codex' : 'claude';
+  const conversationCli: SessionCli = sessionLaunchProvider(deps, sessionId) ?? 'claude';
   const offer = offerSwitch({ cli: conversationCli, from: current, profiles });
 
   // Flock can move a conversation between two logins of the SAME CLI, and only
@@ -8791,8 +8866,7 @@ async function handoffFlow(
   // briefs a Claude one; `transcriptPathOf` answers for either layout (the
   // wiring holds both indexes), so the old "cannot yet find that CLI's own
   // transcript" refusal has nothing left to refuse.
-  const sourceCli: SessionCli =
-    sessionLaunchProvider(deps, sessionId) === 'codex' ? 'codex' : 'claude';
+  const sourceCli: SessionCli = sessionLaunchProvider(deps, sessionId) ?? 'claude';
   const transcriptPath = deps.transcriptPathOf?.(sessionId) ?? null;
   if (transcriptPath === null) {
     void vscode.window.showWarningMessage(
@@ -8809,9 +8883,8 @@ async function handoffFlow(
     (p) => handoffRefusal(current, p, true, sourceCli) === null,
   );
   if (choices.length === 0) {
-    const other = sourceCli === 'codex' ? 'Claude' : 'Codex';
     void vscode.window.showInformationMessage(
-      `Flock: no ${other} account is configured to continue "${label}" on. ` +
+      `Flock: no account on another CLI is configured to continue "${label}" on. ` +
         'Add one in the Accounts section first.',
     );
     return;
@@ -9208,7 +9281,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     // the choice stays the user's. Claude rows only: the one delegate speaks
     // no codex.
     const delegate =
-      deps.sessionProvider?.(id) === 'codex'
+      ownCliOf(deps.sessionProvider?.(id)) !== undefined
         ? null
         : (deps.delegateOpenInfo?.() ?? null);
     const OPEN_THERE = delegate === null ? '' : `Open in ${delegate.label}`;
@@ -9502,6 +9575,12 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         { liveOnly: false },
       );
       if (!parentId) return;
+      if (sessionLaunchProvider(deps, parentId) === 'gemini') {
+        void vscode.window.showInformationMessage(
+          'Flock: Antigravity cannot fork and compact in one step. Use Fork, then /compact in the new session.',
+        );
+        return;
+      }
       if (sessionLaunchProvider(deps, parentId) === 'codex') {
         const childId = await forkFlow(deps, parentId);
         if (childId !== undefined) await compactCodexFork(deps, childId);
@@ -11722,6 +11801,9 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       hasCodexAccount: (deps.accounts?.accounts() ?? []).some(
         (profile) => profile.provider === 'codex',
       ),
+      hasAntigravityAccount: (deps.accounts?.accounts() ?? []).some(
+        (profile) => profile.provider === 'gemini',
+      ),
     });
     const items: (vscode.QuickPickItem & { fact: StatusFact })[] = facts.map(
       (fact) => ({
@@ -11960,6 +12042,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     const on = [
       state.hooksInstalled ? 'session hooks' : '',
       state.codexHooksInstalled === true ? 'Codex hooks' : '',
+      state.antigravityHooksInstalled === true ? 'Antigravity hooks' : '',
       state.verbsInstalled === true ? 'verbs' : '',
     ].filter((s) => s !== '');
     return on.length === 0 ? 'Nothing installed' : `Installed: ${on.join(', ')}`;
@@ -12003,6 +12086,20 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         items.push({
           label: '$(debug-disconnect) Remove Codex Hooks',
           command: COMMANDS.removeCodexHooks,
+        });
+      }
+    }
+    if (state?.antigravityHooksAvailable === true) {
+      if (state.antigravityHooksInstalled !== true) {
+        items.push({
+          label: '$(plug) Install Antigravity Hooks',
+          description: 'The only status an Antigravity row has',
+          command: COMMANDS.installAntigravityHooks,
+        });
+      } else {
+        items.push({
+          label: '$(debug-disconnect) Remove Antigravity Hooks',
+          command: COMMANDS.removeAntigravityHooks,
         });
       }
     }
@@ -12276,6 +12373,14 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     log('hooks: install ->', state.installed ? 'installed' : 'not installed');
   });
 
+  /** Does any CLI other than `except` still have Flock hooks installed? The
+   *  three installs feed one events file behind one reader switch, so removing
+   *  one must leave the reader on while another still writes to it. */
+  const otherHooksInstalled = (except: 'claude' | 'codex' | 'gemini'): boolean =>
+    (except !== 'claude' && deps.getHookState().installed === true) ||
+    (except !== 'codex' && deps.getCodexHookState?.().installed === true) ||
+    (except !== 'gemini' && deps.getAntigravityHookState?.().installed === true);
+
   register(COMMANDS.removeHooks, 'remove hooks', async () => {
     if (!deps.getHookState().installed) {
       void vscode.window.showInformationMessage(
@@ -12285,7 +12390,9 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       return;
     }
     const state = await deps.removeHooks();
-    if (state.installed !== true) await deps.setHooksEnabled(false);
+    if (state.installed !== true && !otherHooksInstalled('claude')) {
+      await deps.setHooksEnabled(false);
+    }
     await syncHookContext(state.installed === true);
     log('hooks: remove ->', state.installed ? 'still installed' : 'removed');
   });
@@ -12327,10 +12434,41 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
     // The reader stays on while the CLAUDE plugin is still installed: the
     // gate is shared, and turning it off here would silence a plugin the user
     // did not ask to silence.
-    if (state.installed !== true && !deps.getHookState().installed) {
+    if (state.installed !== true && !otherHooksInstalled('codex')) {
       await deps.setHooksEnabled(false);
     }
     log('codex hooks: remove ->', state.installed ? 'still installed' : 'removed');
+  });
+
+  // The Antigravity pair (src/antigravityHooks.ts), on the same terms.
+  register(COMMANDS.installAntigravityHooks, 'install antigravity hooks', async () => {
+    if (!deps.installAntigravityHooks) {
+      void vscode.window.showInformationMessage(
+        'Flock: Antigravity hooks are not available in this window.',
+      );
+      return;
+    }
+    const state = await deps.installAntigravityHooks();
+    if (state.installed === true) await deps.setHooksEnabled(true);
+    log('antigravity hooks: install ->', state.installed ? 'installed' : 'not installed');
+  });
+
+  register(COMMANDS.removeAntigravityHooks, 'remove antigravity hooks', async () => {
+    if (!deps.removeAntigravityHooks || !deps.getAntigravityHookState) {
+      void vscode.window.showInformationMessage(
+        'Flock: Antigravity hooks are not available in this window.',
+      );
+      return;
+    }
+    if (!deps.getAntigravityHookState().installed) {
+      void vscode.window.showInformationMessage('Flock: Antigravity hooks are not installed.');
+      return;
+    }
+    const state = await deps.removeAntigravityHooks();
+    if (state.installed !== true && !otherHooksInstalled('gemini')) {
+      await deps.setHooksEnabled(false);
+    }
+    log('antigravity hooks: remove ->', state.installed ? 'still installed' : 'removed');
   });
 
   // ------------------------------------------------------ in-session verbs

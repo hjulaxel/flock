@@ -278,6 +278,8 @@ export interface AccountDeps {
    *  bare word `codex`, which works whenever the terminal's PATH happens to
    *  carry it — the behaviour sign-in had before the resolver existed. */
   codexBinary?(): string | null;
+  /** The `agy` executable, for signing an Antigravity account in. */
+  antigravityBinary?(): string | null;
   /** Absolute path of a file inside the install (provider logos). */
   mediaPath(relative: string): string | undefined;
   /** Repaint the accounts view. */

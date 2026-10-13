@@ -93,6 +93,12 @@ chats, and much more.
   version manager, whose PATH VS Code often does not inherit), set
   `lineage.codexBinary`.
 
+  **Gemini, through the Antigravity CLI.** With Google's `agy` installed, an
+  **Antigravity** account appears on its own. Its sessions get a tree row, an
+  age, resume and history. **Install Antigravity Hooks…** gives them busy and
+  idle. They never show "waiting", because agy does not say when it is asking
+  you something, so Flock types into one only when it is idle.
+
 - **Project workspaces.** Scope a window to one project. Switching saves the tab
   layout you leave and restores the target's. With tmux installed, other
   projects' sessions keep running while hidden and reattach instantly; without
@@ -446,7 +452,7 @@ MIT. See [LICENSE](LICENSE).
 
 > **Not affiliated with, endorsed by, or sponsored by Anthropic, OpenAI or
 > Google.** "Claude" and "Claude Code" are trademarks of Anthropic, PBC;
-> "OpenAI" and "Codex" of OpenAI, L.L.C.; "Gemini" of Google LLC. Their names
+> "OpenAI" and "Codex" of OpenAI, L.L.C.; "Gemini" and "Antigravity" of Google LLC. Their names
 > and logos appear here only to identify which tool a session runs — nominative
 > use — and each remains the property of its owner. This is an independent,
 > community-built tool.
