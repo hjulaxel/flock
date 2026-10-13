@@ -316,7 +316,7 @@ export function mayTypeInto(target: TypeTarget): 'ok' | TypeRefusal {
   // other state may be a trust, permission or onboarding dialog that Enter
   // would answer.
   if (
-    target.provider === 'antigravity' &&
+    target.provider === 'gemini' &&
     (target.promptsVisible !== true || target.status !== 'idle')
   ) {
     return 'blind';

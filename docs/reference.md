@@ -1191,7 +1191,9 @@ with no plan windows to meter.
 ### Antigravity
 
 An Antigravity row runs Google's `agy`, which replaced the Gemini CLI for
-consumer accounts. It wears the Gemini mark.
+consumer accounts. It wears Google's Antigravity mark. Its accounts and
+sessions are stored under the provider id `gemini`, which every Flock since
+0.1.0 knows, so an older Flock sharing `~/.lineage` leaves them alone.
 
 | Fact | Antigravity row |
 | --- | --- |

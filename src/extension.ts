@@ -1361,7 +1361,7 @@ export async function activate(
       if (codex !== undefined) return codex.transcriptPath;
       // Only for an id agy's own store lists: a stat per Claude alias on
       // every lookup would be a filesystem call for nothing.
-      if (idsOf(antigravityArchived()).has(id) || store.get(id)?.provider === 'antigravity') {
+      if (idsOf(antigravityArchived()).has(id) || store.get(id)?.provider === 'gemini') {
         const agy = antigravityTranscriptOf(id);
         if (agy !== null) return agy;
       }
@@ -1431,11 +1431,11 @@ export async function activate(
   const sessionProviderFor = (id: string): ProviderId | undefined => {
     try {
       const recorded = store.get(id)?.provider;
-      if (recorded === 'codex' || recorded === 'antigravity') return recorded;
+      if (recorded === 'codex' || recorded === 'gemini') return recorded;
       if (idsOf(codexArchived()).has(id)) return 'codex';
       // An agy conversation Flock did not launch has no record; which store
       // its transcript sits in is the only thing that knows.
-      if (idsOf(antigravityArchived()).has(id)) return 'antigravity';
+      if (idsOf(antigravityArchived()).has(id)) return 'gemini';
       return undefined;
     } catch (err) {
       logError('extension.sessionProviderFor', err);
@@ -1650,7 +1650,7 @@ export async function activate(
       const cli = sessionProviderFor(sessionId);
       prompt = cli === 'codex'
         ? readFirstCodexPrompt(entry.transcriptPath)
-        : cli === 'antigravity'
+        : cli === 'gemini'
           ? readFirstAntigravityPrompt(entry.transcriptPath)
           : readFirstPrompt(entry.transcriptPath);
     } catch (err) {
@@ -3605,7 +3605,7 @@ export async function activate(
     if (plan.kind === 'none' || launch === undefined) return;
     antigravityBound.set(nodeId, realId);
     const from = store.get(current) ?? launch;
-    const patch: Record<string, unknown> = { provider: 'antigravity', launchedByUs: true };
+    const patch: Record<string, unknown> = { provider: 'gemini', launchedByUs: true };
     if (typeof from.cwd === 'string' && from.cwd !== '') patch.cwd = from.cwd;
     if (plan.kind === 'fork') {
       patch.parentId = plan.parent;
@@ -4556,7 +4556,7 @@ export async function activate(
       // and why the conversation wins when they do.
       const recorded = store.get(sessionId)?.provider;
       const provider =
-        recorded === 'codex' || recorded === 'antigravity' ? recorded : undefined;
+        recorded === 'codex' || recorded === 'gemini' ? recorded : undefined;
       return {
         env: envForProfile(profile),
         profileId: profile.id,
@@ -5737,7 +5737,7 @@ export async function activate(
       const cli = sessionProviderFor(id);
       const at = cli === 'codex'
         ? codexStatsCache.get(file)?.stats.lastRecordAt
-        : cli === 'antigravity'
+        : cli === 'gemini'
           ? antigravityStatsOf(file).lastRecordAt
           : readTailStats(file).lastRecordAt;
       if (at !== undefined && (!Number.isFinite(best) || at > best)) best = at;
@@ -7008,7 +7008,7 @@ export async function activate(
       // launch whose first hook never arrived is keyed on Flock's own id,
       // which agy does not know. And without hooks the row never learns which
       // conversation it is, so the install is offered.
-      if (launchOpts.provider === 'antigravity') {
+      if (launchOpts.provider === 'gemini') {
         for (const alias of chainAliases(opts.sessionId)) antigravityActivity.delete(alias);
         if (
           typeof launchOpts.resumeId === 'string' &&
@@ -7088,11 +7088,11 @@ export async function activate(
       // account, which can be re-pinned, or from the project, which is a glyph
       // heuristic. Claude launches write nothing: absent already means claude,
       // and stamping every row would make the field's presence meaningless.
-      if (binding && launchOpts.provider === 'antigravity') {
+      if (binding && launchOpts.provider === 'gemini') {
         // agy names its own conversation: the row is keyed on this launch id
         // until its first hook reports the real one (adoptAntigravityId).
         void store.upsert(opts.sessionId, {
-          provider: 'antigravity',
+          provider: 'gemini',
           ...(typeof launchOpts.cwd === 'string' && launchOpts.cwd !== '' ? { cwd: launchOpts.cwd } : {}),
         });
       }
@@ -7343,13 +7343,13 @@ export async function activate(
         row: entry !== undefined,
         // Codex and Antigravity rows are Flock's own, not the Claude roster's,
         // so a failed roster fetch says nothing about them.
-        rosterOk: provider === 'codex' || provider === 'antigravity' || lastFetchOk,
+        rosterOk: provider === 'codex' || provider === 'gemini' || lastFetchOk,
         ...(provider !== undefined ? { provider } : {}),
         promptsVisible:
           provider === 'codex'
             ? codexPromptsVisible()
-            : provider === 'antigravity'
-              ? antigravityHooksManager.getState().installed === true &&
+            : provider === 'gemini'
+              ? antigravityHooksManager.isInstalled() &&
                 boolCfg(CONFIG_KEYS.hooksEnabled, false)
               : true,
       });
@@ -7698,7 +7698,7 @@ export async function activate(
             const cli = sessionProviderFor(id);
             const found = cli === 'codex'
               ? parseCodexSummaryReply(text, sinceMs)
-              : cli === 'antigravity'
+              : cli === 'gemini'
                 ? parseAntigravitySummaryReply(text, sinceMs)
                 : parseCompactSummary(text, sinceMs);
             if (found !== undefined) return found;
@@ -8158,7 +8158,7 @@ export async function activate(
         title,
         env: envForProfile(l.profile),
         profileId: l.profile.id,
-        ...(l.profile.provider === 'codex' || l.profile.provider === 'antigravity'
+        ...(l.profile.provider === 'codex' || l.profile.provider === 'gemini'
           ? { provider: l.profile.provider }
           : {}),
       });
@@ -8451,7 +8451,7 @@ export async function activate(
     status(id: string): string | undefined;
   }
   const liveEntriesFor = (
-    provider: 'codex' | 'antigravity',
+    provider: 'codex' | 'gemini',
     look: LiveLookups,
   ): RosterEntry[] => {
     const out: RosterEntry[] = [];
@@ -8525,7 +8525,7 @@ export async function activate(
       status: (id) => codexStatusFor(id),
     });
   const antigravityLiveEntries = (): RosterEntry[] =>
-    liveEntriesFor('antigravity', {
+    liveEntriesFor('gemini', {
       meta: (id) => antigravityArchived().find((s) => s.sessionId === id),
       lastActivityAt: (id) => {
         const file = antigravityTranscriptOf(id);
@@ -8829,7 +8829,7 @@ export async function activate(
       // are dropped and the fresh ones merged back in.
       const entries = withCodexRows(lastEntries.filter((entry) => {
         const p = sessionProviderFor(entry.sessionId);
-        return p !== 'codex' && p !== 'antigravity';
+        return p !== 'codex' && p !== 'gemini';
       }));
       if (entries.length > 0 || haveRoster) {
         lastEntries = entries;

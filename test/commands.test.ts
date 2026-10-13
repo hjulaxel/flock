@@ -4027,92 +4027,6 @@ describe('a new session (newSessionInBranch) is routed and its pin recorded', ()
 // does NOT exec (Gemini) would launch `claude` on the machine's DEFAULT login
 // while the pin, the row and the status line all named the other account, so
 // the verbs refuse that out loud and the router never offers it.
-describe('a session never starts on an account no session can run on', () => {
-  afterEach(() => {
-    delete (mockCommands as { registerCommand?: unknown }).registerCommand;
-    delete (mockWindow as { showWarningMessage?: unknown }).showWarningMessage;
-  });
-
-  function captureWarnings(): string[] {
-    const seen: string[] = [];
-    (
-      mockWindow as { showWarningMessage?: (...args: unknown[]) => Promise<unknown> }
-    ).showWarningMessage = async (message: unknown) => {
-      seen.push(String(message));
-      return undefined;
-    };
-    return seen;
-  }
-
-  it('"New Session on this account" on a Gemini row refuses instead of launching', async () => {
-    const warnings = captureWarnings();
-    const GEMINI = accountProfile('gemini-default', {
-      provider: 'gemini',
-      label: 'Gemini — default',
-    });
-    const { accounts, calls: acctCalls } = fakeAccountDeps([GEMINI]);
-    const { deps, calls } = chatDeps(undefined);
-    const withAccounts: AccountCommandDeps = { ...deps, accounts };
-
-    const harness = withRegisteredCommands(withAccounts);
-    await harness.run(COMMANDS.newSessionFromAccount, GEMINI.id);
-
-    expect(calls.launches).toEqual([]);
-    expect(acctCalls.pinned).toEqual([]);
-    expect(warnings.join(' ')).toContain('Gemini');
-  });
-
-  it('it cannot be made the default for new sessions either', async () => {
-    captureWarnings();
-    const GEMINI = accountProfile('gemini-default', { provider: 'gemini' });
-    const { accounts, calls: acctCalls } = fakeAccountDeps([GEMINI]);
-    const { deps } = chatDeps(undefined);
-    const withAccounts: AccountCommandDeps = { ...deps, accounts };
-
-    const harness = withRegisteredCommands(withAccounts);
-    await harness.run(COMMANDS.setDefaultAccount, GEMINI.id);
-
-    expect(acctCalls.defaultRoutingSet).toEqual([]);
-  });
-
-  it('a pin left on such an account resumes with no environment at all', async () => {
-    const PARENT = uuid(1);
-    const GEMINI = accountProfile('gemini-default', {
-      provider: 'gemini',
-      configDir: '/gemini/home',
-    });
-    const { accounts, calls: acctCalls } = fakeAccountDeps([GEMINI], {
-      sessionProfileId: () => GEMINI.id,
-    });
-    const { deps, calls } = chatDeps(undefined, {
-      hasTranscript: () => true,
-      beginInlineRename: () => true,
-    });
-    const withAccounts: AccountCommandDeps = {
-      ...deps,
-      getForest: () => forestOf([node(PARENT, { cwd: '/code/api' })]),
-      launchSession: async (opts) => {
-        calls.launches.push(opts);
-        return {
-          nodeId: opts.sessionId,
-          sessionId: opts.sessionId,
-          terminalName: 'claude',
-          createdAt: 0,
-        };
-      },
-      accounts,
-    };
-
-    const harness = withRegisteredCommands(withAccounts);
-    await harness.run(COMMANDS.forkSession, PARENT);
-
-    expect(calls.launches).toHaveLength(1);
-    expect(calls.launches[0].env).toBeUndefined();
-    expect(calls.launches[0].profileId).toBeUndefined();
-    expect(acctCalls.pinned).toEqual([]);
-  });
-});
-
 // The other half of the same rule, and the one this feature exists for: a
 // Codex account IS a place a session starts, and the launch has to say so on
 // the way out. `provider: 'codex'` is what makes TerminalRegistry.launch exec
@@ -4808,7 +4722,7 @@ describe('the add-account picker: names and marks, and Antigravity needs no dire
   it('adds an Antigravity account with no directory and no question: it is the machine login', async () => {
     const modals: string[] = [];
     (mockWindow as QuickPickHost).showQuickPick = async (items) =>
-      (items as Array<{ provider: string }>).find((i) => i.provider === 'antigravity');
+      (items as Array<{ provider: string }>).find((i) => i.provider === 'gemini');
     (mockWindow as InputHost).showInputBox = async () => 'Gemini';
     (mockWindow as WarningHost).showWarningMessage = async (message) => {
       modals.push(message);
@@ -4826,7 +4740,7 @@ describe('the add-account picker: names and marks, and Antigravity needs no dire
     await withRegisteredCommands({ ...deps, accounts }).run(COMMANDS.addAccount);
     expect(modals).toEqual([]);
     expect(calls.createdDirs).toEqual([]);
-    expect(patches).toEqual([{ id: 'gemini', provider: 'antigravity', label: 'Gemini' }]);
+    expect(patches).toEqual([{ id: 'gemini', provider: 'gemini', label: 'Gemini' }]);
   });
 });
 

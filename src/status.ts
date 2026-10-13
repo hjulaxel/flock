@@ -79,7 +79,7 @@ export type StatusFactId =
   | 'verbs'
   | 'claude'
   | 'codex'
-  | 'antigravity'
+  | 'gemini'
   | 'windowModel'
   | 'surface';
 
@@ -279,7 +279,7 @@ export function statusFacts(input: StatusInput): StatusFact[] {
     ) {
       const agyKey = fullKey(CONFIG_KEYS.antigravityBinary);
       facts.push({
-        id: 'antigravity',
+        id: 'gemini',
         icon: 'terminal',
         label: 'agy CLI',
         value: cli.antigravity === null ? `not found — set ${agyKey}` : `found at ${cli.antigravity}`,

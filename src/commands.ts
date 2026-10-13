@@ -4102,7 +4102,7 @@ async function forkFlow(
   // unrelated conversation dressed as a child. Its own `/fork` is typed into
   // the session instead (only when the keystroke guard allows it); the next
   // turn's hook names the child and extension.ts records the parent edge.
-  if (sessionLaunchProvider(deps, clickedId) === 'antigravity') {
+  if (sessionLaunchProvider(deps, clickedId) === 'gemini') {
     const label = labelFor(deps, clickedId);
     const sent = deps.sendTextToSession(clickedId, '/fork');
     void vscode.window.showInformationMessage(
@@ -7095,8 +7095,8 @@ function launchProviderOf(profile: AccountProfile): ProviderId | undefined {
  *  everything else (claude, generic, unknown) as undefined, which is what
  *  every launch path here means by Claude. One function, so a third CLI is
  *  one line here and not one ternary per verb. */
-function ownCliOf(provider: unknown): 'codex' | 'antigravity' | undefined {
-  return provider === 'codex' || provider === 'antigravity' ? provider : undefined;
+function ownCliOf(provider: unknown): 'codex' | 'gemini' | undefined {
+  return provider === 'codex' || provider === 'gemini' ? provider : undefined;
 }
 
 /** The LaunchOptions fragment. Spread, so an empty resolution adds no keys at
@@ -7225,7 +7225,7 @@ function routeNewSession(
 function sessionLaunchProvider(
   deps: AccountCommandDeps,
   sessionId: string,
-): 'codex' | 'antigravity' | undefined {
+): 'codex' | 'gemini' | undefined {
   try {
     const recorded = ownCliOf(deps.getRecord(sessionId)?.provider);
     if (recorded !== undefined) return recorded;
@@ -7797,7 +7797,7 @@ async function addAccountFlow(deps: AccountCommandDeps): Promise<void> {
   const providerPicks: ProviderPick[] = [
     { label: 'Claude', iconPath: markOf('claude'), provider: 'claude' },
     { label: 'Codex / OpenAI', iconPath: markOf('codex'), provider: 'codex' },
-    { label: 'Antigravity', description: 'Gemini', iconPath: markOf('antigravity'), provider: 'antigravity' },
+    { label: 'Antigravity', description: 'Gemini', iconPath: markOf('gemini'), provider: 'gemini' },
     {
       label: 'API key',
       iconPath: new vscode.ThemeIcon('key'),
@@ -7842,7 +7842,7 @@ async function addAccountFlow(deps: AccountCommandDeps): Promise<void> {
   // agy keeps its login in the OS keyring and has no variable that moves its
   // config, so there is no directory to make: its account is this machine's
   // login, and saying otherwise would claim an isolation it does not have.
-  const machineLogin = provider.provider === 'antigravity';
+  const machineLogin = provider.provider === 'gemini';
 
   if (machineLogin) {
     // Nothing to ask and nothing to create.
@@ -7948,10 +7948,22 @@ async function addAccountFlow(deps: AccountCommandDeps): Promise<void> {
     return;
   }
   if (machineLogin) {
-    vscode.window.setStatusBarMessage(
-      `Flock: added "${name}". It uses this machine's agy sign-in.`,
-      6000,
+    // Its hooks are the only status an Antigravity row has, and the only way
+    // a new session learns which conversation it is, so they are offered here,
+    // where the account is made, rather than left to be found in a menu.
+    if (deps.getAntigravityHookState?.().installed === true) {
+      vscode.window.setStatusBarMessage(
+        `Flock: added "${name}". It uses this machine's agy sign-in.`,
+        6000,
+      );
+      return;
+    }
+    const INSTALL = 'Install Hooks';
+    const choice = await vscode.window.showInformationMessage(
+      `Flock: added "${name}". Install the Antigravity hooks so its sessions show status?`,
+      INSTALL,
     );
+    if (choice === INSTALL) await vscode.commands.executeCommand(COMMANDS.installAntigravityHooks);
     return;
   }
   const SIGN_IN = 'Sign In Now';
@@ -7970,8 +7982,9 @@ async function addAccountFlow(deps: AccountCommandDeps): Promise<void> {
 const SIGN_IN_ARGS = {
   claude: ['/login'],
   codex: ['login'],
-  // agy has no login subcommand: run bare, it signs in when it has to.
-  antigravity: [],
+  // agy (stored as `gemini`) has no login subcommand: run bare, it signs in
+  // when it has to.
+  gemini: [],
 } as const;
 
 /**
@@ -8056,7 +8069,7 @@ async function loginAccountFlow(
       return;
     }
     launch = signInLaunch('codex', binary, process.platform, process.env['ComSpec']);
-  } else if (profile.provider === 'antigravity') {
+  } else if (profile.provider === 'gemini') {
     const binary = accts.antigravityBinary?.() ?? null;
     if (!binary) {
       void vscode.window.showErrorMessage(
@@ -8065,7 +8078,7 @@ async function loginAccountFlow(
       );
       return;
     }
-    launch = signInLaunch('antigravity', binary, process.platform, process.env['ComSpec']);
+    launch = signInLaunch('gemini', binary, process.platform, process.env['ComSpec']);
   } else {
     void vscode.window.showInformationMessage(
       `Flock: Flock does not know how to sign "${profile.label}" in — ` +
@@ -9562,7 +9575,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         { liveOnly: false },
       );
       if (!parentId) return;
-      if (sessionLaunchProvider(deps, parentId) === 'antigravity') {
+      if (sessionLaunchProvider(deps, parentId) === 'gemini') {
         void vscode.window.showInformationMessage(
           'Flock: Antigravity cannot fork and compact in one step. Use Fork, then /compact in the new session.',
         );
@@ -11789,7 +11802,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
         (profile) => profile.provider === 'codex',
       ),
       hasAntigravityAccount: (deps.accounts?.accounts() ?? []).some(
-        (profile) => profile.provider === 'antigravity',
+        (profile) => profile.provider === 'gemini',
       ),
     });
     const items: (vscode.QuickPickItem & { fact: StatusFact })[] = facts.map(
@@ -12363,10 +12376,10 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
   /** Does any CLI other than `except` still have Flock hooks installed? The
    *  three installs feed one events file behind one reader switch, so removing
    *  one must leave the reader on while another still writes to it. */
-  const otherHooksInstalled = (except: 'claude' | 'codex' | 'antigravity'): boolean =>
+  const otherHooksInstalled = (except: 'claude' | 'codex' | 'gemini'): boolean =>
     (except !== 'claude' && deps.getHookState().installed === true) ||
     (except !== 'codex' && deps.getCodexHookState?.().installed === true) ||
-    (except !== 'antigravity' && deps.getAntigravityHookState?.().installed === true);
+    (except !== 'gemini' && deps.getAntigravityHookState?.().installed === true);
 
   register(COMMANDS.removeHooks, 'remove hooks', async () => {
     if (!deps.getHookState().installed) {
@@ -12452,7 +12465,7 @@ export function registerCommands(deps: AccountCommandDeps): DisposableLike {
       return;
     }
     const state = await deps.removeAntigravityHooks();
-    if (state.installed !== true && !otherHooksInstalled('antigravity')) {
+    if (state.installed !== true && !otherHooksInstalled('gemini')) {
       await deps.setHooksEnabled(false);
     }
     log('antigravity hooks: remove ->', state.installed ? 'still installed' : 'removed');

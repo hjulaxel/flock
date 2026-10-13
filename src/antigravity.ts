@@ -474,7 +474,7 @@ export function planAntigravityId(input: {
   realId: string;
   currentHasTranscript: boolean;
 }): AntigravityIdPlan {
-  if (input.launchProvider !== 'antigravity') return { kind: 'none' };
+  if (input.launchProvider !== 'gemini') return { kind: 'none' };
   if (input.realId === input.current || input.realId === input.nodeId) return { kind: 'none' };
   if (input.currentHasTranscript) {
     return { kind: 'fork', parent: input.current, child: input.realId };

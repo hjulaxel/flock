@@ -107,7 +107,7 @@ export const CONFIG_DIR_ENV: Readonly<Partial<Record<ProviderId, string>>> = {
 export const SESSION_PROVIDERS: readonly ProviderId[] = [
   'claude',
   'codex',
-  'antigravity',
+  'gemini',
   'generic',
 ];
 
@@ -137,7 +137,7 @@ export function canHostSession(
  * onto Gemini.
  */
 export function pickedByAuto(profile: AccountProfile): boolean {
-  return profile.provider !== 'antigravity';
+  return profile.provider !== 'gemini';
 }
 
 /**
@@ -151,7 +151,7 @@ export function pickedByAuto(profile: AccountProfile): boolean {
  * is concerned. That interchangeability is the whole reason this function
  * exists — see `switchRefusal`.
  */
-export type SessionCli = 'claude' | 'codex' | 'gemini' | 'antigravity';
+export type SessionCli = 'claude' | 'codex' | 'gemini';
 
 export function cliOfProfile(
   profile: AccountProfile | null | undefined,
@@ -904,7 +904,7 @@ export function seedDefaultProfiles(
     seed(DEFAULT_CODEX_PROFILE_ID, 'codex', 'Codex — default');
   }
   if (opts?.hasAntigravityBinary === true) {
-    seed(DEFAULT_ANTIGRAVITY_PROFILE_ID, 'antigravity', 'Antigravity — default');
+    seed(DEFAULT_ANTIGRAVITY_PROFILE_ID, 'gemini', 'Antigravity — default');
   }
   return out;
 }

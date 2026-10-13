@@ -37,7 +37,7 @@ import { CODEX_HOOK_COMMAND, parseEventLine } from '../src/hooks';
 import { CODEX_SUMMARY_PROMPT } from '../src/closeSummary';
 import { mayTypeInto } from '../src/roster';
 import { defaultTerminalName, launchCliOf } from '../src/terminals';
-import { PROVIDERS } from '../src/types';
+import { PROVIDERS, PROVIDER_IDS } from '../src/types';
 import type { AccountProfile, HookEvent, UsageSnapshot } from '../src/types';
 
 const homes: string[] = [];
@@ -155,11 +155,11 @@ describe('finding agy', () => {
 
 describe('the launcher', () => {
   it('runs agy for an Antigravity launch, with its own argv, tab and not-found sentence', () => {
-    const cli = launchCliOf('antigravity');
-    expect(cli.cli).toBe('antigravity');
+    const cli = launchCliOf('gemini');
+    expect(cli.cli).toBe('gemini');
     expect(cli.missing).toContain('lineage.antigravityBinary');
     expect(cli.args({ sessionId: CONV, resumeId: CONV, cwd: '/c' })).toEqual(['--conversation', CONV]);
-    expect(defaultTerminalName(CONV, 'antigravity')).toBe(`agy · ${CONV.slice(0, 8)}`);
+    expect(defaultTerminalName(CONV, 'gemini')).toBe(`agy · ${CONV.slice(0, 8)}`);
   });
 
   it('keeps Claude and Codex exactly as they were', () => {
@@ -218,7 +218,7 @@ describe('agy hook events', () => {
 });
 
 describe('the id agy names itself', () => {
-  const base = { launchProvider: 'antigravity' };
+  const base = { launchProvider: 'gemini' };
 
   it('adopts the real id for a fresh launch, whose id agy never used', () => {
     expect(planAntigravityId({ ...base, nodeId: LAUNCH, current: LAUNCH, realId: CONV, currentHasTranscript: false })).toEqual({
@@ -253,7 +253,7 @@ describe('the id agy names itself', () => {
 });
 
 describe('the keystroke guard', () => {
-  const target = { row: true, rosterOk: true, provider: 'antigravity' as const };
+  const target = { row: true, rosterOk: true, provider: 'gemini' as const };
 
   it('types only into a fully idle row with the hooks installed', () => {
     expect(mayTypeInto({ ...target, status: 'idle', promptsVisible: true })).toBe('ok');
@@ -330,31 +330,34 @@ describe('agy transcripts', () => {
 
 describe('Antigravity accounts', () => {
   it('can host a session, claims no isolation, and is its own CLI', () => {
-    const agy = profile('a', { provider: 'antigravity', configDir: '/would/be/wrong' });
-    expect(SESSION_PROVIDERS).toContain('antigravity');
+    const agy = profile('a', { provider: 'gemini', configDir: '/would/be/wrong' });
+    expect(SESSION_PROVIDERS).toContain('gemini');
     expect(canHostSession(agy)).toBe(true);
-    expect(CONFIG_DIR_ENV.antigravity).toBeUndefined();
+    expect(CONFIG_DIR_ENV.gemini).toBeUndefined();
     expect(envForProfile(agy)).toEqual({});
-    expect(cliOfProfile(agy)).toBe('antigravity');
+    expect(cliOfProfile(agy)).toBe('gemini');
   });
 
   it('cliOfProvider: generic is Claude, every other provider is itself', () => {
     expect(cliOfProvider('generic')).toBe('claude');
     expect(cliOfProvider('claude')).toBe('claude');
     expect(cliOfProvider('codex')).toBe('codex');
-    expect(cliOfProvider('antigravity')).toBe('antigravity');
+    expect(cliOfProvider('gemini')).toBe('gemini');
   });
 
   it('is seeded when agy is on the machine, and not otherwise', () => {
     const none = seedDefaultProfiles([], { hasCodexAuth: false, now: 0 });
     expect(none.map((p) => p.provider)).toEqual(['claude']);
     const withAgy = seedDefaultProfiles([], { hasCodexAuth: false, hasAntigravityBinary: true, now: 0 });
-    expect(withAgy.map((p) => p.provider)).toEqual(['claude', 'antigravity']);
+    expect(withAgy.map((p) => p.provider)).toEqual(['claude', 'gemini']);
   });
 
-  it('wears the Gemini mark, which Flock already bundles', () => {
-    expect(PROVIDERS.antigravity.iconFile).toBe('gemini.svg');
-    expect(fs.existsSync(path.join(__dirname, '..', 'media', 'providers', 'gemini.svg'))).toBe(true);
+  it('is stored as gemini, so an older Flock keeps it, and wears the Antigravity name and mark', () => {
+    expect(PROVIDERS.gemini.label).toBe('Antigravity');
+    expect(PROVIDERS.gemini.iconFile).toBe('antigravity.svg');
+    const svg = fs.readFileSync(path.join(__dirname, '..', 'media', 'providers', 'antigravity.svg'), 'utf8');
+    expect(svg).toContain('<svg');
+    expect(svg).not.toContain('<script');
   });
 });
 
@@ -363,7 +366,7 @@ describe('Auto never routes new work onto Antigravity', () => {
   // reads as the best kind. agy has no meter, so without this rule every Auto
   // launch on a machine with agy installed would go to Gemini.
   const claudeFull = profile('c', { provider: 'claude', order: 0 } as Partial<AccountProfile>);
-  const agy = profile('g', { provider: 'antigravity', order: 1 } as Partial<AccountProfile>);
+  const agy = profile('g', { provider: 'gemini', order: 1 } as Partial<AccountProfile>);
   const NOW = Date.parse('2026-10-13T12:00:00Z');
   const usage = new Map([
     ['c', { fiveHour: { utilization: 100, resetsAt: NOW + 3_600_000 } } as unknown as UsageSnapshot],
@@ -376,7 +379,7 @@ describe('Auto never routes new work onto Antigravity', () => {
 
   it('uses it when it is chosen: the account, or its provider', () => {
     expect(resolveRouting({ kind: 'account', id: 'g' }, undefined, [claudeFull, agy], usage, NOW).profile?.id).toBe('g');
-    expect(resolveRouting({ kind: 'provider', provider: 'antigravity' }, undefined, [claudeFull, agy], usage, NOW).profile?.id).toBe('g');
+    expect(resolveRouting({ kind: 'provider', provider: 'gemini' }, undefined, [claudeFull, agy], usage, NOW).profile?.id).toBe('g');
   });
 
   it('is the answer only when it is the only account there is', () => {
@@ -387,5 +390,17 @@ describe('Auto never routes new work onto Antigravity', () => {
     expect(pickedByAuto(agy)).toBe(false);
     expect(pickedByAuto(claudeFull)).toBe(true);
     expect(pickedByAuto(profile('x', { provider: 'codex' }))).toBe(true);
+  });
+});
+
+describe('provider ids an older Flock will not rewrite', () => {
+  it('stores no provider id that a released Flock does not know', () => {
+    // Every Flock since 0.1.0 knows exactly these four. An id outside them is
+    // rewritten to `claude` the next time an OLDER Flock sharing ~/.lineage
+    // saves the store (state.ts sanitize): on 2026-10-13 a test build's
+    // `antigravity` accounts became Claude accounts that way, and an agy
+    // session lost its provider. A new CLI is stored under one of these, or
+    // this list grows only with a migration plan for older installs.
+    expect([...PROVIDER_IDS].sort()).toEqual(['claude', 'codex', 'gemini', 'generic']);
   });
 });

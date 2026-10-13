@@ -13,7 +13,10 @@ All notable changes to Flock are recorded here. The format follows
   accounts on 2026-06-18. With `agy` installed, an **Antigravity** account
   appears on its own, and its sessions get tree rows, resume, history and
   Close with Summary. agy picks its own conversation id; its first hook
-  reports it, so the row is matched exactly.
+  reports it, so the row is matched exactly. Rows wear the Antigravity mark.
+  Antigravity is stored as `gemini`, an id every older Flock keeps, so a
+  second editor running an older Flock does not turn these accounts into
+  Claude ones.
 - **Antigravity hooks.** **Install Antigravity Hooks…** adds a plugin folder at
   `~/.gemini/config/plugins/flock`; **Remove Antigravity Hooks** deletes it.
   They give a row busy and idle, and record the conversation id, folder and

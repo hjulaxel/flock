@@ -312,7 +312,7 @@ export function shortId(sessionId: string): string {
 // actual glyph. Nominative use — identifying which tool a session runs — is
 // what the marks are for; see the README's trademark note.
 
-export type ProviderId = 'claude' | 'codex' | 'gemini' | 'antigravity' | 'generic';
+export type ProviderId = 'claude' | 'codex' | 'gemini' | 'generic';
 
 export interface ProviderInfo {
   id: ProviderId;
@@ -343,20 +343,18 @@ export const PROVIDERS: Record<ProviderId, ProviderInfo> = {
     iconFileDark: 'codex-dark.svg',
     fallbackIcon: 'circuit-board',
   },
+  /** GOOGLE'S ANTIGRAVITY CLI (`agy`), which replaced the Gemini CLI for
+   *  consumer accounts on 2026-06-18. Its sessions and accounts are STORED
+   *  under the id `gemini`, which every Flock since 0.1.0 knows: an older
+   *  Flock sharing ~/.lineage keeps a `gemini` record as it is and never
+   *  starts a session on it, where an unknown id would be rewritten to
+   *  `claude` on its next save. The label and the mark say Antigravity, which
+   *  is what runs. The mark is Google's own (antigravity.google/favicon.svg),
+   *  the glyph without its round favicon background. */
   gemini: {
     id: 'gemini',
-    label: 'Gemini',
-    iconFile: 'gemini.svg',
-    fallbackIcon: 'star-full',
-  },
-  /** Google's Antigravity CLI (`agy`), which replaced the Gemini CLI for
-   *  consumer accounts on 2026-06-18. It wears the GEMINI mark: Simple Icons
-   *  has no Antigravity one, and Gemini is what people run it for. The
-   *  `gemini` row above stays as the id a project could always declare. */
-  antigravity: {
-    id: 'antigravity',
     label: 'Antigravity',
-    iconFile: 'gemini.svg',
+    iconFile: 'antigravity.svg',
     fallbackIcon: 'rocket',
   },
   generic: {
@@ -371,7 +369,6 @@ export const PROVIDER_IDS: readonly ProviderId[] = [
   'claude',
   'codex',
   'gemini',
-  'antigravity',
   'generic',
 ];
 
@@ -3006,7 +3003,6 @@ export type ContextToken =
   | 'claude'
   | 'codex'
   | 'gemini'
-  | 'antigravity'
   /** This session runs DETACHED under the grace countdown
    *  (SessionNode.graceDeadlineAt): its tab is gone, its process is alive so
    *  re-attach is instant, and the sweep will end it at the deadline. A THIRD
@@ -3690,7 +3686,7 @@ export interface TreeDeps {
    *  for why the PROJECT's provider must never be that rule. The return type is
    *  left loose here for the same reason `hostOf`'s is: types.ts may not import
    *  a module that imports it back. Optional; absent reads as 'claude'. */
-  sessionCli?(sessionId: string): 'claude' | 'codex' | 'gemini' | 'antigravity' | undefined;
+  sessionCli?(sessionId: string): 'claude' | 'codex' | 'gemini' | undefined;
   /** RETIRED: `reparent`. Dropping a session onto another re-parented it, and
    *  dropping one onto a folder row detached it to a root — so a fork could be
    *  dragged out of the tree it branched from and an unrelated conversation

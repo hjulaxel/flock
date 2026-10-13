@@ -470,7 +470,7 @@ function stampOfTerminal(
  *  than one ternary per fact. `generic` (an API-key Claude launch) and an
  *  absent provider are Claude. */
 export function launchCliOf(provider: ProviderId | undefined): {
-  cli: 'claude' | 'codex' | 'antigravity';
+  cli: 'claude' | 'codex' | 'gemini';
   /** What a person calls it, for "Could not start …". */
   label: string;
   tab: string;
@@ -480,9 +480,9 @@ export function launchCliOf(provider: ProviderId | undefined): {
   if (provider === 'codex') {
     return { cli: 'codex', label: 'Codex', tab: 'codex', missing: MISSING_CODEX_BINARY_MESSAGE, args: buildCodexArgs };
   }
-  if (provider === 'antigravity') {
+  if (provider === 'gemini') {
     return {
-      cli: 'antigravity',
+      cli: 'gemini',
       label: 'Antigravity',
       tab: 'agy',
       missing: MISSING_ANTIGRAVITY_BINARY_MESSAGE,
@@ -792,7 +792,7 @@ export class TerminalRegistry implements DisposableLike {
     const binary =
       launchCli.cli === 'codex'
         ? (this.deps.codexBinary?.() ?? null)
-        : launchCli.cli === 'antigravity'
+        : launchCli.cli === 'gemini'
           ? (this.deps.antigravityBinary?.() ?? null)
           : this.deps.claudeBinary();
     if (!binary) {
